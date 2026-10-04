@@ -20,8 +20,8 @@ test "control repeated Status intent preserves the first due time" {
     for ([_]u64{ 20, 30, 40 }) |now| {
         control.reStatusPeers(&catalog, Now.fromMilliseconds(.{ .mono_ms = now, .unix_s = 0 }));
         try std.testing.expect(control.reStatusPeer(&catalog, second, second_conn, Now.fromMilliseconds(.{ .mono_ms = now, .unix_s = 0 })));
-        try std.testing.expectEqual(@as(u64, 10), control.schedules[0].status_due_ms);
-        try std.testing.expectEqual(@as(u64, 20), control.schedules[1].status_due_ms);
+        try std.testing.expectEqual(@as(u64, 10), control.connections[0].status_due_ms);
+        try std.testing.expectEqual(@as(u64, 20), control.connections[1].status_due_ms);
     }
 }
 

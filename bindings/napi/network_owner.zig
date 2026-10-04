@@ -52,8 +52,8 @@ pub fn prepareConfiguration(self: *Runtime) !void {
     var seed: u64 = undefined;
     try io.randomSecure(std.mem.asBytes(&seed));
     self.reports.seed = seed;
-    const request = try self.heavy.?.application.buildRequest(&self.heavy.?.config, seed);
-    self.heavy.?.resolved = n.configuration.resolve(request) catch |err| switch (err) {
+    const options = try self.heavy.?.application.buildOptions(&self.heavy.?.config, seed);
+    self.heavy.?.resolved = n.configuration.resolve(options) catch |err| switch (err) {
         error.InvalidLimits => return error.InvalidNetworkConfig,
         else => return err,
     };
@@ -102,8 +102,8 @@ fn serve(self: *Runtime) !void {
     const io = self.heavy.?.threaded.io();
     var ingress: gossip_mod.Ingress = .{ .runtime = self, .io = io };
     const sink = ingress.sink();
-    self.heavy.?.core.service.gossipsub.message_sink = &sink;
-    defer self.heavy.?.core.service.gossipsub.message_sink = null;
+    self.heavy.?.core.protocols.gossipsub.message_sink = &sink;
+    defer self.heavy.?.core.protocols.gossipsub.message_sink = null;
     var host: Host = .{ .runtime = self, .io = io };
     while (try turn(self, io, &host, &ingress)) |result| {
         if (result.cancelled) return error.Canceled;
@@ -301,8 +301,8 @@ fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n
     }
     self.lock();
     if (timestamp.millis() >= self.health_log_due_ms) {
-        const active_requests = self.heavy.?.core.service.reqresp.pendingCounts();
-        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.heavy.?.resolved.core.peers.target_peers, active_requests.outbound, active_requests.inbound, self.heavy.?.core.counters.dial_started, self.heavy.?.core.counters.dial_deferred, if (self.heavy.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.heavy.?.core.service.gossipsub.counters.local_pressure_resets, self.heavy.?.core.transport.counters.received_bytes, self.heavy.?.core.transport.counters.sent_bytes });
+        const active_requests = self.heavy.?.core.protocols.reqresp.pendingCounts();
+        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.heavy.?.resolved.core.peers.target_peers, active_requests.outbound, active_requests.inbound, self.heavy.?.core.counters.dial_started, self.heavy.?.core.counters.dial_deferred, if (self.heavy.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.heavy.?.core.protocols.gossipsub.counters.local_pressure_resets, self.heavy.?.core.transport.counters.received_bytes, self.heavy.?.core.transport.counters.sent_bytes });
         self.health_log_due_ms = timestamp.millis() +| 30000;
     }
     if (self.lane) |lane| lane.publish(self.heavy.?.outputs[0..result.counts.peers], sequence);
@@ -510,18 +510,18 @@ test "queued request and disconnect share the protocol turn clock while latency 
     try std.testing.expect(command.failure == null);
     try std.testing.expectEqual(tick.millis() + 1000, command.deadline);
     try std.testing.expectEqual(error.UnknownTopic, cell.failure.?);
-    try std.testing.expectEqual(tick.millis(), owner.core.service.gossipsub.last_now_ms);
+    try std.testing.expectEqual(tick.millis(), owner.core.protocols.gossipsub.last_now_ms);
     try std.testing.expectEqual(@as(u128, 50), runtime.publications.?.latency.sum);
     try std.testing.expect(runtime.table.get(disconnect).failure == null);
     try std.testing.expect(!owner.core.isConnected(&remote_id));
     try std.testing.expect(request_cell.native != null);
 
-    const counts = owner.core.service.process(&owner.core.transport.engine, &.{}, tick, .{ .application = &owner.application_outputs });
+    const counts = owner.core.protocols.process(&owner.core.transport.engine, &.{}, tick, .{ .application = &owner.application_outputs });
     try requests_mod.capture(&runtime, owner.application_outputs[0..counts.application], tick);
     try std.testing.expectEqual(@as(usize, 1), counts.application);
     try std.testing.expectEqual(requests_mod.State.terminal, request_cell.state);
     try std.testing.expectEqual(n.reqresp.ReqResp.Failure{ .negotiation_failed = .stream_closed }, request_cell.terminal.?.failed.reason);
-    const counters = &owner.core.service.reqresp.protocol_counters[@intFromEnum(n.reqresp.Protocol.blocks_by_root_v2)];
+    const counters = &owner.core.protocols.reqresp.protocol_counters[@intFromEnum(n.reqresp.Protocol.blocks_by_root_v2)];
     try std.testing.expectEqual(@as(u64, 1), counters.outgoing_time.count);
     try std.testing.expectEqual(@as(u128, 0), counters.outgoing_time.sum);
 }

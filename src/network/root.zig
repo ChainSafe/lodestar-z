@@ -1,3 +1,36 @@
+//! A serialized owner advances bounded protocol state machines. Engines own protocol
+//! machinery; transports connect engines to sockets; drivers wait for readiness and
+//! advance with fresh time. NetworkCore coordinates discovery, peer policy and Protocols.
+//! The binding runtime owns the execution environment and host delivery.
+//!
+//! Scheduling vocabulary:
+//! - Schedule describes immediate work and the earliest deadline. It owns no work.
+//! - Turn is one bounded execution opportunity; Pass traverses a defined set of work.
+//! - Cycle is a logical maintenance operation that may span turns.
+//! - step performs one driver iteration, including waiting; advance uses supplied input
+//!   and time; pump services pending work until blocked or limited by its budget.
+//!
+//! Decisions and configuration:
+//! - Intent describes desired state; Demand gives targets; Hints are advisory inputs.
+//! - State records execution; Selection names chosen work. A SelectedDial carries a
+//!   reservation, so its owner must report the attempt's disposition.
+//! - Options are construction inputs, Resolved contains derived settings, and Config
+//!   holds enduring configuration. Options may contain required fields.
+//! - Layout describes storage sizes and offsets. Plan describes a proposed operation;
+//!   Prepared values belong to a preparation/commit contract documented by their owner.
+//!
+//! Storage and delivery:
+//! - Table emphasizes indexed entries; Catalog retains identity knowledge; Registry
+//!   tracks live instances; Pool manages reusable capacity; Store retains payloads.
+//! - Slot names a reusable position, Entry its contents, and Record a domain value or
+//!   bookkeeping object. A generational Handle identifies an incarnation of a slot.
+//! - Result is an operation's return value; Outcome its disposition; Progress records
+//!   advancement and continuation; Event reports a fact; Completion answers a pending
+//!   operation or stage. A completion need not end its enclosing stream or host task.
+//!
+//! Qualify names at domain boundaries. Protocol and JavaScript terminology keeps its
+//! domain meaning, including consensus slots and epochs and Promise settlement.
+
 pub const gossip_processor = @import("gossip_processor/root.zig");
 pub const index_list = @import("index_list.zig");
 pub const chain = @import("chain.zig");
@@ -25,7 +58,7 @@ pub const tls = @import("tls/root.zig");
 pub const udp = @import("udp");
 pub const protocol = @import("protocol.zig");
 pub const Router = @import("router.zig").Router;
-pub const Service = @import("service.zig").Service;
+pub const Protocols = @import("protocols.zig").Protocols;
 pub const stream_io = @import("stream_io.zig");
 pub const reqresp = @import("reqresp/root.zig");
 pub const gossipsub = @import("gossipsub/root.zig");
@@ -63,7 +96,7 @@ test {
     _ = gossipsub;
     _ = @import("wait.zig");
     _ = Router;
-    _ = Service;
+    _ = Protocols;
     _ = @import("network_core.zig");
     _ = driver;
     _ = transport_driver;

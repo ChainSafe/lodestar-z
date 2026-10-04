@@ -120,19 +120,19 @@ pub const Discovery = struct {
         for (sockets.values, 0..) |socket, i| if (socket) |value| {
             udp_addresses[i] = d.types.Address.fromNetwork(value.address);
         };
-        const plan = try advertisement.resolve(if (options.advertisement) |*value| value else null, &options.fixed, &quic, &udp_addresses);
-        try advertisement.validate(plan.endpoints);
+        const resolved = try advertisement.resolve(if (options.advertisement) |*value| value else null, &options.fixed, &quic, &udp_addresses);
+        try advertisement.validate(resolved.endpoints);
         const quic_bound = [2]bool{ quic[0] != null, quic[1] != null };
-        try validateEndpointFamilies(plan.endpoints, quic_bound, &sockets);
-        const announced = advertisementFor(local, fork_schedule, plan.endpoints);
+        try validateEndpointFamilies(resolved.endpoints, quic_bound, &sockets);
+        const announced = advertisementFor(local, fork_schedule, resolved.endpoints);
         const record = try adapter.build(&host.inner, options.sequence, &announced, &local.fork);
         try adapter.requireIdentity(&record, &types.PeerId.fromPublicKey(&host.publicKey()));
         var coordinator_options = options.coordinator;
-        coordinator_options.observations = plan.observations;
+        coordinator_options.observations = resolved.observations;
         coordinator_options.quic_mode = if (quic[0] == null) .ip6 else if (quic[1] == null) .ip4 else .dual;
         try self.initBound(allocator, sockets, &host.inner, &record, &local.fork, options.bootstrap, now_ms, coordinator_options, .{ .engine = options.engine });
-        self.endpoints = plan.endpoints;
-        self.quic_ports = plan.quic_ports;
+        self.endpoints = resolved.endpoints;
+        self.quic_ports = resolved.quic_ports;
         self.quic_bound = quic_bound;
     }
 

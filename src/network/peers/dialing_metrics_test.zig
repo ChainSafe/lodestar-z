@@ -17,7 +17,7 @@ test "peer dial metrics count selections including local deferrals and ignore du
     defer catalog.deinit(a);
     const peer: t.PeerId = .{ .bytes = @splat(1) };
     try q.enqueue(&catalog, &peer, &.{address}, true, 0);
-    var out: [1]mod.Dialing.DialIntent = undefined;
+    var out: [1]mod.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
     try std.testing.expect(q.dialDeferred(&catalog, out[0].token, 100));
     try std.testing.expectEqual(@as(u64, 1), q.selected_attempts[@intFromEnum(mod.Dialing.Source.direct)]);
@@ -87,7 +87,7 @@ test "peer dial time samples each retired attempt once from its own selection" {
     const first: t.PeerId = .{ .bytes = @splat(1) };
     const second: t.PeerId = .{ .bytes = @splat(2) };
     try q.enqueueUntil(&catalog, &first, &.{address}, false, 0, 5_000);
-    var out: [1]mod.Dialing.DialIntent = undefined;
+    var out: [1]mod.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
     const deferred = out[0].token;
     try std.testing.expect(q.dialDeferred(&catalog, deferred, 0));

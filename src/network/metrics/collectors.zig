@@ -74,7 +74,7 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
         }
     }
     try peer_metrics.writeDiscoveryCounters(&self.owner.peer_manager, self.owner.discovery, w);
-    try gossip_metrics.writeQueueDrops(self.owner.service.gossipsub, w);
+    try gossip_metrics.writeQueueDrops(self.owner.protocols.gossipsub, w);
 }
 
 fn writeSockets(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -107,7 +107,7 @@ fn writeSockets(self: *const Context, w: *prom.Encoder) prom.Error!void {
 }
 
 fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    var resources = self.owner.service.gossipsub.resourceSnapshot();
+    var resources = self.owner.protocols.gossipsub.resourceSnapshot();
     if (!self.running) {
         resources.receive_pages = 0;
         resources.pending_validations = 0;
@@ -131,7 +131,7 @@ fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void 
     }, @field(resources, field[0]));
 }
 fn writeRequestResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    const requests = self.owner.service.reqresp.resourceSnapshot();
+    const requests = self.owner.protocols.reqresp.resourceSnapshot();
     try w.scalar(.{ .name = "lodestar_native_reqresp_resources_serving_capacity", .kind = .gauge, .help = "Incoming requests the host may serve at once" }, requests.serving_capacity);
     try w.scalar(.{ .name = "lodestar_native_reqresp_resources_serving_occupied", .kind = .gauge, .help = "Incoming requests the host is serving" }, self.live(requests.serving_occupied));
     try w.scalar(.{ .name = "lodestar_native_reqresp_resources_retiring", .kind = .gauge, .help = "Serving resources awaiting host retirement" }, self.live(requests.retiring));
@@ -156,7 +156,7 @@ fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!voi
 }
 
 fn writeTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try @import("../gossipsub/topic_metrics.zig").write(self.owner.service.gossipsub, self.running, self.owner.peer_manager.local.fork.digest, w);
+    try @import("../gossipsub/topic_metrics.zig").write(self.owner.protocols.gossipsub, self.running, self.owner.peer_manager.local.fork.digest, w);
 }
 
 fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -175,7 +175,7 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
         for (rr.protocol.methods, 0..) |method, index| {
             if (!firstMethod(index)) continue;
             var count: u64 = 0;
-            for (rr.protocol.methods, &self.owner.service.reqresp.protocol_counters) |candidate, *values| {
+            for (rr.protocol.methods, &self.owner.protocols.reqresp.protocol_counters) |candidate, *values| {
                 if (std.mem.eql(u8, candidate, method)) count +|= @field(values, metric[1]);
             }
             try requests.sample(.{method}, count);
@@ -191,7 +191,7 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
         if (!firstMethod(index)) continue;
         inline for (std.meta.fields(rr.ReqResp.metrics.AdmissionRefusal)) |reason| {
             var count: u64 = 0;
-            for (rr.protocol.methods, &self.owner.service.reqresp.protocol_counters) |candidate, *values| {
+            for (rr.protocol.methods, &self.owner.protocols.reqresp.protocol_counters) |candidate, *values| {
                 if (std.mem.eql(u8, candidate, method)) count +|= values.admission_refusals[reason.value];
             }
             try refusals.sample(.{ method, reason.name }, count);
@@ -202,7 +202,7 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .kind = .gauge,
         .help = "Occupied incoming request slots by current phase, including terminal owners awaiting recycling",
         .labels = &.{"phase"},
-    }, rr.ReqResp.metrics.InboundPhase, &self.live(self.owner.service.reqresp.resourceSnapshot().inbound_phases));
+    }, rr.ReqResp.metrics.InboundPhase, &self.live(self.owner.protocols.reqresp.resourceSnapshot().inbound_phases));
 }
 
 fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -216,11 +216,11 @@ fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {
             .help = metric[2],
             .labels = &.{"method"},
             .unit = .seconds,
-        }, @TypeOf(@field(self.owner.service.reqresp.protocol_counters[0], metric[1])));
+        }, @TypeOf(@field(self.owner.protocols.reqresp.protocol_counters[0], metric[1])));
         for (rr.protocol.methods, 0..) |method, index| {
             if (!firstMethod(index)) continue;
-            var aggregate: @TypeOf(@field(self.owner.service.reqresp.protocol_counters[0], metric[1])) = .{};
-            for (rr.protocol.methods, &self.owner.service.reqresp.protocol_counters) |candidate, *values| {
+            var aggregate: @TypeOf(@field(self.owner.protocols.reqresp.protocol_counters[0], metric[1])) = .{};
+            for (rr.protocol.methods, &self.owner.protocols.reqresp.protocol_counters) |candidate, *values| {
                 if (std.mem.eql(u8, candidate, method)) aggregate.merge(&@field(values, metric[1]));
             }
             try durations.histogram(.{method}, &aggregate);
@@ -231,7 +231,7 @@ fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .kind = .counter,
         .help = "Terminal outgoing native failures using host request error labels",
         .labels = &.{"reason"},
-    }, rr.ReqResp.metrics.ErrorReason, &self.owner.service.reqresp.outgoing_error_reasons);
+    }, rr.ReqResp.metrics.ErrorReason, &self.owner.protocols.reqresp.outgoing_error_reasons);
 }
 
 fn writeBridge(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -248,15 +248,15 @@ fn writeGossipExecution(self: *const Context, w: *prom.Encoder) prom.Error!void 
 }
 
 fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try gossip_metrics.writeCounters(self.owner.service.gossipsub, w);
+    try gossip_metrics.writeCounters(self.owner.protocols.gossipsub, w);
 }
 
 fn writeGossipScores(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try gossip_metrics.writeScores(self.owner.service.gossipsub, self.running, self.now.millis(), w);
+    try gossip_metrics.writeScores(self.owner.protocols.gossipsub, self.running, self.now.millis(), w);
 }
 
 fn writeGossipTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try gossip_metrics.writeMessages(self.owner.service.gossipsub, w);
+    try gossip_metrics.writeMessages(self.owner.protocols.gossipsub, w);
 }
 fn writeConnections(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const counters = &self.owner.transport.engine.connection_metrics;

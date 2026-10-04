@@ -21,9 +21,9 @@ import type {
   NativeIncomingRequest,
   NativeLogBatch,
 } from "../src/network-runtime.js";
-import {Turns} from "../src/network-turns.js";
+import {TurnScheduler} from "../src/network-turn-scheduler.js";
 import {childTestTimeout, spawnChild} from "./utils/network.js";
-import {Escalated, immediates, runUntilEscalated} from "./utils/network-turns.js";
+import {Escalated, immediates, runUntilEscalated} from "./utils/network-turn-scheduler.js";
 
 const MIB = 1024 * 1024;
 const full: NativeExchangeDemand = {
@@ -158,11 +158,11 @@ function fixture() {
     fail: vi.fn((site: string, _reason: string): never => {
       throw new Escalated(site);
     }),
+    scheduler: null as unknown,
     state: "running",
-    turns: null as unknown,
   };
   // The pump outlives every test, so its turns never drain without it.
-  runtime.turns = new Turns(runtime);
+  runtime.scheduler = new TurnScheduler(runtime);
   const host = {
     capacity: vi.fn((): {ordinary: boolean; serving: number} | null => ({ordinary: true, serving: 32})),
     checkDependencies: vi.fn((checks: readonly DependencyCheck[]): readonly boolean[] => checks.map(() => true)),

@@ -17,7 +17,7 @@ test "reqresp blocked control writers leave other admitted identities able to se
         .application_requests_max = 8,
         .admission_policy = @import("policy_fixture.zig").config(),
     });
-    var requests = try rr.init(std.testing.allocator, resolved.core.service.reqresp);
+    var requests = try rr.init(std.testing.allocator, resolved.core.protocols.reqresp);
     defer requests.deinit();
     const now: @import("../types.zig").Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     const metadata: [16]u8 = @splat(0);
@@ -321,7 +321,7 @@ test "reqresp control capacity bounds application requests per peer across proto
     );
 }
 
-const Service = @import("../service.zig").Service;
+const Protocols = @import("../protocols.zig").Protocols;
 const Engine = @import("../quic/Engine.zig");
 
 fn inboundStream(pair: *support.Pair, conn: Engine.Handle) !Engine.StreamHandle {
@@ -335,14 +335,14 @@ fn inboundStream(pair: *support.Pair, conn: Engine.Handle) !Engine.StreamHandle 
     return error.TestUnexpectedResult;
 }
 
-test "reqresp control capacity raw and service inbound admission select the same reserved sink" {
+test "reqresp control capacity raw and protocol-stack inbound admission select the same reserved sink" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
     var options = try reservedOptions();
     options.inbound_per_peer_max = 4;
-    var server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
+    var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const ordinary: Router.Selection = .{
@@ -549,13 +549,13 @@ test "reqresp control capacity zero defaults retain all ordinary slots and admis
 fn allocationFailures(allocator: std.mem.Allocator) !void {
     var options = try reservedOptions();
     options.outbound_per_peer_max = 2;
-    var service = try Service.init(allocator, .{
+    var protocols = try Protocols.init(allocator, .{
         .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 },
         .reqresp = options,
         .router = .{ .negotiations_max = 4, .outbound_control_reserved = 2 },
-    }, &try @import("../service_test_support.zig").fixtureLocal(.{}));
-    defer service.deinit();
-    const plan = service.reqresp.memoryPlan();
+    }, &try @import("../protocols_test_support.zig").fixtureLocal(.{}));
+    defer protocols.deinit();
+    const plan = protocols.reqresp.memoryPlan();
     try std.testing.expectEqual(plan.facade_bytes + plan.slot_bytes + plan.io_bytes +
         plan.admission_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes, plan.total_bytes);
 }
@@ -567,7 +567,7 @@ test "reqresp reserved physical sinks admit full native control wave and recycle
     const handles = try support.connectPair(&pair);
     var options = try reservedOptions();
     options.inbound_per_peer_max = 4;
-    var server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
+    var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     var wave: [4]rr.RequestHandle = undefined;

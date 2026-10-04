@@ -86,7 +86,7 @@ const Pair = struct {
 
 fn intent(node: *const NetworkCore, subscriptions: []const @import("gossipsub/local_intent.zig").Boundary) NetworkCore.LocalIntent {
     return .{
-        .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.service.router.capabilities() },
+        .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
         .demand = node.peer_manager.demand,
         .subscriptions = subscriptions,
     };
@@ -101,14 +101,14 @@ test "a host publication submitted after wait planning leaves in the turn that o
     defer std.testing.allocator.destroy(pair);
     pair.* = .{};
     var opts = options(&key_a);
-    opts.resolved.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(@splat(0))};
+    opts.resolved.core.protocols.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(@splat(0))};
     try pair.a.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer pair.a.deinit(std.testing.io);
     opts.startup.host = &key_b;
     try pair.b.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer pair.b.deinit(std.testing.io);
-    pair.a_inbox.attach(pair.a.service.gossipsub);
-    pair.b_inbox.attach(pair.b.service.gossipsub);
+    pair.a_inbox.attach(pair.a.protocols.gossipsub);
+    pair.b_inbox.attach(pair.b.protocols.gossipsub);
     defer {
         pair.b_inbox.deinit();
         pair.a_inbox.deinit();
@@ -117,8 +117,8 @@ test "a host publication submitted after wait planning leaves in the turn that o
     _ = try pair.a.applyIntent(&intent(&pair.a, subscriptions), pair.a.last_now);
     _ = try pair.b.applyIntent(&intent(&pair.b, subscriptions), pair.b.last_now);
     try pair.a.addDirectPeer(&pair.b.peerId(), &.{pair.b.transport.localAddress()}, pair.a.last_now);
-    const ga = pair.a.service.gossipsub;
-    const gb = pair.b.service.gossipsub;
+    const ga = pair.a.protocols.gossipsub;
+    const gb = pair.b.protocols.gossipsub;
     var ready = false;
     for (0..3000) |_| {
         try pair.pump();
@@ -261,9 +261,9 @@ const Visits = struct {
             .timer = engine.timer,
             .collect = engine.collect,
             .flush = engine.flush,
-            .reqresp = node.service.reqresp.visits,
-            .negotiation = node.service.router.negotiator.visits,
-            .gossip = node.service.gossipsub.sessions.visits,
+            .reqresp = node.protocols.reqresp.visits,
+            .negotiation = node.protocols.router.negotiator.visits,
+            .gossip = node.protocols.gossipsub.sessions.visits,
             .control = node.peer_manager.control.visits,
             .dial = node.peer_manager.dialing.visits,
         };
@@ -400,7 +400,7 @@ test "a continuous QUIC flood on both families shares each receive quota and lea
         const now = try currentTime();
         _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
     }
-    const quota = node.transport.work_limits.receive_per_step_max;
+    const quota = node.transport.work_limits.receive_per_turn_max;
     const sockets = node.transport.sockets.values;
     const sender4 = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer sender4.close(std.testing.io);

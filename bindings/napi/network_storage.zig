@@ -57,13 +57,13 @@ pub fn initialize(runtime: *Runtime, app: *const application_cfg.Config) !void {
     const resolved = &runtime.heavy.?.resolved;
     runtime.peer_capacity = resolved.core.peers.capacity;
     runtime.max_peers = resolved.core.peers.max_peers;
-    const limits = resolved.core.service.reqresp;
+    const limits = resolved.core.protocols.reqresp;
     const request_capacity: usize = limits.outbound_max - limits.outbound_control_reserved;
     const incoming_capacity: usize = limits.inbound_max - limits.inbound_control_reserved;
-    const gossip_options = &resolved.core.service.gossipsub;
+    const gossip_options = &resolved.core.protocols.gossipsub;
     const chain = &runtime.heavy.?.config.chain;
-    const gossip_plan = try n.gossip_processor.GossipProcessor.Plan.resolve(runtime.heavy.?.config.processor_limits, runtime.heavy.?.config.execution_limits, gossip_options.topic_policy.?, chain.forks[0..chain.boundary_count], gossip_options.random_seed.?);
-    const gossip_backing = gossip.Table.backingBytes(&gossip_plan);
+    const processor_options = try n.gossip_processor.GossipProcessor.Options.resolve(runtime.heavy.?.config.processor_limits, runtime.heavy.?.config.execution_limits, gossip_options.topic_policy.?, chain.forks[0..chain.boundary_count], gossip_options.random_seed.?);
+    const gossip_backing = gossip.Table.backingBytes(&processor_options);
     const resident_topics = try n.gossipsub.topic_policy.validate(gossip_options.topic_policy.?);
     const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.boundary_count]);
     const publication_capacity: usize = if (runtime.heavy.?.config.profile == .small) 32 else publications.capacity_max;
@@ -84,7 +84,7 @@ pub fn initialize(runtime: *Runtime, app: *const application_cfg.Config) !void {
     try runtime.payload_budget.protect(response_max + 2 * request_max * incoming_capacity, 2 * (request_max + 2 * response_max), 2 * gossip.payload_max);
     runtime.publications = try publications.Table.init(r.allocator, publication_capacity, &runtime.payload_budget);
     runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
-    runtime.gossip = try gossip.Table.init(r.allocator, gossip_plan);
+    runtime.gossip = try gossip.Table.init(r.allocator, processor_options);
     runtime.stores = try Stores.createForTopics(r.allocator, runtime.peer_capacity, resident_topics);
     runtime.lane = try r.allocator.create(projection.Lane);
     runtime.lane.?.* = .{};

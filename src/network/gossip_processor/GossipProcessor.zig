@@ -2,7 +2,7 @@ const std = @import("std");
 const native = @import("../gossipsub/root.zig");
 const storage = @import("../gossipsub/message_store.zig");
 const policy = @import("policy.zig");
-pub const Plan = @import("plan.zig").Plan;
+pub const Options = @import("options.zig").Options;
 pub const Source = @import("../gossipsub/peer_book.zig").Ref;
 const limits_mod = @import("../gossip_limits.zig");
 const lists = @import("../index_list.zig");
@@ -167,11 +167,11 @@ pub fn fork(self: *const GossipProcessor, digest: [4]u8) ?@import("config").Fork
     return null;
 }
 
-pub fn init(backing: std.mem.Allocator, plan: Plan) !GossipProcessor {
-    try plan.validate();
-    const capacity = limits_mod.items(&plan.limits);
-    const bytes = limits_mod.bytes(&plan.limits);
-    const limits = plan.limits;
+pub fn init(backing: std.mem.Allocator, options: Options) !GossipProcessor {
+    try options.validate();
+    const capacity = limits_mod.items(&options.limits);
+    const bytes = limits_mod.bytes(&options.limits);
+    const limits = options.limits;
     const cells = try backing.alloc(Cell, capacity);
     errdefer backing.free(cells);
     @memset(cells, .{});
@@ -180,10 +180,10 @@ pub fn init(backing: std.mem.Allocator, plan: Plan) !GossipProcessor {
     var dependencies = try Dependencies.init(backing, capacity);
     errdefer dependencies.deinit(backing);
     const store = try storage.Store.init(backing, capacity, bytes);
-    var self: GossipProcessor = .{ .cells = cells, .backing = backing, .store = store, .groups = groups, .dependencies = dependencies, .limits = limits, .execution = plan.executionLimits(), .source_maximum = plan.source_maximum, .fork_count = plan.forks.len, .diag = .{ .capacity = capacity } };
-    @memcpy(self.forks[0..plan.forks.len], plan.forks);
-    self.groups.index.seed = plan.random_seed ^ 3;
-    self.dependencies.index.seed = plan.random_seed ^ 4;
+    var self: GossipProcessor = .{ .cells = cells, .backing = backing, .store = store, .groups = groups, .dependencies = dependencies, .limits = limits, .execution = options.executionLimits(), .source_maximum = options.source_maximum, .fork_count = options.forks.len, .diag = .{ .capacity = capacity } };
+    @memcpy(self.forks[0..options.forks.len], options.forks);
+    self.groups.index.seed = options.random_seed ^ 3;
+    self.dependencies.index.seed = options.random_seed ^ 4;
     var k: usize = 0;
     var end: usize = limits[0].items;
     for (cells, 0..) |*cell, i| {
@@ -196,9 +196,9 @@ pub fn init(backing: std.mem.Allocator, plan: Plan) !GossipProcessor {
     }
     return self;
 }
-pub fn backingBytes(plan: *const Plan) usize {
-    const capacity = limits_mod.items(&plan.limits);
-    const bytes = limits_mod.bytes(&plan.limits);
+pub fn backingBytes(options: *const Options) usize {
+    const capacity = limits_mod.items(&options.limits);
+    const bytes = limits_mod.bytes(&options.limits);
     return capacity * @sizeOf(Cell) + Groups.backingBytes(capacity) + Dependencies.backingBytes(capacity) + storage.Store.metadataBytes(capacity, bytes) + bytes / storage.page_bytes * storage.page_bytes;
 }
 pub fn deinit(self: *GossipProcessor) void {

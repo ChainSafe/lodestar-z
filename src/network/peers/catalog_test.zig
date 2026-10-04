@@ -656,14 +656,14 @@ test "peer catalog uses empty established slots before reclaiming disconnected i
             var c = try Catalog.initWithIntents(std.testing.allocator, options, 2, 4, 0);
             defer c.deinit(std.testing.allocator);
             const peer = try c.retainIntent(&remote);
-            c.rowFor(peer).?.intent.automatic = true;
-            c.rowFor(peer).?.intent.addresses = .{ .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9001 } }, .unspecified };
-            c.rowFor(peer).?.intent.address_count = 1;
+            c.rowFor(peer).?.dial.automatic = true;
+            c.rowFor(peer).?.dial.addresses = .{ .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9001 } }, .unspecified };
+            c.rowFor(peer).?.dial.address_count = 1;
             try std.testing.expectEqual(peer, admit(&c, &remote, first, direction, 0).admitted.peer);
             try std.testing.expect(c.disconnect(peer, first, .host, 1));
             var events: [3]t.Event = undefined;
             _ = c.pollEvents(&events);
-            const before = c.rowFor(peer).?.intent;
+            const before = c.rowFor(peer).?.dial;
             try std.testing.expect(before.eligible_at_ms > 2);
             const reputation = c.rowFor(peer).?.reputation;
             const candidate_ref = if (promote) try c.retainIntent(&third) else null;
@@ -671,7 +671,7 @@ test "peer catalog uses empty established slots before reclaiming disconnected i
             if (candidate_ref) |ref| try std.testing.expectEqual(ref, next);
             try std.testing.expectEqual(@as(?u16, 1), c.rowFor(next).?.established_slot);
             try std.testing.expectEqual(peer, c.find(&remote).?);
-            try std.testing.expectEqualDeep(before, c.rowFor(peer).?.intent);
+            try std.testing.expectEqualDeep(before, c.rowFor(peer).?.dial);
             try std.testing.expectEqualDeep(reputation, c.rowFor(peer).?.reputation);
             try std.testing.expect(c.intents.isSet(peer.index));
             const extra: t.PeerId = .{ .bytes = @splat(99) };

@@ -95,7 +95,7 @@ pub const Ingress = struct {
         defer runtime.unlock();
         if (runtime.stop or self.failure != null) return false;
         const core = &runtime.heavy.?.core;
-        const accepted = runtime.gossip.?.admit(core.service.gossipsub, candidate, candidate.event.admitted_ms, received_at, core.current_slot);
+        const accepted = runtime.gossip.?.admit(core.protocols.gossipsub, candidate, candidate.event.admitted_ms, received_at, core.current_slot);
         runtime.recomputeLocked(.checks);
         runtime.recomputeLocked(.gossip);
         return accepted;

@@ -20,7 +20,7 @@ const Fixture = struct {
         errdefer std.testing.allocator.destroy(node);
         const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{93}));
         var options = @import("network_core_test_support.zig").networkOptions(&key);
-        options.resolved.core.service.gossipsub.topic_policy = if (boundaries.len > 0) boundaries else null;
+        options.resolved.core.protocols.gossipsub.topic_policy = if (boundaries.len > 0) boundaries else null;
         options.startup.discovery = discovery;
         try node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup);
         errdefer node.deinit(std.testing.io);
@@ -223,11 +223,11 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     const node = f.node;
     node.counters.transport_failures = std.math.maxInt(u64);
     node.peer_manager.control.counters.closed[0] = 17;
-    node.service.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing = 4;
-    node.service.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing = 5;
-    node.service.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing_time.observe(100);
-    node.service.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing_time.observe(200);
-    node.service.gossipsub.messages.storage_refusals[0] = 11;
+    node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing = 4;
+    node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing = 5;
+    node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing_time.observe(100);
+    node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing_time.observe(200);
+    node.protocols.gossipsub.messages.storage_refusals[0] = 11;
     node.peer_manager.selection.deficits.outbound = 7;
     const original = node.peer_manager.counters;
     const output = try f.render(true);
@@ -257,7 +257,7 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
 test "metrics include remote subscriptions without overlay rows and follow local fork boundary visibility" {
     var f = try Fixture.init(&.{ boundary(@splat(0), 100), boundary(@splat(1), 200) });
     defer f.deinit();
-    const g = f.node.service.gossipsub;
+    const g = f.node.protocols.gossipsub;
     const ns = &g.overlay.namespace.?;
     const name = "/eth2/00000000/data_column_sidecar_9/ssz_snappy";
     const current = ns.lookup(name).?.ordinal;
@@ -291,7 +291,7 @@ test "metrics maximum configured topic domain fits its startup exposition reserv
     for (&boundaries, 0..) |*value, index| value.* = boundary(.{ @intCast(index), 0, 0, 0 }, std.math.maxInt(u64) - index);
     var f = try Fixture.init(&boundaries);
     defer f.deinit();
-    const g = f.node.service.gossipsub;
+    const g = f.node.protocols.gossipsub;
     for (boundaries) |value| {
         var name: [@import("gossipsub/topic.zig").topic_max_len]u8 = undefined;
         try gossip_test.subscribe(g, @import("gossipsub/topic.zig").build(value.digest, "beacon_block", &name));
@@ -306,7 +306,7 @@ test "metrics maximum configured topic domain fits its startup exposition reserv
 test "metrics preserve outgoing queue refusals across session retirement and reuse" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
-    const g = f.node.service.gossipsub;
+    const g = f.node.protocols.gossipsub;
     const first = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     g.sessions.rows[first.index].io.tx.drops[0] = 3;
     try contains(try f.render(true), "lodestar_native_gossip_queue_drops_total{reason=\"data_descriptors\"} 3\n");
@@ -370,7 +370,7 @@ test "metrics render exactly the measurement contract families with their types 
     var f = try Fixture.initWith(&.{boundary(@splat(0), 100)}, .{ .bind = .{ .ip4 = .loopback(0) } });
     defer f.deinit();
     // A connected gossip peer gives the score statistics a population to sample.
-    _ = gossip_test.addPeer(f.node.service.gossipsub, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    _ = gossip_test.addPeer(f.node.protocols.gossipsub, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const output = try f.render(true);
     var missing: usize = 0;
     for (contract) |series| {
@@ -465,7 +465,7 @@ test "metrics export cumulative discovery lookups and datagram rejections" {
 test "metrics export stock per-topic gossipsub peer gauges under full topic strings" {
     var f = try Fixture.init(&.{ boundary(@splat(0), 100), boundary(@splat(1), 200) });
     defer f.deinit();
-    const g = f.node.service.gossipsub;
+    const g = f.node.protocols.gossipsub;
     const ns = &g.overlay.namespace.?;
     const column = "/eth2/00000000/data_column_sidecar_9/ssz_snappy";
     ns.setSubscription(0, ns.lookup(column).?.ordinal, true);
@@ -485,7 +485,7 @@ test "metrics export stock per-topic gossipsub peer gauges under full topic stri
 test "metrics export gossip score populations only while running and omit empty statistics" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
-    const g = f.node.service.gossipsub;
+    const g = f.node.protocols.gossipsub;
     _ = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     gossip_test.penalize(g, g.sessions.rows[0].conn, 7);
     const running = try f.render(true);
@@ -503,7 +503,7 @@ test "metrics export gossip score populations only while running and omit empty 
 test "metrics export gossip message, mesh change, penalty and promise counters through shutdown" {
     var f = try Fixture.init(&.{boundary(@splat(0), 100)});
     defer f.deinit();
-    const g = f.node.service.gossipsub;
+    const g = f.node.protocols.gossipsub;
     const name = "/eth2/00000000/beacon_block/ssz_snappy";
     try gossip_test.subscribe(g, name);
     const peer = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
@@ -538,7 +538,7 @@ test "metrics export gossip message, mesh change, penalty and promise counters t
 test "stopped metrics report all delivery descriptors available with zero occupancy" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
-    const pool = f.node.service.gossipsub.sessions.deliveries;
+    const pool = f.node.protocols.gossipsub.sessions.deliveries;
     const capacity = pool.available;
     pool.available -= 1;
     defer pool.available = capacity;
@@ -574,8 +574,8 @@ test "core metrics aggregate subnets and count distinct mesh peers" {
     const pair = try std.testing.allocator.create(core_test.Setup);
     defer std.testing.allocator.destroy(pair);
     pair.* = .{};
-    var opts = core_test.options();
-    opts.core.service.gossipsub.topic_policy = &.{full(@splat(0))};
+    var opts = core_test.resolvedOptions();
+    opts.core.protocols.gossipsub.topic_policy = &.{full(@splat(0))};
     try pair.initOwnersWithOptions(&.{}, opts);
     defer pair.deinit();
     var a_intent = core_test.intent(&pair.client, &.{});
@@ -591,7 +591,7 @@ test "core metrics aggregate subnets and count distinct mesh peers" {
         try pair.step(1);
         pair.pair.advance(10);
         if (pair.client.last_now.millis() - start > 10_000) break;
-        mesh_count = pair.client.service.gossipsub.resourceSnapshot().mesh_members;
+        mesh_count = pair.client.protocols.gossipsub.resourceSnapshot().mesh_members;
         if (mesh_count == 3) break;
     }
     const context = metrics.Context.init(&pair.client, pair.client.last_now, true);

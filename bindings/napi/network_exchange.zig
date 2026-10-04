@@ -15,7 +15,7 @@ const commands = @import("network_commands.zig");
 const requests = @import("network_requests.zig");
 const fatal = @import("network_fatal.zig");
 const Runtime = r.Runtime;
-const Row = readiness.Row;
+const DeliveryKind = readiness.DeliveryKind;
 const none = n.index_list.none;
 
 /// Actions one exchange applies; a longer batch is refused before any is applied.
@@ -50,7 +50,7 @@ const CheckView = struct { root: [32]u8, slot: u64, identity: n.PeerId, topic: [
 
 /// What one exchange pinned. Pinned cells stay in place: the owner never retires a copying cell.
 pub const Selection = struct {
-    pinned: [readiness.row_count]Row = undefined,
+    pinned: [readiness.delivery_kind_count]DeliveryKind = undefined,
     pinned_count: usize = 0,
     peers: [peers_max]projection.Entry = undefined,
     peer_count: usize = 0,
@@ -105,8 +105,8 @@ pub const Outcome = packed struct(u4) {
 /// breaks the bridge contract and terminates the process. No allocation of ours can fail there.
 pub const Failure = enum { stopped, contract };
 
-fn enabled(runtime: *Runtime, demand: *const Demand, row: Row) bool {
-    return switch (row) {
+fn enabled(runtime: *Runtime, demand: *const Demand, kind: DeliveryKind) bool {
+    return switch (kind) {
         .completions => true,
         .peers => demand.peers > 0,
         .checks => demand.checks > 0,
@@ -143,15 +143,15 @@ fn selectLocked(runtime: *Runtime, demand: *const Demand, now: u64, selection: *
     if (selection.closed != null) return;
     const ready = &runtime.readiness;
     var next = ready.payload.head;
-    for (0..readiness.row_count) |_| {
+    for (0..readiness.delivery_kind_count) |_| {
         if (next == none) break;
-        const row: Row = @enumFromInt(next);
-        next = ready.rows[next].link.next;
-        if (!enabled(runtime, demand, row)) continue;
-        ready.pin(row);
-        selection.pinned[selection.pinned_count] = row;
+        const kind: DeliveryKind = @enumFromInt(next);
+        next = ready.entries[next].link.next;
+        if (!enabled(runtime, demand, kind)) continue;
+        ready.pin(kind);
+        selection.pinned[selection.pinned_count] = kind;
         selection.pinned_count += 1;
-        switch (row) {
+        switch (kind) {
             .completions => unreachable,
             .peers => selection.peer_count = runtime.lane.?.peek(selection.peers[0..demand.peers]),
             .serving => selectServing(runtime, demand, selection),
@@ -331,7 +331,7 @@ fn restoreLocked(runtime: *Runtime, selection: *const Selection) void {
 /// Unpins, wakes the owner once and arms when nothing is queued.
 fn endLocked(runtime: *Runtime, demand: *const Demand, selection: *const Selection) Outcome {
     const ready = &runtime.readiness;
-    for (selection.pinned[0..selection.pinned_count]) |row| ready.unpin(row, runtime.wantLocked(row));
+    for (selection.pinned[0..selection.pinned_count]) |kind| ready.unpin(kind, runtime.wantLocked(kind));
     if (selection.wake) runtime.signalLocked();
     runtime.refreshLocked();
     var outcome: Outcome = .{
@@ -340,10 +340,10 @@ fn endLocked(runtime: *Runtime, demand: *const Demand, selection: *const Selecti
         .parked_ordinary = ready.place(.gossip) == .parked,
     };
     var next = ready.payload.head;
-    for (0..readiness.row_count) |_| {
+    for (0..readiness.delivery_kind_count) |_| {
         if (next == none) break;
         if (enabled(runtime, demand, @enumFromInt(next))) outcome.more = true else outcome.disabled = true;
-        next = ready.rows[next].link.next;
+        next = ready.entries[next].link.next;
     }
     _ = ready.arm();
     return outcome;

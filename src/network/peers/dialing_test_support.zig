@@ -18,7 +18,7 @@ pub fn initCatalog(allocator: std.mem.Allocator, options: mod.Dialing.Options) !
     return Catalog.initWithIntents(allocator, .{ .capacity = 8, .max_peers = 8, .target_peers = 8, .min_outbound = 0, .outbound_reserve = 0 }, options.capacity, 1024, options.seed);
 }
 pub fn selectNext(q: *mod.Dialing, catalog: *Catalog, now: *u64) !mod.Dialing.Token {
-    var out: [1]mod.Dialing.DialIntent = undefined;
+    var out: [1]mod.Dialing.SelectedDial = undefined;
     now.* = refreshAndWakeup(q, catalog, now.*, 1).?;
     try std.testing.expectEqual(@as(usize, 1), q.poll(catalog, now.*, &out));
     return out[0].token;

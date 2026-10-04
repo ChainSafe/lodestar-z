@@ -5,7 +5,7 @@ const RequestIO = @import("RequestIO.zig");
 const ReqResp = @import("ReqResp.zig");
 const Server = @import("Server.zig");
 const admission = @import("admission.zig");
-const ReceivePlan = @import("ReceivePlan.zig");
+const ReceiveLayout = @import("ReceiveLayout.zig");
 const constants = @import("constants.zig");
 const index_list = @import("../index_list.zig");
 const types = @import("../types.zig");
@@ -157,7 +157,7 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
 }
 
 fn availableInbound(slots: []Server, peer: Handle, which: Protocol) ?u16 {
-    const first = ReceivePlan.first(peer.index, which);
+    const first = ReceiveLayout.first(peer.index, which);
     for (slots[first..][0..constants.MAX_CONCURRENT_REQUESTS], first..) |*slot, index| {
         if (slot.request.available()) return @intCast(index);
     }
@@ -166,8 +166,8 @@ fn availableInbound(slots: []Server, peer: Handle, which: Protocol) ?u16 {
 
 pub fn settle(self: *InboundAdmission, slots: []Server, index: u16) void {
     const slot = &slots[index];
-    const peer = index / ReceivePlan.slots_per_peer;
-    const bit = @as(u64, 1) << @intCast(index % ReceivePlan.slots_per_peer);
+    const peer = index / ReceiveLayout.slots_per_peer;
+    const bit = @as(u64, 1) << @intCast(index % ReceiveLayout.slots_per_peer);
     const class: u1 = @intFromBool(slot.request.protocol.isControl());
     const cursor = &self.peer_cursors[peer];
     const waiting = slot.request.running() and slot.state == .ready;
@@ -221,17 +221,17 @@ pub fn promoteReady(self: *InboundAdmission, owner: *ReqResp, now: Now) void {
 /// charged its start or pays toward its cost.
 fn promotePeer(self: *InboundAdmission, owner: *ReqResp, peer: u16, comptime class: u1, now: Now) bool {
     const cursor = &self.peer_cursors[peer];
-    const first = @as(usize, peer) * ReceivePlan.slots_per_peer;
+    const first = @as(usize, peer) * ReceiveLayout.slots_per_peer;
     const start = cursor.admission[class];
-    for (0..ReceivePlan.slots_per_peer) |offset| {
-        const local: u8 = @intCast((start + offset) % ReceivePlan.slots_per_peer);
+    for (0..ReceiveLayout.slots_per_peer) |offset| {
+        const local: u8 = @intCast((start + offset) % ReceiveLayout.slots_per_peer);
         if (cursor.ready_mask[class] & (@as(u64, 1) << @intCast(local)) == 0) continue;
         const index: u16 = @intCast(first + local);
         owner.visits +|= 1;
         const result = self.promote(owner, index, now);
         owner.settleSlot(.inbound, index);
         if (result != .waiting) {
-            cursor.admission[class] = @intCast((local + 1) % ReceivePlan.slots_per_peer);
+            cursor.admission[class] = @intCast((local + 1) % ReceiveLayout.slots_per_peer);
             return true;
         }
     }
@@ -289,7 +289,7 @@ fn chargeStart(self: *InboundAdmission, slots: []Server, index: u16, now: Now) b
 
 /// Whether a running request of the class on the connection is still owed its start.
 fn startsPending(slots: []const Server, conn: Handle, control: bool) bool {
-    for (slots[ReceivePlan.first(conn.index, @enumFromInt(0))..][0..ReceivePlan.slots_per_peer]) |*slot| {
+    for (slots[ReceiveLayout.first(conn.index, @enumFromInt(0))..][0..ReceiveLayout.slots_per_peer]) |*slot| {
         if (!slot.admission.start_pending or !slot.request.running() or slot.request.protocol.isControl() != control) continue;
         if (std.meta.eql(slot.request.conn, conn)) return true;
     }
@@ -302,10 +302,10 @@ fn startsPending(slots: []const Server, conn: Handle, control: bool) bool {
 /// waiter is charged its start within one refill per request ahead of it.
 fn startQueued(self: *const InboundAdmission, slots: []const Server, index: u16) bool {
     const slot = &slots[index];
-    const peer = index / ReceivePlan.slots_per_peer;
-    const first = @as(usize, peer) * ReceivePlan.slots_per_peer;
+    const peer = index / ReceiveLayout.slots_per_peer;
+    const first = @as(usize, peer) * ReceiveLayout.slots_per_peer;
     var mask = self.peer_cursors[peer].ready_mask[@intFromBool(slot.request.protocol.isControl())];
-    for (0..ReceivePlan.slots_per_peer) |_| {
+    for (0..ReceiveLayout.slots_per_peer) |_| {
         if (mask == 0) break;
         const other = first + @ctz(mask);
         mask &= mask - 1;
@@ -331,12 +331,12 @@ pub fn chargeRejected(self: *InboundAdmission, owner: *ReqResp, engine: *Engine,
 }
 
 pub fn checkSlot(self: *const InboundAdmission, slot: *const Server, index: u16) void {
-    const bit = @as(u64, 1) << @intCast(index % ReceivePlan.slots_per_peer);
+    const bit = @as(u64, 1) << @intCast(index % ReceiveLayout.slots_per_peer);
     const class: u1 = @intFromBool(slot.request.protocol.isControl());
     const waiting = slot.request.running() and slot.state == .ready;
-    const cursor = &self.peer_cursors[index / ReceivePlan.slots_per_peer];
+    const cursor = &self.peer_cursors[index / ReceiveLayout.slots_per_peer];
     assert((cursor.ready_mask[class] & bit != 0) == waiting);
-    if (waiting) assert(PeerCursor.linked(self.peer_cursors, class, index / ReceivePlan.slots_per_peer));
+    if (waiting) assert(PeerCursor.linked(self.peer_cursors, class, index / ReceiveLayout.slots_per_peer));
     if (waiting and slot.admission.wait == .none) assert(self.pending);
 }
 
@@ -356,7 +356,7 @@ const PeerCursor = struct {
 };
 
 comptime {
-    assert(ReceivePlan.slots_per_peer <= 64);
+    assert(ReceiveLayout.slots_per_peer <= 64);
 }
 
 test {

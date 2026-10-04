@@ -14,7 +14,7 @@ pub const Config = struct {
     bind: n.udp.Sockets.Bindings,
     local: t.LocalState,
     schedule: n.NetworkCore.ForkSchedule,
-    chain: n.chain.Plan,
+    chain: n.chain.Config,
     discovery_bind: ?n.udp.Sockets.Bindings,
     discovery_sequence: u64,
     advertisement: ?n.NetworkCore.AdvertisementHints,
@@ -79,7 +79,7 @@ pub fn parse(value: Value, out: *Config) !void {
     out.bind = try bindings(try decode.get(value, "bind"));
     out.slot = try decode.bigint(try decode.get(value, "initialSlot"));
     try parseLocal(try decode.get(value, "local"), &out.local);
-    out.chain = try n.chain.Plan.init(&@import("config.zig").state.config, try decode.boolean(try decode.get(value, "serveLightClients")));
+    out.chain = try n.chain.Config.init(&@import("config.zig").state.config, try decode.boolean(try decode.get(value, "serveLightClients")));
     const update = try out.chain.update(out.local, null, out.slot);
     out.local = update.local;
     out.schedule = update.schedule;

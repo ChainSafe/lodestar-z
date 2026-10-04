@@ -17,7 +17,7 @@ pub const Config = struct {
     /// The threshold native records are kept at, or null for none, until the host selects another.
     log_level: ?std.log.Level,
 
-    pub fn buildRequest(self: *const Config, common: *const cfg.Config, seed: u64) !n.configuration.Request {
+    pub fn buildOptions(self: *const Config, common: *const cfg.Config, seed: u64) !n.configuration.Options {
         const r = &self.resources;
         if (r.nativeBudgetBytes <= @sizeOf(n.NetworkCore)) return error.NetworkNativeBudgetExceeded;
         var gossip_options = common.gossip;

@@ -57,7 +57,7 @@ test "address-less discovery learns from ten authenticated prefixes and updates 
     defer peers.deinit();
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{92}));
     var opts = core_test.networkOptions(&key);
-    opts.resolved.core.service.identify = .{};
+    opts.resolved.core.protocols.identify = .{};
     opts.resolved.core.peers.target_peers = 0;
     opts.resolved.core.peers.min_outbound = 0;
     opts.startup.bind = .{ .ip4 = .{ .bytes = @splat(0), .port = 0 } };
@@ -76,7 +76,7 @@ test "address-less discovery learns from ten authenticated prefixes and updates 
     try std.testing.expectEqual(node.discovery.?.transport.localAddress().port(), learned.udp.?);
     try std.testing.expectEqual(node.transport.localAddress().port(), learned.quic.?);
     try std.testing.expectEqual(initial + 1, node.localRecord().?.sequence);
-    const identify = node.service.identify.local;
+    const identify = node.protocols.identify.local;
     try std.testing.expect(identify.address_count > 0);
     try peers.observe(&node, 10, 3);
     try std.testing.expectEqual(initial + 1, node.localRecord().?.sequence);
@@ -84,7 +84,7 @@ test "address-less discovery learns from ten authenticated prefixes and updates 
     intent.update.local.metadata.attnets[0] = 1;
     _ = try node.applyIntent(&intent, node.last_now);
     try std.testing.expectEqualDeep(learned, node.advertisementEndpoints().?);
-    try std.testing.expectEqualDeep(identify, node.service.identify.local);
+    try std.testing.expectEqualDeep(identify, node.protocols.identify.local);
 }
 
 test "failed learned endpoint publication preserves the previous ENR and Identify" {
@@ -92,7 +92,7 @@ test "failed learned endpoint publication preserves the previous ENR and Identif
     defer peers.deinit();
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{93}));
     var opts = core_test.networkOptions(&key);
-    opts.resolved.core.service.identify = .{};
+    opts.resolved.core.protocols.identify = .{};
     opts.resolved.core.peers.target_peers = 0;
     opts.resolved.core.peers.min_outbound = 0;
     opts.startup.bind = .{ .ip4 = .{ .bytes = @splat(0), .port = 0 } };
@@ -101,10 +101,10 @@ test "failed learned endpoint publication preserves the previous ENR and Identif
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const before = node.localRecord().?.*;
-    const identify = node.service.identify.local;
+    const identify = node.protocols.identify.local;
     try peers.observe(&node, 10, 1);
     try std.testing.expectEqualSlices(u8, before.slice(), node.localRecord().?.slice());
-    try std.testing.expectEqualDeep(identify, node.service.identify.local);
+    try std.testing.expectEqualDeep(identify, node.protocols.identify.local);
     try std.testing.expect(node.advertisementEndpoints().?.ip4 == null);
 }
 
@@ -117,7 +117,7 @@ test "core constructs complete dual-family Identify with existing address preced
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{94}));
     for (0..4) |case| {
         var opts = core_test.networkOptions(&key);
-        opts.resolved.core.service.identify = .{ .agent = "complete", .addresses = if (case == 0) &.{} else &explicit };
+        opts.resolved.core.protocols.identify = .{ .agent = "complete", .addresses = if (case == 0) &.{} else &explicit };
         opts.startup.bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
         if (case == 2) opts.startup.discovery = .{ .bind = opts.startup.bind, .fixed = .{
             .ip4 = .{ 127, 9, 8, 7 },
@@ -132,7 +132,7 @@ test "core constructs complete dual-family Identify with existing address preced
         var node: NetworkCore = undefined;
         try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
         defer node.deinit(std.testing.io);
-        const local = node.service.identify.local;
+        const local = node.protocols.identify.local;
         try std.testing.expectEqualStrings("complete", local.agent.slice());
         try std.testing.expectEqual(@as(u8, if (case == 3) 0 else 2), local.address_count);
         for (local.addresses[0..local.address_count], 0..) |encoded, family| {
@@ -147,6 +147,6 @@ test "core constructs complete dual-family Identify with existing address preced
         }
         const intent = core_test.intent(&node, &.{});
         try std.testing.expect(!try node.applyIntent(&intent, node.last_now));
-        try std.testing.expectEqualDeep(local, node.service.identify.local);
+        try std.testing.expectEqualDeep(local, node.protocols.identify.local);
     }
 }

@@ -40,9 +40,9 @@ export class NativeRuntime {
   get closed() {
     return this.#closed;
   }
-  /** The turns a pump drives this runtime on. */
-  get turns() {
-    return this.#owner.turns;
+  /** Schedules bounded host turns for this runtime. */
+  get scheduler() {
+    return this.#owner.scheduler;
   }
   get state() {
     return this.#native.getState();

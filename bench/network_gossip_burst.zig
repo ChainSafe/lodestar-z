@@ -226,29 +226,29 @@ const Schedule = struct {
 
 /// The newest chain boundary, so topics carry the current fork's message sizes.
 const Chain = struct {
-    plan: network.chain.Plan,
+    network_config: network.chain.Config,
     update: network.NetworkCore.LocalUpdate,
     boundary: usize,
     slot: u64,
     attestation_bytes: usize,
 
     fn init(options: *const Options) !Chain {
-        const plan = try network.chain.Plan.init(chain_config, false);
-        const boundary: usize = plan.boundary_count - 1;
-        const slot = plan.boundaries[boundary].epoch * preset.preset.SLOTS_PER_EPOCH;
+        const network_config = try network.chain.Config.init(chain_config, false);
+        const boundary: usize = network_config.boundary_count - 1;
+        const slot = network_config.boundaries[boundary].epoch * preset.preset.SLOTS_PER_EPOCH;
         const local: t.LocalState = .{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT }, .status = .{ .earliest_available_slot = 0 } };
-        const rules = &plan.topics[boundary].rules;
+        const rules = &network_config.topics[boundary].rules;
         const attestation = rules[@intFromEnum(Kind.beacon_attestation)];
         if (attestation.count < options.topics) return error.InvalidOptions;
         if (options.columns > 0) {
             const column = rules[@intFromEnum(Kind.data_column_sidecar)];
             if (column.count < options.topics or options.column_bytes < column.ssz_min or options.column_bytes > column.ssz_max) return error.InvalidColumnSize;
         }
-        return .{ .plan = plan, .update = try plan.update(local, null, slot), .boundary = boundary, .slot = slot, .attestation_bytes = attestation.ssz_min };
+        return .{ .network_config = network_config, .update = try network_config.update(local, null, slot), .boundary = boundary, .slot = slot, .attestation_bytes = attestation.ssz_min };
     }
 
     fn digest(self: *const Chain) [4]u8 {
-        return self.plan.boundaries[self.boundary].digest;
+        return self.network_config.boundaries[self.boundary].digest;
     }
 
     fn topic(self: *const Chain, column: bool, subnet: u16, out: *[gossip.topic.topic_max_len]u8) []const u8 {
@@ -268,7 +268,7 @@ const Chain = struct {
             }
         }
         const intent: network.NetworkCore.LocalIntent = .{
-            .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.service.router.capabilities() },
+            .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
             .demand = node.peer_manager.demand,
             .subscriptions = &.{boundary},
             .slot = self.slot,
@@ -278,7 +278,7 @@ const Chain = struct {
 
     /// Whether every subscribed topic's mesh holds `members`, or with null at least one peer.
     fn meshed(self: *const Chain, node: *const network.NetworkCore, options: *const Options, spoke: ?u16, members: ?usize) bool {
-        const overlay = node.service.gossipsub.overlay;
+        const overlay = node.protocols.gossipsub.overlay;
         var buffer: [gossip.topic.topic_max_len]u8 = undefined;
         for (0..options.topics) |index| {
             const subnet: u16 = @intCast(index);
@@ -302,7 +302,7 @@ fn processorLimits(chain: *const Chain, options: *const Options) network.gossip_
     var limits: network.gossip_processor.limits.Limits = undefined;
     for (&limits, items, weights_mib, 0..) |*limit, count, weight, kind| {
         var largest: usize = 0;
-        for (chain.plan.topics[0..chain.plan.boundary_count]) |boundary| largest = @max(largest, boundary.rules[kind].ssz_max);
+        for (chain.network_config.topics[0..chain.network_config.boundary_count]) |boundary| largest = @max(largest, boundary.rules[kind].ssz_max);
         limit.* = .{
             .items = if (kind == @intFromEnum(Kind.beacon_attestation)) @intCast(@max(128, (slot_messages * 11 + 9) / 10)) else count,
             .bytes = @intCast(std.mem.alignForward(usize, @max(gossip.constants.maxCompressedLen(largest), weight * mib), 4096)),
@@ -318,15 +318,15 @@ fn hubResolved(chain: *const Chain, options: *const Options) !network.configurat
     return network.configuration.resolve(.{
         .profile = .beacon_node,
         .seed = 7,
-        .forks = chain.plan.forks[0..chain.plan.boundary_count],
-        .admission_policy = chain.plan.requestPolicy(),
+        .forks = chain.network_config.forks[0..chain.network_config.boundary_count],
+        .admission_policy = chain.network_config.requestPolicy(),
         .limits = .{ .connections_max = 242, .handshaking_max = 32, .handshaking_per_source_max = 32, .dialing_max = 32, .receive_budget_bytes = 512 * mib },
         .peers = .{ .capacity = 420, .outbound_reserve = 32, .target_peers = 200, .max_peers = 210, .min_outbound = 50 },
         .byte_limit = 768 * mib,
         .router = .{ .capabilities = chain.update.capabilities },
         .gossip = .{
-            .topic_policy = chain.plan.topics[0..chain.plan.boundary_count],
-            .message_id_policy = .{ .phase0_digest = chain.plan.phase0_digest },
+            .topic_policy = chain.network_config.topics[0..chain.network_config.boundary_count],
+            .message_id_policy = .{ .phase0_digest = chain.network_config.phase0_digest },
             .payload_limits = limits,
             .validation_capacity = limits_mod.items(&limits),
             .mcache_arena_bytes = 2 * limits_mod.bytes(&limits),
@@ -397,14 +397,14 @@ fn spokeResolved(chain: *const Chain, options: *const Options, index: u16, slow:
     return network.configuration.resolve(.{
         .profile = .small,
         .seed = 1_000 + index,
-        .forks = chain.plan.forks[0..chain.plan.boundary_count],
-        .admission_policy = chain.plan.requestPolicy(),
+        .forks = chain.network_config.forks[0..chain.network_config.boundary_count],
+        .admission_policy = chain.network_config.requestPolicy(),
         .limits = if (slow) slow_limits else null,
         .socket_buffers = .{ .quic = .{ .receive = 4 * mib, .send = 4 * mib } },
         .router = .{ .capabilities = chain.update.capabilities },
         .gossip = .{
-            .topic_policy = chain.plan.topics[0..chain.plan.boundary_count],
-            .message_id_policy = .{ .phase0_digest = chain.plan.phase0_digest },
+            .topic_policy = chain.network_config.topics[0..chain.network_config.boundary_count],
+            .message_id_policy = .{ .phase0_digest = chain.network_config.phase0_digest },
             .heartbeat_interval_ms = 100,
             .mcache_capacity = 4096,
             .input_per_peer = if (slow) input else null,
@@ -435,7 +435,7 @@ const Host = struct {
     /// The host must not move while the hub holds its sink.
     fn attach(self: *Host, node: *network.NetworkCore) void {
         self.sink = .{ .context = self, .has_capacity = hasCapacity, .admit = admit };
-        node.service.gossipsub.message_sink = &self.sink;
+        node.protocols.gossipsub.message_sink = &self.sink;
     }
 
     fn hasCapacity(context: *anyopaque, _: Kind, _: usize) bool {
@@ -551,7 +551,7 @@ const Spoke = struct {
             if (result.readiness.failure) |err| return err;
         }
         // A spoke runs without a host, so it refuses every message it receives for storage.
-        for (self.core.service.gossipsub.messages.storage_refusals) |count| self.received += count;
+        for (self.core.protocols.gossipsub.messages.storage_refusals) |count| self.received += count;
     }
 
     /// Publishes up to 64 due messages and returns when the spoke should step again.
@@ -612,7 +612,7 @@ const Totals = struct {
     udp_received: u64 = 0,
 
     fn read(hub: *const network.NetworkCore, host: *const Host, steps: u64, now_ms: u64) Totals {
-        const g = hub.service.gossipsub;
+        const g = hub.protocols.gossipsub;
         var result: Totals = .{
             .at_ms = now_ms,
             .admitted = host.admitted,
@@ -676,7 +676,7 @@ const Sample = struct {
     pending_verdicts: usize,
 
     fn read(hub: *const network.NetworkCore, host: *const Host, steps: u64, now_ms: u64) Sample {
-        const g = hub.service.gossipsub;
+        const g = hub.protocols.gossipsub;
         var result: Sample = .{
             .totals = .read(hub, host, steps, now_ms),
             .queued = 0,
@@ -717,7 +717,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var schedule = try Schedule.init(allocator, options);
     defer schedule.deinit(allocator);
     const hub_resolved = try hubResolved(chain, options);
-    const policy = &hub_resolved.core.service.gossipsub;
+    const policy = &hub_resolved.core.protocols.gossipsub;
     std.debug.print("case=gossip_burst preset={s} chain_preset={s} optimize={s} peers={d} topics={d} mesh={d} recipients={d} slow={d} slow_rate={d} attestation_ssz_bytes={d} burst={d} window_ms={d} background={d} duplicates={d} duplicate_ms={d} lead_ms={d} tail_ms={d} delay_ms={d} exchange_ms={d} batch={d} columns={d} column_bytes={d} validators={d} messages={d}\n", .{ parsed.name, @tagName(preset.active_preset), @tagName(@import("builtin").mode), options.peers, options.topics, options.mesh, options.mesh - 1, options.slow, options.slow_rate, chain.attestation_bytes, options.burst, options.window_ms, options.background, options.duplicates, options.duplicate_ms, options.lead_ms, options.tail_ms, options.delay_ms, options.exchange_ms, options.batch, options.columns, options.column_bytes, options.validators, schedule.messages.len });
     std.debug.print("case=gossip_burst hub calls_per_pump={d} calls_per_peer={d} peers_per_pump={d} per_peer_descriptors={d} local_descriptors={d} attestation_items={d} validation_capacity={d}\n", .{ policy.calls_per_pump, policy.calls_per_peer, policy.peers_per_pump, gossip.delivery.per_peer_limit, policy.tx_local_descriptors, policy.payload_limits.?[@intFromEnum(Kind.beacon_attestation)].items, policy.validation_capacity });
 
@@ -735,7 +735,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var host: Host = .{ .ring = try allocator.alloc(Host.Pending, Host.ring_len), .delay_ms = options.delay_ms, .exchange_ms = options.exchange_ms, .batch = options.batch };
     defer allocator.free(host.ring);
     host.attach(hub);
-    defer hub.service.gossipsub.message_sink = null;
+    defer hub.protocols.gossipsub.message_sink = null;
     try chain.subscribe(hub, options, null, try network.Transport.currentTime(io));
 
     var shared: Shared = .{ .io = io, .allocator = allocator, .chain = chain, .options = options, .schedule = &schedule, .hub_id = hub.peerId(), .hub_address = hub.transport.localAddress() };
@@ -764,7 +764,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         if (shared.failed.load(.acquire)) return spokeFailure(spokes);
         if (shared.ready.load(.acquire) == options.peers and hubReady(hub, chain, options)) break;
         if (now.millis() > setup_start.millis() + 20_000) {
-            std.debug.print("case=gossip_burst setup_failed ready={d} peers={any} gossip={any}\n", .{ shared.ready.load(.acquire), hub.peerCounts(), hub.service.gossipsub.resourceSnapshot() });
+            std.debug.print("case=gossip_burst setup_failed ready={d} peers={any} gossip={any}\n", .{ shared.ready.load(.acquire), hub.peerCounts(), hub.protocols.gossipsub.resourceSnapshot() });
             return error.SetupDeadline;
         }
     }
@@ -857,7 +857,7 @@ fn spokeFailure(spokes: []const Spoke) anyerror {
 /// Every subnet mesh holds all its subscribers and every session can write.
 fn hubReady(hub: *const network.NetworkCore, chain: *const Chain, options: *const Options) bool {
     if (!chain.meshed(hub, options, null, options.mesh)) return false;
-    for (hub.service.gossipsub.sessions.rows) |*row| if (row.active and row.outStream() == null) return false;
+    for (hub.protocols.gossipsub.sessions.rows) |*row| if (row.active and row.outStream() == null) return false;
     return true;
 }
 

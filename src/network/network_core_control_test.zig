@@ -1,6 +1,6 @@
 const schedule_test_support = @import("schedule_test_support.zig");
 const std = @import("std");
-const DialIntent = @import("peers/dialing.zig").Dialing.DialIntent;
+const SelectedDial = @import("peers/dialing.zig").Dialing.SelectedDial;
 const localState = @import("network_core_test_support.zig").localState;
 const Setup = @import("network_core_test_support.zig").Setup;
 const t = @import("peers/types.zig");
@@ -30,7 +30,7 @@ test "core fork revalidation protects retention but old replies never restore ap
     next.fork.digest = @splat(1);
     next.status.fork_digest = next.fork.digest;
     try @import("network_core_test_support.zig").updateLocal(&setup.client, &next, setup.pair.now);
-    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     const deadline = setup.client.peer_manager.control.revalidationDeadline(peer.peer, peer.connection.?, setup.pair.now).?;
     try std.testing.expect(!setup.client.peer_manager.catalog.get(peer.peer).?.relevant);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().outbound);
@@ -46,7 +46,7 @@ test "core fork revalidation protects retention but old replies never restore ap
     reply(&setup.client, op, old, setup.pair.now);
     try std.testing.expect(!setup.client.peer_manager.catalog.get(peer.peer).?.relevant);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer.peer).?.disconnect_reason == null);
-    try std.testing.expectEqual(setup.pair.now.millis() + setup.client.peer_manager.control.options.local_retry_ms, setup.client.peer_manager.control.schedules[peer.peer.index].retry_ms);
+    try std.testing.expectEqual(setup.pair.now.millis() + setup.client.peer_manager.control.options.local_retry_ms, setup.client.peer_manager.control.connections[peer.peer.index].retry_ms);
     try std.testing.expectEqual(deadline, setup.client.peer_manager.control.revalidationDeadline(peer.peer, peer.connection.?, setup.pair.now).?);
     setup.pair.advance(deadline - setup.pair.now.millis());
     reply(&setup.client, op, old, setup.pair.now);
@@ -71,8 +71,8 @@ test "core fork revalidation excludes peers that never established relevance" {
 test "core production fork capabilities defer rejected Status probes only during revalidation" {
     const capabilities = @import("capabilities.zig");
     var setup: Setup = .{};
-    var opts = @import("network_core_test_support.zig").options();
-    opts.core.service.router.capabilities = try capabilities.forFork(.electra, false, &.{.v1_2});
+    var opts = @import("network_core_test_support.zig").resolvedOptions();
+    opts.core.protocols.router.capabilities = try capabilities.forFork(.electra, false, &.{.v1_2});
     try setup.initOwnersWithOptions(&.{ .fork = .{ .fork = .electra } }, opts);
     defer setup.deinit();
     _ = try setup.pair.dial();
@@ -83,17 +83,17 @@ test "core production fork capabilities defer rejected Status probes only during
     next.fork.fork = .fulu;
     next.fork.digest = @splat(1);
     next.status.fork_digest = next.fork.digest;
-    setup.client.service.router.setCapabilities(try capabilities.forFork(.fulu, false, &.{.v1_2}));
+    setup.client.protocols.router.setCapabilities(try capabilities.forFork(.fulu, false, &.{.v1_2}));
     try @import("network_core_test_support.zig").updateLocal(&setup.client, &next, setup.pair.now);
-    const deadline = setup.client.peer_manager.control.schedules[peer.index].transition_until_ms;
+    const deadline = setup.client.peer_manager.control.connections[peer.index].transition_until_ms;
     for (0..80) |_| try setup.step(0);
     const waiting = setup.client.peer_manager.catalog.get(peer).?;
     try std.testing.expect(!waiting.relevant and waiting.disconnect_reason == null);
-    const retry = setup.client.peer_manager.control.schedules[peer.index].retry_ms;
+    const retry = setup.client.peer_manager.control.connections[peer.index].retry_ms;
     try std.testing.expect(retry > setup.pair.now.millis() and retry <= deadline);
     setup.pair.advance(retry - setup.pair.now.millis());
     for (0..80) |_| try setup.step(0);
-    try std.testing.expectEqual(deadline, setup.client.peer_manager.control.schedules[peer.index].transition_until_ms);
+    try std.testing.expectEqual(deadline, setup.client.peer_manager.control.connections[peer.index].transition_until_ms);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.disconnect_reason == null);
     setup.pair.advance(deadline - setup.pair.now.millis());
     for (0..80) |_| try setup.step(0);
@@ -104,8 +104,8 @@ test "core production Fulu receives old Status only with established revalidatio
     const capabilities = @import("capabilities.zig");
     for ([_]bool{ false, true }) |established| {
         var setup: Setup = .{};
-        var opts = @import("network_core_test_support.zig").options();
-        opts.core.service.router.capabilities = try capabilities.forFork(.electra, false, &.{.v1_2});
+        var opts = @import("network_core_test_support.zig").resolvedOptions();
+        opts.core.protocols.router.capabilities = try capabilities.forFork(.electra, false, &.{.v1_2});
         try setup.initOwnersWithOptions(&.{ .fork = .{ .fork = .electra } }, opts);
         defer setup.deinit();
         _ = try setup.pair.dial();
@@ -117,19 +117,19 @@ test "core production Fulu receives old Status only with established revalidatio
         next.fork.fork = .fulu;
         next.fork.digest = @splat(1);
         next.status.fork_digest = next.fork.digest;
-        setup.server.service.router.setCapabilities(try capabilities.forFork(.fulu, false, &.{.v1_2}));
+        setup.server.protocols.router.setCapabilities(try capabilities.forFork(.fulu, false, &.{.v1_2}));
         try @import("network_core_test_support.zig").updateLocal(&setup.server, &next, setup.pair.now);
-        const deadline = setup.server.peer_manager.control.schedules[peer.index].transition_until_ms;
-        setup.server.peer_manager.control.schedules[peer.index].retry_ms = std.math.maxInt(u64);
+        const deadline = setup.server.peer_manager.control.connections[peer.index].transition_until_ms;
+        setup.server.peer_manager.control.connections[peer.index].retry_ms = std.math.maxInt(u64);
         setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, peer.index);
         try previousStatus(&setup);
         const snapshot = setup.server.peer_manager.catalog.get(peer).?;
         try std.testing.expect(!snapshot.relevant);
         if (established) {
             try std.testing.expect(snapshot.disconnect_reason == null);
-            try std.testing.expectEqual(deadline, setup.server.peer_manager.control.schedules[peer.index].transition_until_ms);
+            try std.testing.expectEqual(deadline, setup.server.peer_manager.control.connections[peer.index].transition_until_ms);
             setup.pair.advance(deadline - setup.pair.now.millis());
-            setup.server.peer_manager.control.schedules[peer.index].retry_ms = std.math.maxInt(u64);
+            setup.server.peer_manager.control.connections[peer.index].retry_ms = std.math.maxInt(u64);
             setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, peer.index);
             try previousStatus(&setup);
         }
@@ -157,7 +157,7 @@ test "core local pruning records automatic redial backoff separately from peer f
 
 test "core admission evaluation expires without protocol progress" {
     var setup: Setup = .{};
-    var opts = @import("network_core_test_support.zig").options();
+    var opts = @import("network_core_test_support.zig").resolvedOptions();
     opts.core.peers.target_peers = 0;
     opts.core.peers.min_outbound = 0;
     try setup.initOwnersWithOptions(&.{}, opts);
@@ -177,10 +177,10 @@ test "core admission evaluation expires without protocol progress" {
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.selection.retained_count);
     try std.testing.expectEqual(grace, setup.client.peer_manager.selection_deadline.?);
     setup.pair.advance(grace - setup.pair.now.millis() - 1);
-    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.disconnect_reason == null);
     setup.pair.advance(1);
-    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.selection.retained_count);
     try std.testing.expectEqual(t.DisconnectReason.count_pruning, setup.client.peer_manager.catalog.get(peer).?.disconnect_reason.?);
 }
@@ -207,7 +207,7 @@ test "core records a buffered Goodbye before transport cancellation and preserve
         var ready = false;
         for (0..40) |_| {
             try setup.step(0);
-            for (setup.server.service.reqresp.inbound) |slot| if (slot.request.running() and slot.state == .receiving_request and slot.request.protocol == .goodbye_v1) {
+            for (setup.server.protocols.reqresp.inbound) |slot| if (slot.request.running() and slot.state == .receiving_request and slot.request.protocol == .goodbye_v1) {
                 ready = true;
             };
             if (ready) break;
@@ -245,22 +245,22 @@ test "core local head and metadata updates preserve periodic status scheduling" 
     try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.snapshots(&snapshots));
     const peer = snapshots[0].peer;
     try std.testing.expect(snapshots[0].relevant);
-    const due = setup.client.peer_manager.control.schedules[peer.index].status_due_ms;
-    const started = setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
+    const due = setup.client.peer_manager.control.connections[peer.index].status_due_ms;
+    const started = setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
     for (0..3) |_| {
         var local = setup.client.peer_manager.local;
         local.status.head_slot += 1;
         local.metadata.seq_number += 1;
         try @import("network_core_test_support.zig").updateLocal(&setup.client, &local, setup.pair.now);
         for (0..40) |_| try setup.step(1);
-        try std.testing.expectEqual(due, setup.client.peer_manager.control.schedules[peer.index].status_due_ms);
-        try std.testing.expectEqual(started, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
+        try std.testing.expectEqual(due, setup.client.peer_manager.control.connections[peer.index].status_due_ms);
+        try std.testing.expectEqual(started, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
     }
     setup.pair.advance(1);
     setup.client.peer_manager.reStatusPeers(setup.pair.now);
     for (0..40) |_| try setup.step(1);
-    try std.testing.expectEqual(started + 1, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
-    try std.testing.expect(setup.client.peer_manager.control.schedules[peer.index].status_due_ms > due);
+    try std.testing.expectEqual(started + 1, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
+    try std.testing.expect(setup.client.peer_manager.control.connections[peer.index].status_due_ms > due);
 }
 
 test "core stale metadata finishes one refresh while periodic Status and later changes progress" {
@@ -272,46 +272,46 @@ test "core stale metadata finishes one refresh while periodic Status and later c
         var snapshots: [4]t.Snapshot = undefined;
         try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.snapshots(&snapshots));
         const peer = snapshots[0].peer;
-        const row = &setup.client.peer_manager.control.schedules[peer.index];
-        const started = setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing;
-        const statuses = setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
+        const row = &setup.client.peer_manager.control.connections[peer.index];
+        const started = setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing;
+        const statuses = setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
         row.status_due_ms = setup.pair.now.millis() + 2000;
         setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
         try std.testing.expectEqual(@as(usize, 1), setup.server.peer_manager.snapshots(&snapshots));
         const remote = snapshots[0].peer;
         remoteSequence(&setup.server, 11);
-        setup.server.peer_manager.control.schedules[remote.index].ping_due_ms = setup.pair.now.millis();
+        setup.server.peer_manager.control.connections[remote.index].ping_due_ms = setup.pair.now.millis();
         setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, remote.index);
         for (0..80) |_| {
             try setup.step(0);
-            if (setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing > started) break;
+            if (setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing > started) break;
         }
-        try std.testing.expectEqual(started + 1, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
+        try std.testing.expectEqual(started + 1, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
         remoteSequence(&setup.server, reply_sequence);
         for (0..80) |_| try setup.step(0);
         try std.testing.expect(row.metadata_due_ms == null);
         try std.testing.expectEqual(@as(u64, 10), setup.client.peer_manager.catalog.get(peer).?.metadata.?.seq_number);
         setup.pair.advance(1000);
         for (0..80) |_| try setup.step(0);
-        try std.testing.expectEqual(started + 1, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
+        try std.testing.expectEqual(started + 1, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
         setup.pair.advance(1000);
         for (0..80) |_| try setup.step(0);
-        try std.testing.expectEqual(statuses + 1, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
-        try std.testing.expectEqual(started + 1, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
+        try std.testing.expectEqual(statuses + 1, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
+        try std.testing.expectEqual(started + 1, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
         setup.pair.advance(rr.Protocol.metadata_v1.info().quota_period_ms);
         remoteSequence(&setup.server, 12);
-        setup.client.peer_manager.control.schedules[peer.index].ping_due_ms = setup.pair.now.millis();
+        setup.client.peer_manager.control.connections[peer.index].ping_due_ms = setup.pair.now.millis();
         setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
         for (0..80) |_| try setup.step(0);
-        try std.testing.expectEqual(started + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
+        try std.testing.expectEqual(started + 2, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
         try std.testing.expectEqual(@as(u64, 12), setup.client.peer_manager.catalog.get(peer).?.metadata.?.seq_number);
         row.metadata_due_ms = setup.pair.now.millis();
         row.ping_due_ms = setup.pair.now.millis();
         row.status_due_ms = setup.pair.now.millis() - 1;
         setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
         _ = try setup.turn(&setup.client, .{});
-        try std.testing.expectEqual(statuses + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
-        try std.testing.expectEqual(started + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
+        try std.testing.expectEqual(statuses + 2, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
+        try std.testing.expectEqual(started + 2, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
     }
 }
 
@@ -326,7 +326,7 @@ test "core control accepts zero custody metadata without retaining previous cust
     const peer = snapshots[0].peer;
     const conn = snapshots[0].connection.?;
     try std.testing.expectEqual(@as(usize, fork.custody_groups), snapshots[0].custody_groups.?.count());
-    const row = &setup.client.peer_manager.control.schedules[peer.index];
+    const row = &setup.client.peer_manager.control.connections[peer.index];
     row.metadata_due_ms = setup.pair.now.millis();
     setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
     _ = try setup.turn(&setup.client, .{});
@@ -339,13 +339,13 @@ test "core control accepts zero custody metadata without retaining previous cust
         try setup.pair.pump();
         var transport: [32]Engine.Event = undefined;
         var output: [16]rr.ReqResp.Event = undefined;
-        const counts = setup.server.service.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .control = &output });
+        const counts = setup.server.protocols.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .control = &output });
         for (output[0..counts.control]) |event| switch (event) {
             .request => |incoming| {
                 try std.testing.expectEqual(rr.Protocol.metadata_v3, incoming.protocol);
-                try setup.server.service.reqresp.respond(incoming.request, &response, null, setup.pair.now);
+                try setup.server.protocols.reqresp.respond(incoming.request, &response, null, setup.pair.now);
             },
-            .chunk_sent => |chunk| try std.testing.expect(setup.server.service.reqresp.finish(chunk.request, setup.pair.now)),
+            .chunk_sent => |chunk| try std.testing.expect(setup.server.protocols.reqresp.finish(chunk.request, setup.pair.now)),
             .served => served = true,
             else => return error.TestUnexpectedResult,
         };
@@ -373,7 +373,7 @@ test "core native stalled fork transition only wakes for eligible work" {
     const peer = snapshots[0].peer;
     const conn = snapshots[0].connection.?;
     try std.testing.expect(snapshots[0].relevant);
-    try std.testing.expect(setup.client.service.gossipsub.admitted(conn));
+    try std.testing.expect(setup.client.protocols.gossipsub.admitted(conn));
     const updated: t.LocalState = .{
         .fork = .{ .fork = .fulu, .digest = @splat(1) },
         .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
@@ -385,13 +385,13 @@ test "core native stalled fork transition only wakes for eligible work" {
         _ = try setup.turn(&setup.client, .{});
     }
     try std.testing.expect(!setup.client.peer_manager.catalog.get(peer).?.relevant);
-    try std.testing.expect(setup.client.service.gossipsub.admitted(conn));
+    try std.testing.expect(setup.client.protocols.gossipsub.admitted(conn));
     var active: usize = 0;
     for (setup.client.control_protocol.operations) |op| if (op.request != null and !op.cancelled) {
         active += 1;
     };
     try std.testing.expect(active > 0);
-    const service_due = schedule_test_support.wakeupMilliseconds(setup.client.service.schedule(.{ .application = 0, .control = 32 }), setup.pair.now.millis()).?;
+    const service_due = schedule_test_support.wakeupMilliseconds(setup.client.protocols.schedule(.{ .application = 0, .control = 32 }), setup.pair.now.millis()).?;
     try std.testing.expect(service_due > setup.pair.now.millis());
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now), setup.pair.now.millis()) == null);
     const core_due = schedule_test_support.wakeupMilliseconds(setup.client.wakeups(setup.pair.now, .{}).schedule(), setup.pair.now.millis()).?;
@@ -439,13 +439,13 @@ test "core native host fork transition cancels old maintenance without reviving 
     try std.testing.expectEqual(@as(u64, 0), confirmed.status.?.earliest_available_slot.?);
     try std.testing.expectEqual(setup.server.localState().metadata.seq_number, confirmed.metadata.?.seq_number);
     try std.testing.expect(setup.client.peer_manager.disconnect(before.peer, .host, setup.pair.now));
-    const deadline = setup.client.peer_manager.control.schedules[before.peer.index].closing.?.deadline_ms;
+    const deadline = setup.client.peer_manager.control.connections[before.peer.index].closing.?.deadline_ms;
     var next = updated;
     next.fork.digest = @splat(2);
     next.status.fork_digest = @splat(2);
     try @import("network_core_test_support.zig").updateLocal(&setup.client, &next, setup.pair.now);
     try std.testing.expectEqual(t.DisconnectReason.host, setup.client.peer_manager.catalog.get(before.peer).?.disconnect_reason.?);
-    try std.testing.expectEqual(deadline, setup.client.peer_manager.control.schedules[before.peer.index].closing.?.deadline_ms);
+    try std.testing.expectEqual(deadline, setup.client.peer_manager.control.connections[before.peer.index].closing.?.deadline_ms);
 }
 
 test "core native previous fork request grace does not refresh relevance and expires" {
@@ -465,7 +465,7 @@ test "core native previous fork request grace does not refresh relevance and exp
     try @import("network_core_test_support.zig").updateLocal(&setup.server, &updated, setup.pair.now);
     for (0..80) |_| try setup.step(1);
     const before = setup.server.peer_manager.catalog.get(peer).?;
-    const deadline = setup.server.peer_manager.control.schedules[peer.index].transition_until_ms;
+    const deadline = setup.server.peer_manager.control.connections[peer.index].transition_until_ms;
     setup.pair.advance(100);
     try previousStatus(&setup);
     const after = setup.server.peer_manager.catalog.get(peer).?;
@@ -473,7 +473,7 @@ test "core native previous fork request grace does not refresh relevance and exp
     try std.testing.expectEqual(before.status_at_ms, after.status_at_ms);
     try std.testing.expectEqual(before.metadata_at_ms, after.metadata_at_ms);
     try std.testing.expect(after.relevant and after.disconnect_reason == null);
-    try std.testing.expectEqual(deadline, setup.server.peer_manager.control.schedules[peer.index].transition_until_ms);
+    try std.testing.expectEqual(deadline, setup.server.peer_manager.control.connections[peer.index].transition_until_ms);
     setup.pair.advance(10_001);
     try previousStatus(&setup);
     try std.testing.expectEqual(t.DisconnectReason.incompatible_fork, setup.server.peer_manager.catalog.get(peer).?.disconnect_reason.?);
@@ -484,27 +484,27 @@ fn previousStatus(setup: *Setup) !void {
     _ = setup.client.peer_manager.snapshots(&snapshots);
     var bytes: [84]u8 = @splat(0);
     var sink: [84]u8 = undefined;
-    const handle = try setup.client.service.request(setup.pair.client, snapshots[0].connection.?, .status_v1, &bytes, &sink, .{}, setup.pair.now);
+    const handle = try setup.client.protocols.request(setup.pair.client, snapshots[0].connection.?, .status_v1, &bytes, &sink, .{}, setup.pair.now);
     var done = false;
     for (0..80) |_| {
         try setup.pair.pump();
         var events: [32]Engine.Event = undefined;
         _ = try setup.turn(&setup.server, .{});
         var out: [1]rr.ReqResp.Event = undefined;
-        const count = setup.client.service.process(setup.pair.client, setup.pair.events(setup.pair.client, &events), setup.pair.now, .{ .application = &.{}, .control = &out });
+        const count = setup.client.protocols.process(setup.pair.client, setup.pair.events(setup.pair.client, &events), setup.pair.now, .{ .application = &.{}, .control = &out });
         for (out[0..count.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualDeep(handle, chunk.request);
-                try std.testing.expect(setup.client.service.reqresp.consume(handle, setup.pair.now));
+                try std.testing.expect(setup.client.protocols.reqresp.consume(handle, setup.pair.now));
             },
             .done => {
                 done = true;
             },
             .request => |request| {
-                try setup.client.service.reqresp.respond(request.request, &.{ 1, 0, 0, 0, 0, 0, 0, 0 }, null, setup.pair.now);
+                try setup.client.protocols.reqresp.respond(request.request, &.{ 1, 0, 0, 0, 0, 0, 0, 0 }, null, setup.pair.now);
             },
             .chunk_sent => |sent| {
-                _ = setup.client.service.reqresp.finish(sent.request, setup.pair.now);
+                _ = setup.client.protocols.reqresp.finish(sent.request, setup.pair.now);
             },
             else => {},
         };
@@ -546,7 +546,7 @@ test "core control native Fulu serves older schemas but old Status cannot establ
             else => 0,
         };
         var sink: [92]u8 = undefined;
-        const request = try setup.client.service.request(
+        const request = try setup.client.protocols.request(
             setup.pair.client,
             conn,
             protocol,
@@ -566,14 +566,14 @@ test "core control native Fulu serves older schemas but old Status cannot establ
             _ = try setup.turn(&setup.server, .{});
             if (protocol == .goodbye_v1) {
                 for (setup.server.control_protocol.responses) |response| if (response.request) |inbound| {
-                    const owner = &setup.server.service.reqresp.inbound[inbound.index];
+                    const owner = &setup.server.protocols.reqresp.inbound[inbound.index];
                     if (owner.request.protocol != .goodbye_v1 or !owner.request.io.writing) continue;
                     try std.testing.expectEqualSlices(u8, &goodbye_reply, response.bytes[0..8]);
                     goodbye_writer = true;
                 };
             }
             var output: [1]rr.ReqResp.Event = undefined;
-            const counts = setup.client.service.process(setup.pair.client, setup.pair.events(
+            const counts = setup.client.protocols.process(setup.pair.client, setup.pair.events(
                 setup.pair.client,
                 &transport,
             ), setup.pair.now, .{ .application = &.{}, .control = &output });
@@ -585,16 +585,16 @@ test "core control native Fulu serves older schemas but old Status cannot establ
                     if (protocol == .goodbye_v1) {
                         try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, chunk.bytes[0..8], .little));
                     }
-                    try std.testing.expect(setup.client.service.reqresp.consume(request, setup.pair.now));
+                    try std.testing.expect(setup.client.protocols.reqresp.consume(request, setup.pair.now));
                     chunks += 1;
                 },
                 .done => terminal = true,
                 .request => |incoming| {
                     try std.testing.expectEqual(rr.Protocol.goodbye_v1, incoming.protocol);
-                    try setup.client.service.reqresp.respond(incoming.request, &goodbye_reply, null, setup.pair.now);
+                    try setup.client.protocols.reqresp.respond(incoming.request, &goodbye_reply, null, setup.pair.now);
                 },
                 .chunk_sent => |sent| {
-                    try std.testing.expect(setup.client.service.reqresp.finish(sent.request, setup.pair.now));
+                    try std.testing.expect(setup.client.protocols.reqresp.finish(sent.request, setup.pair.now));
                 },
                 .served => {},
                 else => return error.UnexpectedControlResult,
@@ -628,11 +628,11 @@ test "core native gossip admission precedes Status without establishing relevanc
         conn = event.connected.conn;
     };
     try std.testing.expect(conn != null);
-    _ = setup.client.service.gossipsub.peerConnected(setup.pair.client, conn.?, false, setup.pair.now);
+    _ = setup.client.protocols.gossipsub.peerConnected(setup.pair.client, conn.?, false, setup.pair.now);
     for (0..30) |_| {
         try setup.pair.pump();
         _ = try setup.turn(&setup.server, .{});
-        _ = setup.client.service.process(setup.pair.client, setup.pair.events(
+        _ = setup.client.protocols.process(setup.pair.client, setup.pair.events(
             setup.pair.client,
             &transport,
         ), setup.pair.now, .{ .application = &.{}, .control = &.{} });
@@ -640,19 +640,19 @@ test "core native gossip admission precedes Status without establishing relevanc
     var snapshots: [4]t.Snapshot = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.server.peer_manager.snapshots(&snapshots));
     try std.testing.expect(!snapshots[0].relevant);
-    try std.testing.expect(setup.server.service.gossipsub.admitted(snapshots[0].connection.?));
+    try std.testing.expect(setup.server.protocols.gossipsub.admitted(snapshots[0].connection.?));
     try std.testing.expectEqual(@as(f64, 0), snapshots[0].score);
     try std.testing.expectEqual(@as(u16, 0), setup.server.peer_manager.peerCounts().relevant);
 }
 
 test "core native inbound application per peer cap protects control from extra raw bulk owners" {
     var setup: Setup = .{};
-    var options = @import("network_core_test_support.zig").options();
-    options.core.service.reqresp.inbound_max = 24;
-    options.core.service.reqresp.outbound_max = 24;
-    options.core.service.reqresp.inbound_per_peer_max = 16;
-    options.core.service.reqresp.outbound_per_peer_max = 0;
-    options.core.service.reqresp.inbound_application_per_peer_max = 8;
+    var options = @import("network_core_test_support.zig").resolvedOptions();
+    options.core.protocols.reqresp.inbound_max = 24;
+    options.core.protocols.reqresp.outbound_max = 24;
+    options.core.protocols.reqresp.inbound_per_peer_max = 16;
+    options.core.protocols.reqresp.outbound_per_peer_max = 0;
+    options.core.protocols.reqresp.inbound_application_per_peer_max = 8;
     try setup.initOwnersWithOptions(&.{}, options);
     defer setup.deinit();
     _ = try setup.pair.dial();
@@ -674,7 +674,7 @@ test "core native inbound application per peer cap protects control from extra r
     const bytes = [_]u8{0} ** 8 ++ [_]u8{1} ++ [_]u8{0} ** 15;
     for (0..9) |index| {
         const protocol = protocols[index / 2];
-        _ = try setup.client.service.request(
+        _ = try setup.client.protocols.request(
             setup.pair.client,
             conn,
             protocol,
@@ -699,23 +699,23 @@ test "core native inbound application per peer cap protects control from extra r
     }
     try std.testing.expectEqual(@as(usize, 4), count);
     const ready = @intFromEnum(@import("reqresp/metrics.zig").InboundPhase.ready);
-    try std.testing.expectEqual(@as(usize, 4), setup.server.service.reqresp.resourceSnapshot().inbound_phases[ready]);
+    try std.testing.expectEqual(@as(usize, 4), setup.server.protocols.reqresp.resourceSnapshot().inbound_phases[ready]);
     _ = setup.server.peer_manager.snapshots(&snapshots);
     const server_conn = snapshots[0].connection.?;
-    try std.testing.expect(setup.server.service.reqresp.cancel(first.?, setup.pair.now));
-    setup.server.service.reqresp.cleanupPending(
+    try std.testing.expect(setup.server.protocols.reqresp.cancel(first.?, setup.pair.now));
+    setup.server.protocols.reqresp.cleanupPending(
         setup.pair.server,
-        &setup.server.service.router,
+        &setup.server.protocols.router,
     );
     try std.testing.expectEqual(
         @as(u16, 8),
-        setup.server.service.reqresp.inboundApplicationOccupiedCount(server_conn),
+        setup.server.protocols.reqresp.inboundApplicationOccupiedCount(server_conn),
     );
     var stale = server_conn;
     stale.generation += 1;
     try std.testing.expectEqual(
         @as(u16, 0),
-        setup.server.service.reqresp.inboundApplicationOccupiedCount(stale),
+        setup.server.protocols.reqresp.inboundApplicationOccupiedCount(stale),
     );
 }
 
@@ -745,7 +745,7 @@ test "core native immutable Status writer survives local update" {
     for (0..40) |_| {
         try setup.step(0);
         for (setup.server.control_protocol.responses) |response| if (response.request) |request| {
-            const slot = &setup.server.service.reqresp.inbound[request.index];
+            const slot = &setup.server.protocols.reqresp.inbound[request.index];
             if (slot.request.protocol != .status_v1) continue;
             try std.testing.expect(slot.request.io.writing);
             try setup.server.updateStatus(&localState(.{ .status = .{ .head_slot = 80 } }).status);
@@ -788,7 +788,7 @@ test "core control native Goodbye maps shutdown incompatibility and fault wire r
             var transport: [32]Engine.Event = undefined;
             _ = try setup.turn(&setup.client, .{});
             var control: [1]rr.ReqResp.Event = undefined;
-            const counts = setup.server.service.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .application = &.{}, .control = &control });
+            const counts = setup.server.protocols.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .application = &.{}, .control = &control });
             if (counts.control == 0) continue;
             try std.testing.expectEqual(rr.Protocol.goodbye_v1, control[0].request.protocol);
             try std.testing.expectEqual(@as(usize, 8), control[0].request.bytes.len);
@@ -810,7 +810,7 @@ test "core control irrelevant metadata cannot create an ineligible wakeup" {
     const peer = snapshots[0].peer;
     const conn = snapshots[0].connection.?;
     try std.testing.expect(setup.client.peer_manager.catalog.invalidateStatus(peer, conn));
-    const row = &setup.client.peer_manager.control.schedules[peer.index];
+    const row = &setup.client.peer_manager.control.connections[peer.index];
     row.metadata_due_ms = setup.pair.now.millis();
     row.status_due_ms = setup.pair.now.millis() + 100;
     row.ping_due_ms = setup.pair.now.millis() + 200;
@@ -832,7 +832,7 @@ test "core control does not schedule gossip admission alongside active request" 
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.peer_manager.snapshots(&snapshots);
     const peer = snapshots[0].peer;
-    const row = &setup.client.peer_manager.control.schedules[peer.index];
+    const row = &setup.client.peer_manager.control.connections[peer.index];
     setup.client.peer_manager.reStatusPeers(setup.pair.now);
     _ = try setup.turn(&setup.client, .{});
     const started = setup.client.peer_manager.control.counters.started;
@@ -849,11 +849,11 @@ test "core control does not schedule gossip admission alongside active request" 
 
 test "core control cancelled canonical requests retain buffers until local retirement" {
     var setup: Setup = .{};
-    var opts = @import("network_core_test_support.zig").options();
+    var opts = @import("network_core_test_support.zig").resolvedOptions();
     opts.core.peers.max_peers = 2;
     opts.core.peers.target_peers = 1;
     opts.core.peers.min_outbound = 0;
-    opts.core.service.reqresp.outbound_control_reserved = 2;
+    opts.core.protocols.reqresp.outbound_control_reserved = 2;
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();
     _ = try setup.pair.dial();
@@ -879,14 +879,14 @@ test "core control cancelled canonical requests retain buffers until local retir
     try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now), setup.pair.now.millis()));
     const started = setup.client.peer_manager.control.counters.started;
     const deferred = setup.client.peer_manager.control.counters.deferred;
-    const grace = setup.client.peer_manager.control.schedules[peer.index].transition_until_ms;
+    const grace = setup.client.peer_manager.control.connections[peer.index].transition_until_ms;
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(started + 1, setup.client.peer_manager.control.counters.started);
     try std.testing.expectEqual(deferred, setup.client.peer_manager.control.counters.deferred);
     try std.testing.expect(op.request != null);
     try std.testing.expect(!std.meta.eql(request, op.request.?));
     try std.testing.expect(!op.cancelled);
-    try std.testing.expectEqual(grace, setup.client.peer_manager.control.schedules[peer.index].transition_until_ms);
+    try std.testing.expectEqual(grace, setup.client.peer_manager.control.connections[peer.index].transition_until_ms);
 }
 
 test "control replacement retirement rekeys the current schedule without crediting stale evidence" {
@@ -901,7 +901,7 @@ test "control replacement retirement rekeys the current schedule without crediti
     const control = &setup.client.peer_manager.control;
     const requests = &setup.client.control_protocol;
     try std.testing.expect(snapshots[0].relevant);
-    try std.testing.expect(control.schedules[peer.index].evidence == .ready);
+    try std.testing.expect(control.connections[peer.index].evidence == .ready);
     setup.client.peer_manager.reStatusPeers(setup.pair.now);
     _ = try setup.turn(&setup.client, .{});
     const op = for (requests.operations) |*op| {
@@ -918,7 +918,7 @@ test "control replacement retirement rekeys the current schedule without crediti
     try setup.pair.pump();
     _ = try setup.turn(&setup.client, .{});
     const current = setup.client.peer_manager.catalog.get(peer).?.connection.?;
-    const row = &control.schedules[peer.index];
+    const row = &control.connections[peer.index];
     try std.testing.expect(!std.meta.eql(old, current));
     try std.testing.expectEqualDeep(current, row.conn);
     // The cancelled Status retired in that turn and rekeyed the new schedule, whose own Status
@@ -957,13 +957,13 @@ test "core control capabilities pre-Fulu Metadata3 serves configured custody cou
     try setup.init(&local);
     defer setup.deinit();
     const active = try @import("capabilities.zig").forFork(.phase0, false, &.{ .v1_2, .v1_1 });
-    setup.client.service.router.setCapabilities(active);
-    setup.server.service.router.setCapabilities(active);
+    setup.client.protocols.router.setCapabilities(active);
+    setup.server.protocols.router.setCapabilities(active);
     for (0..50) |_| try setup.step(0);
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.peer_manager.snapshots(&snapshots);
     var sink: [32]u8 = undefined;
-    const request = try setup.client.service.request(setup.pair.client, snapshots[0].connection.?, .metadata_v3, &.{}, &sink, .{}, setup.pair.now);
+    const request = try setup.client.protocols.request(setup.pair.client, snapshots[0].connection.?, .metadata_v3, &.{}, &sink, .{}, setup.pair.now);
     var received = false;
     var done = false;
     for (0..50) |_| {
@@ -971,13 +971,13 @@ test "core control capabilities pre-Fulu Metadata3 serves configured custody cou
         var events: [32]Engine.Event = undefined;
         _ = try setup.turn(&setup.server, .{});
         var out: [1]rr.ReqResp.Event = undefined;
-        const counts = setup.client.service.process(setup.pair.client, setup.pair.events(setup.pair.client, &events), setup.pair.now, .{ .application = &.{}, .control = &out });
+        const counts = setup.client.protocols.process(setup.pair.client, setup.pair.events(setup.pair.client, &events), setup.pair.now, .{ .application = &.{}, .control = &out });
         for (out[0..counts.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualDeep(request, chunk.request);
                 const metadata = try wire.decodeMetadata(.metadata_v3, chunk.bytes, local.fork);
                 try std.testing.expectEqual(local.metadata.custody_group_count, metadata.custody_group_count);
-                try std.testing.expect(setup.client.service.reqresp.consume(request, setup.pair.now));
+                try std.testing.expect(setup.client.protocols.reqresp.consume(request, setup.pair.now));
                 received = true;
             },
             .done => done = true,
@@ -999,20 +999,20 @@ test "core native targeted Status only schedules the full current nonclosing own
     const other_peer: t.PeerRef = .{ .index = 3, .generation = 55 };
     const other_conn: t.Handle = .{ .index = 3, .generation = 56 };
     setup.client.peer_manager.control.connected(&setup.client.peer_manager.catalog, other_peer, other_conn, .inbound, setup.pair.now);
-    const other_before = setup.client.peer_manager.control.schedules[3];
-    const before = setup.client.peer_manager.control.schedules[selected.peer.index];
+    const other_before = setup.client.peer_manager.control.connections[3];
+    const before = setup.client.peer_manager.control.connections[selected.peer.index];
     var stale_peer = selected.peer;
     stale_peer.generation += 1;
     var stale_conn = selected.connection.?;
     stale_conn.generation += 1;
     try std.testing.expect(!setup.client.peer_manager.reStatusPeer(stale_peer, selected.connection.?, setup.pair.now));
     try std.testing.expect(!setup.client.peer_manager.reStatusPeer(selected.peer, stale_conn, setup.pair.now));
-    try std.testing.expectEqualDeep(before, setup.client.peer_manager.control.schedules[selected.peer.index]);
+    try std.testing.expectEqualDeep(before, setup.client.peer_manager.control.connections[selected.peer.index]);
     try std.testing.expect(setup.client.peer_manager.reStatusPeer(selected.peer, selected.connection.?, setup.pair.now));
     var expected = before;
     expected.status_due_ms = setup.pair.now.millis();
-    try std.testing.expectEqualDeep(expected, setup.client.peer_manager.control.schedules[selected.peer.index]);
-    try std.testing.expectEqualDeep(other_before, setup.client.peer_manager.control.schedules[3]);
+    try std.testing.expectEqualDeep(expected, setup.client.peer_manager.control.connections[selected.peer.index]);
+    try std.testing.expectEqualDeep(other_before, setup.client.peer_manager.control.connections[3]);
     _ = try setup.turn(&setup.client, .{});
     var selected_started = false;
     for (setup.client.control_protocol.operations) |op| {
@@ -1036,7 +1036,7 @@ test "peer control retires each connection's schedule once across connection gen
     const old = snapshots[0].connection.?;
     const replacement: t.Handle = .{ .index = old.index, .generation = old.generation + 1 };
     const control = &setup.client.peer_manager.control;
-    const schedule = &control.schedules[peer.index];
+    const schedule = &control.connections[peer.index];
     control.retire(peer, replacement);
     try std.testing.expectEqualDeep(old, schedule.conn);
     try std.testing.expect(schedule.peer != null);
@@ -1074,15 +1074,15 @@ test "core control response deadline survives continuous peer progress" {
         try setup.pair.pump();
         var transport: [32]Engine.Event = undefined;
         var incoming: [16]rr.ReqResp.Event = undefined;
-        const counts = setup.server.service.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .control = &incoming });
+        const counts = setup.server.protocols.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .control = &incoming });
         for (incoming[0..counts.control]) |event| if (event == .request and event.request.protocol == .status_v1) {
-            remote_stream = setup.server.service.reqresp.inbound[event.request.request.index].request.stream;
+            remote_stream = setup.server.protocols.reqresp.inbound[event.request.request.index].request.stream;
         };
         _ = try setup.turn(&setup.client, .{});
         if (remote_stream != null) break;
     }
     const stream = remote_stream orelse return error.TestUnexpectedResult;
-    const client = &setup.client.service.reqresp.outbound[handle.index];
+    const client = &setup.client.protocols.reqresp.outbound[handle.index];
     try std.testing.expectEqual(.response, client.phase);
     const due = client.deadline().?;
     try std.testing.expectEqual(@as(u64, 10_000), due - setup.pair.now.millis());
@@ -1122,7 +1122,7 @@ test "core coalesces silent inbound request owners before host request delivery"
         try std.testing.expectEqual(header.len + proposal.len, try setup.pair.client.write(stream, bytes[0 .. header.len + proposal.len], false));
     }
     for (0..30) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(u16, 2), setup.server.service.reqresp.pendingCounts().inbound);
+    try std.testing.expectEqual(@as(u16, 2), setup.server.protocols.reqresp.pendingCounts().inbound);
     setup.pair.advance(10_000);
     // Both expired slots are serviced from the deadline heap in one turn.
     var events: [2]rr.ReqResp.Event = undefined;
@@ -1149,7 +1149,7 @@ test "core control scores intrinsic decoding once and keeps custody schema limit
         var snapshots: [4]t.Snapshot = undefined;
         _ = setup.client.peer_manager.snapshots(&snapshots);
         const peer = snapshots[0].peer;
-        const schedule = &setup.client.peer_manager.control.schedules[peer.index];
+        const schedule = &setup.client.peer_manager.control.connections[peer.index];
         schedule.metadata_due_ms = setup.pair.now.millis();
         setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
         _ = try setup.turn(&setup.client, .{});
@@ -1164,18 +1164,18 @@ test "core control scores intrinsic decoding once and keeps custody schema limit
             try setup.pair.pump();
             var transport: [32]Engine.Event = undefined;
             var output: [16]rr.ReqResp.Event = undefined;
-            const counts = setup.server.service.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .control = &output });
+            const counts = setup.server.protocols.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .control = &output });
             for (output[0..counts.control]) |event| switch (event) {
                 .request => |incoming| {
                     if (incoming.protocol == .goodbye_v1) {
-                        _ = setup.server.service.reqresp.finish(incoming.request, setup.pair.now);
+                        _ = setup.server.protocols.reqresp.finish(incoming.request, setup.pair.now);
                         continue;
                     }
                     try std.testing.expectEqual(rr.Protocol.metadata_v3, incoming.protocol);
-                    try setup.server.service.reqresp.respond(incoming.request, &response, null, setup.pair.now);
+                    try setup.server.protocols.reqresp.respond(incoming.request, &response, null, setup.pair.now);
                     sent = true;
                 },
-                .chunk_sent => |chunk| _ = setup.server.service.reqresp.finish(chunk.request, setup.pair.now),
+                .chunk_sent => |chunk| _ = setup.server.protocols.reqresp.finish(chunk.request, setup.pair.now),
                 else => {},
             };
             _ = try setup.turn(&setup.client, .{});
@@ -1198,16 +1198,16 @@ test "core request terminal scores captured identity without a JavaScript consum
     const conn = peers[0].connection.?;
     const sink = try std.testing.allocator.alloc(u8, rr.Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
-    _ = try setup.client.service.request(setup.pair.client, conn, .blocks_by_root_v2, &(@as([32]u8, @splat(0))), sink, .{}, setup.pair.now);
+    _ = try setup.client.protocols.request(setup.pair.client, conn, .blocks_by_root_v2, &(@as([32]u8, @splat(0))), sink, .{}, setup.pair.now);
     var sent = false;
     var terminal = false;
     for (0..60) |_| {
         try setup.pair.pump();
         var transport: [32]Engine.Event = undefined;
         var incoming: [16]rr.ReqResp.Event = undefined;
-        const accepted = setup.server.service.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .application = &incoming });
+        const accepted = setup.server.protocols.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .application = &incoming });
         for (incoming[0..accepted.application]) |event| if (event == .request) {
-            const stream = setup.server.service.reqresp.inbound[event.request.request.index].request.stream;
+            const stream = setup.server.protocols.reqresp.inbound[event.request.request.index].request.stream;
             try std.testing.expectEqual(@as(usize, 5), try setup.pair.server.write(stream, &.{ 0, 99, 99, 99, 99 }, true));
             sent = true;
         };
@@ -1232,8 +1232,8 @@ test "core idle connected peers cost no control or dial visits" {
     // A manual intent backing off after a failed dial keeps a dial deadline on the heap.
     const absent: t.PeerId = .{ .bytes = @splat(7) };
     try setup.client.peer_manager.connectUntil(&absent, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, setup.pair.now, setup.pair.now.millis() + 60_000);
-    var intents: [4]DialIntent = undefined;
-    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
+    var intents: [4]SelectedDial = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     try std.testing.expect(setup.client.peer_manager.dialFailed(intents[0].token, setup.pair.now));
     var control_visits: u64 = 0;
     var dial_visits: u64 = 0;
@@ -1251,7 +1251,7 @@ test "core idle connected peers cost no control or dial visits" {
             dial_due = due_now[@intFromEnum(Source.dial)];
         }
         try setup.step(0);
-        try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
+        try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     }
     try std.testing.expectEqual(control_due, due_now[@intFromEnum(Source.control)]);
     try std.testing.expectEqual(dial_due, due_now[@intFromEnum(Source.dial)]);
@@ -1262,7 +1262,7 @@ test "core idle connected peers cost no control or dial visits" {
 
 test "core control starts a due ping or Status on the turn its deadline passes" {
     for ([_]rr.Protocol{ .ping_v1, .status_v1 }) |protocol| {
-        var opts = @import("network_core_test_support.zig").options();
+        var opts = @import("network_core_test_support.zig").resolvedOptions();
         // A Status interval shorter than the ping interval makes Status the next probe.
         if (protocol == .status_v1) {
             opts.core.control.status_interval_ms = 30_000;
@@ -1274,11 +1274,11 @@ test "core control starts a due ping or Status on the turn its deadline passes" 
         _ = try setup.pair.dial();
         for (0..80) |_| try setup.step(0);
         const peer = setup.client.peer_manager.catalog.find(&setup.server.peerId()).?;
-        const row = &setup.client.peer_manager.control.schedules[peer.index];
+        const row = &setup.client.peer_manager.control.connections[peer.index];
         const due = if (protocol == .ping_v1) row.ping_due_ms else row.status_due_ms;
         try std.testing.expect(due > setup.pair.now.millis());
         try std.testing.expectEqual(due, schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now), setup.pair.now.millis()).?);
-        const counter = &setup.client.service.reqresp.protocol_counters[@intFromEnum(protocol)].outgoing;
+        const counter = &setup.client.protocols.reqresp.protocol_counters[@intFromEnum(protocol)].outgoing;
         const started = counter.*;
         const visits = setup.client.peer_manager.control.visits;
         setup.pair.now.monotonic = @import("time.zig").milliseconds(due - 1);
@@ -1293,24 +1293,24 @@ test "core control starts a due ping or Status on the turn its deadline passes" 
 }
 
 test "core control retries a start refused for want of a request slot after the local retry delay" {
-    var opts = @import("network_core_test_support.zig").options();
+    var opts = @import("network_core_test_support.zig").resolvedOptions();
     opts.core.peers.max_peers = 2;
     opts.core.peers.target_peers = 1;
     opts.core.peers.min_outbound = 0;
-    opts.core.service.reqresp.outbound_control_reserved = 2;
+    opts.core.protocols.reqresp.outbound_control_reserved = 2;
     var setup: Setup = .{};
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();
     _ = try setup.pair.dial();
     for (0..80) |_| try setup.step(0);
     const peer = setup.client.peer_manager.catalog.find(&setup.server.peerId()).?;
-    const row = &setup.client.peer_manager.control.schedules[peer.index];
+    const row = &setup.client.peer_manager.control.connections[peer.index];
     try std.testing.expectEqual(row.ping_due_ms, schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now), setup.pair.now.millis()).?);
     // Requests the control does not own hold both control slots.
     var sinks: [2][wire.status_size_max]u8 = undefined;
     const ping = [_]u8{0} ** 8;
-    _ = try setup.client.service.request(setup.pair.client, row.conn, .ping_v1, &ping, &sinks[0], .{}, setup.pair.now);
-    _ = try setup.client.service.request(setup.pair.client, row.conn, wire.metadataProtocol(setup.client.peer_manager.local.fork), &.{}, &sinks[1], .{}, setup.pair.now);
+    _ = try setup.client.protocols.request(setup.pair.client, row.conn, .ping_v1, &ping, &sinks[0], .{}, setup.pair.now);
+    _ = try setup.client.protocols.request(setup.pair.client, row.conn, wire.metadataProtocol(setup.client.peer_manager.local.fork), &.{}, &sinks[1], .{}, setup.pair.now);
     setup.pair.now.monotonic = @import("time.zig").milliseconds(row.ping_due_ms);
     const deferred = setup.client.peer_manager.control.counters.deferred;
     _ = try setup.turn(&setup.client, .{});

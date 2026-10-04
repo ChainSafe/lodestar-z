@@ -61,10 +61,10 @@ test "peer fold discovery pressure retires hints while retaining established ban
     try std.testing.expectEqual(@as(u16, 1), c.intent_count);
     try std.testing.expectEqual(Catalog.Admission.banned, admit(&c, &first.peer, 0, .inbound, 600_000));
     const second_ref = c.find(&second.peer).?;
-    c.rows[second_ref.index].intent.automatic = false;
+    c.rows[second_ref.index].dial.automatic = false;
     c.releaseIntent(second_ref);
     try d.enqueue(&c, &first.peer, &.{address}, true, 600_000);
-    var out: [1]dialing.Dialing.DialIntent = undefined;
+    var out: [1]dialing.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 0), d.poll(&c, 600_000, &out));
     try std.testing.expect(@import("dialing_test_support.zig").refreshAndWakeup(&d, &c, 600_000, 1).? >= rep.ban_until_ms);
 }
@@ -78,9 +78,9 @@ test "peer fold candidate selection revisits every retained intent after demand 
     try d.enqueueDiscovered(&c, &first, &.{}, &.{ .syncnets = 1 }, 0);
     try d.enqueueDiscovered(&c, &second, &.{}, &.{ .syncnets = 1 }, 0);
     d.configureSelection(&c, &.{ .syncnets = 1 }, false, &.{}, 0);
-    try std.testing.expect(!c.rowFor(c.find(&second.peer).?).?.intent.selected);
+    try std.testing.expect(!c.rowFor(c.find(&second.peer).?).?.dial.selected);
     d.configureSelection(&c, &.{ .syncnets = 2 }, false, &.{}, 0);
-    var out: [1]dialing.Dialing.DialIntent = undefined;
+    var out: [1]dialing.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), d.poll(&c, 0, &out));
     try std.testing.expect(out[0].peer.eql(&second.peer));
 }
@@ -92,7 +92,7 @@ test "peer fold attempt generation advances independently of a retained peer ref
     const first = try candidate(1, 1);
     try d.enqueue(&c, &first.peer, &.{address}, true, 0);
     const peer = c.find(&first.peer).?;
-    var out: [1]dialing.Dialing.DialIntent = undefined;
+    var out: [1]dialing.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), d.poll(&c, 0, &out));
     const stale = out[0].token;
     try expire(&d, &c, 10_000);
@@ -150,9 +150,9 @@ test "peer fold canonical disconnect backs off once even without a dial intent" 
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
     try std.testing.expect(c.disconnect(peer, conn, .health_timeout, 1));
     try std.testing.expect(!c.disconnect(peer, conn, .health_timeout, 2));
-    const before = c.rowFor(peer).?.intent;
+    const before = c.rowFor(peer).?.dial;
     try d.enqueueDiscovered(&c, &hint, &.{}, &.{}, 2);
-    try std.testing.expectEqual(before.failures, c.rowFor(peer).?.intent.failures);
+    try std.testing.expectEqual(before.failures, c.rowFor(peer).?.dial.failures);
     try std.testing.expectEqual(before.eligible_at_ms, @import("dialing_test_support.zig").refreshAndWakeup(&d, &c, 2, 1).?);
 }
 
@@ -170,7 +170,7 @@ test "peer fold inbound health close leaves the discovered endpoint history unto
     try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, hint.sequence, 1));
     try std.testing.expect(c.disconnect(peer, conn, .health_timeout, 1));
     try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, hint.sequence, 1));
-    try std.testing.expectEqual(@as(u8, 1), c.rowFor(peer).?.intent.failures);
+    try std.testing.expectEqual(@as(u8, 1), c.rowFor(peer).?.dial.failures);
 }
 
 test "peer fold long-lived health disconnect restarts redial backoff" {
@@ -179,16 +179,16 @@ test "peer fold long-lived health disconnect restarts redial backoff" {
     const hint = try candidate(1, 1);
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
     const peer = admit(&c, &hint.peer, 0, .inbound, 0).admitted.peer;
-    c.rowFor(peer).?.intent.failures = 4;
+    c.rowFor(peer).?.dial.failures = 4;
     try std.testing.expect(c.disconnect(peer, conn, .health_timeout, 300_000));
-    try std.testing.expectEqual(@as(u8, 1), c.rowFor(peer).?.intent.failures);
+    try std.testing.expectEqual(@as(u8, 1), c.rowFor(peer).?.dial.failures);
 }
 
 /// A QUIC-admitted connection whose probes never answer: Control cools the peer down and closes it
 /// for health after about 25 s.
 fn zombieRound(c: *Catalog, d: *dialing.Dialing, identity: *const t.PeerId, conn: t.Handle, now: *u64) !t.PeerRef {
     now.* = @import("dialing_test_support.zig").refreshAndWakeup(d, c, now.*, 1).?;
-    var out: [1]dialing.Dialing.DialIntent = undefined;
+    var out: [1]dialing.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), d.poll(c, now.*, &out));
     try std.testing.expect(out[0].peer.eql(identity));
     try std.testing.expect(d.dialStarted(out[0].token, conn));
@@ -228,7 +228,7 @@ test "peer fold zombie endpoint is blocked after two health closes across redisc
     _ = c.pollEvents(&events);
     zombie.sequence = 2;
     try d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, now);
-    try std.testing.expectEqual(@as(u8, 1), c.rowFor(c.find(&zombie.peer).?).?.intent.failures);
+    try std.testing.expectEqual(@as(u8, 1), c.rowFor(c.find(&zombie.peer).?).?.dial.failures);
     const peer = try zombieRound(&c, &d, &zombie.peer, .{ .index = 1, .generation = 1 }, &now);
     try std.testing.expectEqual(@as(u64, 1), d.retries[@intFromEnum(t.DialFailure.health)]);
     try std.testing.expect(c.history.blocked(key, zombie.sequence, now));
@@ -247,7 +247,7 @@ test "peer fold zombie endpoint is blocked after two health closes across redisc
 
 /// Dials the discovered peer, lands the connection, and has the remote end it with `rejection`.
 fn rejectedRound(c: *Catalog, d: *dialing.Dialing, identity: *const t.PeerId, index: u16, rejection: t.Rejection, now_ms: u64) !void {
-    var out: [1]dialing.Dialing.DialIntent = undefined;
+    var out: [1]dialing.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), d.poll(c, now_ms, &out));
     try std.testing.expect(out[0].peer.eql(identity));
     const conn: t.Handle = .{ .index = index, .generation = 1 };
@@ -305,7 +305,7 @@ test "peer fold early closes escalate while manual and inbound connections bypas
     try d.enqueue(&c, &gated.peer, &.{address}, false, now);
     const due = @import("dialing_test_support.zig").refreshAndWakeup(&d, &c, now, 1).?;
     try std.testing.expect(due < block_end);
-    var out: [1]dialing.Dialing.DialIntent = undefined;
+    var out: [1]dialing.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), d.poll(&c, due, &out));
     try std.testing.expect(out[0].peer.eql(&gated.peer));
     try std.testing.expect(d.dialDeferred(&c, out[0].token, due));
@@ -342,7 +342,7 @@ test "peer fold a full direct peer waits 5, 15 then 60 minutes while a manual co
     try d.enqueue(&c, &direct.peer, &.{address}, false, now);
     const due = @import("dialing_test_support.zig").refreshAndWakeup(&d, &c, now, 1).?;
     try std.testing.expect(due < now + dialing.Dialing.connect_timeout_ms);
-    var out: [1]dialing.Dialing.DialIntent = undefined;
+    var out: [1]dialing.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), d.poll(&c, due, &out));
     try std.testing.expect(out[0].peer.eql(&direct.peer));
 }
@@ -363,7 +363,7 @@ test "peer fold a direct peer whose rejection the history evicts mid-block waits
     _ = c.history.reject(key +% c.history.entries.len, .fault, 1);
     try std.testing.expectEqual(@as(u64, 0), c.history.rejectedUntil(key, 1));
     try std.testing.expectEqual(@as(u64, block_end), @import("dialing_test_support.zig").refreshAndWakeup(&d, &c, 1, 1).?);
-    var out: [1]dialing.Dialing.DialIntent = undefined;
+    var out: [1]dialing.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 0), d.poll(&c, block_end - 1, &out));
     try std.testing.expectEqual(@as(u64, block_end), @import("dialing_test_support.zig").refreshAndWakeup(&d, &c, block_end - 1, 1).?);
     try std.testing.expectEqual(@as(usize, 1), d.poll(&c, block_end, &out));
@@ -394,9 +394,9 @@ test "peer discovery known and new identities share candidate replacement and re
                 try d.enqueueDiscovered(&c, &incoming, &.{}, &.{ .syncnets = 1 }, 3);
                 const accepted = c.find(&incoming.peer).?;
                 try std.testing.expect(c.intents.isSet(accepted.index));
-                try std.testing.expect(c.rowFor(accepted).?.intent.automatic);
-                try std.testing.expectEqual(@as(?u8, 1), c.rowFor(accepted).?.intent.hints.?.syncnets);
-                try std.testing.expect(c.rowFor(accepted).?.intent.addresses[0].eql(incoming.addresses[0]));
+                try std.testing.expect(c.rowFor(accepted).?.dial.automatic);
+                try std.testing.expectEqual(@as(?u8, 1), c.rowFor(accepted).?.dial.hints.?.syncnets);
+                try std.testing.expect(c.rowFor(accepted).?.dial.addresses[0].eql(incoming.addresses[0]));
                 try std.testing.expect(c.find(&retained.peer) == null);
                 if (previous) |peer| try std.testing.expectEqual(peer, accepted);
             } else {
@@ -407,7 +407,7 @@ test "peer discovery known and new identities share candidate replacement and re
                 try std.testing.expect(c.intents.isSet(victim.index));
                 if (previous) |peer| {
                     try std.testing.expect(!c.intents.isSet(peer.index));
-                    try std.testing.expect(c.rowFor(peer).?.intent.hints == null);
+                    try std.testing.expect(c.rowFor(peer).?.dial.hints == null);
                     try std.testing.expectEqualDeep(old.?.node_id, c.rowFor(peer).?.node_id);
                 } else try std.testing.expect(c.find(&incoming.peer) == null);
             }
@@ -415,9 +415,9 @@ test "peer discovery known and new identities share candidate replacement and re
             if (previous) |peer| {
                 const after = c.rowFor(peer).?;
                 try std.testing.expectEqualDeep(old.?.reputation, after.reputation);
-                try std.testing.expectEqual(old.?.intent.failures, after.intent.failures);
-                try std.testing.expectEqual(old.?.intent.eligible_at_ms, after.intent.eligible_at_ms);
-                try std.testing.expectEqual(old.?.intent.history_until_ms, after.intent.history_until_ms);
+                try std.testing.expectEqual(old.?.dial.failures, after.dial.failures);
+                try std.testing.expectEqual(old.?.dial.eligible_at_ms, after.dial.eligible_at_ms);
+                try std.testing.expectEqual(old.?.dial.history_until_ms, after.dial.history_until_ms);
             }
         }
     }

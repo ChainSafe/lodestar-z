@@ -136,7 +136,7 @@ test "router accepted selection survives capability changes behind outcome press
     server.cancel(&pair.server, out[0].stream);
 }
 
-test "router capabilities validate service limits and preserve configured preference" {
+test "router capabilities validate protocol limits and preserve configured preference" {
     const caps = @import("capabilities.zig");
     var active: caps.Directional = .{ .receive = .initEmpty(), .request = .initEmpty() };
     active.receive.insert(.{ .reqresp = .ping_v1 });
@@ -312,7 +312,7 @@ test "router accepted selection survives capability changes while ACK is flow co
 }
 
 fn pumpRouter(router: *Router, pair: *support.Pair, transport: *Engine, now: @import("types.zig").Now, outcomes: []Router.Outcome) usize {
-    @import("service_test_support.zig").forward(pair, transport, .{ .negotiator = &router.negotiator });
+    @import("protocols_test_support.zig").forward(pair, transport, .{ .negotiator = &router.negotiator });
     return router.pump(transport, now, outcomes);
 }
 

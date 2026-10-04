@@ -9,7 +9,7 @@
 //!   the following pump recycles native slots. Cleanup closes streams without ending either lifetime.
 //! - retainServing/releaseServing cover asynchronous host execution independently of stream lifetime.
 //! - cancel and connection events latch close intent. Raw callers drain cleanupPending before Router
-//!   work or buffer reuse; Service and pump provide their documented cleanup barriers.
+//!   work or buffer reuse; Protocols and pump provide their documented cleanup barriers.
 const time = @import("../time.zig");
 const std = @import("std");
 const codec = @import("codec.zig");
@@ -26,7 +26,7 @@ const RequestState = @import("RequestState.zig");
 const RequestIO = @import("RequestIO.zig");
 const Router = @import("../router.zig").Router;
 const types = @import("../types.zig");
-const ReceivePlan = @import("ReceivePlan.zig");
+const ReceiveLayout = @import("ReceiveLayout.zig");
 const ServingPool = @import("ServingPool.zig");
 const index_list = @import("../index_list.zig");
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
@@ -223,7 +223,7 @@ outbound: []Client,
 inbound: []Server,
 arena: []u8,
 request_sinks: []u8,
-receive_plan: ReceivePlan,
+receive_layout: ReceiveLayout,
 serving: ServingPool,
 /// Indexed by slot id: outbound slots are `[0, outbound.len)`, and inbound slot `i` is
 /// `outbound.len + i`, which belongs to connection index `i / slots_per_peer`.
@@ -316,8 +316,8 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
     const outbound = try allocator.alloc(Client, options.outbound_max);
     errdefer allocator.free(outbound);
     @memset(outbound, .{});
-    const receive = ReceivePlan.init(&policy);
-    const inbound = try allocator.alloc(Server, @as(usize, options.peers) * ReceivePlan.slots_per_peer);
+    const receive = ReceiveLayout.init(&policy);
+    const inbound = try allocator.alloc(Server, @as(usize, options.peers) * ReceiveLayout.slots_per_peer);
     errdefer allocator.free(inbound);
     @memset(inbound, .{});
 
@@ -367,7 +367,7 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
         .inbound = inbound,
         .arena = arena,
         .request_sinks = request_sinks,
-        .receive_plan = receive,
+        .receive_layout = receive,
         .serving = serving,
         .links = links,
         .deadlines = deadlines,
@@ -644,7 +644,7 @@ pub fn errorMessage(self: *const ReqResp, handle: RequestHandle) []const u8 {
 pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *Router, conn: Handle, now: Now) ?u64 {
     defer self.cleanupPending(engine, router);
     if (conn.index >= self.options.peers) return null;
-    const first = ReceivePlan.first(conn.index, .goodbye_v1);
+    const first = ReceiveLayout.first(conn.index, .goodbye_v1);
     for (first..first + constants.MAX_CONCURRENT_REQUESTS) |position| {
         const index: u16 = @intCast(position);
         const slot = &self.inbound[index];
@@ -655,7 +655,7 @@ pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *Router, conn: Ha
     return null;
 }
 
-/// Fails the connection's slots: its outbound list and its inbound block of the receive plan.
+/// Fails the connection's slots: its outbound list and its inbound block of the receive layout.
 pub fn connectionClosed(self: *ReqResp, conn: Handle, now: Now) void {
     if (conn.index >= self.options.peers) return;
     const list = &self.outbound_by_connection[conn.index];
@@ -668,8 +668,8 @@ pub fn connectionClosed(self: *ReqResp, conn: Handle, now: Now) void {
         if (!slot.request.awaitingTerminal() or !std.meta.eql(slot.request.conn, conn)) continue;
         slot.fail(self, index, .connection_closed, now);
     }
-    const first = ReceivePlan.first(conn.index, @enumFromInt(0));
-    for (first..first + ReceivePlan.slots_per_peer) |position| {
+    const first = ReceiveLayout.first(conn.index, @enumFromInt(0));
+    for (first..first + ReceiveLayout.slots_per_peer) |position| {
         const index: u16 = @intCast(position);
         const slot = &self.inbound[index];
         if (!slot.request.awaitingTerminal() or !std.meta.eql(slot.request.conn, conn)) continue;
@@ -766,7 +766,7 @@ pub fn schedule(self: *const ReqResp, capacities: Capacities) types.Schedule {
     };
 }
 
-/// Checks that the receive plan covers every possible transport connection.
+/// Checks that the receive layout covers every possible transport connection.
 pub fn validateTransportCapacity(self: *const ReqResp, engine: *const Engine) error{InvalidCapacity}!void {
     if (engine.limits.connections_max > self.options.peers) return error.InvalidCapacity;
 }
@@ -1174,10 +1174,10 @@ pub fn outboundApplicationOccupiedCount(self: *const ReqResp, conn: Handle) u16 
     return count;
 }
 
-/// The connection's block of the receive plan.
+/// The connection's block of the receive layout.
 fn inboundOf(self: *const ReqResp, conn: Handle) []const Server {
     if (conn.index >= self.options.peers) return &.{};
-    return self.inbound[ReceivePlan.first(conn.index, @enumFromInt(0))..][0..ReceivePlan.slots_per_peer];
+    return self.inbound[ReceiveLayout.first(conn.index, @enumFromInt(0))..][0..ReceiveLayout.slots_per_peer];
 }
 
 pub fn inboundApplicationOccupiedCount(self: *const ReqResp, conn: Handle) u16 {

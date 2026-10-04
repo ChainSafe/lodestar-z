@@ -23,7 +23,7 @@ pub const Overrides = struct {
 };
 
 pub const Pair = struct {
-    shared: @import("../service_test_support.zig").ServicePair = .{},
+    shared: @import("../protocols_test_support.zig").ProtocolsPair = .{},
     forks: [2]@import("../types.zig").ForkEntry = .{
         .{ .digest = deneb_digest, .fork = .deneb },
         .{ .digest = fulu_digest, .fork = .fulu },
@@ -35,10 +35,10 @@ pub const Pair = struct {
     server_event_capacity: usize = 16,
 
     pub fn init(self: *Pair, client: Overrides, server: Overrides) !void {
-        try self.shared.init(try serviceOptions(client, &self.forks), try serviceOptions(server, &self.forks));
+        try self.shared.init(try protocolsOptions(client, &self.forks), try protocolsOptions(server, &self.forks));
     }
 
-    fn serviceOptions(overrides: Overrides, forks: []const @import("../types.zig").ForkEntry) !@import("../service.zig").Service.Options {
+    fn protocolsOptions(overrides: Overrides, forks: []const @import("../types.zig").ForkEntry) !@import("../protocols.zig").Protocols.Options {
         return .{ .reqresp = try options(overrides, forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 } };
     }
 
@@ -67,8 +67,8 @@ pub const Pair = struct {
 
     /// Routes both sides' stream events to their negotiators and reqresp owners.
     pub fn forwardEvents(self: *Pair) void {
-        @import("../service_test_support.zig").forward(&self.shared.pair, &self.shared.pair.client, .{ .negotiator = &self.shared.client.router.negotiator, .reqresp = &self.shared.client.reqresp });
-        @import("../service_test_support.zig").forward(&self.shared.pair, &self.shared.pair.server, .{ .negotiator = &self.shared.server.router.negotiator, .reqresp = &self.shared.server.reqresp });
+        @import("../protocols_test_support.zig").forward(&self.shared.pair, &self.shared.pair.client, .{ .negotiator = &self.shared.client.router.negotiator, .reqresp = &self.shared.client.reqresp });
+        @import("../protocols_test_support.zig").forward(&self.shared.pair, &self.shared.pair.server, .{ .negotiator = &self.shared.server.router.negotiator, .reqresp = &self.shared.server.reqresp });
     }
 
     pub fn pumpOnce(self: *Pair) !void {

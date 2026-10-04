@@ -27,7 +27,7 @@ export function escalate(runtime, site, cause) {
  * native reports closed. It holds the pump weakly and the route strongly, so a scheduled turn roots the completion
  * owner but never the pump or its host.
  */
-export class Turns {
+export class TurnScheduler {
   #route;
   #pump = null;
   #scheduled = false;
@@ -49,7 +49,7 @@ export class Turns {
   schedule() {
     if (this.#scheduled || this.#running || this.#stopped) return;
     this.#scheduled = true;
-    setImmediate(Turns.#run, this);
+    setImmediate(TurnScheduler.#run, this);
   }
 
   /** Native reported closed, or a turn escalated. */
@@ -59,19 +59,19 @@ export class Turns {
     this.#retry = undefined;
   }
 
-  static #run(turns) {
-    turns.#scheduled = false;
-    if (turns.#stopped) return;
-    turns.#running = true;
+  static #run(scheduler) {
+    scheduler.#scheduled = false;
+    if (scheduler.#stopped) return;
+    scheduler.#running = true;
     // A turn that throws runs again, since native may hold more.
     let next = "now";
     try {
-      const pump = turns.#pump?.deref();
-      next = pump ? pump.turn() : turns.#drain();
+      const pump = scheduler.#pump?.deref();
+      next = pump ? pump.turn() : scheduler.#drain();
     } finally {
-      turns.#running = false;
-      if (next === "now") turns.schedule();
-      else if (next !== "idle") turns.#retryLater(next === "retry");
+      scheduler.#running = false;
+      if (next === "now") scheduler.schedule();
+      else if (next !== "idle") scheduler.#retryLater(next === "retry");
     }
   }
 
@@ -93,13 +93,13 @@ export class Turns {
 
   #retryLater(failed) {
     if (this.#stopped) return;
-    this.#retry ??= setTimeout(Turns.#retryFired, RETRY_MS, this).unref();
+    this.#retry ??= setTimeout(TurnScheduler.#retryFired, RETRY_MS, this).unref();
     // A failed exchange retries until it settles or escalates, also when nothing else keeps the process alive.
     if (failed) this.#retry.ref();
   }
 
-  static #retryFired(turns) {
-    turns.#retry = undefined;
-    turns.schedule();
+  static #retryFired(scheduler) {
+    scheduler.#retry = undefined;
+    scheduler.schedule();
   }
 }

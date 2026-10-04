@@ -3,8 +3,8 @@ const control = @import("peer_control.zig");
 const Peer = @import("network_peer.zig").Peer;
 
 pub fn emit(peer: *Peer, id: u32) !void {
-    const reqresp = peer.service.reqresp.pendingCounts();
-    const gossip = peer.service.gossipsub.resourceSnapshot();
+    const reqresp = peer.protocols.reqresp.pendingCounts();
+    const gossip = peer.protocols.gossipsub.resourceSnapshot();
     var streams: usize = 0;
     for (peer.transport.engine.registry.activeIndices()) |index| {
         for (peer.transport.engine.registry.slots[index].table.entries) |entry| {
@@ -12,12 +12,12 @@ pub fn emit(peer: *Peer, id: u32) !void {
         }
     }
     var negotiations: usize = 0;
-    for (peer.service.router.negotiator.entries) |entry| {
+    for (peer.protocols.router.negotiator.entries) |entry| {
         if (entry.state != .free) negotiations += 1;
     }
     var has_inbound = false;
     var outbound_version: ?[]const u8 = null;
-    for (peer.service.gossipsub.sessions.rows) |entry| {
+    for (peer.protocols.gossipsub.sessions.rows) |entry| {
         if (!entry.active) continue;
         if (entry.in_stream != null) has_inbound = true;
         if (entry.outbound == .live) outbound_version = @tagName(entry.outbound.live.version);
@@ -36,7 +36,7 @@ pub fn emit(peer: *Peer, id: u32) !void {
         .connectionIndex = if (peer.conn) |conn| @as(?u16, conn.index) else null,
         .connectionDirection = if (peer.conn) |conn| if (peer.transport.engine.direction(conn)) |direction| @as(?[]const u8, @tagName(direction)) else null else null,
         .connectionGeneration = if (peer.conn) |conn| @as(?u32, conn.generation) else null,
-        .malformedRpcs = peer.service.gossipsub.counters.malformed_rpcs,
+        .malformedRpcs = peer.protocols.gossipsub.counters.malformed_rpcs,
         .gossipPeers = gossip.admitted_peers,
         .remoteSubscriptions = gossip.remote_subscriptions,
         .meshMembers = gossip.mesh_members,

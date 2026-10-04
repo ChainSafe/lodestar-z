@@ -1,5 +1,5 @@
 const support = @import("../quic/test_support.zig");
-const Service = @import("../service.zig").Service;
+const Protocols = @import("../protocols.zig").Protocols;
 const Engine = @import("../quic/Engine.zig");
 const identify = @import("root.zig");
 
@@ -8,12 +8,12 @@ pub fn peerId() !@import("../wire/peer_id.zig").PeerId {
     return .fromPublicKey(&key.publicKey());
 }
 
-pub fn step(pair: *support.Pair, service: *Service, server: bool, results: []identify.Handler.Result) usize {
+pub fn step(pair: *support.Pair, protocols: *Protocols, server: bool, results: []identify.Handler.Result) usize {
     const engine = if (server) &pair.server else &pair.client;
     var events: [64]Engine.Event = undefined;
-    return service.process(engine, pair.events(engine, &events), pair.now, .{ .identify = results }).identify;
+    return protocols.process(engine, pair.events(engine, &events), pair.now, .{ .identify = results }).identify;
 }
 
-pub fn serviceOptions(agent: []const u8) !Service.Options {
+pub fn protocolsOptions(agent: []const u8) !Protocols.Options {
     return .{ .reqresp = .{ .forks = &.{}, .admission = try @import("../reqresp/ReqResp.zig").Options.Admission.defaults(&@import("../reqresp/policy_fixture.zig").config(), 128, 128, 64) }, .gossipsub = .{ .random_seed = 1 }, .identify = .{ .agent = agent, .inbound_max = 1, .outbound_max = 1 } };
 }

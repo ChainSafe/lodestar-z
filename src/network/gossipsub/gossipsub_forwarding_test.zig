@@ -12,7 +12,7 @@ const testMessage = support.message;
 test "gossipsub legal maximum host acceptance forwards retained pages through actual IO" {
     var setup: @import("test_pair.zig").Pair = .{};
     const small = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = @import("../reqresp/policy_fixture.zig").config() });
-    try setup.initOpts(small.core.service.gossipsub, small.core.service.gossipsub);
+    try setup.initOpts(small.core.protocols.gossipsub, small.core.protocols.gossipsub);
     defer setup.deinit();
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(setup.shared.client.gossipsub, topic);

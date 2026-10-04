@@ -279,7 +279,7 @@ test "transport rotates dirty connections under one aggregate send allowance" {
     var node: Node = .{};
     try node.init(13);
     defer node.deinit();
-    node.transport.work_limits.send_per_step_max = 1;
+    node.transport.work_limits.send_per_turn_max = 1;
     node.transport.work_limits.burst_per_connection = 1;
     const loopback = net.IpAddress{ .ip4 = .loopback(0) };
     var receive_buffer: [constants.datagram_size_max]u8 = undefined;
@@ -474,7 +474,7 @@ test "transport bounds each turn's receive drain without active connections" {
     var node: Node = .{};
     try node.init(17);
     defer node.deinit();
-    node.transport.work_limits.receive_per_step_max = 2;
+    node.transport.work_limits.receive_per_turn_max = 2;
     var source = try udp_mod.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer source.close(std.testing.io);
     const destination = node.transport.localAddress();
@@ -495,7 +495,7 @@ test "transport drains dirty connections across small send budgets" {
     var node: Node = .{};
     try node.init(18);
     defer node.deinit();
-    node.transport.work_limits.send_per_step_max = 2;
+    node.transport.work_limits.send_per_turn_max = 2;
     node.transport.work_limits.burst_per_connection = 1;
     var sink = try udp_mod.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sink.close(std.testing.io);
@@ -609,7 +609,7 @@ test "transport keys quiche's timer from a clock read after the flush so it neve
     const tick = try Transport.currentTime(io);
     try std.testing.expectEqual(@as(usize, 4), try transport.engine.write(stream, "slow", false));
     try std.Io.sleep(io, .fromMilliseconds(20), .awake);
-    var result: Transport.StepResult = .{ .now = tick };
+    var result: Transport.Progress = .{ .now = tick };
     try transport.flush(io, tick, &result);
     try std.testing.expect(result.datagrams_sent > 0);
     // Each turn waits for the timer key as the owner loop does, and each popped key finds
@@ -624,7 +624,7 @@ test "transport keys quiche's timer from a clock read after the flush so it neve
         const turn = try Transport.currentTime(io);
         transport.expire(turn);
         transport.engine.collect(turn);
-        var flushed: Transport.StepResult = .{ .now = turn };
+        var flushed: Transport.Progress = .{ .now = turn };
         try transport.flush(io, turn, &flushed);
     }
     try std.testing.expectEqual(pops + 2, transport.engine.visits.timer);
@@ -706,7 +706,7 @@ test "transport bursts one busy connection among many idle ones in one flush vis
     try std.testing.expect(try spoke.engine.write(stream, &payload, false) > 0);
     try std.testing.expectEqual(@as(usize, 1), spoke.engine.dirtyCount());
     const visits = spoke.engine.visits;
-    var result = Transport.StepResult{ .now = try Transport.currentTime(std.testing.io) };
+    var result = Transport.Progress{ .now = try Transport.currentTime(std.testing.io) };
     try spoke.flush(std.testing.io, result.now, &result);
     try std.testing.expectEqual(visits.flush + 1, spoke.engine.visits.flush);
     try std.testing.expectEqual(visits.timer, spoke.engine.visits.timer);
@@ -723,7 +723,7 @@ test "transport reads only the ready families up to the turn quota and resumes t
     var hub: Transport = .{};
     try hub.init(std.testing.allocator, std.testing.io, .{ .host = &key, .bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } } });
     defer hub.deinit(std.testing.io);
-    const quota = hub.work_limits.receive_per_step_max;
+    const quota = hub.work_limits.receive_per_turn_max;
     try std.testing.expectEqual(constants.receive_batch_max, quota);
     const sockets = hub.sockets.values;
     const sources: wait.Sources = .{ .quic = hub.sockets.handles() };
@@ -734,7 +734,7 @@ test "transport reads only the ready families up to the turn quota and resumes t
     for (0..quota + 7) |_| try stranger.send(std.testing.io, &sockets[0].?.address, &.{0});
     for (0..3) |_| try sockets[1].?.send(std.testing.io, &sockets[1].?.address, &.{0});
 
-    var result: Transport.StepResult = .{ .now = try Transport.currentTime(std.testing.io) };
+    var result: Transport.Progress = .{ .now = try Transport.currentTime(std.testing.io) };
     try hub.receive(std.testing.io, &result, .{ false, true });
     try std.testing.expectEqual(@as(u32, 3), result.datagrams_received);
     try std.testing.expectEqual(@as(u32, 3), result.datagrams_dropped);
@@ -778,7 +778,7 @@ test "transport drops a pressure suffix once and preserves every connection and 
         var vtable = std.testing.io.vtable.*;
         vtable.netSend = Prefix.send;
         const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-        var result: Transport.StepResult = .{ .now = now };
+        var result: Transport.Progress = .{ .now = now };
         try node.transport.flush(io, now, &result);
         try std.testing.expectEqual(@as(usize, 1), Prefix.calls);
         try std.testing.expectEqual(@as(u32, @intCast(prefix)), result.datagrams_sent);
@@ -791,7 +791,7 @@ test "transport drops a pressure suffix once and preserves every connection and 
         for (handles) |handle| try std.testing.expectEqual(@as(?Engine.Handle, handle), node.transport.engine.sendOwner(handle.index));
         try std.testing.expect(node.transport.nextDeadlineNs().? > now.nanos());
         try std.testing.expect(!result.backlog);
-        var idle: Transport.StepResult = .{ .now = now };
+        var idle: Transport.Progress = .{ .now = now };
         try node.transport.flush(io, now, &idle);
         try std.testing.expectEqual(@as(u32, 0), idle.send_calls);
         try std.testing.expectEqual(@as(usize, 1), Prefix.calls);
@@ -823,7 +823,7 @@ test "transport recovers a locally dropped first flight through QUIC loss recove
     try std.Io.sleep(std.testing.io, .fromMilliseconds(@intCast(deadline_ms - now.millis())), .awake);
     const after = try Transport.currentTime(std.testing.io);
     client.transport.expire(after);
-    var retransmitted: Transport.StepResult = .{ .now = after };
+    var retransmitted: Transport.Progress = .{ .now = after };
     try client.transport.flush(std.testing.io, after, &retransmitted);
     try std.testing.expect(retransmitted.datagrams_sent > 0);
     try std.testing.expectEqual(@as(u32, 0), retransmitted.send_failures);
@@ -851,7 +851,7 @@ test "transport pressure drops later families with exact cumulative accounting" 
     var owners: [3]Engine.Handle = undefined;
     for (&owners, [_]usize{ 0, 1, 0 }) |*owner, family| owner.* = try node.engine.dial(&local[family].?, node.peerId(), now);
     var faults: FaultIo = .{ .send = .{ .socket = node.sockets.values[1].?.handle }, .send_failure = error.SystemResources };
-    var result: Transport.StepResult = .{ .now = now };
+    var result: Transport.Progress = .{ .now = now };
     try node.flush(faults.io(), now, &result);
     try std.testing.expectEqual(@as(usize, 2), faults.send_calls);
     try std.testing.expectEqual(@as(u32, 1), result.send_calls);
@@ -866,7 +866,7 @@ test "transport pressure drops later families with exact cumulative accounting" 
         try std.testing.expectEqual(@as(?Engine.Handle, owner), node.engine.sendOwner(owner.index));
         try std.testing.expect(node.engine.registry.timers.get(owner.index) != null);
     }
-    var idle: Transport.StepResult = .{ .now = now };
+    var idle: Transport.Progress = .{ .now = now };
     try node.flush(faults.io(), now, &idle);
     try std.testing.expectEqual(@as(usize, 2), faults.send_calls);
     try std.testing.expectEqual(@as(u8, 0), node.batch_len);
@@ -900,7 +900,7 @@ test "transport cancellation stops final and capacity flushes without failing ow
             Canceled.calls = 0;
             Canceled.accepted_bytes = 0;
             Canceled.prefix = prefix;
-            var result: Transport.StepResult = .{ .now = now };
+            var result: Transport.Progress = .{ .now = now };
             try std.testing.expectError(error.Canceled, node.flush(io, now, &result));
             try std.testing.expectEqual(@as(usize, 1), Canceled.calls);
             try std.testing.expectEqual(prefix, result.datagrams_sent);

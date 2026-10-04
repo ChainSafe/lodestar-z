@@ -20,7 +20,7 @@ pub const Options = struct {
     dial: peers.Dialing.Options,
     metadata_freshness_ms: u64 = 60_000,
 };
-pub const DialIntent = peers.Dialing.DialIntent;
+pub const SelectedDial = peers.Dialing.SelectedDial;
 pub const DiscoveryNeed = struct {
     general: bool = false,
     attnets: [8]u8 = @splat(0),
@@ -194,7 +194,7 @@ pub const PeerManager = struct {
     }
     pub const Retired = struct { peer: t.PeerRef, conn: t.Handle };
     /// Settles an ended dial and connection once. Preserve remote evidence before retirement
-    /// releases Status, Metadata and intent state. The caller then cancels protocol/gossip I/O.
+    /// releases Status, Metadata and dial state. The caller then cancels protocol/gossip I/O.
     pub fn transportClosed(self: *PeerManager, closed: *const @FieldType(Engine.Event, "closed"), goodbye: ?u64, now: Now) ?Retired {
         _ = self.dialing.dialClosed(&self.catalog, closed.conn, closed.reason, now.millis());
         const peer = self.catalog.findConnection(closed.conn) orelse return null;
@@ -434,7 +434,7 @@ pub const PeerManager = struct {
     }
 
     /// Applies peer policy's consequences of a committed local state. The caller validates it and
-    /// the demand that holds under it, and revalidates control schedules first when the fork changes.
+    /// the demand that holds under it, and revalidates control connection states first when the fork changes.
     pub fn commitLocal(self: *PeerManager, local: *const t.LocalState, now: Now) void {
         self.local = local.*;
         var budget: u16 = 0;
@@ -540,12 +540,12 @@ pub const PeerManager = struct {
         );
     }
     /// Run `expireDials` before admitting transport events and selecting dials at this time.
-    pub fn dialIntents(
+    pub fn selectDials(
         self: *PeerManager,
         gossipsub: *gossip.Gossipsub,
         engine: *Engine,
         now: Now,
-        out: []peers.Dialing.DialIntent,
+        out: []peers.Dialing.SelectedDial,
     ) usize {
         if (self.phase != .running) return 0;
         self.reconcile(gossipsub, now);

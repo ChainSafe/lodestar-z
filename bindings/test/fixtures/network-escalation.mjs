@@ -58,7 +58,7 @@ pump.attach({
     return native.exchange(actions, site === "generated_batch" ? {...demand, settleCells: 0} : demand);
   },
   fail: (raised, reason) => native.fail(raised, reason),
-  turns: native.turns,
+  scheduler: native.scheduler,
 });
 // Keep failed/recovering turns alive until the bounded scenario settles or its deadline expires.
 const deadline = setTimeout(() => console.log("survived"), 5000);
