@@ -16,7 +16,7 @@ pub const Hints = struct {
     udp: ?u16 = null,
     udp6: ?u16 = null,
 };
-pub const Plan = struct {
+pub const Resolved = struct {
     endpoints: Endpoints = .{},
     observations: [2]d.AddressVotes.Policy = .{ .{}, .{} },
     quic_ports: [2]?u16 = .{ null, null },
@@ -24,10 +24,10 @@ pub const Plan = struct {
 
 /// Cached endpoints are hints. Only explicit fixed fields disable learning. An explicit IP
 /// also fixes its discovery port, defaulting to the actual listener port.
-pub fn resolve(hints: ?*const Hints, fixed: *const Endpoints, quic: *const [2]?Address, udp: *const [2]?Address) error{InvalidAdvertisement}!Plan {
-    var plan: Plan = .{};
+pub fn resolve(hints: ?*const Hints, fixed: *const Endpoints, quic: *const [2]?Address, udp: *const [2]?Address) error{InvalidAdvertisement}!Resolved {
+    var resolved: Resolved = .{};
     const initial = hints orelse &Hints{};
-    inline for (.{ .{ "ip4", "udp", "quic" }, .{ "ip6", "udp6", "quic6" } }, 0..) |fields, family| family_plan: {
+    inline for (.{ .{ "ip4", "udp", "quic" }, .{ "ip6", "udp6", "quic6" } }, 0..) |fields, family| resolve_family: {
         const ip_pin = @field(fixed, fields[0]);
         const port_pin = @field(fixed, fields[1]);
         const quic_pin = @field(fixed, fields[2]);
@@ -35,7 +35,7 @@ pub fn resolve(hints: ?*const Hints, fixed: *const Endpoints, quic: *const [2]?A
         if (quic_pin != null and quic[family] == null) return error.InvalidAdvertisement;
         const listener = udp[family] orelse {
             if (ip_pin != null or port_pin != null or quic_pin != null) return error.InvalidAdvertisement;
-            break :family_plan;
+            break :resolve_family;
         };
         const bound_ip = if (family == 0) listener.ip4.octets else listener.ip6.octets;
         if (ip_pin) |ip| if (!validIp(ip)) return error.InvalidAdvertisement;
@@ -43,16 +43,16 @@ pub fn resolve(hints: ?*const Hints, fixed: *const Endpoints, quic: *const [2]?A
         const use_hint = ip_pin == null and hint_ip != null and validIp(hint_ip.?);
         var ip = ip_pin orelse if (use_hint) hint_ip else null;
         if (ip == null and validIp(bound_ip)) ip = bound_ip;
-        plan.observations[family] = .{ .enabled = ip_pin == null, .fixed_port = port_pin };
-        plan.quic_ports[family] = quic_pin orelse if (quic[family]) |address| address.port() else null;
+        resolved.observations[family] = .{ .enabled = ip_pin == null, .fixed_port = port_pin };
+        resolved.quic_ports[family] = quic_pin orelse if (quic[family]) |address| address.port() else null;
         if (ip) |value| {
-            @field(plan.endpoints, fields[0]) = value;
+            @field(resolved.endpoints, fields[0]) = value;
             const hint_port = @field(initial, fields[1]);
-            @field(plan.endpoints, fields[1]) = port_pin orelse if (use_hint and hint_port != null and hint_port.? != 0) hint_port.? else listener.port();
-            @field(plan.endpoints, fields[2]) = plan.quic_ports[family];
+            @field(resolved.endpoints, fields[1]) = port_pin orelse if (use_hint and hint_port != null and hint_port.? != 0) hint_port.? else listener.port();
+            @field(resolved.endpoints, fields[2]) = resolved.quic_ports[family];
         }
     }
-    return plan;
+    return resolved;
 }
 
 pub fn validate(endpoints: Endpoints) error{InvalidAdvertisement}!void {

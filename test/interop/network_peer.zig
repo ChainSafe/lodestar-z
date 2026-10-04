@@ -11,7 +11,7 @@ const ping = [_]u8{ 1, 0, 0, 0, 0, 0, 0, 0 };
 const identify_status = [_]u8{1} ++ [_]u8{0} ** 91;
 const range = [_]u8{0} ** 8 ++ ping ++ ping;
 
-/// A gossip message admitted through the sink, reported after the service turn.
+/// A gossip message admitted through the sink, reported after the protocol turn.
 const Delivery = struct {
     handle: Gossip.Gossipsub.ValidationHandle,
     id: Gossip.Gossipsub.MessageId,
@@ -23,7 +23,7 @@ const Delivery = struct {
 
 pub const Peer = struct {
     transport: network.Transport = .{},
-    service: network.Service,
+    protocols: network.Protocols,
     io: std.Io,
     allocator: std.mem.Allocator,
     conn: ?Engine.Handle = null,
@@ -50,10 +50,10 @@ pub const Peer = struct {
     deliveries: [16]Delivery = undefined,
     delivery_count: usize = 0,
 
-    /// The peer must not move while the service holds the sink.
+    /// The peer must not move while the protocol stack holds the sink.
     fn attachSink(self: *Peer) void {
         self.gossip_sink = .{ .context = self, .has_capacity = hasCapacity, .admit = admit };
-        self.service.gossipsub.message_sink = &self.gossip_sink;
+        self.protocols.gossipsub.message_sink = &self.gossip_sink;
     }
 
     fn hasCapacity(context: *anyopaque, _: Gossip.topic.Kind, _: usize) bool {
@@ -78,7 +78,7 @@ pub const Peer = struct {
     fn deliver(self: *Peer, name: []const u8, length: usize, sha256: [64]u8, id: Gossip.Gossipsub.MessageId, handle: Gossip.Gossipsub.ValidationHandle) !void {
         self.emitted += 1;
         try control.emit(self.allocator, .{ .event = "message", .topic = name, .length = length, .sha256 = sha256, .messageId = std.fmt.bytesToHex(id, .lower) });
-        const report = self.service.gossipsub.report(handle, .accept, self.now);
+        const report = self.protocols.gossipsub.report(handle, .accept, self.now);
         std.debug.assert(report == .applied);
     }
 
@@ -95,7 +95,7 @@ pub const Peer = struct {
         for (events[0..result.events]) |event| switch (event) {
             .connected => |c| {
                 self.conn = c.conn;
-                _ = self.service.gossipsub.peerConnected(&self.transport.engine, c.conn, false, self.now);
+                _ = self.protocols.gossipsub.peerConnected(&self.transport.engine, c.conn, false, self.now);
                 var text: [network.wire.peer_id.text_length_max]u8 = undefined;
                 try control.emit(self.allocator, .{ .event = "connected", .peer = c.peer_id.toText(&text), .generation = c.conn.generation });
             },
@@ -110,7 +110,7 @@ pub const Peer = struct {
         };
         var controls: [16]network.reqresp.ReqResp.Event = undefined;
         var identified: [4]network.identify.Handler.Result = undefined;
-        const counts = self.service.process(&self.transport.engine, events[0..result.events], self.now, .{ .application = &requests, .control = &controls, .identify = &identified });
+        const counts = self.protocols.process(&self.transport.engine, events[0..result.events], self.now, .{ .application = &requests, .control = &controls, .identify = &identified });
         for (requests[0..counts.application]) |event| try self.requestEvent(event);
         for (controls[0..counts.control]) |event| try self.requestEvent(event);
         for (identified[0..counts.identify]) |*completion| switch (completion.outcome) {
@@ -128,7 +128,7 @@ pub const Peer = struct {
             .request => |r| {
                 if (self.application and r.protocol.isControl()) {
                     if (r.protocol == .goodbye_v1) {
-                        std.debug.assert(self.service.reqresp.finish(r.request, self.now));
+                        std.debug.assert(self.protocols.reqresp.finish(r.request, self.now));
                         return;
                     }
                     const out = &self.control_responses[r.request.index];
@@ -146,14 +146,14 @@ pub const Peer = struct {
                         },
                         else => unreachable,
                     };
-                    try self.service.reqresp.respond(r.request, out[0..len], null, self.now);
+                    try self.protocols.reqresp.respond(r.request, out[0..len], null, self.now);
                     return;
                 }
                 if (r.protocol == .status_v2) {
                     const remote = try network.control_wire.decodeStatus(.status_v2, r.bytes);
                     const local = try network.control_wire.decodeStatus(.status_v2, &identify_status);
                     if (!std.meta.eql(remote, local)) return error.InvalidStatus;
-                    try self.service.reqresp.respond(r.request, &identify_status, null, self.now);
+                    try self.protocols.reqresp.respond(r.request, &identify_status, null, self.now);
                     self.status_accepted = true;
                     try control.emit(self.allocator, .{ .event = "statusAccepted", .protocol = r.protocol.id() });
                     return;
@@ -162,17 +162,17 @@ pub const Peer = struct {
                 if (!std.mem.eql(u8, r.bytes, if (r.protocol == .ping_v1) &ping else &range)) return error.InvalidRequestBytes;
                 try control.emit(self.allocator, .{ .event = "request", .protocol = r.protocol.id(), .length = r.bytes.len, .sha256 = hash(r.bytes) });
                 if (r.protocol == .ping_v1) {
-                    try self.service.reqresp.respond(r.request, &ping, null, self.now);
+                    try self.protocols.reqresp.respond(r.request, &ping, null, self.now);
                 } else {
                     generate(self.response[0..self.response_size], self.response_seed);
-                    try self.service.reqresp.respond(r.request, self.response[0..self.response_size], .{ .digest = if (self.application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }, self.now);
+                    try self.protocols.reqresp.respond(r.request, self.response[0..self.response_size], .{ .digest = if (self.application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }, self.now);
                 }
             },
             .chunk => |c| {
-                const decoded_context = self.service.reqresp.outbound[c.request.index].request.io.decoder.context();
+                const decoded_context = self.protocols.reqresp.outbound[c.request.index].request.io.decoder.context();
                 const context_hex = if (decoded_context) |digest| std.fmt.bytesToHex(digest, .lower) else null;
                 try control.emit(self.allocator, .{ .event = "chunk", .length = c.bytes.len, .sha256 = hash(c.bytes), .context = if (context_hex) |*value| @as(?[]const u8, value) else null, .result = 0 });
-                std.debug.assert(self.service.reqresp.consume(c.request, self.now));
+                std.debug.assert(self.protocols.reqresp.consume(c.request, self.now));
             },
             .done => {
                 self.outbound = false;
@@ -188,7 +188,7 @@ pub const Peer = struct {
                     self.held_since = self.now.millis();
                 } else {
                     self.finish_calls += 1;
-                    std.debug.assert(self.service.reqresp.finish(c.request, self.now));
+                    std.debug.assert(self.protocols.reqresp.finish(c.request, self.now));
                 }
             },
             else => {},
@@ -218,10 +218,10 @@ pub const Peer = struct {
                 };
                 active.request.insert(.identify);
             }
-            try self.service.router.validateCapabilities(active);
-            self.service.router.setCapabilities(active);
+            try self.protocols.router.validateCapabilities(active);
+            self.protocols.router.setCapabilities(active);
             if (std.mem.eql(u8, c.op, "enableGossipRequest")) {
-                const sessions = self.service.gossipsub.sessions;
+                const sessions = self.protocols.gossipsub.sessions;
                 // Restoring capabilities does not retry a previously refused outbound stream.
                 for (sessions.rows, 0..) |*session, index| {
                     if (session.active and session.outbound == .none) sessions.setOutbound(@intCast(index), .pending);
@@ -230,29 +230,29 @@ pub const Peer = struct {
         } else if (std.mem.eql(u8, c.op, "identify")) {
             if (!self.status_accepted) return error.StatusRequired;
             const conn = self.conn orelse return error.NoConnection;
-            try self.service.identify.start(&self.service.router, &self.transport.engine, .{ .index = 0, .generation = conn.generation }, conn, self.now);
+            try self.protocols.identify.start(&self.protocols.router, &self.transport.engine, .{ .index = 0, .generation = conn.generation }, conn, self.now);
         } else if (std.mem.eql(u8, c.op, "subscribe")) {
             const parsed = Gossip.topic.parseCanonical(c.topic orelse topic) orelse return error.InvalidTopic;
             if (parsed.name.kind != .beacon_block) return error.InvalidTopic;
             var subscription: Gossip.local_intent.Boundary = .{ .digest = parsed.digest };
             subscription.mask(.beacon_block)[0] = 1;
             subscription.lengths[@intFromEnum(Gossip.topic.Kind.beacon_block)] = 1;
-            var workspace = try Gossip.local_intent.Workspace.init(self.allocator, self.service.gossipsub.overlay.rows.len);
+            var workspace = try Gossip.local_intent.Workspace.init(self.allocator, self.protocols.gossipsub.overlay.rows.len);
             defer workspace.deinit(self.allocator);
-            _ = try self.service.gossipsub.prepareSubscriptions(&.{subscription}, &workspace, self.now, 0);
-            self.service.gossipsub.commitSubscriptions(&workspace);
+            _ = try self.protocols.gossipsub.prepareSubscriptions(&.{subscription}, &workspace, self.now, 0);
+            self.protocols.gossipsub.commitSubscriptions(&workspace);
         } else if (std.mem.eql(u8, c.op, "publish")) {
             const size = c.size orelse 65537;
             if (size > max_payload) return error.MessageTooLarge;
             const bytes = try self.allocator.alloc(u8, size);
             defer self.allocator.free(bytes);
             generate(bytes, c.seed orelse 0x6d2b79f5);
-            const outcome = try self.service.gossipsub.publish(c.topic orelse topic, bytes, self.now);
+            const outcome = try self.protocols.gossipsub.publish(c.topic orelse topic, bytes, self.now);
             return control.emit(self.allocator, .{ .id = c.id, .ok = true, .queued = outcome.queued, .pressured = outcome.pressured });
         } else if (std.mem.eql(u8, c.op, "request")) {
             if (self.outbound) return error.Busy;
             const large = c.large orelse false;
-            _ = try self.service.request(&self.transport.engine, self.conn orelse return error.NoConnection, if (large) .blocks_by_range_v2 else .ping_v1, if (large) &range else &ping, self.sink, .{ .expected_chunks = 1 }, self.now);
+            _ = try self.protocols.request(&self.transport.engine, self.conn orelse return error.NoConnection, if (large) .blocks_by_range_v2 else .ping_v1, if (large) &range else &ping, self.sink, .{ .expected_chunks = 1 }, self.now);
             self.outbound = true;
         } else return self.schedule(c);
         try control.emit(self.allocator, .{ .id = c.id, .ok = true });
@@ -264,7 +264,7 @@ pub const Peer = struct {
         } else if (std.mem.eql(u8, c.op, "releaseFin")) {
             const request = self.held_finish orelse return error.NoHeldFin;
             self.finish_calls += 1;
-            _ = self.service.reqresp.finish(request, self.now);
+            _ = self.protocols.reqresp.finish(request, self.now);
             self.held_finish = null;
             self.held_since = null;
             self.hold_fin = false;
@@ -328,15 +328,15 @@ pub fn main(init: std.process.Init) !void {
     gossip_topics[0].rules[@intFromEnum(Gossip.topic.Kind.beacon_block)] = .{ .count = 1, .ssz_min = 0, .ssz_max = max_payload };
     const peer = try a.create(Peer);
     defer a.destroy(peer);
-    peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = undefined, .sink = undefined, .response = undefined };
+    peer.* = .{ .application = application, .allocator = a, .io = init.io, .protocols = undefined, .sink = undefined, .response = undefined };
     const key = try network.wire.keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ .{31}));
     try peer.transport.init(a, init.io, .{ .host = &key, .bind = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2, .outbound_max = 3 } });
     defer peer.transport.deinit(init.io);
-    const service_options: network.Service.Options = .{ .identify = .{ .agent = "lodestar-z-identify" }, .reqresp = .{ .admission = admission, .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000 }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .topic_policy = &gossip_topics, .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } };
-    const local = try service_options.identify.makeLocal(&peer.transport.peerId(), &peer.transport.sockets.localAddresses());
-    peer.service = try network.Service.init(a, service_options, &local);
-    defer peer.service.deinit();
-    peer.control_responses = try a.alloc([92]u8, peer.service.reqresp.inbound.len);
+    const protocols_options: network.Protocols.Options = .{ .identify = .{ .agent = "lodestar-z-identify" }, .reqresp = .{ .admission = admission, .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000 }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .topic_policy = &gossip_topics, .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } };
+    const local = try protocols_options.identify.makeLocal(&peer.transport.peerId(), &peer.transport.sockets.localAddresses());
+    peer.protocols = try network.Protocols.init(a, protocols_options, &local);
+    defer peer.protocols.deinit();
+    peer.control_responses = try a.alloc([92]u8, peer.protocols.reqresp.inbound.len);
     defer a.free(peer.control_responses);
     peer.attachSink();
     peer.sink = try a.alloc(u8, max_payload);
@@ -344,8 +344,8 @@ pub fn main(init: std.process.Init) !void {
     peer.response = try a.alloc(u8, max_payload);
     defer a.free(peer.response);
 
-    defer peer.service.identify.shutdown(&peer.service.router, &peer.transport.engine);
-    defer peer.service.reqresp.cancelAll(&peer.transport.engine, &peer.service.router, peer.now);
+    defer peer.protocols.identify.shutdown(&peer.protocols.router, &peer.transport.engine);
+    defer peer.protocols.reqresp.cancelAll(&peer.transport.engine, &peer.protocols.router, peer.now);
     try control.run(peer);
 }
 

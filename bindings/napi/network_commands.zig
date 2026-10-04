@@ -178,7 +178,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             operation.count = try core.completeSnapshots(self.stores.?.snapshots[store.?]);
             operation.counts = core.peerCounts();
         },
-        .getGossipDiagnostics => try n.gossipsub.diagnostics.capture(core.service.gossipsub, input.diagnostics_cursor, timestamp, &self.stores.?.gossip_diagnostics[store.?]),
+        .getGossipDiagnostics => try n.gossipsub.diagnostics.capture(core.protocols.gossipsub, input.diagnostics_cursor, timestamp, &self.stores.?.gossip_diagnostics[store.?]),
         .getDirectPeers => operation.count = try core.directPeers(&self.stores.?.direct[store.?]),
         .getRememberedPeers => {
             const page = &self.stores.?.remembered[store.?];

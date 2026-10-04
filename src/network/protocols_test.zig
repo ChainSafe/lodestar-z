@@ -9,7 +9,7 @@ const topic_mod = @import("gossipsub/topic.zig");
 const multistream = @import("wire/multistream.zig");
 const protobuf = @import("gossipsub/protobuf.zig");
 
-fn rrOptions() !@import("service.zig").Service.Options {
+fn rrOptions() !@import("protocols.zig").Protocols.Options {
     return .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
         .outbound_max = 4,
         .inbound_max = 4,
@@ -19,13 +19,13 @@ fn rrOptions() !@import("service.zig").Service.Options {
     } };
 }
 
-test "service composes simultaneous ping and meshsub on one connection" {
+test "protocol stack composes simultaneous ping and meshsub on one connection" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var client = try @import("service_test_support.zig").initService(std.testing.allocator, try rrOptions(), &pair.client);
+    var client = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, try rrOptions(), &pair.client);
     defer client.deinit();
-    var server = try @import("service_test_support.zig").initService(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1, .topic_policy = &.{@import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 })} }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
+    var server = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1, .topic_policy = &.{@import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 })} }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
     defer server.deinit();
     const requests = &server.reqresp;
     const gossip = server.gossipsub;
@@ -77,11 +77,11 @@ test "service composes simultaneous ping and meshsub on one connection" {
     try std.testing.expect(pong);
 }
 
-test "service handles native stream events past empty request capacity" {
+test "protocol stack handles native stream events past empty request capacity" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var client = try @import("service_test_support.zig").initService(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
+    var client = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
         .forks = &.{},
         .outbound_max = 64,
         .inbound_max = 64,
@@ -90,7 +90,7 @@ test "service handles native stream events past empty request capacity" {
     } }, &pair.client);
     defer client.deinit();
     defer client.reqresp.cancelAll(&pair.client, &client.router, pair.now);
-    var server = try @import("service_test_support.zig").initService(std.testing.allocator, try rrOptions(), &pair.server);
+    var server = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, try rrOptions(), &pair.server);
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const handles = try support.connectPair(&pair);
@@ -123,14 +123,14 @@ test "service handles native stream events past empty request capacity" {
     try std.testing.expectEqualSlices(u8, &ping, requests[0].chunk.bytes);
 }
 
-test "service gossip capacity refusal preserves reqresp and explicit host retry" {
+test "protocol stack gossip capacity refusal preserves reqresp and explicit host retry" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var client = try @import("service_test_support.zig").initService(std.testing.allocator, try rrOptions(), &pair.client);
+    var client = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, try rrOptions(), &pair.client);
     defer client.deinit();
     defer client.reqresp.cancelAll(&pair.client, &client.router, pair.now);
-    var server = try @import("service_test_support.zig").initService(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
+    var server = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const handles = try support.connectPair(&pair);
@@ -176,31 +176,31 @@ test "service gossip capacity refusal preserves reqresp and explicit host retry"
     try std.testing.expect(server.gossipsub.admitted(handles.server));
 }
 
-test "service capabilities disabled outbound preserves stream and request owners" {
+test "protocol stack capabilities disabled outbound preserves stream and request owners" {
     const caps = @import("capabilities.zig");
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var service = try @import("service_test_support.zig").initService(std.testing.allocator, .{
+    var protocols = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, .{
         .reqresp = (try rrOptions()).reqresp,
         .gossipsub = .{ .random_seed = 1 },
         .router = .{ .capabilities = caps.Directional{ .receive = .initEmpty(), .request = .initEmpty() } },
     }, &pair.client);
-    defer service.deinit();
+    defer protocols.deinit();
     const before = pair.client.resourceSnapshot();
-    const requests = service.reqresp.pendingCounts();
-    const negotiations = service.router.negotiator.active();
+    const requests = protocols.reqresp.pendingCounts();
+    const negotiations = protocols.router.negotiator.active();
     var sink: [8]u8 = undefined;
-    try std.testing.expectError(error.ProtocolDisabled, service.request(&pair.client, handles.client, .ping_v1, &(@as([8]u8, @splat(0))), &sink, .{}, pair.now));
-    try std.testing.expectError(error.ProtocolDisabled, service.router.beginOutbound(&pair.client, handles.client, .{ .reqresp = .status_v1 }, pair.now));
-    try std.testing.expectError(error.ProtocolDisabled, service.router.beginMeshsub(&pair.client, handles.client, pair.now));
+    try std.testing.expectError(error.ProtocolDisabled, protocols.request(&pair.client, handles.client, .ping_v1, &(@as([8]u8, @splat(0))), &sink, .{}, pair.now));
+    try std.testing.expectError(error.ProtocolDisabled, protocols.router.beginOutbound(&pair.client, handles.client, .{ .reqresp = .status_v1 }, pair.now));
+    try std.testing.expectError(error.ProtocolDisabled, protocols.router.beginMeshsub(&pair.client, handles.client, pair.now));
     try std.testing.expectEqualDeep(before, pair.client.resourceSnapshot());
-    try std.testing.expectEqualDeep(requests, service.reqresp.pendingCounts());
-    try std.testing.expectEqual(negotiations, service.router.negotiator.active());
+    try std.testing.expectEqualDeep(requests, protocols.reqresp.pendingCounts());
+    try std.testing.expectEqual(negotiations, protocols.router.negotiator.active());
 }
 
-test "service capabilities activation preserves negotiated response context and captured ceiling" {
+test "protocol stack capabilities activation preserves negotiated response context and captured ceiling" {
     const harness = @import("reqresp/test_pair.zig");
     const ct = @import("consensus_types");
     const context: @import("types.zig").ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };

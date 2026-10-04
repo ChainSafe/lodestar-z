@@ -48,7 +48,7 @@ test("running application advances fork state only when the host updates intent"
   }
 });
 
-test("owned chain plan follows Fulu and BPO with Lodestar topics", async () => {
+test("owned chain config follows Fulu and BPO with Lodestar topics", async () => {
   const config = discoveryConfig();
   const runtime = startRuntime(config, () => undefined);
   try {

@@ -7,13 +7,13 @@ const Channel = @import("Channel.zig");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
 const RoutingTable = @import("RoutingTable.zig");
-const ResponsePlan = @import("ResponsePlan.zig");
+const PendingResponse = @import("PendingResponse.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
 
 pub const Error = CallTable.Error || Channel.Error || RoutingTable.Error ||
-    ResponsePlan.Error || error{
+    PendingResponse.Error || error{
     ApplicationResponseRequired,
     ClockOverflow,
     HandshakeUnsent,
@@ -254,7 +254,7 @@ pub fn sendResponse(
 pub fn prepareStandardResponse(
     self: *const Engine,
     request: *const AuthenticatedRequest,
-    response: *ResponsePlan,
+    response: *PendingResponse,
 ) Error!void {
     return switch (request.message) {
         .ping => |ping| response.preparePong(
@@ -281,11 +281,11 @@ pub fn prepareStandardResponse(
 pub fn sendNextStandardResponse(
     self: *Engine,
     out: []u8,
-    response: *ResponsePlan,
+    response: *PendingResponse,
     now_ms: u64,
     entropy: *const StartEntropy,
 ) Error!?u16 {
-    var raw_records: ResponsePlan.RawRecords = undefined;
+    var raw_records: PendingResponse.RawRecords = undefined;
     const message_response = response.next(&raw_records) orelse return null;
     const packet_length = try self.sendPreparedResponse(
         out,

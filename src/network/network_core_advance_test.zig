@@ -19,10 +19,10 @@ test "core connection deadlines preserve fractions through millisecond expiry" {
     const catalog = &core.peer_manager.catalog;
     const peer = catalog.find(&identity).?;
     const due_ms = now.millis() + 2;
-    try std.testing.expectEqual(due_ms, catalog.rowFor(peer).?.intent.manual_until_ms);
+    try std.testing.expectEqual(due_ms, catalog.rowFor(peer).?.dial.manual_until_ms);
     now.monotonic = @import("time.zig").milliseconds(due_ms - 1);
     core.peer_manager.expireDials(&core.transport.engine, now);
-    try std.testing.expectEqual(due_ms, catalog.rowFor(peer).?.intent.manual_until_ms);
+    try std.testing.expectEqual(due_ms, catalog.rowFor(peer).?.dial.manual_until_ms);
     try std.testing.expectError(error.InvalidDeadline, core.connectUntil(&identity, &addresses, now, setup.pair.now.monotonic));
     now.monotonic = @import("time.zig").milliseconds(due_ms);
     core.peer_manager.expireDials(&core.transport.engine, now);
@@ -36,7 +36,7 @@ test "core advance uses supplied time and schedules deferred application shutdow
     try setup.initOwners(&.{});
     defer setup.deinit();
     const core = &setup.client;
-    core.service.quiesceApplications();
+    core.protocols.quiesceApplications();
     const before = core.wakeups(setup.pair.now, .{});
     try std.testing.expect(before.sources[@intFromEnum(Source.gossip)].runnable);
     var tick = setup.pair.now;
@@ -44,7 +44,7 @@ test "core advance uses supplied time and schedules deferred application shutdow
     const result = core.advance(setup.pair.io(), .{ .now = tick, .readiness = .{} }, .{}, .{});
     try std.testing.expect(result.failure == null);
     try std.testing.expectEqual(tick, result.transport.now);
-    try std.testing.expectEqual(.closed, core.service.applications);
+    try std.testing.expectEqual(.closed, core.protocols.applications);
     const after = core.wakeups(tick, .{});
     try std.testing.expect(!after.sources[@intFromEnum(Source.gossip)].runnable);
 }
@@ -156,7 +156,7 @@ test "core shutdown waits for retained host serving work after stream retirement
     try core.setHostWake(host_socket.handle);
     defer core.setHostWake(null) catch unreachable;
     core.shutdown(setup.pair.now);
-    try std.testing.expectError(error.ProtocolDisabled, core.service.request(&core.transport.engine, .{ .index = 0, .generation = 1 }, .ping_v1, &.{}, &.{}, .{}, setup.pair.now));
+    try std.testing.expectError(error.ProtocolDisabled, core.protocols.request(&core.transport.engine, .{ .index = 0, .generation = 1 }, .ping_v1, &.{}, &.{}, .{}, setup.pair.now));
     var terminal_count: usize = 0;
     for (0..5) |_| {
         try setup.pair.pump();

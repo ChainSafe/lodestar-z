@@ -14,7 +14,7 @@ const assert = std.debug.assert;
 pub const Catalog = struct {
     pub const history_retention_ms: u64 = 600_000;
     pub const hint_freshness_ms: u64 = 300_000;
-    pub const Intent = struct {
+    pub const DialState = struct {
         automatic: bool = false,
         selected: bool = true,
         priority: u2 = 0,
@@ -33,7 +33,7 @@ pub const Catalog = struct {
     pub const Row = struct {
         free_link: lists.Link = .{},
         established_slot: ?u16 = null,
-        intent: Intent = .{},
+        dial: DialState = .{},
         attempt: ?u8 = null,
         identify: ?@import("../identify/root.zig").Metadata = null,
         custody_work: ?custody.SamplingDerivation = null,
@@ -248,7 +248,7 @@ pub const Catalog = struct {
 
     pub fn prepareCandidateCustody(row: *Row, context: *const t.ForkContext) void {
         if (row.connection != null) return;
-        const hints = row.intent.hints orelse return;
+        const hints = row.dial.hints orelse return;
         const count = hints.custody_group_count orelse context.custody_requirement;
         if (!hints.validFor(context) or count == 0) {
             row.custody_work = null;
@@ -260,8 +260,8 @@ pub const Catalog = struct {
     }
 
     pub fn candidateCoverage(row: *const Row, context: *const t.ForkContext, now_ms: u64) t.Coverage {
-        const hints = row.intent.hints orelse return .{};
-        if (now_ms >= row.intent.hints_at_ms +| hint_freshness_ms or !hints.validFor(context)) return .{};
+        const hints = row.dial.hints orelse return .{};
+        if (now_ms >= row.dial.hints_at_ms +| hint_freshness_ms or !hints.validFor(context)) return .{};
         var result: t.Coverage = .{ .attnets = if (hints.attnets) |bits| std.mem.readInt(u64, &bits, .little) else 0, .syncnets = @intCast(hints.syncnets orelse 0) };
         const count = hints.custody_group_count orelse context.custody_requirement;
         if (std.meta.eql(row.custody_context, context.*)) if (row.custody_work) |*work| {
@@ -290,7 +290,7 @@ pub const Catalog = struct {
                 const had_work = row.custody_work != null;
                 prepareCandidateCustody(row, context);
                 if (!std.meta.eql(before_context, row.custody_context) or had_work != (row.custody_work != null)) self.intent_revision +|= 1;
-                if (now_ms >= row.intent.hints_at_ms +| hint_freshness_ms) continue;
+                if (now_ms >= row.dial.hints_at_ms +| hint_freshness_ms) continue;
                 const work = if (row.custody_work) |*value| value else continue;
                 const before = work.totalHashes();
                 const result = work.step(@min(custody.hashes_per_row, budget.*)) catch {
@@ -524,7 +524,7 @@ pub const Catalog = struct {
         if (row.established_slot == null) {
             self.forget(peer);
         } else {
-            row.intent = .{ .failures = row.intent.failures, .eligible_at_ms = row.intent.eligible_at_ms, .history_until_ms = row.intent.history_until_ms };
+            row.dial = .{ .failures = row.dial.failures, .eligible_at_ms = row.dial.eligible_at_ms, .history_until_ms = row.dial.history_until_ms };
             if (row.connection == null) {
                 row.custody_work = null;
                 row.custody_context = null;
@@ -570,7 +570,7 @@ pub const Catalog = struct {
         for (self.established[0..limit], 0..) |entry, slot| {
             const index = entry.?;
             const row = &self.rows[index];
-            if (row.connection != null or row.direct or row.attempt != null or row.intent.manual_until_ms > now_ms or row.pending_close != null or
+            if (row.connection != null or row.direct or row.attempt != null or row.dial.manual_until_ms > now_ms or row.pending_close != null or
                 row.pending_update or row.generation == std.math.maxInt(u64)) continue;
             var current_reputation = row.reputation;
             current_reputation.decay(now_ms);
@@ -684,17 +684,17 @@ pub const Catalog = struct {
 
     fn connectionClosed(self: *Catalog, index: usize, reason: t.DisconnectReason, now_ms: u64) void {
         const row = &self.rows[index];
-        row.intent.history_until_ms = @max(row.intent.history_until_ms, now_ms +| history_retention_ms);
+        row.dial.history_until_ms = @max(row.dial.history_until_ms, now_ms +| history_retention_ms);
         if (reason == .capacity or reason == .count_pruning) {
             if (row.reputation.redial_until_ms <= now_ms)
                 row.reputation.deferRedial(now_ms, @import("goodbye.zig").cooldownMs(129));
             return;
         }
         const lifetime = now_ms -| row.connected_at_ms;
-        if (lifetime >= 300_000) row.intent.failures = 0;
-        row.intent.failures = @min(row.intent.failures +| 1, 7);
-        const delay = @min(@as(u64, 5_000) << @intCast(row.intent.failures - 1), 300_000);
-        row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| delay +| (self.random.random().int(u16) % 1_001));
+        if (lifetime >= 300_000) row.dial.failures = 0;
+        row.dial.failures = @min(row.dial.failures +| 1, 7);
+        const delay = @min(@as(u64, 5_000) << @intCast(row.dial.failures - 1), 300_000);
+        row.dial.eligible_at_ms = @max(row.dial.eligible_at_ms, now_ms +| delay +| (self.random.random().int(u16) % 1_001));
         if (reason == .health_timeout or reason == .health_error) {
             self.remembered.forget(&row.identity);
             self.recordHealth(index, now_ms);
@@ -709,19 +709,19 @@ pub const Catalog = struct {
     fn recordHealth(self: *Catalog, index: usize, now_ms: u64) void {
         const row = &self.rows[index];
         const key = self.history.endpointKey(&row.identity, row.dialed orelse return);
-        const intent = &row.intent;
-        const sequence = if (intent.hints) |hints| hints.sequence else 0;
+        const dial = &row.dial;
+        const sequence = if (dial.hints) |hints| hints.sequence else 0;
         self.history.recordEndpoint(key, .health, sequence, now_ms);
         self.history.markRetry(key, .health, now_ms);
-        if (!intent.automatic or row.direct or intent.manual_until_ms != 0) return;
-        for (0..intent.address_count) |offset| {
-            const position: u8 = @intCast((intent.address_index + offset) % intent.address_count);
-            if (!self.history.blocked(self.history.endpointKey(&row.identity, intent.addresses[position]), sequence, now_ms)) {
-                intent.address_index = position;
+        if (!dial.automatic or row.direct or dial.manual_until_ms != 0) return;
+        for (0..dial.address_count) |offset| {
+            const position: u8 = @intCast((dial.address_index + offset) % dial.address_count);
+            if (!self.history.blocked(self.history.endpointKey(&row.identity, dial.addresses[position]), sequence, now_ms)) {
+                dial.address_index = position;
                 return;
             }
         }
-        intent.automatic = false;
+        dial.automatic = false;
         if (row.attempt == null) self.releaseIntent(self.reference(index));
     }
 
@@ -748,10 +748,10 @@ pub const Catalog = struct {
         self.rejections[@intFromEnum(kind)] +|= 1;
         if (kind != .shutdown) self.remembered.forget(&row.identity);
         std.log.scoped(.network_peers).debug("peer_rejection_recorded peer={f} connection={d}:{d} kind={s} block_ms={d}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(kind), block_ms });
-        if (!row.intent.automatic) return;
-        row.intent.automatic = false;
+        if (!row.dial.automatic) return;
+        row.dial.automatic = false;
         self.markDial(ref.index);
-        if (!row.direct and row.intent.manual_until_ms == 0 and row.attempt == null) self.releaseIntent(ref);
+        if (!row.direct and row.dial.manual_until_ms == 0 and row.attempt == null) self.releaseIntent(ref);
     }
 
     /// Counts an automatic dial's connection as kept, and refreshes the peer's remembered record,
@@ -837,7 +837,7 @@ pub const Catalog = struct {
         if (row.closing_reason != null) return false;
         self.revision +|= 1;
         row.status = status.*;
-        row.intent.history_until_ms = @max(row.intent.history_until_ms, now_ms +| history_retention_ms);
+        row.dial.history_until_ms = @max(row.dial.history_until_ms, now_ms +| history_retention_ms);
         row.status_at_ms = now_ms;
         row.pending_update = true;
         self.syncEvent(ref.index);

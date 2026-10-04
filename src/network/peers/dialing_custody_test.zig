@@ -22,14 +22,14 @@ test "peer discovery uses the configured custody minimum only for an absent ENR 
     try std.testing.expect(!catalog.advanceCustody(&context, 0, 60_000, &budget));
     q.configureSelection(&catalog, &wanted, false, &context, 0);
     try std.testing.expectEqual(@as(usize, 4), candidates[0].custody_work.?.walk.groups.count());
-    try std.testing.expectEqual(@as(u2, 2), candidates[0].intent.priority);
-    var out: [1]mod.Dialing.DialIntent = undefined;
+    try std.testing.expectEqual(@as(u2, 2), candidates[0].dial.priority);
+    var out: [1]mod.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
     try std.testing.expectEqual(@as(u64, 1), q.selected_attempts[@intFromEnum(mod.Dialing.Source.discovery)]);
     candidate.sequence += 1;
     candidate.custody_group_count = 0;
     try q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, 0);
-    try std.testing.expectEqual(@as(?u64, 0), candidates[0].intent.hints.?.custody_group_count);
+    try std.testing.expectEqual(@as(?u64, 0), candidates[0].dial.hints.?.custody_group_count);
     try std.testing.expect(candidates[0].custody_work == null);
     candidate.custody_group_count = context.custody_groups + 1;
     try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, 0));
@@ -61,7 +61,7 @@ test "peer dial custody diagnostics count unfinished derivations without mutatin
     try std.testing.expectError(error.WorkLimit, candidates[3].custody_work.?.step(1));
     q.configureSelection(&catalog, &wanted, false, &.{}, 0);
     for ([_]u16{ 0, 1, 1, 0 }, candidates) |priority, row| {
-        try std.testing.expectEqual(priority, row.intent.priority);
+        try std.testing.expectEqual(priority, row.dial.priority);
     }
 
     const works = [4]custody.SamplingDerivation{
@@ -78,8 +78,8 @@ test "peer dial custody diagnostics count unfinished derivations without mutatin
         try std.testing.expectEqual(@as(usize, 1), custodyIncomplete(&catalog));
         for (works, candidates, [_]u16{ 0, 1, 1, 0 }) |work, row, priority| {
             try std.testing.expectEqualDeep(work, row.custody_work.?);
-            try std.testing.expectEqual(priority, row.intent.priority);
-            try std.testing.expectEqual(priority > 0, row.intent.selected);
+            try std.testing.expectEqual(priority, row.dial.priority);
+            try std.testing.expectEqual(priority > 0, row.dial.selected);
         }
         try std.testing.expectEqual(cursor, q.cursor);
         try std.testing.expectEqual(custody_cursor, catalog.candidate_custody_cursor);
@@ -125,31 +125,31 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     wanted.groups.set(0);
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &wanted, 0);
     q.configureSelection(&catalog, &wanted, false, &.{}, 0);
-    try std.testing.expectEqual(@as(u16, 2), candidates[0].intent.priority);
-    var out: [1]mod.Dialing.DialIntent = undefined;
+    try std.testing.expectEqual(@as(u16, 2), candidates[0].dial.priority);
+    var out: [1]mod.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
     try std.testing.expect(q.dialFailed(&catalog, out[0].token, 1));
-    const eligible = candidates[0].intent.eligible_at_ms;
-    const horizon = candidates[0].intent.history_until_ms;
-    const failures = candidates[0].intent.failures;
+    const eligible = candidates[0].dial.eligible_at_ms;
+    const horizon = candidates[0].dial.history_until_ms;
+    const failures = candidates[0].dial.failures;
     const context: t.ForkContext = .{ .custody_groups = 64 };
     var budget: u16 = 0;
     try std.testing.expect(!catalog.advanceCustody(&context, eligible, 60_000, &budget));
     q.configureSelection(&catalog, &wanted, false, &context, eligible);
-    try std.testing.expectEqual(@as(u16, 0), candidates[0].intent.priority);
+    try std.testing.expectEqual(@as(u16, 0), candidates[0].dial.priority);
     try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, eligible, &out));
     q.configureSelection(&catalog, &wanted, true, &context, eligible);
     try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, eligible, &out));
     try std.testing.expectEqual(@as(?u64, null), support.refreshAndWakeup(&q, &catalog, eligible, 1));
-    try std.testing.expectEqual(eligible, candidates[0].intent.eligible_at_ms);
-    try std.testing.expectEqual(horizon, candidates[0].intent.history_until_ms);
-    try std.testing.expectEqual(failures, candidates[0].intent.failures);
+    try std.testing.expectEqual(eligible, candidates[0].dial.eligible_at_ms);
+    try std.testing.expectEqual(horizon, candidates[0].dial.history_until_ms);
+    try std.testing.expectEqual(failures, candidates[0].dial.failures);
     try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, eligible));
     candidate.sequence = 2;
     candidate.custody_group_count = 64;
     try q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, eligible);
     q.configureSelection(&catalog, &wanted, false, &context, eligible);
-    try std.testing.expectEqual(@as(u16, 2), candidates[0].intent.priority);
+    try std.testing.expectEqual(@as(u16, 2), candidates[0].dial.priority);
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, eligible, &out));
     const token = out[0].token;
     const conn: t.Handle = .{ .index = 2, .generation = 99 };
@@ -160,12 +160,12 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     q.configureSelection(&catalog, &wanted, true, &smaller, eligible);
     try std.testing.expectEqual(conn, q.active[0].connection.?);
     try std.testing.expectEqual(lease, support.refreshAndWakeup(&q, &catalog, eligible, 1).?);
-    try std.testing.expectEqual(failures, candidates[0].intent.failures);
-    try std.testing.expectEqual(horizon, candidates[0].intent.history_until_ms);
+    try std.testing.expectEqual(failures, candidates[0].dial.failures);
+    try std.testing.expectEqual(horizon, candidates[0].dial.history_until_ms);
     const manual: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 9 }, .port = 9999 } };
     try q.enqueue(&catalog, &candidate.peer, &.{manual}, true, eligible);
     q.configureSelection(&catalog, &wanted, true, &smaller, eligible);
-    try std.testing.expectEqual(@as(u16, 0), candidates[0].intent.priority);
+    try std.testing.expectEqual(@as(u16, 0), candidates[0].dial.priority);
     try std.testing.expect(catalog.rowFor(catalog.find(&candidate.peer).?).?.direct);
     try std.testing.expectEqual(conn, q.active[0].connection.?);
     try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, eligible, &out));
@@ -215,7 +215,7 @@ test "peer dial review custody-only full table recovers at fixed horizon with bo
     try std.testing.expect(candidates[0].identity.eql(&scarce.peer));
     try std.testing.expectEqual(@as(u16, 0), candidates[0].custody_work.?.walk.hashes);
     q.configureSelection(&catalog, &wanted, false, &.{}, 600_000);
-    var out: [1]mod.Dialing.DialIntent = undefined;
+    var out: [1]mod.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, 600_000, &out));
     var pending = true;
     for (0..64) |_| {
@@ -230,7 +230,7 @@ test "peer dial review custody-only full table recovers at fixed horizon with bo
     try std.testing.expect(!pending);
     try std.testing.expect(candidates[0].custody_work.?.walk.hashes <= 4096);
     q.configureSelection(&catalog, &wanted, false, &.{}, 600_000);
-    try std.testing.expectEqual(@as(u16, 1), candidates[0].intent.priority);
+    try std.testing.expectEqual(@as(u16, 1), candidates[0].dial.priority);
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 600_000, &out));
     try std.testing.expect(out[0].peer.eql(&scarce.peer));
 }
@@ -251,13 +251,13 @@ test "peer dial actual custody gives no utility for connected sampling only grou
     var budget: u16 = 64;
     try std.testing.expect(!catalog.advanceCustody(&context, 0, 60_000, &budget));
     q.configureSelection(&catalog, &wanted, false, &context, 0);
-    try std.testing.expectEqual(@as(u16, 0), candidates[0].intent.priority);
-    try std.testing.expect(!candidates[0].intent.selected);
+    try std.testing.expectEqual(@as(u16, 0), candidates[0].dial.priority);
+    try std.testing.expect(!candidates[0].dial.selected);
     try std.testing.expectEqual(@as(u16, 4), @import("policy.zig").utility(&.{ .groups = derived.sampling }, &wanted));
     wanted.groups = derived.custody;
     q.configureSelection(&catalog, &wanted, false, &context, 0);
-    try std.testing.expectEqual(@as(u16, 1), candidates[0].intent.priority);
-    try std.testing.expect(candidates[0].intent.selected);
+    try std.testing.expectEqual(@as(u16, 1), candidates[0].dial.priority);
+    try std.testing.expect(candidates[0].dial.selected);
 }
 
 fn custodyIncomplete(catalog: *const @import("catalog.zig").Catalog) usize {

@@ -11,7 +11,7 @@ pub const application_config = @import("network_application_config.zig");
 pub const projection = @import("network_peer_projection.zig");
 const Wake = @import("network_wake.zig").Wake;
 const readiness_mod = @import("network_readiness.zig");
-pub const Row = readiness_mod.Row;
+pub const DeliveryKind = readiness_mod.DeliveryKind;
 pub const Place = readiness_mod.Place;
 pub const Owner = @import("network_owner.zig").Owner;
 pub const allocator = std.heap.c_allocator;
@@ -229,10 +229,10 @@ pub const Runtime = struct {
         self.terminal_error = err;
         self.state = .failed;
     }
-    /// Where `row` belongs now. Neither checks nor serving starts are served after a stop, no claim after
+    /// Where `kind` belongs now. Neither checks nor serving starts are served after a stop, no claim after
     /// quiescence, and nothing once the close result was delivered, so a host may stop exchanging.
-    pub fn wantLocked(self: *Runtime, row: Row) Place {
-        switch (row) {
+    pub fn wantLocked(self: *Runtime, kind: DeliveryKind) Place {
+        switch (kind) {
             .completions => return if (self.settleableLocked() or self.acknowledgingLocked() or (self.quiescent and !self.close_delivered)) .control else .none,
             .peers => return if (!self.close_delivered and self.lane != null and self.lane.?.len > 0) .payload else .none,
             .checks => {
@@ -253,12 +253,12 @@ pub const Runtime = struct {
             },
         }
     }
-    /// Moves `row` to where it belongs, notifying the host when the move disarms.
-    pub fn recomputeLocked(self: *Runtime, row: Row) void {
-        if (self.readiness.recompute(row, self.wantLocked(row))) self.notifyLocked();
+    /// Moves `kind` to where it belongs, notifying the host when the move disarms.
+    pub fn recomputeLocked(self: *Runtime, kind: DeliveryKind) void {
+        if (self.readiness.recompute(kind, self.wantLocked(kind))) self.notifyLocked();
     }
     pub fn refreshLocked(self: *Runtime) void {
-        inline for (@typeInfo(Row).@"enum".fields) |field| self.recomputeLocked(@enumFromInt(field.value));
+        inline for (@typeInfo(DeliveryKind).@"enum".fields) |field| self.recomputeLocked(@enumFromInt(field.value));
     }
     pub fn notifyLocked(self: *Runtime) void {
         if (!self.notify_live or !self.env_alive) return;

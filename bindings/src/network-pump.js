@@ -1,5 +1,5 @@
 import {LogDelivery} from "./network-log-delivery.js";
-import {CONTROL, FAILURES_MAX, SETTLE_CELLS, escalate} from "./network-turns.js";
+import {CONTROL, FAILURES_MAX, SETTLE_CELLS, escalate} from "./network-turn-scheduler.js";
 
 /** Actions one exchange applies; native refuses a longer batch. */
 export const ACTION_MAX = 256;
@@ -98,11 +98,11 @@ class IncomingRequest {
  * a failed turn. A null host capacity, or a closing facade, leaves settlement and acknowledgements only, until native
  * reports closed. A broken bridge contract escalates through native `fail`, which terminates the process.
  *
- * The runtime's turns and the closed observation hold the pump weakly, so a dropped facade and host can be collected.
+ * The runtime's scheduler and the closed observation hold the pump weakly, so a dropped facade and host can be collected.
  */
 export class NativePump {
   #runtime = null;
-  #turns = null;
+  #scheduler = null;
   #host;
   /** Terminal bookkeeping the facade shares; it holds no host reference. */
   #terminal;
@@ -140,11 +140,11 @@ export class NativePump {
     this.#terminal = terminal;
   }
 
-  /** Starts draining `runtime` on its turns, whose notifications call `request`, and delivering its log records. */
+  /** Starts draining `runtime` on its scheduler, whose notifications call `request`, and delivering its log records. */
   attach(runtime) {
     this.#runtime = runtime;
-    this.#turns = runtime.turns;
-    this.#turns.bind(this);
+    this.#scheduler = runtime.scheduler;
+    this.#scheduler.bind(this);
     NativePump.#observe(this.#weak, this.#unsettled, runtime.closed);
     this.#logs = new LogDelivery(runtime, this.#host, (error) => this.#error(error));
     this.#logs.start();
@@ -299,12 +299,12 @@ export class NativePump {
   }
 
   #schedule() {
-    if (!this.#stopped) this.#turns?.schedule();
+    if (!this.#stopped) this.#scheduler?.schedule();
   }
 
   #stop() {
     this.#stopped = true;
-    this.#turns.stop();
+    this.#scheduler.stop();
     this.close();
     // Native keeps its records past close, so the last ones, the shutdown's included, still reach the host.
     this.#logs.stop();

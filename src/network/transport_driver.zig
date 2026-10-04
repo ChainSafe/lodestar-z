@@ -5,8 +5,8 @@ const Engine = @import("quic/Engine.zig");
 const wait = @import("wait.zig");
 
 pub const Options = struct { wait_max: std.Io.Duration = .fromMilliseconds(@import("constants.zig").poll_interval_ms) };
-pub const Error = Transport.StepError || wait.Error || error{ClockOutOfRange};
-pub const Result = struct { progress: Transport.StepResult, cancelled: bool = false, failure: ?Error = null };
+pub const Error = Transport.AdvanceError || wait.Error || error{ClockOutOfRange};
+pub const Result = struct { progress: Transport.Progress, cancelled: bool = false, failure: ?Error = null };
 
 /// Standalone driver for a transport without NetworkCore. Requires OS sockets and the OS clock,
 /// like the network driver. The caller consumes event borrows before another turn or teardown.

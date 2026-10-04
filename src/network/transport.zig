@@ -37,15 +37,15 @@ pub const Transport = struct {
 
     pub const WorkLimits = struct {
         /// Datagrams sent per turn.
-        send_per_step_max: u16 = send_burst_max,
-        receive_per_step_max: u16 = constants.receive_batch_max,
+        send_per_turn_max: u16 = send_burst_max,
+        receive_per_turn_max: u16 = constants.receive_batch_max,
         /// Datagrams sent per dirty-connection visit.
         burst_per_connection: u16 = constants.send_batch_max,
 
         pub fn validate(self: WorkLimits) error{InvalidLimits}!void {
-            if (self.send_per_step_max == 0 or self.send_per_step_max > send_burst_max) return error.InvalidLimits;
-            if (self.receive_per_step_max == 0 or self.receive_per_step_max > constants.receive_batch_max) return error.InvalidLimits;
-            if (self.burst_per_connection == 0 or self.burst_per_connection > self.send_per_step_max) return error.InvalidLimits;
+            if (self.send_per_turn_max == 0 or self.send_per_turn_max > send_burst_max) return error.InvalidLimits;
+            if (self.receive_per_turn_max == 0 or self.receive_per_turn_max > constants.receive_batch_max) return error.InvalidLimits;
+            if (self.burst_per_connection == 0 or self.burst_per_connection > self.send_per_turn_max) return error.InvalidLimits;
         }
     };
 
@@ -66,7 +66,7 @@ pub const Transport = struct {
         ready_batch_storage_bytes: u64 = @sizeOf(SendBatch),
     };
 
-    pub const StepError = Sockets.DatagramError;
+    pub const AdvanceError = Sockets.DatagramError;
     pub const DialError = Sockets.SendError || Engine.DialError || error{ DestinationUnreachable, MissingPeerId };
 
     const Received = union(enum) {
@@ -75,7 +75,7 @@ pub const Transport = struct {
         timeout,
     };
 
-    pub const StepResult = struct {
+    pub const Progress = struct {
         now: Engine.Now,
         datagrams_received: u32 = 0,
         datagrams_accepted: u32 = 0,
@@ -91,10 +91,10 @@ pub const Transport = struct {
         backlog: bool = false,
     };
 
-    pub const ProgressResult = struct {
-        progress: StepResult,
+    pub const AdvanceResult = struct {
+        progress: Progress,
         cancelled: bool = false,
-        failure: ?StepError = null,
+        failure: ?AdvanceError = null,
     };
 
     pub const Counters = struct {
@@ -193,8 +193,8 @@ pub const Transport = struct {
             else => return err,
         };
         assert(self.batch_len == 0);
-        var result = StepResult{ .now = now };
-        var remaining: u32 = self.work_limits.send_per_step_max;
+        var result = Progress{ .now = now };
+        var remaining: u32 = self.work_limits.send_per_turn_max;
         assert(remaining > 0);
         const drained = self.burst(io, handle.index, handle, now, &remaining, &result) catch |err| {
             self.engine.sent(handle.index, keyClock(io, now), false);
@@ -211,7 +211,7 @@ pub const Transport = struct {
     }
 
     /// Ends the preceding turn's transport-event borrow and retires reported connections.
-    pub fn beginTurn(self: *Transport, now: Engine.Now) StepResult {
+    pub fn beginTurn(self: *Transport, now: Engine.Now) Progress {
         self.engine.releaseReported();
         return .{ .now = now };
     }
@@ -224,11 +224,11 @@ pub const Transport = struct {
 
     /// Uses the same receive/expire/collect/flush ordering as NetworkCore. Events caused by
     /// flush remain pending for the next turn. Consume event borrows before advancing again.
-    pub fn advance(self: *Transport, io: std.Io, input: Input, events: []Engine.Event) ProgressResult {
+    pub fn advance(self: *Transport, io: std.Io, input: Input, events: []Engine.Event) AdvanceResult {
         const now = input.now;
         var result = self.beginTurn(now);
         var cancelled = input.cancelled;
-        var failure: ?StepError = if (cancelled) error.Canceled else null;
+        var failure: ?AdvanceError = if (cancelled) error.Canceled else null;
         if (!cancelled) self.receive(io, &result, input.ready) catch |err| {
             cancelled = cancelled or err == error.Canceled;
             failure = failure orelse err;
@@ -247,7 +247,7 @@ pub const Transport = struct {
     /// only the families `ready` marks, indexed like the sockets, alternating while both hold
     /// datagrams. A family found empty is not read again this turn; a later arrival keeps its
     /// socket readable for the owner's next poll.
-    pub fn receive(self: *Transport, io: std.Io, result: *StepResult, ready: [2]bool) StepError!void {
+    pub fn receive(self: *Transport, io: std.Io, result: *Progress, ready: [2]bool) AdvanceError!void {
         return self.receiveBatch(io, result, ready);
     }
 
@@ -268,9 +268,9 @@ pub const Transport = struct {
     /// local pressure instead drops the unsent suffix for QUIC loss recovery.
     /// Cancellation stops production and submission, retains completed progress, and leaves
     /// connection recovery state intact. It never identifies a failed destination.
-    pub fn flush(self: *Transport, io: std.Io, now: Engine.Now, result: *StepResult) std.Io.Cancelable!void {
+    pub fn flush(self: *Transport, io: std.Io, now: Engine.Now, result: *Progress) std.Io.Cancelable!void {
         assert(self.batch_len == 0);
-        var remaining: u32 = self.work_limits.send_per_step_max;
+        var remaining: u32 = self.work_limits.send_per_turn_max;
         assert(remaining > 0);
         // The latest clock read that keyed a timer.
         var keyed = now;
@@ -309,7 +309,7 @@ pub const Transport = struct {
 
     /// Sends up to burst_per_connection datagrams of one connection into the shared batch.
     /// Returns whether quiche reported nothing left to send.
-    fn burst(self: *Transport, io: std.Io, index: u16, owner: types.Handle, now: Engine.Now, remaining: *u32, result: *StepResult) std.Io.Cancelable!bool {
+    fn burst(self: *Transport, io: std.Io, index: u16, owner: types.Handle, now: Engine.Now, remaining: *u32, result: *Progress) std.Io.Cancelable!bool {
         var count: u16 = 0;
         while (count < self.work_limits.burst_per_connection and remaining.* > 0) : (count += 1) {
             if (self.batch_len == constants.send_batch_max) {
@@ -330,7 +330,7 @@ pub const Transport = struct {
     /// Returns cancellation immediately, or the first destination failure after failing its owner. QUIC already accounts
     /// for produced packets as sent: local pressure drops their bytes without rolling back packet
     /// state or closing connections, so loss timers can retransmit the frames.
-    fn submit(self: *Transport, io: std.Io, result: *StepResult) ?Sockets.SendError {
+    fn submit(self: *Transport, io: std.Io, result: *Progress) ?Sockets.SendError {
         const count = self.batch_len;
         if (count == 0) return null;
         defer self.batch_len = 0;
@@ -369,10 +369,10 @@ pub const Transport = struct {
         };
     }
 
-    fn receiveBatch(self: *Transport, io: std.Io, result: *StepResult, ready: [2]bool) StepError!void {
+    fn receiveBatch(self: *Transport, io: std.Io, result: *Progress, ready: [2]bool) AdvanceError!void {
         var eligible = ready;
         var count: u32 = 0;
-        while (count < self.work_limits.receive_per_step_max) : (count += 1) {
+        while (count < self.work_limits.receive_per_turn_max) : (count += 1) {
             const admitted = switch (try self.receiveDatagram(io, result, &eligible)) {
                 .timeout => break,
                 .dropped => continue,
@@ -397,9 +397,9 @@ pub const Transport = struct {
     fn receiveDatagram(
         self: *Transport,
         io: std.Io,
-        result: *StepResult,
+        result: *Progress,
         ready: *[2]bool,
-    ) StepError!Received {
+    ) AdvanceError!Received {
         const received = self.sockets.receiveReadyDatagram(io, &self.receive_buffer, ready);
         const datagram = received catch |err| switch (err) {
             error.Timeout => return .timeout,

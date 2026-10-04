@@ -2,18 +2,18 @@ const failStatusRound = @import("network_core_test_support.zig").failStatusRound
 const failStatus = @import("network_core_test_support.zig").failStatus;
 const schedule_test_support = @import("schedule_test_support.zig");
 const std = @import("std");
-const DialIntent = @import("peers/dialing.zig").Dialing.DialIntent;
+const SelectedDial = @import("peers/dialing.zig").Dialing.SelectedDial;
 const support = @import("quic/test_support.zig");
 const t = @import("peers/types.zig");
 const Engine = @import("quic/Engine.zig");
-const options = @import("network_core_test_support.zig").options;
+const resolvedOptions = @import("network_core_test_support.zig").resolvedOptions;
 const Setup = @import("network_core_test_support.zig").Setup;
 const clientWakeup = @import("network_core_test_support.zig").clientWakeup;
 
 /// Dials the discovered server, so the client's connection has a dialed endpoint.
 fn dialServer(setup: *Setup) !void {
-    var intents: [1]DialIntent = undefined;
-    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
+    var intents: [1]SelectedDial = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     const handle = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);
     try std.testing.expect(setup.client.peer_manager.dialStarted(intents[0].token, handle));
 }
@@ -26,7 +26,7 @@ fn serverStrikes(setup: *Setup, server: *const @import("peers/enr.zig").Candidat
 fn discoverServer(setup: *Setup) !@import("peers/enr.zig").Candidate {
     const server = try discoveredAt(2, support.server_address);
     try std.testing.expect(server.peer.eql(&setup.server.peerId()));
-    try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.service.gossipsub, &.{server}, setup.pair.now).accepted);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.protocols.gossipsub, &.{server}, setup.pair.now).accepted);
     return server;
 }
 
@@ -74,10 +74,10 @@ test "core Status and Metadata clear dial failures that QUIC admission keeps" {
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().relevant);
     try std.testing.expectEqual(@as(u8, 0), serverStrikes(&setup, &server));
     const peer = setup.client.peer_manager.catalog.find(&server.peer).?;
-    try std.testing.expect(setup.client.peer_manager.control.schedules[peer.index].evidence == .ready);
+    try std.testing.expect(setup.client.peer_manager.control.connections[peer.index].evidence == .ready);
     setup.pair.advance(21_000);
     for (0..50) |_| try setup.step(1);
-    try std.testing.expect(setup.client.peer_manager.control.schedules[peer.index].evidence == .proven);
+    try std.testing.expect(setup.client.peer_manager.control.connections[peer.index].evidence == .proven);
     try std.testing.expectEqual(@as(u8, 0), serverStrikes(&setup, &server));
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().relevant);
 }
@@ -138,10 +138,10 @@ test "core native leased dial retires uncompleted handshake and rejects late ack
     try setup.client.peer_manager.connect(&identity, &.{address}, setup.pair.now);
     identity.bytes[0] ^= 1;
     address = .unspecified;
-    var output: [1]DialIntent = undefined;
+    var output: [1]SelectedDial = undefined;
     try std.testing.expectEqual(
         @as(usize, 1),
-        setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &output),
+        setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &output),
     );
     const intent = output[0];
     try std.testing.expect(intent.peer.eql(&setup.server.peerId()));
@@ -173,8 +173,8 @@ test "core native dial expiry closes authenticated attempt before connected even
             &.{support.server_address},
             setup.pair.now,
         );
-        var output: [1]DialIntent = undefined;
-        _ = setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &output);
+        var output: [1]SelectedDial = undefined;
+        _ = setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &output);
         const intent = output[0];
         const conn = try setup.pair.client.dial(
             &intent.address,
@@ -187,7 +187,7 @@ test "core native dial expiry closes authenticated attempt before connected even
         if (shutdown) setup.client.shutdown(setup.pair.now) else {
             setup.pair.advance(10_000);
             setup.client.peer_manager.expireDials(setup.pair.client, setup.pair.now);
-            _ = setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &output);
+            _ = setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &output);
         }
         for (0..8) |_| {
             try setup.pair.pump();
@@ -203,7 +203,7 @@ test "core native dial expiry closes authenticated attempt before connected even
 
 test "core simultaneous selected dials consume one commitment and preserve duplicate tie breaking" {
     var setup: Setup = .{};
-    var opts = options();
+    var opts = resolvedOptions();
     opts.core.peers.target_peers = 1;
     opts.core.peers.max_peers = 2;
     opts.core.peers.min_outbound = 0;
@@ -222,8 +222,8 @@ test "core simultaneous selected dials consume one commitment and preserve dupli
             .outbound_reserved = 1,
         }) == .admitted);
         try owner.connect(identity, &.{address}, setup.pair.now);
-        var intents: [1]DialIntent = undefined;
-        try std.testing.expectEqual(@as(usize, 1), owner.dialIntents(node.service.gossipsub, &node.transport.engine, setup.pair.now, &intents));
+        var intents: [1]SelectedDial = undefined;
+        try std.testing.expectEqual(@as(usize, 1), owner.selectDials(node.protocols.gossipsub, &node.transport.engine, setup.pair.now, &intents));
         const conn = try node.transport.engine.dial(&intents[0].address, intents[0].peer, setup.pair.now);
         try std.testing.expect(owner.dialStarted(intents[0].token, conn));
     }
@@ -237,7 +237,7 @@ test "core simultaneous selected dials consume one commitment and preserve dupli
         const expected: t.Direction = if (std.mem.order(u8, &owner.local_identity.bytes, &identity.bytes) == .lt) .outbound else .inbound;
         try std.testing.expectEqual(expected, row.direction);
         try std.testing.expectEqual(@as(u16, 0), owner.dialing.attempts().total);
-        try std.testing.expectEqual(@as(u8, 0), row.intent.failures);
+        try std.testing.expectEqual(@as(u8, 0), row.dial.failures);
     }
     for (0..8) |_| {
         try setup.step(0);
@@ -253,8 +253,8 @@ test "core competing one-shot attempt expires during selected peer ban cooldown"
     const unanswered: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4_009 } };
     setup.pair.drop_to_address = unanswered;
     try setup.client.peer_manager.connect(&setup.server.peerId(), &.{unanswered}, setup.pair.now);
-    var intents: [1]DialIntent = undefined;
-    _ = setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents);
+    var intents: [1]SelectedDial = undefined;
+    _ = setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents);
     const token = intents[0].token;
     const attempt = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);
     try std.testing.expect(setup.client.peer_manager.dialStarted(token, attempt));
@@ -267,7 +267,7 @@ test "core competing one-shot attempt expires during selected peer ban cooldown"
     try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.peer_manager.reportPeer(snapshots[0].peer, .fatal, setup.pair.now).?);
     _ = try setup.turn(&setup.client, .{});
     setup.pair.advance(10_000);
-    _ = setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents);
+    _ = setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents);
     for (0..8) |_| try setup.step(0);
     try std.testing.expect(setup.pair.client.registry.slots[attempt.index].conn == null);
     try std.testing.expect(!setup.client.peer_manager.dialStarted(token, attempt));
@@ -347,9 +347,9 @@ test "core records a refused Status on its dial before readiness as an early clo
         .{ support.server_address, 15 * 60_000 },
         .{ second, 60 * 60_000 },
     }, 1..) |round, count| {
-        try std.testing.expectEqual(@as(u16, 1), manager.discoveredBatch(setup.client.service.gossipsub, &.{server}, setup.pair.now).accepted);
-        var intents: [1]DialIntent = undefined;
-        try std.testing.expectEqual(@as(usize, 1), manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
+        try std.testing.expectEqual(@as(u16, 1), manager.discoveredBatch(setup.client.protocols.gossipsub, &.{server}, setup.pair.now).accepted);
+        var intents: [1]SelectedDial = undefined;
+        try std.testing.expectEqual(@as(usize, 1), manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
         try std.testing.expect(intents[0].address.eql(round[0]));
         const handle = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);
         try std.testing.expect(manager.dialStarted(intents[0].token, handle));
@@ -360,12 +360,12 @@ test "core records a refused Status on its dial before readiness as an early clo
         }
         try std.testing.expectEqual(@as(u16, 1), manager.catalog.connectedCount());
         const peer = manager.catalog.find(&server.peer).?;
-        try std.testing.expect(manager.control.schedules[peer.index].evidence == .pending);
+        try std.testing.expect(manager.control.connections[peer.index].evidence == .pending);
         try refuseStatus(&setup);
         try expectRefusals(&setup, count, count);
         try std.testing.expectEqual(@as(?t.Rejection, .early_close), history.rejection(identity, setup.pair.now.millis()));
         try std.testing.expectEqual(setup.pair.now.millis() + round[1], history.rejectedUntil(identity, setup.pair.now.millis()));
-        try std.testing.expectEqual(@as(u16, 1), manager.discoveredBatch(setup.client.service.gossipsub, &.{server}, setup.pair.now).refused);
+        try std.testing.expectEqual(@as(u16, 1), manager.discoveredBatch(setup.client.protocols.gossipsub, &.{server}, setup.pair.now).refused);
         try std.testing.expectEqual(@as(u64, count), manager.dialing.refused.identity[@intFromEnum(t.Rejection.early_close)]);
         setup.pair.advance(round[1]);
     }
@@ -383,7 +383,7 @@ test "core refused Status records no rejection once ready or on an inbound conne
         manager.reStatusPeers(setup.pair.now);
         try setup.step(1);
         const peer = manager.catalog.find(&setup.server.peerId()).?;
-        try std.testing.expectEqual(!inbound, manager.control.schedules[peer.index].evidence != .pending);
+        try std.testing.expectEqual(!inbound, manager.control.connections[peer.index].evidence != .pending);
         try refuseStatus(&setup);
         try expectRefusals(&setup, 1, 0);
         try std.testing.expectEqual(@as(?t.Rejection, null), manager.catalog.history.rejection(manager.catalog.history.identityKey(&setup.server.peerId()), setup.pair.now.millis()));
@@ -400,7 +400,7 @@ test "core refused Status inside the fork transition grace neither closes nor re
         if (manager.peerCounts().relevant == 1) break;
     }
     const peer = manager.catalog.find(&setup.server.peerId()).?;
-    const row = &manager.control.schedules[peer.index];
+    const row = &manager.control.connections[peer.index];
     try std.testing.expect(row.evidence == .pending);
     var next = manager.local;
     next.fork.digest = @splat(3);
@@ -428,8 +428,8 @@ test "core native public close cancels overlapping attempts and preserves bounde
     const unanswered: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4_009 } };
     setup.pair.drop_to_address = unanswered;
     try setup.client.addDirectPeer(&setup.server.peerId(), &.{unanswered}, setup.pair.now);
-    var intents: [1]DialIntent = undefined;
-    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
+    var intents: [1]SelectedDial = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     const token = intents[0].token;
     const attempt = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);
     try std.testing.expect(setup.client.peer_manager.dialStarted(token, attempt));
@@ -454,14 +454,14 @@ test "core native public close cancels overlapping attempts and preserves bounde
     const due = schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.dialing.schedule(&setup.client.peer_manager.catalog, 1), setup.pair.now.millis()) orelse return error.MissingRetryDeadline;
     try std.testing.expect(due >= setup.pair.now.millis() + 60_000);
     setup.pair.advance(due - setup.pair.now.millis());
-    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
+    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     try std.testing.expectEqualDeep(accepted.identity, intents[0].peer);
     try std.testing.expectEqual(token.generation + 1, intents[0].token.generation);
 }
 
 test "core dial admission reserve counts only answered dials" {
     var setup: Setup = .{};
-    var opts = @import("network_core_test_support.zig").options();
+    var opts = @import("network_core_test_support.zig").resolvedOptions();
     opts.core.dial.concurrent_max = 2;
     opts.limits.dialing_max = 2;
     try setup.initOwnersWithOptions(&.{}, opts);
@@ -470,9 +470,9 @@ test "core dial admission reserve counts only answered dials" {
     setup.pair.drop_to_address = dead;
     const answering = try discoveredAt(9, support.server_address);
     const silent = try discoveredAt(10, dead);
-    try std.testing.expectEqual(@as(u16, 2), setup.client.peer_manager.discoveredBatch(setup.client.service.gossipsub, &.{ answering, silent }, setup.pair.now).accepted);
-    var intents: [2]DialIntent = undefined;
-    try std.testing.expectEqual(@as(usize, 2), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
+    try std.testing.expectEqual(@as(u16, 2), setup.client.peer_manager.discoveredBatch(setup.client.protocols.gossipsub, &.{ answering, silent }, setup.pair.now).accepted);
+    var intents: [2]SelectedDial = undefined;
+    try std.testing.expectEqual(@as(usize, 2), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     for (intents) |intent| {
         const handle = try setup.pair.client.dial(&intent.address, intent.peer, setup.pair.now);
         try std.testing.expect(setup.client.peer_manager.dialStarted(intent.token, handle));
@@ -486,7 +486,7 @@ test "core dial admission reserve counts only answered dials" {
 
 test "core inbound admission is not blocked by unanswered dials in flight" {
     var setup: Setup = .{};
-    var opts = @import("network_core_test_support.zig").options();
+    var opts = @import("network_core_test_support.zig").resolvedOptions();
     opts.core.dial.concurrent_max = 3;
     opts.limits.dialing_max = 3;
     try setup.initOwnersWithOptions(&.{}, opts);
@@ -498,8 +498,8 @@ test "core inbound admission is not blocked by unanswered dials in flight" {
         const silent = try discoveredAt(@intCast(20 + index), dead);
         try setup.client.peer_manager.connect(&silent.peer, &.{dead}, setup.pair.now);
     }
-    var intents: [3]DialIntent = undefined;
-    try std.testing.expectEqual(@as(usize, 3), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
+    var intents: [3]SelectedDial = undefined;
+    try std.testing.expectEqual(@as(usize, 3), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     for (intents) |intent| {
         const handle = try setup.pair.client.dial(&intent.address, intent.peer, setup.pair.now);
         try std.testing.expect(setup.client.peer_manager.dialStarted(intent.token, handle));
@@ -518,9 +518,9 @@ test "core peer id mismatch releases the discovered endpoint and refuses its red
     try setup.initOwners(&.{});
     defer setup.deinit();
     const stranger = try discoveredAt(9, support.server_address);
-    try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.service.gossipsub, &.{stranger}, setup.pair.now).accepted);
-    var intents: [1]DialIntent = undefined;
-    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.protocols.gossipsub, &.{stranger}, setup.pair.now).accepted);
+    var intents: [1]SelectedDial = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     const handle = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);
     try std.testing.expect(setup.client.peer_manager.dialStarted(intents[0].token, handle));
     for (0..20) |_| try setup.step(0);
@@ -528,8 +528,8 @@ test "core peer id mismatch releases the discovered endpoint and refuses its red
     try std.testing.expectEqual(@as(u64, 1), setup.client.peer_manager.dialing.outcomes[@intFromEnum(t.DialOutcome.peer_id_mismatch)]);
     var newer = stranger;
     newer.sequence = 2;
-    try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.service.gossipsub, &.{newer}, setup.pair.now).refused);
-    try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.protocols.gossipsub, &.{newer}, setup.pair.now).refused);
+    try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     try std.testing.expectEqual(@as(u64, 0), setup.client.peer_manager.dialing.retries[@intFromEnum(t.DialFailure.peer_id_mismatch)]);
 }
 
@@ -570,10 +570,10 @@ test "core remembers a served dial, keeps it through close, and replays it after
     defer setup.deinit();
     setup.client.peer_manager.loadRemembered(records[0..count], setup.pair.now);
     // The first turn queues the remembered candidate, and its due first attempt wakes the next.
-    var intents: [1]DialIntent = undefined;
-    try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
+    var intents: [1]SelectedDial = undefined;
+    try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     try std.testing.expectEqual(setup.pair.now.millis(), clientWakeup(&setup).?);
-    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
+    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     try std.testing.expect(intents[0].peer.eql(&records[0].peer));
     try std.testing.expect(intents[0].address.eql(support.server_address));
     const handle = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);

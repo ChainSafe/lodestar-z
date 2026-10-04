@@ -1,4 +1,4 @@
-//! A ResponsePlan is a PONG or NODES reply staged for sending. NODES fragments are cut by
+//! A PendingResponse is a PONG or NODES reply staged for sending. NODES fragments are cut by
 //! encoded size, so up to sixteen records go out in as few packets as fit.
 
 const std = @import("std");
@@ -7,7 +7,7 @@ const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
 
-const ResponsePlan = @This();
+const PendingResponse = @This();
 
 pub const Error = message.Error;
 
@@ -29,7 +29,7 @@ body: union(enum) {
 } = .none,
 
 /// The returned NODES message borrows `raw` for its record slices.
-pub fn next(self: *const ResponsePlan, raw: *RawRecords) ?message.Message {
+pub fn next(self: *const PendingResponse, raw: *RawRecords) ?message.Message {
     return switch (self.body) {
         .none => null,
         .pong => |value| if (self.sent == 0) .{ .pong = value } else null,
@@ -49,12 +49,12 @@ pub fn next(self: *const ResponsePlan, raw: *RawRecords) ?message.Message {
     };
 }
 
-pub fn markSent(self: *ResponsePlan) void {
+pub fn markSent(self: *PendingResponse) void {
     std.debug.assert(!self.complete());
     self.sent += 1;
 }
 
-pub fn complete(self: *const ResponsePlan) bool {
+pub fn complete(self: *const PendingResponse) bool {
     return switch (self.body) {
         .none => true,
         .pong => self.sent == 1,
@@ -63,14 +63,14 @@ pub fn complete(self: *const ResponsePlan) bool {
 }
 
 pub fn preparePong(
-    plan: *ResponsePlan,
+    response: *PendingResponse,
     peer: types.Endpoint,
     request_id: message.RequestId,
     local_enr_sequence: u64,
 ) void {
-    plan.peer = peer;
-    plan.sent = 0;
-    plan.body = .{ .pong = switch (peer.address) {
+    response.peer = peer;
+    response.sent = 0;
+    response.body = .{ .pong = switch (peer.address) {
         .ip4 => |address| .{
             .request_id = request_id,
             .enr_sequence = local_enr_sequence,
@@ -88,29 +88,29 @@ pub fn preparePong(
 
 /// Cuts `records[0..record_count]` into packets. The caller fills `records` in place first.
 pub fn prepareNodes(
-    plan: *ResponsePlan,
+    response: *PendingResponse,
     peer: types.Endpoint,
     request_id: message.RequestId,
     record_count: usize,
 ) Error!void {
     if (record_count > types.findnode_result_max) return Error.InvalidMessage;
-    plan.peer = peer;
-    plan.sent = 0;
+    response.peer = peer;
+    response.sent = 0;
     if (record_count == 0) {
-        plan.boundaries[0] = 0;
-        plan.boundaries[1] = 0;
-        setNodes(plan, request_id, 1);
+        response.boundaries[0] = 0;
+        response.boundaries[1] = 0;
+        setNodes(response, request_id, 1);
         return;
     }
     var raw_records: RawRecords = undefined;
-    const raw = sliceRecords(plan.records[0..record_count], &raw_records);
+    const raw = sliceRecords(response.records[0..record_count], &raw_records);
 
     var packet_count: u8 = 0;
     var record_start: usize = 0;
     var encoded: [constants.ordinary_plaintext_size_max]u8 = undefined;
     while (record_start < record_count) {
         std.debug.assert(packet_count < types.findnode_response_packets_max);
-        plan.boundaries[packet_count] = @intCast(record_start);
+        response.boundaries[packet_count] = @intCast(record_start);
         var record_end = record_start;
         while (record_end < record_count) {
             const candidate = message.Message{
@@ -131,8 +131,8 @@ pub fn prepareNodes(
         packet_count += 1;
         record_start = record_end;
     }
-    plan.boundaries[packet_count] = @intCast(record_count);
-    setNodes(plan, request_id, packet_count);
+    response.boundaries[packet_count] = @intCast(record_count);
+    setNodes(response, request_id, packet_count);
 }
 
 fn sliceRecords(records: []const enr.Record, raw: *RawRecords) []const []const u8 {
@@ -140,19 +140,19 @@ fn sliceRecords(records: []const enr.Record, raw: *RawRecords) []const []const u
     return raw[0..records.len];
 }
 
-fn setNodes(plan: *ResponsePlan, request_id: message.RequestId, packet_count: u8) void {
+fn setNodes(response: *PendingResponse, request_id: message.RequestId, packet_count: u8) void {
     std.debug.assert(packet_count > 0);
     std.debug.assert(packet_count <= types.findnode_response_packets_max);
-    plan.body = .{ .nodes = .{
+    response.body = .{ .nodes = .{
         .request_id = request_id,
         .packet_count = packet_count,
     } };
 }
 
 comptime {
-    std.debug.assert(@sizeOf(ResponsePlan) <= 8 * 1_024);
+    std.debug.assert(@sizeOf(PendingResponse) <= 8 * 1_024);
 }
 
 test {
-    _ = @import("response_plan_test.zig");
+    _ = @import("pending_response_test.zig");
 }

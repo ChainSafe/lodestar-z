@@ -13,7 +13,7 @@ pub const boundary_max = topics.boundary_max;
 pub const Boundary = struct { epoch: u64, fork: config.ForkSeq, digest: [4]u8, version: [4]u8 };
 
 /// Startup-derived network data. No slice or pointer borrows the source BeaconConfig.
-pub const Plan = struct {
+pub const Config = struct {
     boundaries: [boundary_max]Boundary = undefined,
     boundary_count: u8 = 0,
     forks: [boundary_max]@import("types.zig").ForkEntry = undefined,
@@ -26,7 +26,7 @@ pub const Plan = struct {
     custody_requirement: u16,
     serve_light_clients: bool,
 
-    pub fn init(cfg: *const config.BeaconConfig, serve_light_clients: bool) !Plan {
+    pub fn init(cfg: *const config.BeaconConfig, serve_light_clients: bool) !Config {
         const chain = &cfg.chain;
         if (chain.PRESET_BASE != preset.active_preset or chain.BLOB_SCHEDULE.len > boundary_max - config.ForkSeq.count or
             chain.MAX_PAYLOAD_SIZE == 0 or chain.MAX_PAYLOAD_SIZE > @import("gossipsub/constants.zig").MAX_PAYLOAD_SIZE or
@@ -54,7 +54,7 @@ pub const Plan = struct {
         var blob_storage: [policy.schedule_max]policy.BlobLimit = undefined;
         var request = try policy.Config.fromBeaconConfig(cfg, &blob_storage);
         request.host_integer_max = 9007199254740991;
-        var result: Plan = .{
+        var result: Config = .{
             .policy = try policy.Policy.init(&request),
             .fulu_scheduled = chain.FULU_FORK_EPOCH != constants.FAR_FUTURE_EPOCH,
             .custody_groups = @intCast(chain.NUMBER_OF_CUSTODY_GROUPS),
@@ -87,7 +87,7 @@ pub const Plan = struct {
     // The host adds namespaces two epochs early and removes them two epochs late.
     // Resident storage covers the complete namespace, including outgoing and retained rows.
     // The live subscription limit applies to the committed host schedule.
-    fn validateScheduledTopicDemand(self: *const Plan) error{UnsupportedTopicOverlap}!void {
+    fn validateScheduledTopicDemand(self: *const Config) error{UnsupportedTopicOverlap}!void {
         const lookahead: u64 = 2;
         var counts: [boundary_max]usize = @splat(0);
         for (self.topics[0..self.boundary_count], counts[0..self.boundary_count]) |*boundary, *count| {
@@ -109,13 +109,13 @@ pub const Plan = struct {
         }
     }
 
-    pub fn requestPolicy(self: *const Plan) policy.Config {
+    pub fn requestPolicy(self: *const Config) policy.Config {
         var result = self.policy.config;
         result.blob_schedule = self.policy.points[0..self.policy.point_count];
         return result;
     }
 
-    pub fn update(self: *const Plan, local: values.LocalState, endpoints: ?NetworkCore.AdvertisementEndpoints, slot: u64) !NetworkCore.LocalUpdate {
+    pub fn update(self: *const Config, local: values.LocalState, endpoints: ?NetworkCore.AdvertisementEndpoints, slot: u64) !NetworkCore.LocalUpdate {
         const epoch = slot / preset.preset.SLOTS_PER_EPOCH;
         var index: usize = 0;
         for (self.boundaries[0..self.boundary_count], 0..) |boundary, i| {

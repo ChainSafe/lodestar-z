@@ -1,7 +1,7 @@
 const std = @import("std");
 const CallTable = @import("CallTable.zig");
 const Engine = @import("Engine.zig");
-const ResponsePlan = @import("ResponsePlan.zig");
+const PendingResponse = @import("PendingResponse.zig");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
 const message = @import("wire/message.zig");
@@ -94,7 +94,7 @@ test "paired engines return the local record for FINDNODE distance zero" {
         &pair.scratch_a,
     );
     try std.testing.expect(received.accepted.event == .request);
-    var response: ResponsePlan = .{};
+    var response: PendingResponse = .{};
     try pair.node_a.prepareStandardResponse(
         &received.accepted.event.request,
         &response,
@@ -491,7 +491,7 @@ const Pair = struct {
         started: Engine.StartResult,
         request: *const Engine.AuthenticatedRequest,
     ) !void {
-        var response: ResponsePlan = .{};
+        var response: PendingResponse = .{};
         try self.node_b.prepareStandardResponse(request, &response);
         var too_small: [1]u8 = undefined;
         try std.testing.expectError(

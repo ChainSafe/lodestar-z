@@ -37,9 +37,9 @@ const Samples = struct {
         return .{
             .due_start = node.due_now_turns,
             .visits_start = node.transport.engine.visits,
-            .reqresp_visits_start = node.service.reqresp.visits,
-            .negotiation_visits_start = node.service.router.negotiator.visits,
-            .gossip_visits_start = node.service.gossipsub.sessions.visits,
+            .reqresp_visits_start = node.protocols.reqresp.visits,
+            .negotiation_visits_start = node.protocols.router.negotiator.visits,
+            .gossip_visits_start = node.protocols.gossipsub.sessions.visits,
             .control_visits_start = node.peer_manager.control.visits,
             .dial_visits_start = node.peer_manager.dialing.visits,
         };
@@ -64,7 +64,7 @@ const Samples = struct {
         std.mem.sort(u64, &self.ns, {}, std.sort.asc(u64));
         const visits = node.transport.engine.visits;
         std.debug.print("case={s} turns={} wait_max_ms=0 p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} backlog_turns={} immediate_deadlines={} visits_timer={} visits_collect={} visits_flush={} uncapped_backlog_due={} uncapped_events_due={}\n", .{ name, turns, self.ns[turns / 2], self.ns[turns * 95 / 100], self.ns[turns * 99 / 100], self.ns[turns - 1], self.received, self.sent, self.backlog, self.immediate, visits.timer - self.visits_start.timer, visits.collect - self.visits_start.collect, visits.flush - self.visits_start.flush, self.uncapped_backlog, self.uncapped_events });
-        std.debug.print("case={s} visits_reqresp={} visits_negotiation={} visits_gossip={} visits_control={} visits_dial={}\n", .{ name, node.service.reqresp.visits - self.reqresp_visits_start, node.service.router.negotiator.visits - self.negotiation_visits_start, node.service.gossipsub.sessions.visits - self.gossip_visits_start, node.peer_manager.control.visits - self.control_visits_start, node.peer_manager.dialing.visits - self.dial_visits_start });
+        std.debug.print("case={s} visits_reqresp={} visits_negotiation={} visits_gossip={} visits_control={} visits_dial={}\n", .{ name, node.protocols.reqresp.visits - self.reqresp_visits_start, node.protocols.router.negotiator.visits - self.negotiation_visits_start, node.protocols.gossipsub.sessions.visits - self.gossip_visits_start, node.peer_manager.control.visits - self.control_visits_start, node.peer_manager.dialing.visits - self.dial_visits_start });
         std.debug.print("case={s} due_now", .{name});
         inline for (std.meta.fields(Source)) |field| {
             std.debug.print(" {s}={}", .{ field.name, node.due_now_turns[field.value] - self.due_start[field.value] });
@@ -76,8 +76,8 @@ const Samples = struct {
     fn visited(self: *const Samples, node: *const network.NetworkCore) u64 {
         const visits = node.transport.engine.visits;
         return (visits.timer - self.visits_start.timer) + (visits.collect - self.visits_start.collect) + (visits.flush - self.visits_start.flush) +
-            (node.service.reqresp.visits - self.reqresp_visits_start) + (node.service.router.negotiator.visits - self.negotiation_visits_start) +
-            (node.service.gossipsub.sessions.visits - self.gossip_visits_start) + (node.peer_manager.control.visits - self.control_visits_start) +
+            (node.protocols.reqresp.visits - self.reqresp_visits_start) + (node.protocols.router.negotiator.visits - self.negotiation_visits_start) +
+            (node.protocols.gossipsub.sessions.visits - self.gossip_visits_start) + (node.peer_manager.control.visits - self.control_visits_start) +
             (node.peer_manager.dialing.visits - self.dial_visits_start);
     }
 };
@@ -92,7 +92,7 @@ const GossipSink = struct {
     /// The sink must not move while the node holds it.
     fn attach(self: *GossipSink, node: *network.NetworkCore) void {
         self.sink = .{ .context = self, .has_capacity = hasCapacity, .admit = admit };
-        node.service.gossipsub.message_sink = &self.sink;
+        node.protocols.gossipsub.message_sink = &self.sink;
     }
 
     fn hasCapacity(context: *anyopaque, _: network.gossipsub.topic.Kind, _: usize) bool {
@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, selected, "idle_connections")) return idleConnections(init);
     const profile: network.configuration.Profile = if (std.mem.eql(u8, selected, "small")) .small else if (std.mem.eql(u8, selected, "beacon_node")) .beacon_node else return error.InvalidProfile;
     std.debug.print("profile={s} preset={s} optimize={s} warmup_turns={} measured_turns={} payload=synthetic_transport_bytes host_consensus_validation=false\n", .{ selected, @tagName(preset.active_preset), @tagName(@import("builtin").mode), warmup_turns, turns });
-    const plan = try network.chain.Plan.init(chain_config, false);
+    const network_config = try network.chain.Config.init(chain_config, false);
     const io = init.io;
     const allocator = init.gpa;
     const sinks = try allocator.alloc(u8, 4 * sink_size);
@@ -146,10 +146,10 @@ pub fn main(init: std.process.Init) !void {
     const a = try allocator.create(network.NetworkCore);
     defer allocator.destroy(a);
     var backing_a = std.testing.FailingAllocator.init(allocator, .{});
-    try initialize(a, backing_a.allocator(), io, &key_a, profile, &plan);
+    try initialize(a, backing_a.allocator(), io, &key_a, profile, &network_config);
     defer a.deinit(io);
-    std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.reservations.bytes, @sizeOf(network.NetworkCore), a.service.gossipsub.memoryPlan().total_bytes, backing_a.allocations });
-    std.debug.print("gossip_metadata_bytes={}\n", .{a.service.gossipsub.memoryPlan().metadata_bytes});
+    std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.reservations.bytes, @sizeOf(network.NetworkCore), a.protocols.gossipsub.memoryPlan().total_bytes, backing_a.allocations });
+    std.debug.print("gossip_metadata_bytes={}\n", .{a.protocols.gossipsub.memoryPlan().metadata_bytes});
     for (0..warmup_turns) |_| _ = try turn(a, io, .{});
     const idle_allocations = backing_a.allocations;
     var samples: Samples = .begin(a);
@@ -167,10 +167,10 @@ pub fn main(init: std.process.Init) !void {
     const b = try allocator.create(network.NetworkCore);
     defer allocator.destroy(b);
     var backing_b = std.testing.FailingAllocator.init(allocator, .{});
-    try initialize(b, backing_b.allocator(), io, &key_b, profile, &plan);
+    try initialize(b, backing_b.allocator(), io, &key_b, profile, &network_config);
     defer b.deinit(io);
     var topic_buffer: [network.gossipsub.topic.topic_max_len]u8 = undefined;
-    const topic = network.gossipsub.topic.build(plan.forks[0].digest, "beacon_block", &topic_buffer);
+    const topic = network.gossipsub.topic.build(network_config.forks[0].digest, "beacon_block", &topic_buffer);
     try connectPair(a, b, io, topic);
     for (0..warmup_turns) |_| {
         _ = try turn(a, io, .{});
@@ -178,20 +178,20 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocations_a = backing_a.allocations;
     const allocations_b = backing_b.allocations;
-    try pressure(a, b, sinks, io, topic, plan.forks[0]);
+    try pressure(a, b, sinks, io, topic, network_config.forks[0]);
     printReconciliation(a, "connected_cumulative");
     std.debug.print("turn_allocation_calls_a={} turn_allocation_calls_b={} process_rss=external_time_maximum_resident_set_kbytes\n", .{ backing_a.allocations - allocations_a, backing_b.allocations - allocations_b });
 }
 
-fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key: *const network.KeyPair, profile: network.configuration.Profile, plan: *const network.chain.Plan) !void {
-    const update = try plan.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
+fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key: *const network.KeyPair, profile: network.configuration.Profile, network_config: *const network.chain.Config) !void {
+    const update = try network_config.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
     const resolved = try network.configuration.resolve(.{
         .profile = profile,
         .seed = 7,
-        .forks = plan.forks[0..plan.boundary_count],
-        .admission_policy = plan.requestPolicy(),
+        .forks = network_config.forks[0..network_config.boundary_count],
+        .admission_policy = network_config.requestPolicy(),
         .router = .{ .capabilities = update.capabilities },
-        .gossip = .{ .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
+        .gossip = .{ .topic_policy = network_config.topics[0..network_config.boundary_count], .message_id_policy = .{ .phase0_digest = network_config.phase0_digest } },
     });
     try node.init(a, io, &resolved, .{
         .host = key,
@@ -222,7 +222,7 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
     subscription.lengths[@intFromEnum(network.gossipsub.topic.Kind.beacon_block)] = 1;
     for ([_]*network.NetworkCore{ a, b }) |node| {
         const intent: network.NetworkCore.LocalIntent = .{
-            .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.service.router.capabilities() },
+            .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
             .demand = node.peer_manager.demand,
             .subscriptions = &.{subscription},
             .slot = 100,
@@ -236,11 +236,11 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
         const now_b = try network.Transport.currentTime(io);
         const result_b = network.driver.step(b, io, now_b, .{ .peers = &peer_events }, .deadlineOnly(@import("network").time.optionalMilliseconds(now_b.millis() +| 1)));
         if (result_b.failure) |err| return err;
-        if (a.service.gossipsub.resourceSnapshot().remote_subscriptions > 0 and a.service.gossipsub.peers.rows[0].direct) break;
+        if (a.protocols.gossipsub.resourceSnapshot().remote_subscriptions > 0 and a.protocols.gossipsub.peers.rows[0].direct) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     }
-    if (a.service.gossipsub.resourceSnapshot().remote_subscriptions == 0) {
-        std.debug.print("setup a={any} b={any} gossip_a={any} gossip_b={any}\n", .{ a.peerCounts(), b.peerCounts(), a.service.gossipsub.resourceSnapshot(), b.service.gossipsub.resourceSnapshot() });
+    if (a.protocols.gossipsub.resourceSnapshot().remote_subscriptions == 0) {
+        std.debug.print("setup a={any} b={any} gossip_a={any} gossip_b={any}\n", .{ a.peerCounts(), b.peerCounts(), a.protocols.gossipsub.resourceSnapshot(), b.protocols.gossipsub.resourceSnapshot() });
         return error.SubscriptionDeadline;
     }
 }
@@ -255,7 +255,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     var peak_validations: usize = 0;
     var gossip: GossipSink = .{};
     gossip.attach(b);
-    defer b.service.gossipsub.message_sink = null;
+    defer b.protocols.gossipsub.message_sink = null;
     var request: [32]u8 = @splat(0);
     request[8] = 1;
     request[16] = 1;
@@ -278,8 +278,8 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
         }
         _ = try turn(b, io, .{});
         if (gossip.excess) return error.ExcessGossip;
-        const sender = a.service.gossipsub.resourceSnapshot();
-        const receiver = b.service.gossipsub.resourceSnapshot();
+        const sender = a.protocols.gossipsub.resourceSnapshot();
+        const receiver = b.protocols.gossipsub.resourceSnapshot();
         peak_descriptors = @max(peak_descriptors, sender.queued_descriptors);
         peak_validations = @max(peak_validations, receiver.pending_validations);
         const now = try network.Transport.currentTime(io);
@@ -300,7 +300,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
         };
     }
     if (!control_progress) return error.ControlDidNotProgress;
-    std.debug.print("control_status_head_slot=42 progress=true request_count=4 caller_sink_bytes={} gossip_resources={any}\n", .{ sinks.len, b.service.gossipsub.resourceSnapshot() });
+    std.debug.print("control_status_head_slot=42 progress=true request_count=4 caller_sink_bytes={} gossip_resources={any}\n", .{ sinks.len, b.protocols.gossipsub.resourceSnapshot() });
     for (gossip.handles[0..gossip.count]) |handle| {
         const verdict = b.reportValidation(handle, .ignore, try network.Transport.currentTime(io));
         if (verdict != .applied) return error.GossipVerdictFailed;
@@ -356,7 +356,7 @@ fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected:
 
 fn printReconciliation(node: *network.NetworkCore, name: []const u8) void {
     const c = node.peer_manager.counters;
-    const score = &node.service.gossipsub.peers.scores;
+    const score = &node.protocols.gossipsub.peers.scores;
     std.debug.print("case={s} selections={} selection_rows={} candidate_selections={} score_calculations={} score_topic_visits={}\n", .{ name, c.selections, c.selection_rows, c.candidate_selections, score.calculations, score.topic_visits });
 }
 
@@ -384,9 +384,9 @@ fn idleWait(init: std.process.Init) !void {
     const key = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{11}));
     const node = try init.gpa.create(network.NetworkCore);
     defer init.gpa.destroy(node);
-    const plan = try network.chain.Plan.init(chain_config, false);
+    const network_config = try network.chain.Config.init(chain_config, false);
     var backing = std.testing.FailingAllocator.init(init.gpa, .{});
-    try initialize(node, backing.allocator(), io, &key, .small, &plan);
+    try initialize(node, backing.allocator(), io, &key, .small, &network_config);
     defer node.deinit(io);
     var host: IdleHost = .{ .pipe = undefined };
     if (std.c.pipe(&host.pipe) != 0) return error.PipeFailed;
@@ -503,7 +503,7 @@ fn idleTransport(init: std.process.Init) !void {
     var sent: u64 = 0;
     for (&ns) |*elapsed| {
         const start = timestamp(io);
-        var result: network.Transport.StepResult = .{ .now = try network.Transport.currentTime(io) };
+        var result: network.Transport.Progress = .{ .now = try network.Transport.currentTime(io) };
         try hub.receive(io, &result, @splat(true));
         hub.expire(result.now);
         _ = hub.collect(result.now, &events);
@@ -532,18 +532,18 @@ const idle_connections_p50_budget_ns = 40_000;
 fn idleConnections(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
-    const plan = try network.chain.Plan.init(chain_config, false);
-    const update = try plan.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
+    const network_config = try network.chain.Config.init(chain_config, false);
+    const update = try network_config.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
     const resolved = try network.configuration.resolve(.{
         .profile = .beacon_node,
         .seed = 7,
-        .forks = plan.forks[0..plan.boundary_count],
-        .admission_policy = plan.requestPolicy(),
+        .forks = network_config.forks[0..network_config.boundary_count],
+        .admission_policy = network_config.requestPolicy(),
         .limits = .{ .connections_max = 256, .handshaking_max = 256, .handshaking_per_source_max = 256, .dialing_max = 32, .receive_budget_bytes = 512 * 1024 * 1024 },
         .peers = .{ .capacity = 512, .outbound_reserve = 32, .target_peers = 200, .max_peers = 210, .min_outbound = 16 },
         .byte_limit = 1024 * 1024 * 1024,
         .router = .{ .capabilities = update.capabilities },
-        .gossip = .{ .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
+        .gossip = .{ .topic_policy = network_config.topics[0..network_config.boundary_count], .message_id_policy = .{ .phase0_digest = network_config.phase0_digest } },
     });
     const hub_key = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{14}));
     const hub = try allocator.create(network.NetworkCore);

@@ -125,7 +125,7 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
 
 test "gossipsub IHAVE maximum advertisement shares oversized allowance with data and makes progress" {
     const small = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = @import("../reqresp/policy_fixture.zig").config() });
-    var options = small.core.service.gossipsub;
+    var options = small.core.protocols.gossipsub;
     options.work_per_pump = 1;
     options.decompress_per_peer_bytes = 1;
     var g = try support.init(std.testing.allocator, options);

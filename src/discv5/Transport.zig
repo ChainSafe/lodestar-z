@@ -6,7 +6,7 @@ const CallTable = @import("CallTable.zig");
 const Engine = @import("Engine.zig");
 const Lookup = @import("Lookup.zig");
 const Maintenance = @import("Maintenance.zig");
-const ResponsePlan = @import("ResponsePlan.zig");
+const PendingResponse = @import("PendingResponse.zig");
 const enr = @import("identity/enr.zig");
 const Sockets = @import("udp").Sockets;
 const types = @import("types.zig");
@@ -54,7 +54,7 @@ engine: Engine,
 sockets: Sockets,
 send_drops: Sockets.SendDrops = .{},
 scratch: Engine.Scratch = .{},
-response: ResponsePlan = .{},
+response: PendingResponse = .{},
 output: [constants.packet_size_max]u8 = undefined,
 receive_buffer: [constants.packet_size_max]u8 = undefined,
 

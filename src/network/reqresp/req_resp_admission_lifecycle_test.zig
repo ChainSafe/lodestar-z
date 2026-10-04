@@ -1,4 +1,4 @@
-const Plan = @import("ReceivePlan.zig");
+const Plan = @import("ReceiveLayout.zig");
 const std = @import("std");
 const ct = @import("consensus_types");
 const rr = @import("ReqResp.zig");

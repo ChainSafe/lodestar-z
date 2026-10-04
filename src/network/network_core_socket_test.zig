@@ -220,7 +220,7 @@ test "core beacon idle scans do not manufacture immediate deadlines" {
     for (0..8) |_| {
         const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
         try std.testing.expect(result.failure == null);
-        try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(node.service.reqresp.schedule(.{}), now.millis()));
+        try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(node.protocols.reqresp.schedule(.{}), now.millis()));
         try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(now, .{}).schedule(), now.millis()).? > now.millis());
     }
     try std.testing.expectEqual(calls, backing_node.allocations);
@@ -244,19 +244,19 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
         _ = try transport_test.step(&spoke, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(1) });
         _ = try stepAfter(&node, 1);
     }
-    try std.testing.expect(node.service.router.negotiator.active() > 0);
+    try std.testing.expect(node.protocols.router.negotiator.active() > 0);
     const Source = @import("wake_sources.zig").Source;
     const due = node.due_now_turns;
-    const visits = .{ node.service.reqresp.visits, node.service.router.negotiator.visits };
+    const visits = .{ node.protocols.reqresp.visits, node.protocols.router.negotiator.visits };
     for (0..64) |_| {
         const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-        if (schedule_test_support.wakeupMilliseconds(node.service.reqresp.schedule(.{ .application = 1, .control = 1 }), now.millis())) |wakeup| try std.testing.expect(wakeup > now.millis());
-        try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.service.router.schedule(1), now.millis()).? > now.millis());
+        if (schedule_test_support.wakeupMilliseconds(node.protocols.reqresp.schedule(.{ .application = 1, .control = 1 }), now.millis())) |wakeup| try std.testing.expect(wakeup > now.millis());
+        try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.protocols.router.schedule(1), now.millis()).? > now.millis());
         try std.testing.expect(driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis()))).failure == null);
     }
     try std.testing.expectEqual(due[@intFromEnum(Source.reqresp)], node.due_now_turns[@intFromEnum(Source.reqresp)]);
     try std.testing.expectEqual(due[@intFromEnum(Source.negotiation)], node.due_now_turns[@intFromEnum(Source.negotiation)]);
-    try std.testing.expectEqual(visits[0], node.service.reqresp.visits);
-    try std.testing.expectEqual(visits[1], node.service.router.negotiator.visits);
-    try std.testing.expect(node.service.router.negotiator.active() > 0);
+    try std.testing.expectEqual(visits[0], node.protocols.reqresp.visits);
+    try std.testing.expectEqual(visits[1], node.protocols.router.negotiator.visits);
+    try std.testing.expect(node.protocols.router.negotiator.active() > 0);
 }

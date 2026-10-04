@@ -15,21 +15,21 @@ test "gossip processor validates explicit execution overrides before allocating"
         const execution: p.limits.Limits = @splat(limit);
         var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
         try t.expectError(error.InvalidGossipProcessorLimits, p.GossipProcessor.init(failing.allocator(), .{ .limits = limits, .execution = execution }));
-        try t.expectError(error.InvalidGossipProcessorLimits, p.GossipProcessor.Plan.resolve(limits, execution, &.{}, &.{}, 1));
+        try t.expectError(error.InvalidGossipProcessorLimits, p.GossipProcessor.Options.resolve(limits, execution, &.{}, &.{}, 1));
     }
 }
 
 test "gossip processor preserves derived defaults above explicit execution ceilings" {
     const limits: p.limits.Limits = @splat(.{ .items = 4096, .bytes = 4096 });
-    const resolved = try p.GossipProcessor.Plan.resolve(limits, null, &.{}, &.{}, 1);
+    const resolved = try p.GossipProcessor.Options.resolve(limits, null, &.{}, &.{}, 1);
     try t.expectEqual(@as(?p.limits.Limits, null), resolved.execution);
     try t.expectEqual(@as(u32, 2048), resolved.executionLimits()[0].items);
-    for ([_]p.GossipProcessor.Plan{ .{ .limits = limits }, resolved }) |plan| {
+    for ([_]p.GossipProcessor.Options{ .{ .limits = limits }, resolved }) |options| {
         var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
-        try t.expectError(error.OutOfMemory, p.GossipProcessor.init(failing.allocator(), plan));
+        try t.expectError(error.OutOfMemory, p.GossipProcessor.init(failing.allocator(), options));
     }
     const explicit: p.limits.Limits = @splat(.{ .items = 1, .bytes = 4096 });
-    const valid = try p.GossipProcessor.Plan.resolve(limits, explicit, &.{}, &.{}, 1);
+    const valid = try p.GossipProcessor.Options.resolve(limits, explicit, &.{}, &.{}, 1);
     try t.expectEqualDeep(explicit, valid.executionLimits());
 }
 

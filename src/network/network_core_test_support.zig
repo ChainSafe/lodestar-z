@@ -33,8 +33,8 @@ pub const socket_buffers: @import("configuration.zig").SocketBuffers = .{
     .discovery = .{ .receive = 208 * 1024, .send = 208 * 1024 },
 };
 
-/// The small resolved profile with the harness's peer, dial, request and gossip values.
-pub fn request() configuration.Request {
+/// The small profile with the harness's peer, dial, request and gossip values.
+pub fn options() configuration.Options {
     const gc = @import("gossipsub/constants.zig");
     return .{
         .profile = .small,
@@ -78,8 +78,8 @@ pub fn request() configuration.Request {
     };
 }
 
-pub fn options() configuration.Resolved {
-    return configuration.resolve(request()) catch unreachable;
+pub fn resolvedOptions() configuration.Resolved {
+    return configuration.resolve(options()) catch unreachable;
 }
 
 /// Commits `local` through the owner's intent path, keeping its schedule, endpoints,
@@ -98,7 +98,7 @@ pub fn updateDemand(node: *NetworkCore, demand: *const t.Demand, now: Now) !void
 /// endpoints, capabilities and subscriptions.
 pub fn updateLocalDemand(node: *NetworkCore, local: *const t.LocalState, demand: *const t.Demand, now: Now) !void {
     var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
-    var desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, null, false, &boundaries));
+    var desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
     desired.update.local = local.*;
     desired.demand = demand.*;
     _ = try node.applyIntent(&desired, now);
@@ -107,7 +107,7 @@ pub fn updateLocalDemand(node: *NetworkCore, local: *const t.LocalState, demand:
 /// Moves the owner's wall-clock slot forward through the intent path, changing nothing else.
 pub fn advanceSlot(node: *NetworkCore, slot: u64, now: Now) !void {
     var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
-    var desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, null, false, &boundaries));
+    var desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
     desired.slot = slot;
     _ = try node.applyIntent(&desired, now);
     std.debug.assert(node.current_slot == slot);
@@ -322,7 +322,7 @@ pub const Setup = struct {
     }
 
     pub fn initOwners(self: *Setup, local: *const t.LocalState) !void {
-        try self.initOwnersWithOptions(local, options());
+        try self.initOwnersWithOptions(local, resolvedOptions());
     }
 
     /// Serves the local fork, the Fulu digests tests move to, and a foreign digest of the local fork.
@@ -345,16 +345,16 @@ pub const Setup = struct {
             count += 1;
         }
         var resolved = opts;
-        resolved.core.service.reqresp.forks = self.forks[0..count];
+        resolved.core.protocols.reqresp.forks = self.forks[0..count];
         const io = self.pair.io();
         const client_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{1}));
         try self.client.init(std.testing.allocator, io, &resolved, .{ .host = &client_key, .bind = .{ .ip4 = .loopback(0) }, .local = local, .slot = 100, .discovery = self.client_discovery });
         self.initialized[0] = true;
-        self.client_inbox.attach(self.client.service.gossipsub);
+        self.client_inbox.attach(self.client.protocols.gossipsub);
         const server_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{2}));
         try self.server.init(std.testing.allocator, io, &resolved, .{ .host = &server_key, .bind = .{ .ip4 = .loopback(0) }, .local = local, .slot = 100 });
         self.initialized[1] = true;
-        self.server_inbox.attach(self.server.service.gossipsub);
+        self.server_inbox.attach(self.server.protocols.gossipsub);
         self.pair.client = &self.client.transport.engine;
         self.pair.server = &self.server.transport.engine;
         self.pair.client_sockets = self.client.transport.sockets.handles();
@@ -393,9 +393,9 @@ pub const NetworkOptions = struct {
     startup: NetworkCore.Startup,
 };
 
-/// The owner harness request resolved for a NetworkCore on loopback.
+/// The owner harness options resolved for a NetworkCore on loopback.
 pub fn networkOptions(key: *const keys.KeyPair) NetworkOptions {
-    var requested = request();
+    var requested = options();
     requested.forks = &.{
         .{ .digest = @splat(0), .fork = .phase0 },
         .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu },
@@ -422,11 +422,11 @@ pub fn intent(node: *const NetworkCore, subscriptions: []const local_intent.Boun
             .local = node.localState(),
             .schedule = node.schedule,
             .endpoints = node.advertisementEndpoints(),
-            .capabilities = node.service.router.capabilities(),
+            .capabilities = node.protocols.router.capabilities(),
         },
         .demand = node.peer_manager.demand,
         .subscriptions = subscriptions,
-        .slot = node.service.gossipsub.overlay.slot,
+        .slot = node.protocols.gossipsub.overlay.slot,
     };
 }
 
@@ -447,7 +447,7 @@ pub fn unsubscribe(node: *NetworkCore, name: []const u8) !void {
 
 fn setSubscription(node: *NetworkCore, name: []const u8, subscribed: bool) !void {
     var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
-    const desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, name, subscribed, &boundaries));
+    const desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.protocols.gossipsub, name, subscribed, &boundaries));
     _ = try node.applyIntent(&desired, node.last_now);
 }
 
@@ -463,10 +463,10 @@ pub fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
 pub fn failStatus(setup: *Setup, failure: @import("reqresp/ReqResp.zig").Failure) !void {
     for (setup.client.control_protocol.operations) |operation| if (operation.request) |handle| {
         if (operation.protocol != .status_v1) continue;
-        const service = &setup.client.service.reqresp;
-        const slot = &service.outbound[handle.index];
-        slot.fail(service, handle.index, failure, setup.pair.now);
-        service.cleanupPending(setup.pair.client, &setup.client.service.router);
+        const requests = &setup.client.protocols.reqresp;
+        const slot = &requests.outbound[handle.index];
+        slot.fail(requests, handle.index, failure, setup.pair.now);
+        requests.cleanupPending(setup.pair.client, &setup.client.protocols.router);
         return;
     };
     return error.TestUnexpectedResult;

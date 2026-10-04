@@ -3,12 +3,12 @@ const schedule_test_support = @import("schedule_test_support.zig");
 const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
 const PeerManager = @import("peer_manager.zig").PeerManager;
-const DialIntent = @import("peers/dialing.zig").Dialing.DialIntent;
+const SelectedDial = @import("peers/dialing.zig").Dialing.SelectedDial;
 const support = @import("quic/test_support.zig");
 const t = @import("peers/types.zig");
 const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
-const options = @import("network_core_test_support.zig").options;
+const resolvedOptions = @import("network_core_test_support.zig").resolvedOptions;
 const localState = @import("network_core_test_support.zig").localState;
 const Setup = @import("network_core_test_support.zig").Setup;
 
@@ -102,7 +102,7 @@ test "core native immutable metadata response survives local update during pendi
     for (0..40) |_| {
         try setup.step(0);
         for (setup.server.control_protocol.responses) |response| if (response.request) |request| {
-            const slot = &setup.server.service.reqresp.inbound[request.index];
+            const slot = &setup.server.protocols.reqresp.inbound[request.index];
             if (slot.request.protocol != .metadata_v1) continue;
             try std.testing.expect(slot.request.io.writing);
             const changed: t.Metadata = .{ .seq_number = 5, .attnets = @splat(9) };
@@ -189,14 +189,14 @@ test "core native control retries a failed probe on the turn its retry deadline 
     defer setup.deinit();
     for (0..50) |_| try setup.step(0);
     const peer = setup.client.peer_manager.catalog.find(&setup.server.peerId()).?;
-    const row = &setup.client.peer_manager.control.schedules[peer.index];
+    const row = &setup.client.peer_manager.control.connections[peer.index];
     const status = @intFromEnum(@import("peers/control.zig").Control.HealthProbe.status);
     try failStatusRound(&setup, .timeout);
     try std.testing.expectEqual(@as(u8, 1), row.health_failures[status]);
     const retry = row.retry_ms;
     try std.testing.expectEqual(setup.pair.now.millis() + setup.client.peer_manager.control.options.failure_retry_ms, retry);
     try std.testing.expectEqual(retry, schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now), setup.pair.now.millis()).?);
-    const counter = &setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
+    const counter = &setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
     const started = counter.*;
     const visits = setup.client.peer_manager.control.visits;
     setup.pair.now.monotonic = @import("time.zig").milliseconds(retry - 1);
@@ -223,18 +223,18 @@ test "core native control success clears a health failure streak" {
             try failStatusRound(&setup, .timeout);
             setup.pair.advance(setup.client.peer_manager.control.options.failure_retry_ms);
         }
-        try std.testing.expectEqual(limit - 1, setup.client.peer_manager.control.schedules[peer.index].health_failures[status]);
+        try std.testing.expectEqual(limit - 1, setup.client.peer_manager.control.connections[peer.index].health_failures[status]);
         setup.client.peer_manager.reStatusPeers(setup.pair.now);
         for (0..20) |_| try setup.step(0);
-        try std.testing.expectEqual(@as(u8, 0), setup.client.peer_manager.control.schedules[peer.index].health_failures[status]);
+        try std.testing.expectEqual(@as(u8, 0), setup.client.peer_manager.control.connections[peer.index].health_failures[status]);
     }
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().relevant);
 }
 
 fn allocationCheck(a: std.mem.Allocator) !void {
     const identity: t.PeerId = .{ .bytes = @splat(1) };
-    const opts = options().core;
-    const receive = @import("router.zig").Router.initialCapabilities(opts.service.router).receive;
+    const opts = resolvedOptions().core;
+    const receive = @import("router.zig").Router.initialCapabilities(opts.protocols.router).receive;
     var core = try PeerManager.init(a, &identity, &localState(.{}), opts.peerManager(), receive, 4);
     defer core.deinit();
 }
@@ -352,7 +352,7 @@ test "core native saturated app requests retain partitioned borrows while contro
             request.bytes,
         );
         delivered += 1;
-        _ = setup.server.service.reqresp.cancel(request.request, setup.pair.now);
+        _ = setup.server.protocols.reqresp.cancel(request.request, setup.pair.now);
     }
     try std.testing.expectEqual(@as(usize, 8), delivered);
 }
@@ -394,8 +394,8 @@ test "core retains explicit direct connections without periodically resurrecting
     var remote: [4]t.Snapshot = undefined;
     _ = setup.server.peer_manager.snapshots(&remote);
     try std.testing.expect(setup.server.peer_manager.catalog.setDirect(remote[0].peer, true));
-    const driver = setup.client.service.gossipsub;
-    @import("gossipsub/session_io.zig").retirePeer(driver, &setup.client.service.router, setup.pair.client, driver.sessions.find(conn).?);
+    const driver = setup.client.protocols.gossipsub;
+    @import("gossipsub/session_io.zig").retirePeer(driver, &setup.client.protocols.router, setup.pair.client, driver.sessions.find(conn).?);
     const started = driver.counters.negotiation_started;
     for (0..4) |_| {
         setup.pair.advance(1_000);
@@ -424,23 +424,23 @@ test "core direct removal clears both pins and gossip score reads have no feedba
     _ = setup.client.peer_manager.snapshots(&snapshots);
     try std.testing.expect(snapshots[0].direct);
     const conn = snapshots[0].connection.?;
-    @import("gossipsub/test_support.zig").penalize(setup.client.service.gossipsub, conn, 7);
-    const before = setup.client.peer_manager.gossipScore(setup.client.service.gossipsub, snapshots[0].peer, setup.pair.now).?;
+    @import("gossipsub/test_support.zig").penalize(setup.client.protocols.gossipsub, conn, 7);
+    const before = setup.client.peer_manager.gossipScore(setup.client.protocols.gossipsub, snapshots[0].peer, setup.pair.now).?;
     try std.testing.expect(std.math.isFinite(before));
     _ = setup.client.peer_manager.reportPeer(snapshots[0].peer, .high_tolerance, setup.pair.now);
     try std.testing.expectEqual(
         before,
-        setup.client.peer_manager.gossipScore(setup.client.service.gossipsub, snapshots[0].peer, setup.pair.now).?,
+        setup.client.peer_manager.gossipScore(setup.client.protocols.gossipsub, snapshots[0].peer, setup.pair.now).?,
     );
     _ = setup.client.removeDirectPeer(&identity);
     _ = setup.client.peer_manager.snapshots(&snapshots);
     try std.testing.expect(!snapshots[0].direct);
-    const logical = setup.client.service.gossipsub.peers.find(&identity).?;
-    try std.testing.expect(!setup.client.service.gossipsub.peers.rows[logical.index].direct);
-    var intents: [2]@import("peers/dialing.zig").Dialing.DialIntent = undefined;
+    const logical = setup.client.protocols.gossipsub.peers.find(&identity).?;
+    try std.testing.expect(!setup.client.protocols.gossipsub.peers.rows[logical.index].direct);
+    var intents: [2]@import("peers/dialing.zig").Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(
         @as(usize, 0),
-        setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents),
+        setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents),
     );
 }
 
@@ -449,8 +449,8 @@ test "core native preserves gossip events under one output and caller validation
     try setup.init(&.{});
     defer setup.deinit();
     const topic = "/eth2/00000000/beacon_block/ssz_snappy";
-    try gossip_test.subscribe(setup.client.service.gossipsub, topic);
-    try gossip_test.subscribe(setup.server.service.gossipsub, topic);
+    try gossip_test.subscribe(setup.client.protocols.gossipsub, topic);
+    try gossip_test.subscribe(setup.server.protocols.gossipsub, topic);
     for (0..50) |_| try setup.step(0);
     setup.pair.advance(1_001);
     for (0..30) |_| try setup.step(0);
@@ -473,7 +473,7 @@ test "core native preserves gossip events under one output and caller validation
             try std.testing.expectEqualStrings(payload, message.bytes);
             try std.testing.expectEqual(
                 gossip.Gossipsub.ReportOutcome{ .applied = .accept },
-                setup.server.service.gossipsub.report(message.handle, .accept, setup.pair.now),
+                setup.server.protocols.gossipsub.report(message.handle, .accept, setup.pair.now),
             );
             try std.testing.expectEqualStrings(payload, message.bytes);
             received += 1;
@@ -482,7 +482,7 @@ test "core native preserves gossip events under one output and caller validation
         _ = try setup.turn(&setup.client, .{});
     }
     try std.testing.expectEqual(@as(usize, 1), received);
-    try gossip_test.unsubscribe(setup.client.service.gossipsub, topic);
+    try gossip_test.unsubscribe(setup.client.protocols.gossipsub, topic);
 }
 
 test "core native continuous reStatus cannot starve due metadata sequence confirmation" {

@@ -3,7 +3,7 @@ const Engine = @import("../quic/Engine.zig");
 const MessageEvent = @import("messages.zig").MessageEvent;
 
 pub const Pair = struct {
-    shared: @import("../service_test_support.zig").ServicePair = .{},
+    shared: @import("../protocols_test_support.zig").ProtocolsPair = .{},
 
     pub fn init(self: *Pair) !void {
         try self.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1 });
@@ -54,11 +54,11 @@ pub const Pair = struct {
     /// Routes the client's stream events polled since the last call to its gossip sessions,
     /// for tests that drive the gossip turn directly.
     pub fn forwardClient(self: *Pair) void {
-        @import("../service_test_support.zig").forward(&self.shared.pair, &self.shared.pair.client, .{ .gossip = self.shared.client.gossipsub });
+        @import("../protocols_test_support.zig").forward(&self.shared.pair, &self.shared.pair.client, .{ .gossip = self.shared.client.gossipsub });
     }
 
     pub fn forwardServer(self: *Pair) void {
-        @import("../service_test_support.zig").forward(&self.shared.pair, &self.shared.pair.server, .{ .gossip = self.shared.server.gossipsub });
+        @import("../protocols_test_support.zig").forward(&self.shared.pair, &self.shared.pair.server, .{ .gossip = self.shared.server.gossipsub });
     }
 
     /// Messages the client admitted in the last step.

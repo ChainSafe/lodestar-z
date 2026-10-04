@@ -4,11 +4,11 @@ const support = @import("../quic/test_support.zig");
 const Engine = @import("../quic/Engine.zig");
 const identify = @import("root.zig");
 const fixtures = @import("test_support.zig");
-const options = fixtures.serviceOptions;
+const options = fixtures.protocolsOptions;
 const step = fixtures.step;
 
 fn allocationCheck(allocator: std.mem.Allocator) !void {
-    var handler = try identify.Handler.init(allocator, .{ .inbound_max = 2, .outbound_max = 3 }, &try @import("../service_test_support.zig").fixtureLocal(.{}));
+    var handler = try identify.Handler.init(allocator, .{ .inbound_max = 2, .outbound_max = 3 }, &try @import("../protocols_test_support.zig").fixtureLocal(.{}));
     defer handler.deinit();
     try std.testing.expectEqual(2 * @sizeOf(@TypeOf(handler.inbound[0])) + 3 * @sizeOf(@TypeOf(handler.outbound[0])), handler.allocatedBytes());
 }
@@ -19,7 +19,7 @@ test "identify delivers retained completions before recycled lower slots" {
     defer pair.deinit();
     var router = try @import("../router.zig").Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var handler = try identify.Handler.init(std.testing.allocator, .{ .outbound_max = 4 }, &try @import("../service_test_support.zig").fixtureLocal(.{}));
+    var handler = try identify.Handler.init(std.testing.allocator, .{ .outbound_max = 4 }, &try @import("../protocols_test_support.zig").fixtureLocal(.{}));
     defer handler.deinit();
     const conn: Engine.Handle = .{ .index = 0, .generation = 1 };
     for (handler.outbound, 0..) |*slot, index| {
@@ -48,10 +48,10 @@ test "identify delivers retained completions before recycled lower slots" {
 test "identify validates capacities and cleans every allocation prefix" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationCheck, .{});
     for ([_]u16{ 0, 65 }) |invalid| {
-        try std.testing.expectError(error.InvalidLimits, identify.Handler.init(std.testing.allocator, .{ .inbound_max = invalid }, &try @import("../service_test_support.zig").fixtureLocal(.{})));
-        try std.testing.expectError(error.InvalidLimits, identify.Handler.init(std.testing.allocator, .{ .outbound_max = invalid }, &try @import("../service_test_support.zig").fixtureLocal(.{})));
+        try std.testing.expectError(error.InvalidLimits, identify.Handler.init(std.testing.allocator, .{ .inbound_max = invalid }, &try @import("../protocols_test_support.zig").fixtureLocal(.{})));
+        try std.testing.expectError(error.InvalidLimits, identify.Handler.init(std.testing.allocator, .{ .outbound_max = invalid }, &try @import("../protocols_test_support.zig").fixtureLocal(.{})));
     }
-    var local = try @import("../service_test_support.zig").fixtureLocal(.{ .agent = "a" });
+    var local = try @import("../protocols_test_support.zig").fixtureLocal(.{ .agent = "a" });
     var handler = try identify.Handler.init(std.testing.allocator, .{ .inbound_max = 64, .outbound_max = 64 }, &local);
     defer handler.deinit();
     local.agent = try .init("b");
@@ -65,7 +65,7 @@ test "identify deadline includes stalled negotiation and retained completion doe
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var client = try @import("../service_test_support.zig").initService(std.testing.allocator, try options("client"), &pair.client);
+    var client = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("client"), &pair.client);
     defer client.deinit();
     const start = pair.now.millis();
     try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
@@ -110,9 +110,9 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
     defer pair.deinit();
     @import("../quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 96);
     const handles = try support.connectPair(&pair);
-    var client = try @import("../service_test_support.zig").initService(std.testing.allocator, try options("client"), &pair.client);
+    var client = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("client"), &pair.client);
     defer client.deinit();
-    var server = try @import("../service_test_support.zig").initService(std.testing.allocator, try options("server"), &pair.server);
+    var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("server"), &pair.server);
     defer server.deinit();
     try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     for (0..16) |_| {
@@ -129,7 +129,7 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
     var refused = false;
     for (0..32) |_| {
         var outcomes: [8]@import("../router.zig").Router.Outcome = undefined;
-        @import("../service_test_support.zig").forward(&pair, &pair.client, .{ .negotiator = &client.router.negotiator });
+        @import("../protocols_test_support.zig").forward(&pair, &pair.client, .{ .negotiator = &client.router.negotiator });
         _ = client.router.pump(&pair.client, pair.now, &outcomes);
         try pair.pump();
         _ = step(&pair, &server, true, &.{});
@@ -162,9 +162,9 @@ test "identify remote reset and transport close retain one failed result without
         defer pair.deinit();
         @import("../quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 96);
         const handles = try support.connectPair(&pair);
-        var client = try @import("../service_test_support.zig").initService(std.testing.allocator, try options("client"), &pair.client);
+        var client = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("client"), &pair.client);
         defer client.deinit();
-        var server = try @import("../service_test_support.zig").initService(std.testing.allocator, try options("server"), &pair.server);
+        var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("server"), &pair.server);
         defer server.deinit();
         try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
         for (0..16) |_| {

@@ -1,7 +1,7 @@
 const schedule_test_support = @import("schedule_test_support.zig");
 const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
-const Service = @import("service.zig").Service;
+const Protocols = @import("protocols.zig").Protocols;
 const topic_mod = @import("gossipsub/topic.zig");
 const Engine = @import("quic/Engine.zig");
 const support = @import("quic/test_support.zig");
@@ -11,7 +11,7 @@ const heartbeat = @import("gossipsub/constants.zig").heartbeat_interval_ms;
 
 const Pair = @import("gossipsub/test_pair.zig").Pair;
 
-test "gossipsub service composes the mesh and delivers a message" {
+test "gossipsub protocol stack composes the mesh and delivers a message" {
     var setup: Pair = .{};
     try setup.init();
     defer setup.deinit();
@@ -44,7 +44,7 @@ test "gossipsub service composes the mesh and delivers a message" {
     try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.topic_metrics.get(beacon_block).accepted);
 }
 
-test "gossipsub service does not retry a closed outbound stream" {
+test "gossipsub protocol stack does not retry a closed outbound stream" {
     var setup: Pair = .{};
     try setup.init();
     defer setup.deinit();
@@ -159,12 +159,12 @@ test "gossipsub replacement resets a partial frame and keeps directional version
     try std.testing.expectError(error.StreamStopped, setup.shared.pair.client.write(first, "x", false));
 }
 
-test "gossipsub service negotiates with a v1.1-only peer" {
+test "gossipsub protocol stack negotiates with a v1.1-only peer" {
     var setup: Pair = .{};
     try setup.init();
     defer setup.deinit();
     setup.shared.server.deinit();
-    setup.shared.server = try @import("service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .admission = try @import("reqresp/ReqResp.zig").Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 4, 4, 1) }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } }, &setup.shared.pair.server);
+    setup.shared.server = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .admission = try @import("reqresp/ReqResp.zig").Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 4, 4, 1) }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } }, &setup.shared.pair.server);
     setup.shared.server_inbox.attach(setup.shared.server.gossipsub);
     _ = setup.shared.server.gossipsub.peerConnected(&setup.shared.pair.server, setup.shared.handles.server, false, setup.shared.pair.now);
     for (0..24) |_| try setup.pumpOnce();
@@ -176,7 +176,7 @@ test "gossipsub service negotiates with a v1.1-only peer" {
     try std.testing.expectEqual(@import("gossipsub/sessions.zig").Version.v1_1, setup.shared.server.gossipsub.sessions.rows[server_index].outbound.live.version);
 }
 
-test "gossipsub service subscribes only after negotiation and retirement cancels the router" {
+test "gossipsub protocol stack subscribes only after negotiation and retirement cancels the router" {
     var setup: Pair = .{};
     try setup.init();
     defer setup.deinit();
@@ -196,7 +196,7 @@ test "gossipsub service subscribes only after negotiation and retirement cancels
     try std.testing.expect(setup.shared.pair.client.peerId(setup.shared.handles.client) != null);
 }
 
-test "gossipsub service ignores stale outcomes after connection and peer slot reuse" {
+test "gossipsub protocol stack ignores stale outcomes after connection and peer slot reuse" {
     var setup: Pair = .{};
     try setup.init();
     defer setup.deinit();
@@ -235,7 +235,7 @@ test "gossipsub service ignores stale outcomes after connection and peer slot re
     try std.testing.expectEqual(@import("gossipsub/peer_book.zig").normalize(setup.shared.pair.client.peerAddress(handles.client).?), peer.address);
 }
 
-test "gossipsub service detects an idle stop and reopens only on a new inbound stream" {
+test "gossipsub protocol stack detects an idle stop and reopens only on a new inbound stream" {
     var setup: Pair = .{};
     try setup.init();
     defer setup.deinit();
@@ -270,7 +270,7 @@ test "gossipsub service detects an idle stop and reopens only on a new inbound s
     for (0..16) |_| try setup.pumpOnce();
 }
 
-test "gossipsub service preserves a remotely half-closed outbound stream without idle work hints" {
+test "gossipsub protocol stack preserves a remotely half-closed outbound stream without idle work hints" {
     var setup: Pair = .{};
     try setup.init();
     defer setup.deinit();
@@ -299,10 +299,10 @@ test "gossipsub service preserves a remotely half-closed outbound stream without
 
 fn compositionAllocationPrefix(allocator: std.mem.Allocator) !void {
     const resolved = try @import("configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
-    var service = try Service.init(allocator, .{ .reqresp = resolved.core.service.reqresp, .gossipsub = resolved.core.service.gossipsub, .router = .{ .negotiations_max = 2 } }, &try @import("service_test_support.zig").fixtureLocal(.{}));
-    defer service.deinit();
-    try std.testing.expectEqual(@as(usize, 12), service.gossipsub.sessions.rows.len);
-    try std.testing.expectEqual(@as(usize, 2), service.router.negotiator.entries.len);
+    var protocols = try Protocols.init(allocator, .{ .reqresp = resolved.core.protocols.reqresp, .gossipsub = resolved.core.protocols.gossipsub, .router = .{ .negotiations_max = 2 } }, &try @import("protocols_test_support.zig").fixtureLocal(.{}));
+    defer protocols.deinit();
+    try std.testing.expectEqual(@as(usize, 12), protocols.gossipsub.sessions.rows.len);
+    try std.testing.expectEqual(@as(usize, 2), protocols.router.negotiator.entries.len);
 }
 
 test "network composition with gossip cleans every initialization prefix" {

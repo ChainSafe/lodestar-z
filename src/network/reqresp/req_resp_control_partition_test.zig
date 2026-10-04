@@ -87,16 +87,16 @@ test "reqresp drain retains blocked terminals across control and application par
     try std.testing.expectEqual(0, requests.pendingCounts().outbound);
 }
 
-test "reqresp service retains request and chunk bytes through control progress" {
+test "reqresp protocol integration retains request and chunk bytes through control progress" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
     var options = try reservedOptions();
     options.forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }};
-    var client = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.client);
+    var client = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.client);
     defer client.deinit();
-    var server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
+    var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const sink = try std.testing.allocator.alloc(

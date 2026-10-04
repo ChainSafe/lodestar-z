@@ -23,25 +23,25 @@ fn timestamp(io: std.Io) u64 {
 pub fn run(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
-    const plan = try network.chain.Plan.init(chain_config, false);
-    const update = try plan.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
+    const network_config = try network.chain.Config.init(chain_config, false);
+    const update = try network_config.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
     const resolved = try network.configuration.resolve(.{
         .profile = .beacon_node,
         .seed = 7,
         .limits = .{ .connections_max = 256, .handshaking_max = 32, .dialing_max = 32, .receive_budget_bytes = 512 * 1024 * 1024 },
         .peers = .{ .target_peers = peers, .max_peers = peers + 20, .min_outbound = peers / 4 },
         .byte_limit = 1024 * 1024 * 1024,
-        .forks = plan.forks[0..plan.boundary_count],
-        .admission_policy = plan.requestPolicy(),
+        .forks = network_config.forks[0..network_config.boundary_count],
+        .admission_policy = network_config.requestPolicy(),
         .router = .{ .capabilities = update.capabilities },
-        .gossip = .{ .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest }, .score_params = .{ .ip_colocation_weight = -53, .ip_colocation_threshold = 3 } },
+        .gossip = .{ .topic_policy = network_config.topics[0..network_config.boundary_count], .message_id_policy = .{ .phase0_digest = network_config.phase0_digest }, .score_params = .{ .ip_colocation_weight = -53, .ip_colocation_threshold = 3 } },
     });
     const key = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{13}));
     const node = try allocator.create(network.NetworkCore);
     defer allocator.destroy(node);
     try node.init(allocator, io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = update.local, .schedule = update.schedule, .slot = 100 });
     defer node.deinit(io);
-    const g = node.service.gossipsub;
+    const g = node.protocols.gossipsub;
     const topics_cap = g.overlay.rows.len;
     for (0..peers) |index| {
         var identity: network.PeerId = .{ .bytes = @splat(0) };
@@ -50,7 +50,7 @@ pub fn run(init: std.process.Init) !void {
         const admitted = g.addPeer(.{ .index = @intCast(index), .generation = 1 }, &.{ .identity = identity, .address = address, .direction = .inbound }, Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 }));
         if (admitted != .admitted) return error.PeerAdmission;
     }
-    const buffer = try allocator.alloc(u8, network.metrics.textCapacity(plan.topics[0..plan.boundary_count]));
+    const buffer = try allocator.alloc(u8, network.metrics.textCapacity(network_config.topics[0..network_config.boundary_count]));
     defer allocator.free(buffer);
     std.debug.print("case=score_collection preset={s} optimize={s} peers={} topic_cells_per_peer={} rounds={}\n", .{ @tagName(preset.active_preset), @tagName(@import("builtin").mode), peers, topics_cap, rounds });
     for ([_]struct { []const u8, usize, usize }{ .{ "empty", 0, 0 }, .{ "typical", 8, 32 }, .{ "full", @min(topics_cap, gossip.constants.topics_cap), topics_cap } }) |level| {

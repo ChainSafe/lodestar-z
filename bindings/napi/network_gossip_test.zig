@@ -2,14 +2,14 @@ const std = @import("std");
 const g = @import("network_gossip.zig");
 const limits_mod = @import("network").gossip_processor.limits;
 
-fn plan(block: limits_mod.Limit) @import("network").gossip_processor.GossipProcessor.Plan {
+fn options(block: limits_mod.Limit) @import("network").gossip_processor.GossipProcessor.Options {
     var limits: limits_mod.Limits = @splat(.{ .items = 2, .bytes = 4096 });
     limits[@intFromEnum(limits_mod.Kind.beacon_block)] = block;
     return .{ .limits = limits, .execution = limits };
 }
 
 test "gossip exact shared 2Q admission and generation exhaustion" {
-    var table = try g.Table.init(std.testing.allocator, plan(.{ .items = 64, .bytes = 64 * 4096 }));
+    var table = try g.Table.init(std.testing.allocator, options(.{ .items = 64, .bytes = 64 * 4096 }));
     defer table.deinit();
     const token = try table.reserve(10);
     table.retire(token);
@@ -24,7 +24,7 @@ test "gossip table and payload allocation prefixes unwind shared reservation" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationPrefix, .{});
 }
 fn allocationPrefix(allocator: std.mem.Allocator) !void {
-    var table = try g.Table.init(allocator, plan(.{ .items = 1024, .bytes = 64 * 1024 * 1024 }));
+    var table = try g.Table.init(allocator, options(.{ .items = 1024, .bytes = 64 * 1024 * 1024 }));
     defer table.deinit();
     const token = try table.reserve(10);
     defer table.retire(token);
@@ -32,7 +32,7 @@ fn allocationPrefix(allocator: std.mem.Allocator) !void {
 }
 
 test "gossip batch bounds, rollback and expiry keep pins until full completion" {
-    var table = try g.Table.init(std.testing.allocator, plan(.{ .items = 1024, .bytes = 64 * 1024 * 1024 }));
+    var table = try g.Table.init(std.testing.allocator, options(.{ .items = 1024, .bytes = 64 * 1024 * 1024 }));
     defer table.deinit();
     const data = try std.testing.allocator.alloc(u8, 10 * 1024 * 1024);
     defer std.testing.allocator.free(data);
@@ -76,7 +76,7 @@ test "gossip original admission wall projection is precise and independent of dr
 test "gossip flags remain independent of full command capacity and reject stale generations" {
     var commands: @import("network_commands.zig").Table = .{};
     for (0..32) |_| _ = try commands.reserve(.getIdentity);
-    var table = try g.Table.init(std.testing.allocator, plan(.{ .items = 64, .bytes = 64 * 4096 }));
+    var table = try g.Table.init(std.testing.allocator, options(.{ .items = 64, .bytes = 64 * 4096 }));
     defer table.deinit();
     var handles: [64]g.Token = undefined;
     for (&handles) |*token| {

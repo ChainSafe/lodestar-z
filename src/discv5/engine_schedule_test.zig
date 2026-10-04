@@ -1,7 +1,7 @@
 const std = @import("std");
 const CallTable = @import("CallTable.zig");
 const Engine = @import("Engine.zig");
-const ResponsePlan = @import("ResponsePlan.zig");
+const PendingResponse = @import("PendingResponse.zig");
 const enr = @import("identity/enr.zig");
 const message = @import("wire/message.zig");
 const constants = @import("wire/constants.zig");
@@ -57,7 +57,7 @@ const Network = struct {
         out.length = accepted.packet_length;
         switch (accepted.event) {
             .request => |request| {
-                var response: ResponsePlan = .{};
+                var response: PendingResponse = .{};
                 try self.nodes[recipient].prepareStandardResponse(&request, &response);
                 out.length = (try self.nodes[recipient].sendNextStandardResponse(&out.bytes, &response, now_ms, &support.sealEntropy(60))).?;
                 try std.testing.expect(response.complete());

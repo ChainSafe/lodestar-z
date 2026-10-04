@@ -44,6 +44,11 @@ The adapted ChainSafe LevelDB handles retain their
 [MIT license](./src/leveldb/LICENSE). See the [LevelDB documentation](./docs/leveldb.md#native-dependencies-and-attribution)
 for dependency attribution.
 
+## Network architecture
+
+The [network module](./src/network/root.zig) documents the owner, protocol, scheduling,
+storage, and delivery vocabulary used across discovery, QUIC, and the binding.
+
 ## Zig UDP API migration
 
 The network transport owns `udp.Sockets` directly. `network.Udp` and

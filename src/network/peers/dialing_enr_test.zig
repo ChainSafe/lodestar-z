@@ -20,7 +20,7 @@ test "peer ENR canonical fingerprint rejects equal sequence changes outside dial
     var catalog = try Catalog.initWithIntents(std.testing.allocator, .{}, 1, 1024, 1);
     defer catalog.deinit(std.testing.allocator);
     try queue.enqueueDiscovered(&catalog, &candidate, &context, &.{}, 0);
-    @memset(catalog.rows[0].intent.addresses[catalog.rows[0].intent.address_count..], .unspecified);
+    @memset(catalog.rows[0].dial.addresses[catalog.rows[0].dial.address_count..], .unspecified);
     const before = catalog.rows[0];
     for ([_]struct { name: []const u8, value: d.identity.enr.Field.Value }{
         .{ .name = "udp", .value = .{ .uint = 9002 } },
@@ -35,7 +35,7 @@ test "peer ENR canonical fingerprint rejects equal sequence changes outside dial
         try std.testing.expectEqualDeep(before, catalog.rows[0]);
     }
     try queue.enqueueDiscovered(&catalog, &candidate, &context, &.{}, 200);
-    try std.testing.expectEqual(@as(u64, 200), catalog.rows[0].intent.hints_at_ms);
+    try std.testing.expectEqual(@as(u64, 200), catalog.rows[0].dial.hints_at_ms);
 }
 
 test "peer ENR zero custody remains dialable for subnet demand without custody credit" {
@@ -53,14 +53,14 @@ test "peer ENR zero custody remains dialable for subnet demand without custody c
     try std.testing.expect(!catalog.advanceCustody(&fork, 0, 60_000, &budget));
     try std.testing.expectEqual(@as(u16, 64), budget);
     const row = catalog.rowFor(catalog.find(&candidate.peer).?).?;
-    try std.testing.expectEqual(@as(?u64, 0), row.intent.hints.?.custody_group_count);
+    try std.testing.expectEqual(@as(?u64, 0), row.dial.hints.?.custody_group_count);
     const coverage = Catalog.candidateCoverage(row, &fork, 0);
     try std.testing.expectEqual(@as(u64, 0x8000000000000001), coverage.attnets);
     try std.testing.expectEqual(@as(u4, 5), coverage.syncnets);
     try std.testing.expectEqual(@as(usize, 0), coverage.groups.count());
     try std.testing.expectEqual(@as(usize, 0), coverage.custody_groups.count());
     queue.configureSelection(&catalog, &wanted, false, &fork, 0);
-    var out: [1]@import("dialing.zig").Dialing.DialIntent = undefined;
+    var out: [1]@import("dialing.zig").Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), queue.poll(&catalog, 0, &out));
     try std.testing.expect(out[0].peer.eql(&candidate.peer));
 }

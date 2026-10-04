@@ -144,12 +144,12 @@ test "dual-stack transport authenticates both families through one connection bu
 test "transport validates socket work limits before startup allocation" {
     const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{27}));
     const invalid = [_]Transport.WorkLimits{
-        .{ .send_per_step_max = 0 },
-        .{ .send_per_step_max = Transport.send_burst_max + 1 },
-        .{ .receive_per_step_max = 0 },
-        .{ .receive_per_step_max = @import("constants.zig").receive_batch_max + 1 },
+        .{ .send_per_turn_max = 0 },
+        .{ .send_per_turn_max = Transport.send_burst_max + 1 },
+        .{ .receive_per_turn_max = 0 },
+        .{ .receive_per_turn_max = @import("constants.zig").receive_batch_max + 1 },
         .{ .burst_per_connection = 0 },
-        .{ .send_per_step_max = 8, .burst_per_connection = 9 },
+        .{ .send_per_turn_max = 8, .burst_per_connection = 9 },
     };
     for (invalid) |work_limits| {
         var target: Transport = .{};
@@ -159,7 +159,7 @@ test "transport validates socket work limits before startup allocation" {
             .work_limits = work_limits,
         }));
     }
-    try (Transport.WorkLimits{ .send_per_step_max = 1, .receive_per_step_max = 1, .burst_per_connection = 1 }).validate();
+    try (Transport.WorkLimits{ .send_per_turn_max = 1, .receive_per_turn_max = 1, .burst_per_connection = 1 }).validate();
     try (Transport.WorkLimits{ .burst_per_connection = Transport.send_burst_max }).validate();
 }
 

@@ -1,4 +1,4 @@
-import {Turns} from "./network-turns.js";
+import {TurnScheduler} from "./network-turn-scheduler.js";
 
 /** The families whose completions the owner settles, each with a record per native cell. */
 const FAMILIES = ["publication", "command", "request", "incoming"];
@@ -105,7 +105,7 @@ export class CompletionOwner {
   #hold = undefined;
   #closed = false;
   /** The runtime's one scheduling flag and retry timer, which a pump shares while it lives. */
-  turns = new Turns(this);
+  scheduler = new TurnScheduler(this);
 
   constructor(native, notify) {
     this.#native = native;
@@ -177,7 +177,7 @@ export class CompletionOwner {
       this.#abandoned = true;
       this.#native.abandon();
     }
-    this.turns.schedule();
+    this.scheduler.schedule();
   }
 
   #complete(completion) {
@@ -196,12 +196,12 @@ export class CompletionOwner {
     let live = 0;
     for (const table of this.#tables.values()) live += table.live;
     if (live > 0) this.#breach(`closed with records unsettled: ${live}`);
-    this.turns.stop();
+    this.scheduler.stop();
     this.#resolveClosed(result);
   }
 
   #breach(reason) {
-    this.turns.stop();
+    this.scheduler.stop();
     this.#native.fail("completion_contract", reason.slice(0, 64));
     throw Error("Native escalation returned");
   }

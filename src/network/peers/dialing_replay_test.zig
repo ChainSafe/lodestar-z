@@ -37,7 +37,7 @@ fn rememberedAt(c: *Catalog, now_ms: u64) []remembered.Record {
 fn dialAll(c: *Catalog, d: *dialing.Dialing, candidates: []const enr.Candidate, now_ms: u64) ![8]t.PeerRef {
     var peers: [8]t.PeerRef = undefined;
     for (candidates) |*value| try d.enqueueDiscovered(c, value, &.{}, &.{}, now_ms);
-    var out: [8]dialing.Dialing.DialIntent = undefined;
+    var out: [8]dialing.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(candidates.len, d.poll(c, now_ms, out[0..candidates.len]));
     for (out[0..candidates.len]) |intent| {
         var index: u16 = 0;
@@ -125,7 +125,7 @@ test "remembered records refresh at a served close and drop on rejection, health
     try std.testing.expectEqual(t.ReputationDecision.ban, c.report(peers[5], .fatal, now.millis()).?);
     // Another identity answered at the seventh peer's endpoint.
     try d.enqueueDiscovered(&c, &candidates[6], &.{}, &.{}, 0);
-    var out: [1]dialing.Dialing.DialIntent = undefined;
+    var out: [1]dialing.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), d.poll(&c, 0, &out));
     const handle: t.Handle = .{ .index = 6, .generation = 1 };
     try std.testing.expect(d.dialStarted(out[0].token, handle));
@@ -165,7 +165,7 @@ test "replayed remembered candidates meet the rejection memory, the endpoint his
     try std.testing.expectEqual([5]u64{ 1, 1, 1, 2, 0 }, c.remembered.counters.replays);
     // Without general demand, selection holds back a candidate that has no ENR coverage.
     d.configureSelection(&c, &.{}, false, &.{}, 0);
-    var out: [4]dialing.Dialing.DialIntent = undefined;
+    var out: [4]dialing.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 0), d.poll(&c, 0, &out));
     d.configureSelection(&c, &.{}, true, &.{}, 0);
     try std.testing.expectEqual(@as(usize, 1), d.poll(&c, 0, &out));
@@ -217,7 +217,7 @@ test "replay paces remembered first attempts as they start while direct and fres
             try std.testing.expect(d.dialFailed(&c, attempt.token, now));
             slot.* = null;
         };
-        var out: [4]dialing.Dialing.DialIntent = undefined;
+        var out: [4]dialing.Dialing.SelectedDial = undefined;
         for (out[0..d.poll(&c, now, &out)]) |intent| {
             for (&flight) |*slot| if (slot.* == null) {
                 slot.* = .{ .token = intent.token, .until = now + 1_500 };
@@ -233,7 +233,7 @@ test "replay paces remembered first attempts as they start while direct and fres
         // At most a burst waits, and the eligibility heap wakes poll for the next paced start.
         var waiting: usize = 0;
         var it = c.intents.iterator(.{});
-        while (it.next()) |index| waiting += @intFromBool(c.rows[index].intent.replay == .untried);
+        while (it.next()) |index| waiting += @intFromBool(c.rows[index].dial.replay == .untried);
         try std.testing.expect(waiting <= remembered.replay_burst);
         if (waiting > 0 and d.attempts().total < 16) try std.testing.expect(@import("dialing_test_support.zig").refreshAndWakeup(&d, &c, now, 4).? <= @max(now, c.remembered.replayDue()));
     }
@@ -254,7 +254,7 @@ test "replay alternates remembered first attempts with fresh candidates of equal
     seedRemembered(&c, 4);
     try std.testing.expectEqual(@as(usize, 4), d.replayRemembered(&c, &.{}, &.{}, at(0)));
     d.configureSelection(&c, &.{}, true, &.{}, 0);
-    var out: [4]dialing.Dialing.DialIntent = undefined;
+    var out: [4]dialing.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 4), d.poll(&c, 0, &out));
     for (out, [_]bool{ true, false, true, false }) |intent, replayed| {
         try std.testing.expectEqual(replayed, seedTag(&intent.peer, 4) != null);
@@ -279,13 +279,13 @@ test "remembered candidates replace failed intents for known and new identities"
         }
         const retained = try candidate(74, 0);
         try d.enqueueDiscovered(&c, &retained, &.{}, &.{}, 2);
-        c.rowFor(c.find(&retained.peer).?).?.intent.failures = 1;
+        c.rowFor(c.find(&retained.peer).?).?.dial.failures = 1;
         const seeds = [_]remembered.Record{.{ .peer = incoming.peer, .address = address, .qualified_at_s = unix_s }};
         c.remembered.load(&seeds, &local, unix_s, c.random.random());
         try std.testing.expectEqual(@as(usize, 1), d.replayRemembered(&c, &.{}, &.{}, at(10_000)));
         const accepted = c.find(&incoming.peer).?;
         if (previous) |peer| try std.testing.expectEqual(peer, accepted);
-        try std.testing.expectEqual(.untried, c.rowFor(accepted).?.intent.replay);
+        try std.testing.expectEqual(.untried, c.rowFor(accepted).?.dial.replay);
         try std.testing.expect(c.intents.isSet(accepted.index));
         try std.testing.expect(c.find(&retained.peer) == null);
         try std.testing.expectEqual(@as(u16, 1), c.intent_count);

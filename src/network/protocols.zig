@@ -8,7 +8,7 @@ const gossip_mod = @import("gossipsub/root.zig");
 const identify_mod = @import("identify/root.zig");
 const wake_sources = @import("wake_sources.zig");
 
-pub const Service = struct {
+pub const Protocols = struct {
     identify: identify_mod.Handler,
     applications: enum { active, quiescing, closed } = .active,
     stopped: bool = false,
@@ -39,7 +39,7 @@ pub const Service = struct {
 
     /// The caller constructs Local from the transport identity and resolved advertisement.
     /// The supplied value is authoritative; Identify options retain startup validation and limits.
-    pub fn init(allocator: std.mem.Allocator, options: Options, local: *const identify_mod.Local) InitError!Service {
+    pub fn init(allocator: std.mem.Allocator, options: Options, local: *const identify_mod.Local) InitError!Protocols {
         try validateOptions(options);
         var router = try Router.init(allocator, options.router);
         errdefer router.deinit();
@@ -59,7 +59,7 @@ pub const Service = struct {
     }
 
     /// Stops admission permanently and cancels streams. Process drains promised results afterwards.
-    pub fn shutdown(self: *Service, engine: *Engine, now: types.Now) void {
+    pub fn shutdown(self: *Protocols, engine: *Engine, now: types.Now) void {
         if (self.stopped) return;
         self.stopped = true;
         self.identify.shutdown(&self.router, engine);
@@ -69,12 +69,12 @@ pub const Service = struct {
         self.applications = .closed;
     }
 
-    pub fn isDrained(self: *const Service) bool {
+    pub fn isDrained(self: *const Protocols) bool {
         return self.reqresp.isDrained() and self.identify.isDrained();
     }
 
     /// Ends all borrows and discards results that the caller has not drained.
-    pub fn deinit(self: *Service) void {
+    pub fn deinit(self: *Protocols) void {
         self.identify.deinit();
         const allocator = self.gossipsub.allocator;
         self.gossipsub.deinit();
@@ -85,7 +85,7 @@ pub const Service = struct {
     }
 
     pub fn request(
-        self: *Service,
+        self: *Protocols,
         engine: *Engine,
         conn: Engine.Handle,
         protocol: reqresp_mod.Protocol,
@@ -107,13 +107,13 @@ pub const Service = struct {
         );
     }
 
-    pub fn schedule(self: *const Service, capacities: Capacities) types.Schedule {
+    pub fn schedule(self: *const Protocols, capacities: Capacities) types.Schedule {
         var wakeups: wake_sources.Wakeups = .{};
         self.collectWakeups(capacities, &wakeups);
         return wakeups.schedule();
     }
 
-    pub fn collectWakeups(self: *const Service, capacities: Capacities, wakeups: *wake_sources.Wakeups) void {
+    pub fn collectWakeups(self: *const Protocols, capacities: Capacities, wakeups: *wake_sources.Wakeups) void {
         wakeups.note(.reqresp, self.reqresp.schedule(.{ .application = capacities.application, .control = capacities.control }));
         switch (self.applications) {
             .active => wakeups.note(.gossip, self.gossipsub.schedule()),
@@ -125,7 +125,7 @@ pub const Service = struct {
     }
 
     /// Delivers one turn of engine events, then pumps each owner's ready work and due deadlines.
-    pub fn process(self: *Service, engine: *Engine, events: []const Engine.Event, now: types.Now, outputs: Outputs) OutputCounts {
+    pub fn process(self: *Protocols, engine: *Engine, events: []const Engine.Event, now: types.Now, outputs: Outputs) OutputCounts {
         if (!self.stopped) self.dispatch(engine, events, now);
         const counts = self.reqresp.pump(engine, &self.router, now, .{ .application = outputs.application, .control = outputs.control });
         if (self.applications == .active) self.gossipsub.pump(&self.router, engine, now);
@@ -133,11 +133,11 @@ pub const Service = struct {
     }
 
     /// Defer stream cleanup until the next process call, preserving the current event borrows.
-    pub fn quiesceApplications(self: *Service) void {
+    pub fn quiesceApplications(self: *Protocols) void {
         if (self.applications == .active) self.applications = .quiescing;
     }
 
-    fn rejectApplication(self: *const Service, outcome: *const Router.Outcome) bool {
+    fn rejectApplication(self: *const Protocols, outcome: *const Router.Outcome) bool {
         if (self.applications == .active) return false;
         return switch (outcome.result) {
             .ready => |selection| switch (selection.protocol) {
@@ -153,7 +153,7 @@ pub const Service = struct {
     /// event goes to the owner its route names, read from the engine at dispatch time; an
     /// unrouted one advances nothing.
     fn dispatch(
-        self: *Service,
+        self: *Protocols,
         engine: *Engine,
         events: []const Engine.Event,
         now: types.Now,
@@ -181,7 +181,7 @@ pub const Service = struct {
         self.negotiate(engine, now);
     }
 
-    fn routeReadiness(self: *Service, engine: *Engine, events: []const Engine.Event) void {
+    fn routeReadiness(self: *Protocols, engine: *Engine, events: []const Engine.Event) void {
         for (events) |event| {
             const ready = switch (event) {
                 .stream_ready => |ready| ready,
@@ -198,7 +198,7 @@ pub const Service = struct {
         }
     }
 
-    fn negotiate(self: *Service, engine: *Engine, now: types.Now) void {
+    fn negotiate(self: *Protocols, engine: *Engine, now: types.Now) void {
         const count = self.router.pump(engine, now, &self.outcomes);
         defer self.router.releaseOutcomes();
         for (self.outcomes[0..count]) |outcome| {
@@ -219,7 +219,7 @@ pub const Service = struct {
 };
 
 test {
-    _ = @import("service_test.zig");
-    _ = @import("service_reqresp_test.zig");
-    _ = @import("service_gossipsub_test.zig");
+    _ = @import("protocols_test.zig");
+    _ = @import("protocols_reqresp_test.zig");
+    _ = @import("protocols_gossipsub_test.zig");
 }

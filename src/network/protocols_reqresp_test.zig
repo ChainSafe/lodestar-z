@@ -50,7 +50,7 @@ fn roundTrip(setup: *Pair, seed: u8) !void {
     try std.testing.expect(done);
 }
 
-test "service round trips a status request through the collapsed host loop" {
+test "protocol stack round trips a status request through the collapsed host loop" {
     var setup: Pair = .{};
     try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
     defer setup.deinit();
@@ -60,7 +60,7 @@ test "service round trips a status request through the collapsed host loop" {
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
 }
 
-test "service reclaims inbound sinks across more requests than it has slots" {
+test "protocol stack reclaims inbound sinks across more requests than it has slots" {
     const admission: reqresp.Options.Admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{
         .identities = 2,
         .peer = @import("reqresp/admission_fixture.zig").quotas(1_000, 1_000),
@@ -75,7 +75,7 @@ test "service reclaims inbound sinks across more requests than it has slots" {
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
 }
 
-test "service fails in-flight requests when the connection closes" {
+test "protocol stack fails in-flight requests when the connection closes" {
     var setup: Pair = .{};
     try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
     defer setup.deinit();
@@ -119,7 +119,7 @@ test "service fails in-flight requests when the connection closes" {
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
 }
 
-test "service control wakeup includes negotiation after application quiescence" {
+test "protocol stack control wakeup includes negotiation after application quiescence" {
     var setup: Pair = .{};
     try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
     defer setup.deinit();
@@ -137,7 +137,7 @@ test "service control wakeup includes negotiation after application quiescence" 
     try std.testing.expect(events[0].failed.reason == .cancelled);
 }
 
-test "service preserves drained native stream events across a partial request sweep" {
+test "protocol stack preserves drained native stream events across a partial request sweep" {
     var setup: Pair = .{};
     try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
     defer setup.deinit();
@@ -181,7 +181,7 @@ test "service preserves drained native stream events across a partial request sw
     try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
 }
 
-test "service request work remains bounded and rotates between live streams" {
+test "protocol stack request work remains bounded and rotates between live streams" {
     var setup: Pair = .{};
     try setup.init(.{ .outbound_max = 64, .inbound_max = 64 }, .{});
     defer setup.deinit();
@@ -211,7 +211,7 @@ test "service request work remains bounded and rotates between live streams" {
         try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
     }
     try setup.shared.pair.pump();
-    @import("service_test_support.zig").forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
+    @import("protocols_test_support.zig").forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     var events: [2]Event = undefined;
     var delivered: [2]reqresp.RequestHandle = undefined;
@@ -225,7 +225,7 @@ test "service request work remains bounded and rotates between live streams" {
     for (handles) |handle| try std.testing.expect(setup.shared.client.reqresp.consume(handle, setup.shared.pair.now));
 }
 
-test "service reqresp slot is serviced only after a stream event or its deadline" {
+test "protocol stack reqresp slot is serviced only after a stream event or its deadline" {
     var setup: Pair = .{};
     try setup.init(.{}, .{ .progress_timeout_ms = 1_000 });
     defer setup.deinit();
@@ -282,7 +282,7 @@ test "service reqresp slot is serviced only after a stream event or its deadline
     try std.testing.expect(server.visits > waiting);
 }
 
-test "service reqresp deadline fires on time while more slots than the pump budget stay ready" {
+test "protocol stack reqresp deadline fires on time while more slots than the pump budget stay ready" {
     // One client identity opens every stream, so its request starts need a larger burst.
     var admission = try reqresp.Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 8);
     admission.limits.starts.tokens = 64;
@@ -337,7 +337,7 @@ test "service reqresp deadline fires on time while more slots than the pump budg
     try std.testing.expect(timed_out);
 }
 
-test "service reqresp slots stay indexed by connection across a reconnect at the same index" {
+test "protocol stack reqresp slots stay indexed by connection across a reconnect at the same index" {
     var setup: Pair = .{};
     try setup.init(.{}, .{});
     defer setup.deinit();
@@ -348,7 +348,7 @@ test "service reqresp slots stay indexed by connection across a reconnect at the
     var sinks: [2][8]u8 = undefined;
     _ = try setup.shared.client.request(&setup.shared.pair.client, old.client, .ping_v1, &bytes, &sinks[0], .{}, setup.shared.pair.now);
     const stale = try awaitRequest(&setup);
-    const slots_per_peer = @import("reqresp/ReceivePlan.zig").slots_per_peer;
+    const slots_per_peer = @import("reqresp/ReceiveLayout.zig").slots_per_peer;
     try std.testing.expectEqual(@as(usize, old.server.index), stale.index / slots_per_peer);
 
     // The server holds its host events while the connection closes and a new one takes its index.
@@ -422,7 +422,7 @@ fn awaitRequest(setup: *Pair) !reqresp.RequestHandle {
     return error.TestUnexpectedResult;
 }
 
-test "service reqresp request on one connection among 64 visits only its own slots" {
+test "protocol stack reqresp request on one connection among 64 visits only its own slots" {
     var setup: Pair = .{};
     try setup.init(.{}, .{});
     defer setup.deinit();
