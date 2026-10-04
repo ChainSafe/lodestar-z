@@ -7,10 +7,10 @@ const codec = @import("codec.zig");
 const Policy = @import("request_policy.zig").Policy;
 const Protocol = protocol.Protocol;
 
-pub const slots_per_peer = Protocol.count * constants.MAX_CONCURRENT_REQUESTS;
+pub const slots_per_connection = Protocol.count * constants.MAX_CONCURRENT_REQUESTS;
 comptime {
-    std.debug.assert(slots_per_peer <= std.math.maxInt(u8));
-    std.debug.assert(slots_per_peer * constants.slots_ceiling <= std.math.maxInt(u16));
+    std.debug.assert(slots_per_connection <= std.math.maxInt(u8));
+    std.debug.assert(slots_per_connection * constants.slots_ceiling <= std.math.maxInt(u16));
 }
 const read_max = 16 * 1024;
 const handoff_max = @import("../negotiate.zig").Negotiator.inbox_capacity;
@@ -50,16 +50,16 @@ pub fn init(policy: *const Policy) ReceiveLayout {
     return layout;
 }
 
-pub fn first(peer: u16, which: Protocol) usize {
-    return @as(usize, peer) * slots_per_peer + @as(usize, @intFromEnum(which)) * constants.MAX_CONCURRENT_REQUESTS;
+pub fn first(conn: u16, which: Protocol) usize {
+    return @as(usize, conn) * slots_per_connection + @as(usize, @intFromEnum(which)) * constants.MAX_CONCURRENT_REQUESTS;
 }
 
 pub fn buffers(self: *const ReceiveLayout, index: usize, sinks: []u8, arena: []u8) Buffers {
-    const peer = index / slots_per_peer;
-    const entry = self.entries[(index % slots_per_peer) / constants.MAX_CONCURRENT_REQUESTS];
+    const conn = index / slots_per_connection;
+    const entry = self.entries[(index % slots_per_connection) / constants.MAX_CONCURRENT_REQUESTS];
     const position = index % constants.MAX_CONCURRENT_REQUESTS;
-    const sink_offset = peer * self.sink_bytes + entry.sink_offset + position * entry.sink_bytes;
-    const io_offset = peer * self.io_bytes + entry.io_offset + position * (entry.scratch_bytes + entry.read_bytes);
+    const sink_offset = conn * self.sink_bytes + entry.sink_offset + position * entry.sink_bytes;
+    const io_offset = conn * self.io_bytes + entry.io_offset + position * (entry.scratch_bytes + entry.read_bytes);
     return .{
         .sink = sinks[sink_offset..][0..entry.sink_bytes],
         .scratch = arena[io_offset..][0..entry.scratch_bytes],

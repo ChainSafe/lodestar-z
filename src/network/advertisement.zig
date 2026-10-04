@@ -42,7 +42,10 @@ pub fn resolve(hints: ?*const Hints, fixed: *const Endpoints, quic: *const [2]?A
         const hint_ip = @field(initial, fields[0]);
         const use_hint = ip_pin == null and hint_ip != null and validIp(hint_ip.?);
         var ip = ip_pin orelse if (use_hint) hint_ip else null;
-        if (ip == null and validIp(bound_ip)) ip = bound_ip;
+        if (ip == null and validIp(bound_ip)) {
+            if (family == 1 and listener.ip6.interface != 0) return error.InvalidAdvertisement;
+            ip = bound_ip;
+        }
         resolved.observations[family] = .{ .enabled = ip_pin == null, .fixed_port = port_pin };
         resolved.quic_ports[family] = quic_pin orelse if (quic[family]) |address| address.port() else null;
         if (ip) |value| {

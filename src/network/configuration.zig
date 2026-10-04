@@ -11,7 +11,7 @@ const peers = @import("peers/root.zig");
 const Router = @import("router.zig").Router;
 
 pub const Profile = enum { small, beacon_node };
-pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks", "request_fork", "outbound_control_reserved", "inbound_control_reserved", "admission" });
+pub const ReqRespOverrides = Overrides(rr.Options, &.{ "connections", "forks", "request_fork", "outbound_control_reserved", "serving_control_reserved", "admission" });
 pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "connection_slots", "retained_capacity", "retained_outbound_reserve", "random_seed" });
 pub const IdentifyOverrides = Overrides(@import("identify/root.zig").Handler.Options, &.{});
 pub const RouterOverrides = Overrides(Router.Options, &.{ "outbound_control_reserved", "inbound_connections" });
@@ -89,25 +89,25 @@ pub fn resolve(options: Options) !Resolved {
     limits.outbound_max = limits.connections_max;
     var requests: rr.Options = .{
         .forks = options.forks,
-        .peers = limits.connections_max,
+        .connections = limits.connections_max,
         .outbound_max = peer_options.max_peers + @as(u16, if (small) 6 else 56),
-        .inbound_max = peer_options.max_peers + @as(u16, if (small) 6 else 56),
+        .serving_max = peer_options.max_peers + @as(u16, if (small) 6 else 56),
         .outbound_control_reserved = peer_options.max_peers,
-        .inbound_control_reserved = peer_options.max_peers,
-        .outbound_per_peer_max = if (small) 4 else 8,
-        .inbound_per_peer_max = if (small) 8 else 16,
-        .inbound_application_per_peer_max = if (small) 4 else 8,
+        .serving_control_reserved = peer_options.max_peers,
+        .outbound_per_connection_max = if (small) 4 else 8,
+        .inbound_per_connection_max = if (small) 8 else 16,
+        .inbound_application_per_connection_max = if (small) 4 else 8,
         .admission = undefined,
     };
     applyOverrides(&requests, options.reqresp);
-    if (requests.inbound_max < requests.inbound_control_reserved) return error.InvalidOptions;
+    if (requests.serving_max < requests.serving_control_reserved) return error.InvalidOptions;
     if (options.application_requests_max) |maximum| {
-        if (maximum == 0 or requests.inbound_max < requests.inbound_control_reserved or requests.outbound_max < requests.outbound_control_reserved) return error.InvalidOptions;
-        requests.inbound_max = requests.inbound_control_reserved + @min(maximum, requests.inbound_max - requests.inbound_control_reserved);
+        if (maximum == 0 or requests.serving_max < requests.serving_control_reserved or requests.outbound_max < requests.outbound_control_reserved) return error.InvalidOptions;
+        requests.serving_max = requests.serving_control_reserved + @min(maximum, requests.serving_max - requests.serving_control_reserved);
         requests.outbound_max = requests.outbound_control_reserved + @min(maximum, requests.outbound_max - requests.outbound_control_reserved);
     }
 
-    requests.admission = try rr.Options.Admission.defaults(&options.admission_policy, peer_options.capacity, peer_options.max_peers, requests.inbound_max - requests.inbound_control_reserved);
+    requests.admission = try rr.Options.Admission.defaults(&options.admission_policy, peer_options.capacity, peer_options.max_peers, requests.serving_max - requests.serving_control_reserved);
     var identify: @import("identify/root.zig").Handler.Options = .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 };
     applyOverrides(&identify, options.identify);
     var router_options: Router.Options = .{
@@ -115,7 +115,7 @@ pub fn resolve(options: Options) !Resolved {
         .outbound_control_reserved = requests.outbound_control_reserved,
         .outbound_reserved = peer_options.max_peers + @as(u16, if (small) 8 else 64),
         .inbound_connections = limits.connections_max,
-        .inbound_per_connection_max = @as(u16, requests.inbound_per_peer_max) + rr.outbound_stream_headroom,
+        .inbound_per_connection_max = @as(u16, requests.inbound_per_connection_max) + rr.outbound_stream_headroom,
     };
     applyOverrides(&router_options, options.router);
     var gossip_options: gossip.Options = .{
@@ -151,7 +151,7 @@ pub fn resolve(options: Options) !Resolved {
         },
     };
     try validate(result.limits, result.core);
-    if (result.core.protocols.reqresp.outbound_control_reserved == 0 or result.core.protocols.reqresp.inbound_control_reserved == 0 or
+    if (result.core.protocols.reqresp.outbound_control_reserved == 0 or result.core.protocols.reqresp.serving_control_reserved == 0 or
         result.limits.connections_max > c.peers_cap)
         return error.InvalidOptions;
     return result;
@@ -162,12 +162,12 @@ pub fn validate(limits: Engine.Limits, options: Core) !void {
     try peer_manager.PeerManager.validateOptions(options.peerManager());
     try Protocols.validateOptions(options.protocols);
     if (options.peers.max_peers > limits.connections_max or
-        options.protocols.reqresp.peers < limits.connections_max or
+        options.protocols.reqresp.connections < limits.connections_max or
         options.protocols.gossipsub.connection_slots < limits.connections_max or
         options.dial.concurrent_max != limits.dialing_max or
         options.dial.outbound_reserved != limits.outbound_reserved or
         limits.outbound_max != limits.connections_max or
-        options.protocols.reqresp.inbound_control_reserved < options.peers.max_peers or
+        options.protocols.reqresp.serving_control_reserved < options.peers.max_peers or
         options.protocols.reqresp.outbound_control_reserved < options.peers.max_peers or
         options.protocols.router.outbound_control_reserved < options.protocols.reqresp.outbound_control_reserved)
         return error.InvalidOptions;

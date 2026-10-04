@@ -645,14 +645,14 @@ test "core native gossip admission precedes Status without establishing relevanc
     try std.testing.expectEqual(@as(u16, 0), setup.server.peer_manager.peerCounts().relevant);
 }
 
-test "core native inbound application per peer cap protects control from extra raw bulk owners" {
+test "core native inbound application per connection cap protects control from extra raw bulk owners" {
     var setup: Setup = .{};
     var options = @import("network_core_test_support.zig").resolvedOptions();
-    options.core.protocols.reqresp.inbound_max = 24;
+    options.core.protocols.reqresp.serving_max = 24;
     options.core.protocols.reqresp.outbound_max = 24;
-    options.core.protocols.reqresp.inbound_per_peer_max = 16;
-    options.core.protocols.reqresp.outbound_per_peer_max = 0;
-    options.core.protocols.reqresp.inbound_application_per_peer_max = 8;
+    options.core.protocols.reqresp.inbound_per_connection_max = 16;
+    options.core.protocols.reqresp.outbound_per_connection_max = 0;
+    options.core.protocols.reqresp.inbound_application_per_connection_max = 8;
     try setup.initOwnersWithOptions(&.{}, options);
     defer setup.deinit();
     _ = try setup.pair.dial();

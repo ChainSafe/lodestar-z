@@ -25,17 +25,8 @@ pub const NetworkCore = struct {
     pub const controls_per_turn = 32;
     pub const identify_per_turn = 8;
     pub const dials_per_turn = 4;
-    pub const ForkSchedule = peers.Discovery.ForkSchedule;
-    pub const AdvertisementEndpoints = advertisement.Endpoints;
-    pub const AdvertisementHints = advertisement.Hints;
-    pub const LocalUpdate = struct {
-        local: t.LocalState,
-        schedule: ForkSchedule,
-        endpoints: ?AdvertisementEndpoints,
-        capabilities: @import("capabilities.zig").Directional,
-    };
     pub const LocalIntent = struct {
-        update: LocalUpdate,
+        update: control_values.LocalUpdate,
         demand: peers.Demand,
         subscriptions: []const gossip.local_intent.Boundary,
         slot: u64 = 0,
@@ -45,7 +36,7 @@ pub const NetworkCore = struct {
         host: *const @import("wire/keys.zig").KeyPair,
         bind: @import("udp").Sockets.Bindings,
         local: t.LocalState,
-        schedule: ForkSchedule = .{},
+        schedule: control_values.ForkSchedule = .{},
         discovery: ?DiscoveryOptions = null,
         /// The host's wall-clock slot until its first intent.
         slot: u64 = 0,
@@ -117,7 +108,7 @@ pub const NetworkCore = struct {
     discovery: ?*peers.Discovery,
     native_events: []Engine.Event,
     local_intent_workspace: *gossip.local_intent.Workspace,
-    schedule: ForkSchedule,
+    schedule: control_values.ForkSchedule,
     counters: Counters = .{},
     step_duration: @import("metrics/timing.zig").Duration = .{},
     /// Zero-wait turns, counted under every source already due; readiness tests and the idle
@@ -179,7 +170,7 @@ pub const NetworkCore = struct {
         self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, resolved.core.peerManager(), self.protocols.router.capabilities().receive, self.transport.engine.limits.connections_max);
         errdefer self.peer_manager.deinit();
         const peer_capacity: u16 = @intCast(self.peer_manager.catalog.rows.len);
-        self.control_protocol = try ControlProtocol.init(allocator, peer_capacity, resolved.core.peers.max_peers, protocols_options.reqresp.inbound_control_reserved);
+        self.control_protocol = try ControlProtocol.init(allocator, peer_capacity, resolved.core.peers.max_peers, protocols_options.reqresp.serving_control_reserved);
         errdefer self.control_protocol.deinit(allocator);
         self.peer_manager.loadRemembered(startup.remembered, self.last_now);
         self.protocols.gossipsub.clock = io;
@@ -225,7 +216,8 @@ pub const NetworkCore = struct {
             for (pm.snapshot_scratch[0..count]) |snapshot| if (snapshot.connection) |conn| {
                 self.closeConnection(snapshot.peer, conn, .shutdown, now);
             };
-            pm.shutdownDials(&self.transport.engine, now);
+            var close: [peers.Dialing.attempts_max]t.Handle = undefined;
+            for (pm.shutdownDials(now, &close)) |conn| self.closeDial(conn);
         }
         if (self.discovery) |owned| owned.shutdown();
         self.transport.engine.closeAll();
@@ -250,7 +242,7 @@ pub const NetworkCore = struct {
     pub fn localRecord(self: *const NetworkCore) ?*const d.identity.enr.Record {
         return if (self.discovery) |owned| owned.localRecord() else null;
     }
-    pub fn advertisementEndpoints(self: *const NetworkCore) ?AdvertisementEndpoints {
+    pub fn advertisementEndpoints(self: *const NetworkCore) ?advertisement.Endpoints {
         return if (self.discovery) |owned| owned.endpoints else null;
     }
     pub fn localState(self: *const NetworkCore) t.LocalState {
@@ -265,7 +257,11 @@ pub const NetworkCore = struct {
         try self.peer_manager.connectUntil(identity, addresses, now, time.ceilMilliseconds(deadline));
     }
     pub fn cancelConnect(self: *NetworkCore, identity: *const t.PeerId, now: Now) void {
-        self.peer_manager.cancelConnect(&self.transport.engine, identity, now);
+        if (self.peer_manager.cancelConnect(identity, now)) |conn| self.closeDial(conn);
+    }
+    fn closeDial(self: *NetworkCore, conn: t.Handle) void {
+        const engine = &self.transport.engine;
+        if (engine.peerId(conn) != null) _ = engine.close(conn, 0) else _ = engine.abandon(conn);
     }
     pub fn addDirectPeer(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now) !void {
         if (try self.peer_manager.addDirectPeer(identity, addresses, now)) |conn| self.protocols.gossipsub.markDirect(conn);
@@ -287,7 +283,7 @@ pub const NetworkCore = struct {
         const connection = self.peer_manager.catalog.rowFor(peer).?.connection orelse return false;
         if (self.peer_manager.phase == .stopping) return false;
         self.closeConnection(peer, connection, .host, now);
-        self.peer_manager.cancelConnect(&self.transport.engine, identity, now);
+        if (self.peer_manager.cancelConnect(identity, now)) |conn| self.closeDial(conn);
         return true;
     }
     pub fn reStatusPeer(self: *NetworkCore, identity: *const t.PeerId, now: Now) bool {
@@ -381,7 +377,7 @@ pub const NetworkCore = struct {
         self.protocols.router.setCapabilities(active);
     }
 
-    fn updateLocalWithEndpoints(self: *NetworkCore, desired: *const t.LocalState, schedule: ForkSchedule, endpoints: ?AdvertisementEndpoints, now: Now) !bool {
+    fn updateLocalWithEndpoints(self: *NetworkCore, desired: *const t.LocalState, schedule: control_values.ForkSchedule, endpoints: ?advertisement.Endpoints, now: Now) !bool {
         return self.applyLocal(&.{
             .local = desired.*,
             .schedule = schedule,
@@ -390,7 +386,7 @@ pub const NetworkCore = struct {
         }, now);
     }
 
-    fn prepareIdentifyLocal(base: *const @import("identify/root.zig").Local, endpoints: ?AdvertisementEndpoints, capabilities: @import("capabilities.zig").Directional) !@import("identify/root.zig").Local {
+    fn prepareIdentifyLocal(base: *const @import("identify/root.zig").Local, endpoints: ?advertisement.Endpoints, capabilities: @import("capabilities.zig").Directional) !@import("identify/root.zig").Local {
         var local = base.*;
         if (endpoints) |announced| {
             var addresses: [2]t.Address = undefined;
@@ -412,15 +408,15 @@ pub const NetworkCore = struct {
 
     const PreparedLocal = struct {
         local: t.LocalState,
-        schedule: ForkSchedule,
-        endpoints: ?AdvertisementEndpoints,
+        schedule: control_values.ForkSchedule,
+        endpoints: ?advertisement.Endpoints,
         capabilities: @import("capabilities.zig").Directional,
         identify: @import("identify/root.zig").Local,
         record: ?peers.Discovery.PreparedAdvertisement = null,
         changed: bool,
     };
 
-    fn prepareLocal(self: *const NetworkCore, update: *const LocalUpdate) !PreparedLocal {
+    fn prepareLocal(self: *const NetworkCore, update: *const control_values.LocalUpdate) !PreparedLocal {
         if (self.peer_manager.phase != .running) return error.Stopped;
         const schedule = update.schedule;
         const endpoints = update.endpoints;
@@ -482,7 +478,7 @@ pub const NetworkCore = struct {
     }
 
     /// Prepares every owner before ENR publication; caller sequence input is ignored.
-    fn applyLocal(self: *NetworkCore, update: *const LocalUpdate, now: Now) !bool {
+    fn applyLocal(self: *NetworkCore, update: *const control_values.LocalUpdate, now: Now) !bool {
         const prepared = try self.prepareLocal(update);
         if (!prepared.changed) return false;
         try self.publishLocal(&prepared);
@@ -702,7 +698,10 @@ pub const NetworkCore = struct {
             self.controlEvents(self.controls[0..counts.control], now);
             return .{ .peers = pm.catalog.pollEvents(outputs.peers), .application = counts.application };
         }
-        if (pm.phase == .running) pm.expireDials(quic, now);
+        if (pm.phase == .running) {
+            var close: [peers.Dialing.attempts_max]t.Handle = undefined;
+            for (pm.expireDials(now, &close)) |conn| self.closeDial(conn);
+        }
         for (events) |*event| self.transportEvent(event, now);
         const controls = &self.controls;
         const identify_results = &self.identify_results;
@@ -878,7 +877,7 @@ fn validateForkTable(table: []const @import("types.zig").ForkEntry, context: *co
     }
     if (!found) return error.UnknownFork;
 }
-fn validateSchedule(local: *const t.LocalState, schedule: NetworkCore.ForkSchedule) !void {
+fn validateSchedule(local: *const t.LocalState, schedule: control_values.ForkSchedule) !void {
     if (schedule.next_epoch == std.math.maxInt(u64) and !std.mem.allEqual(u8, &schedule.next_digest, 0)) return error.InvalidSchedule;
     if ((schedule.fulu_scheduled or local.fork.fork.gte(.fulu)) and local.metadata.custody_group_count == null) return error.MissingCustodyAdvertisement;
 }

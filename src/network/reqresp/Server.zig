@@ -218,7 +218,7 @@ pub fn admit(self: *Server, index: u16, lease: *const @import("InboundAdmission.
     self.progress_ms = now.millis();
     request.queue(.{ .request = .{
         .request = request.handle(index),
-        .peer = request.conn,
+        .conn = request.conn,
         .protocol = request.protocol,
         .bytes = payload,
     } });

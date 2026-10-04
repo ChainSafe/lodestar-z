@@ -38,7 +38,7 @@ pub const Progress = struct {
     standard_responses: u8 = 0,
 };
 
-pub const StepResult = struct {
+pub const AdvanceResult = struct {
     now_ms: u64 = 0,
     event: Engine.Event = .none,
     datagram: DatagramResult = .timeout,
@@ -173,9 +173,9 @@ pub fn receive(self: *Transport, io: std.Io, ready: *[2]bool) Input {
 
 /// Expires once at the supplied time, then processes input and sends standard replies. Consume
 /// every result, including failures, before the next advance; events borrow protocol scratch.
-pub fn advance(self: *Transport, io: std.Io, now_ms: u64, expired_calls: []CallTable.Expired, input: Input) Error!StepResult {
+pub fn advance(self: *Transport, io: std.Io, now_ms: u64, expired_calls: []CallTable.Expired, input: Input) Error!AdvanceResult {
     if (expired_calls.len == 0) return error.MissingExpiryStorage;
-    var result: StepResult = .{ .now_ms = now_ms };
+    var result: AdvanceResult = .{ .now_ms = now_ms };
     const expired = self.engine.tick(now_ms, expired_calls);
     result.calls_expired = expired.calls;
     result.progress.challenges_expired = expired.challenges;
@@ -197,7 +197,7 @@ pub fn advance(self: *Transport, io: std.Io, now_ms: u64, expired_calls: []CallT
     return result;
 }
 
-fn recordFailure(result: *StepResult, err: Error, stage: FailureStage) void {
+fn recordFailure(result: *AdvanceResult, err: Error, stage: FailureStage) void {
     result.cancelled = result.cancelled or err == error.Canceled;
     if (result.failure != null) return;
     result.failure = .{ .cause = err, .stage = stage };
@@ -207,7 +207,7 @@ fn processDatagram(
     self: *Transport,
     io: std.Io,
     datagram: Sockets.Datagram,
-    result: *StepResult,
+    result: *AdvanceResult,
 ) Error!void {
     if (!self.engine.admitDatagram(&datagram.from, result.now_ms)) {
         result.datagram = .{ .rejected = .admission_limited };
@@ -250,7 +250,7 @@ fn handleEvent(
     self: *Transport,
     io: std.Io,
     event: Engine.Event,
-    result: *StepResult,
+    result: *AdvanceResult,
 ) Error!Engine.Event {
     const request = switch (event) {
         .request => |request| request,

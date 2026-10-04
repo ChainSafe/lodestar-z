@@ -21,6 +21,7 @@ import type {
   NativePeerAction,
   NativePeerObservation,
   NativePeerSnapshot,
+  NativeProtocolId,
   NativeRememberedPeersSnapshot,
   NativeRequestOptions,
   NativeResolvedLimits,
@@ -247,7 +248,7 @@ export function initializeNativeNetworkRuntime(
 export interface NativeIncomingRequest {
   readonly peerId: PeerIdStr;
   readonly connection: NativeConnection;
-  readonly protocol: string;
+  readonly protocol: NativeProtocolId;
   readonly data: Uint8Array;
   /** Resolves once the stream and pending responses have retired. Retained host work may still be running. */
   readonly closed: Promise<void>;

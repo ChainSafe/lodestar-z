@@ -59,7 +59,7 @@ pub fn initialize(runtime: *Runtime, app: *const application_cfg.Config) !void {
     runtime.max_peers = resolved.core.peers.max_peers;
     const limits = resolved.core.protocols.reqresp;
     const request_capacity: usize = limits.outbound_max - limits.outbound_control_reserved;
-    const incoming_capacity: usize = limits.inbound_max - limits.inbound_control_reserved;
+    const incoming_capacity: usize = limits.serving_max - limits.serving_control_reserved;
     const gossip_options = &resolved.core.protocols.gossipsub;
     const chain = &runtime.heavy.?.config.chain;
     const processor_options = try n.gossip_processor.GossipProcessor.Options.resolve(runtime.heavy.?.config.processor_limits, runtime.heavy.?.config.execution_limits, gossip_options.topic_policy.?, chain.forks[0..chain.boundary_count], gossip_options.random_seed.?);

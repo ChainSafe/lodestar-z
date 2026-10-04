@@ -18,14 +18,15 @@ test "core connection deadlines preserve fractions through millisecond expiry" {
     try core.connectUntil(&identity, &addresses, now, deadline);
     const catalog = &core.peer_manager.catalog;
     const peer = catalog.find(&identity).?;
+    var close: [@import("peers/dialing.zig").Dialing.attempts_max]@import("types.zig").Handle = undefined;
     const due_ms = now.millis() + 2;
     try std.testing.expectEqual(due_ms, catalog.rowFor(peer).?.dial.manual_until_ms);
     now.monotonic = @import("time.zig").milliseconds(due_ms - 1);
-    core.peer_manager.expireDials(&core.transport.engine, now);
+    try std.testing.expectEqual(@as(usize, 0), core.peer_manager.expireDials(now, &close).len);
     try std.testing.expectEqual(due_ms, catalog.rowFor(peer).?.dial.manual_until_ms);
     try std.testing.expectError(error.InvalidDeadline, core.connectUntil(&identity, &addresses, now, setup.pair.now.monotonic));
     now.monotonic = @import("time.zig").milliseconds(due_ms);
-    core.peer_manager.expireDials(&core.transport.engine, now);
+    try std.testing.expectEqual(@as(usize, 0), core.peer_manager.expireDials(now, &close).len);
     try std.testing.expect(catalog.find(&identity) == null);
 }
 

@@ -58,10 +58,10 @@ pub fn options() configuration.Options {
         .router = .{ .negotiations_max = 24 },
         .reqresp = .{
             .outbound_max = 16,
-            .inbound_max = 16,
-            .outbound_per_peer_max = 8,
-            .inbound_per_peer_max = 16,
-            .inbound_application_per_peer_max = 8,
+            .serving_max = 16,
+            .outbound_per_connection_max = 8,
+            .inbound_per_connection_max = 16,
+            .inbound_application_per_connection_max = 8,
         },
         .gossip = .{
             .topic_policy = comptime &.{@import("gossipsub/topic_fixture.zig").bytes(@splat(0))},
@@ -400,7 +400,7 @@ pub fn networkOptions(key: *const keys.KeyPair) NetworkOptions {
         .{ .digest = @splat(0), .fork = .phase0 },
         .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu },
     };
-    requested.reqresp.outbound_per_peer_max = 4;
+    requested.reqresp.outbound_per_connection_max = 4;
     requested.gossip.topic_policy = comptime &.{
         @import("gossipsub/topic_fixture.zig").bytes(@splat(0)),
         @import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 }),

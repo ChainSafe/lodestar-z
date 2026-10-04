@@ -227,7 +227,7 @@ const Schedule = struct {
 /// The newest chain boundary, so topics carry the current fork's message sizes.
 const Chain = struct {
     network_config: network.chain.Config,
-    update: network.NetworkCore.LocalUpdate,
+    update: network.control_values.LocalUpdate,
     boundary: usize,
     slot: u64,
     attestation_bytes: usize,

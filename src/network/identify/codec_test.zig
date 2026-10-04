@@ -301,3 +301,15 @@ test "identify includes the current observed QUIC endpoint" {
     try std.testing.expect(reader.atEnd());
     try std.testing.expectEqual(@as(usize, 1), observed);
 }
+
+test "identify rejects scoped listen and observed addresses without changing local advertisement" {
+    const peer = try identity();
+    const endpoint: @import("../types.zig").Address = .{ .ip6 = .{ .octets = .{ 0xfe, 0x80 } ++ .{0} ** 13 ++ .{1}, .port = 9000, .interface = 7 } };
+    var local = try codec.Local.init(&peer, "stock", "ipfs/0.1.0", &.{});
+    const previous = local;
+    try std.testing.expectError(error.InvalidAddress, codec.Local.validate("stock", "ipfs/0.1.0", &.{endpoint}));
+    try std.testing.expectError(error.InvalidAddress, local.setAddresses(&.{endpoint}));
+    try std.testing.expectEqualDeep(previous, local);
+    var frame: [codec.encoded_frame_max]u8 = undefined;
+    try std.testing.expectError(error.InvalidAddress, local.encode(.initEmpty(), endpoint, &frame));
+}

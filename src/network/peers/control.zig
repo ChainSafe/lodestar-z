@@ -513,7 +513,7 @@ pub const Control = struct {
             .status_v1, .status_v2 => self.acceptStatus(
                 catalog,
                 peer,
-                event.peer,
+                event.conn,
                 event.protocol,
                 event.bytes,
                 local,
@@ -524,7 +524,7 @@ pub const Control = struct {
                 if (wire.decodeScalar(event.bytes)) |seq_number| self.sequence(
                     catalog,
                     peer,
-                    event.peer,
+                    event.conn,
                     seq_number,
                     now,
                 ) else |_| {}
@@ -533,8 +533,8 @@ pub const Control = struct {
             .goodbye_v1 => {
                 std.debug.assert(event.bytes.len == 8);
                 const code = wire.decodeScalar(event.bytes) catch unreachable;
-                self.receivedGoodbye(catalog, peer, event.peer, code, false);
-                _ = self.disconnect(catalog, peer, event.peer, .remote_goodbye, now);
+                self.receivedGoodbye(catalog, peer, event.conn, code, false);
+                _ = self.disconnect(catalog, peer, event.conn, .remote_goodbye, now);
                 self.connections[peer.index].closing.?.sent = true;
             },
             else => unreachable,

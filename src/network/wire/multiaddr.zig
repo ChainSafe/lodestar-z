@@ -14,12 +14,13 @@ const code_quic_v1: u64 = 461;
 
 pub const Error = error{ InvalidMultiaddr, BufferTooSmall } || peer_id.Error || varint.Error;
 
+/// QUIC multiaddrs do not support IPv6 interface zones; encoding rejects scoped endpoints.
 pub const Multiaddr = struct {
     address: Address,
     peer: ?peer_id.PeerId = null,
 
     pub fn encode(self: *const Multiaddr, out: []u8) Error![]u8 {
-        if (self.address == .ip6 and Address.isIp4Mapped(self.address.ip6.octets)) return error.InvalidMultiaddr;
+        if (self.address == .ip6 and (self.address.ip6.interface != 0 or Address.isIp4Mapped(self.address.ip6.octets))) return error.InvalidMultiaddr;
         var cursor: usize = 0;
         switch (self.address) {
             .ip4 => |ip| {
@@ -72,7 +73,7 @@ pub const Multiaddr = struct {
     }
 
     pub fn toText(self: *const Multiaddr, out: *[text_length_max]u8) Error![]const u8 {
-        if (self.address == .ip6 and Address.isIp4Mapped(self.address.ip6.octets)) return error.InvalidMultiaddr;
+        if (self.address == .ip6 and (self.address.ip6.interface != 0 or Address.isIp4Mapped(self.address.ip6.octets))) return error.InvalidMultiaddr;
         var cursor: usize = 0;
         switch (self.address) {
             .ip4 => |ip| {

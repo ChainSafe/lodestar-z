@@ -3,19 +3,19 @@ const Now = @import("../types.zig").Now;
 const RequestIO = @import("RequestIO.zig");
 const rr = @import("ReqResp.zig");
 const Protocol = @import("protocol.zig").Protocol;
-const Plan = @import("ReceiveLayout.zig");
+const ReceiveLayout = @import("ReceiveLayout.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const types = @import("../types.zig");
 const support = @import("../quic/test_support.zig");
 const Router = @import("../router.zig").Router;
 const quotas = @import("admission_fixture.zig").quotas;
 
-fn options(peers: u16) rr.Options {
+fn options(connections: u16) rr.Options {
     return .{
-        .peers = peers,
+        .connections = connections,
         .outbound_max = 1,
-        .inbound_max = 4,
-        .inbound_per_peer_max = 8,
+        .serving_max = 4,
+        .inbound_per_connection_max = 8,
         .forks = &.{},
         .admission = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{
             .identities = 4,
@@ -54,7 +54,7 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
             .leftover = &.{},
             .fin = false,
         }, pair.now);
-        const first = Plan.first(handles.server.index, .metadata_v1);
+        const first = ReceiveLayout.first(handles.server.index, .metadata_v1);
         owner.inbound[first].request.generation = std.math.maxInt(u32);
         if (!handoff) owner.inbound[first + 1].request.generation = std.math.maxInt(u32);
         var bytes: [RequestIO.read_buffer_length]u8 = @splat(0);
@@ -78,9 +78,9 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
 }
 
 fn readySlot(owner: *rr, peer: u16, which: Protocol, ordinal: u16, identity: PeerId, accepted_ms: u64) u16 {
-    std.debug.assert(peer < owner.options.peers);
+    std.debug.assert(peer < owner.options.connections);
     std.debug.assert(ordinal < @import("constants.zig").MAX_CONCURRENT_REQUESTS);
-    const index: u16 = @intCast(Plan.first(peer, which) + ordinal);
+    const index: u16 = @intCast(ReceiveLayout.first(peer, which) + ordinal);
     const slot = &owner.inbound[index];
     std.debug.assert(slot.request.available());
     const conn: types.Handle = .{ .index = peer, .generation = 1 };
@@ -130,7 +130,7 @@ test "inbound admission delayed decode and equal timestamps retain acceptance th
     // Reverse readiness order and start the round-robin scan at the higher slot.
     deferStart(&ties, high, 20);
     deferStart(&ties, low, 20);
-    ties.admission.peer_cursors[0].admission[0] = @intCast(high);
+    ties.admission.connection_cursors[0].admission[0] = @intCast(high);
     ties.admission.promoteReady(&ties, Now.fromMilliseconds(.{ .mono_ms = 20, .unix_s = 0 }));
     try std.testing.expect(ties.inbound[low].request.pendingEvent() != null);
     try std.testing.expect(ties.inbound[high].admission.start_pending);

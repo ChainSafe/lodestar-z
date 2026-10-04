@@ -76,7 +76,7 @@ test "reqresp terminal pressure quiesces without capacity and wakes when host un
 
 test "reqresp empty capacity does not delay buffered response chunks" {
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 64, .inbound_max = 64 }, .{});
+    try setup.init(.{ .outbound_max = 64, .serving_max = 64 }, .{});
     defer setup.deinit();
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
@@ -108,7 +108,7 @@ test "reqresp empty capacity does not delay buffered response chunks" {
 
 test "reqresp host response retains write work behind a partial cursor" {
     var setup: Pair = .{};
-    try setup.init(.{}, .{ .outbound_max = 1, .inbound_max = 2 });
+    try setup.init(.{}, .{ .outbound_max = 1, .serving_max = 2 });
     defer setup.deinit();
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
@@ -145,7 +145,7 @@ test "reqresp host response retains write work behind a partial cursor" {
 
 test "reqresp native bytes arriving behind cursor remain ready after a routed readable event" {
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+    try setup.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});
     defer setup.deinit();
     const bytes = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;
@@ -175,7 +175,7 @@ test "reqresp native bytes arriving behind cursor remain ready after a routed re
 
 test "reqresp native write credit behind cursor resumes from a routed writable event" {
     var setup: Pair = .{};
-    try setup.init(.{}, .{ .outbound_max = 1, .inbound_max = 2 });
+    try setup.init(.{}, .{ .outbound_max = 1, .serving_max = 2 });
     defer setup.deinit();
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
@@ -228,7 +228,7 @@ test "reqresp native write credit behind cursor resumes from a routed writable e
 
 test "reqresp routed readiness checks the stream generation and quiets after one service" {
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+    try setup.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});
     defer setup.deinit();
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
@@ -254,7 +254,7 @@ test "reqresp routed readiness checks the stream generation and quiets after one
 
 test "reqresp partial beacon scans preserve host waits and elapsed deadlines" {
     var setup: Pair = .{};
-    try setup.init(.{}, .{ .outbound_max = 64, .inbound_max = 64, .host_timeout_ms = 2000 });
+    try setup.init(.{}, .{ .outbound_max = 64, .serving_max = 64, .host_timeout_ms = 2000 });
     defer setup.deinit();
     for (0..8) |_| {
         _ = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &.{} }).control;
@@ -288,7 +288,7 @@ test "reqresp partial beacon scans preserve host waits and elapsed deadlines" {
 
 test "reqresp request write preserves already readable native response" {
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+    try setup.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});
     defer setup.deinit();
     const bytes = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;

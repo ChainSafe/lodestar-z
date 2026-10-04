@@ -76,7 +76,7 @@ test "network chain derives fixed request storage and historical blob limits ind
     const maximum = 128 * (40 + 8 * preset.NUMBER_OF_COLUMNS);
     try std.testing.expectEqual(@as(usize, maximum), chain_config.policy.requestMax());
     const policy = chain_config.requestPolicy();
-    var requests = try rr.init(std.testing.allocator, .{ .forks = chain_config.forks[0..chain_config.boundary_count], .admission = try rr.Options.Admission.defaults(&policy, 8, 2, 6), .inbound_max = 8, .inbound_control_reserved = 2, .inbound_per_peer_max = 8 });
+    var requests = try rr.init(std.testing.allocator, .{ .forks = chain_config.forks[0..chain_config.boundary_count], .admission = try rr.Options.Admission.defaults(&policy, 8, 2, 6), .serving_max = 8, .serving_control_reserved = 2, .inbound_per_connection_max = 8 });
     defer requests.deinit();
     const bytes = requests.memoryPlan().total_bytes;
     for ([_]config.ForkSeq{ .deneb, .electra, .fulu }) |fork| {

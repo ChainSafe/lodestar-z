@@ -29,6 +29,30 @@ pub const Catalog = struct {
         failures: u8 = 0,
         /// Replay queued this automatic intent from a remembered record; its first attempt is preferred.
         replay: enum { none, untried, tried } = .none,
+
+        pub fn deferUntil(self: *DialState, eligible_at_ms: u64) void {
+            self.eligible_at_ms = @max(self.eligible_at_ms, eligible_at_ms);
+        }
+
+        pub fn dialFailed(self: *DialState, now_ms: u64, jitter: u16) void {
+            self.backoff(.dial, now_ms, jitter);
+        }
+
+        pub fn connectionClosed(self: *DialState, now_ms: u64, lifetime_ms: u64, jitter: u16) void {
+            if (lifetime_ms >= 300_000) self.failures = 0;
+            self.backoff(.connection, now_ms, jitter);
+        }
+
+        fn backoff(self: *DialState, stage: enum { dial, connection }, now_ms: u64, jitter: u16) void {
+            assert(jitter <= 1_000);
+            self.failures = @min(self.failures +| 1, 7);
+            const base: u64 = if (stage == .dial) 1_000 else 5_000;
+            const ceiling: u64 = if (stage == .dial) 60_000 else 300_000;
+            const delay = @min(base << @intCast(self.failures - 1), ceiling);
+            // Dial jitter fits inside its ceiling; established-connection jitter follows it.
+            const jittered = if (stage == .dial) @min(delay + jitter, ceiling) else delay + jitter;
+            self.deferUntil(now_ms +| jittered);
+        }
     };
     pub const Row = struct {
         free_link: lists.Link = .{},
@@ -690,11 +714,7 @@ pub const Catalog = struct {
                 row.reputation.deferRedial(now_ms, @import("goodbye.zig").cooldownMs(129));
             return;
         }
-        const lifetime = now_ms -| row.connected_at_ms;
-        if (lifetime >= 300_000) row.dial.failures = 0;
-        row.dial.failures = @min(row.dial.failures +| 1, 7);
-        const delay = @min(@as(u64, 5_000) << @intCast(row.dial.failures - 1), 300_000);
-        row.dial.eligible_at_ms = @max(row.dial.eligible_at_ms, now_ms +| delay +| (self.random.random().int(u16) % 1_001));
+        row.dial.connectionClosed(now_ms, now_ms -| row.connected_at_ms, self.random.random().int(u16) % 1_001);
         if (reason == .health_timeout or reason == .health_error) {
             self.remembered.forget(&row.identity);
             self.recordHealth(index, now_ms);

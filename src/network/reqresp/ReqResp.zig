@@ -54,20 +54,20 @@ const ForkEntry = types.ForkEntry;
 const InboundAdmission = @import("InboundAdmission.zig");
 
 pub const Options = struct {
-    peers: u16 = limits.connections_max_default,
+    connections: u16 = limits.connections_max_default,
     outbound_max: u16 = constants.outbound_max_default,
     /// Shared execution slots, including the control reserve.
-    inbound_max: u16 = constants.inbound_max_default,
+    serving_max: u16 = constants.serving_max_default,
     /// Two concurrent sync batches can each request blocks and sidecars.
     serving_per_peer_max: u8 = 2 * constants.MAX_CONCURRENT_REQUESTS,
     /// Nonzero partitions outbound slots between control and application requests.
     outbound_control_reserved: u16 = 0,
-    inbound_control_reserved: u16 = 0,
+    serving_control_reserved: u16 = 0,
     /// Zero preserves raw admission without an aggregate application limit.
-    outbound_per_peer_max: u8 = 0,
-    inbound_per_peer_max: u8 = constants.inbound_per_peer_max_default,
+    outbound_per_connection_max: u8 = 0,
+    inbound_per_connection_max: u8 = constants.inbound_per_connection_max_default,
     /// Concurrent application receivers per connection; zero disables the cap.
-    inbound_application_per_peer_max: u8 = 0,
+    inbound_application_per_connection_max: u8 = 0,
     /// Complete inbound request transfer and each response chunk within this duration.
     progress_timeout_ms: u64 = constants.progress_timeout_ms_default,
     forks: []const ForkEntry,
@@ -109,17 +109,17 @@ pub const Options = struct {
         if (options.outbound_max == 0 or options.outbound_max > constants.slots_ceiling) {
             return error.InvalidOptions;
         }
-        if (options.inbound_max == 0 or options.inbound_max > constants.slots_ceiling) {
+        if (options.serving_max == 0 or options.serving_max > constants.slots_ceiling) {
             return error.InvalidOptions;
         }
         if (options.outbound_control_reserved > options.outbound_max or
-            options.inbound_control_reserved > options.inbound_max) return error.InvalidOptions;
+            options.serving_control_reserved > options.serving_max) return error.InvalidOptions;
         const application_max = options.outbound_max - options.outbound_control_reserved;
-        if (options.outbound_per_peer_max > limits.peer_streams_bidi - outbound_stream_headroom or
-            options.outbound_per_peer_max > application_max) return error.InvalidOptions;
-        if (options.inbound_per_peer_max == 0 or options.peers == 0 or options.serving_per_peer_max == 0) return error.InvalidOptions;
-        if (options.inbound_application_per_peer_max > options.inbound_per_peer_max) return error.InvalidOptions;
-        if (options.peers > constants.slots_ceiling) return error.InvalidOptions;
+        if (options.outbound_per_connection_max > limits.peer_streams_bidi - outbound_stream_headroom or
+            options.outbound_per_connection_max > application_max) return error.InvalidOptions;
+        if (options.inbound_per_connection_max == 0 or options.connections == 0 or options.serving_per_peer_max == 0) return error.InvalidOptions;
+        if (options.inbound_application_per_connection_max > options.inbound_per_connection_max) return error.InvalidOptions;
+        if (options.connections > constants.slots_ceiling) return error.InvalidOptions;
         if (options.progress_timeout_ms == 0 or options.host_timeout_ms == 0 or
             options.quota_timeout_ms == 0 or options.work_per_pump_max == 0 or
             options.work_per_pump_max > 2 * constants.slots_ceiling) return error.InvalidOptions;
@@ -128,12 +128,12 @@ pub const Options = struct {
 };
 
 const Settings = struct {
-    peers: u16,
+    connections: u16,
     outbound_control_reserved: u16,
-    inbound_control_reserved: u16,
-    outbound_per_peer_max: u8,
-    inbound_per_peer_max: u8,
-    inbound_application_per_peer_max: u8,
+    serving_control_reserved: u16,
+    outbound_per_connection_max: u8,
+    inbound_per_connection_max: u8,
+    inbound_application_per_connection_max: u8,
     progress_timeout_ms: u64,
     host_timeout_ms: u64,
     quota_timeout_ms: u64,
@@ -184,7 +184,7 @@ pub const AcceptError = error{
     StaleHandle,
     InvalidHandoff,
     SlotsExhausted,
-    PeerSlotsExhausted,
+    ConnectionSlotsExhausted,
     UnknownProtocol,
 };
 
@@ -226,7 +226,7 @@ request_sinks: []u8,
 receive_layout: ReceiveLayout,
 serving: ServingPool,
 /// Indexed by slot id: outbound slots are `[0, outbound.len)`, and inbound slot `i` is
-/// `outbound.len + i`, which belongs to connection index `i / slots_per_peer`.
+/// `outbound.len + i`, which belongs to connection index `i / slots_per_connection`.
 links: []SlotLinks,
 /// Running slots whose next advance can progress without a new stream event.
 ready: index_list.List = .{},
@@ -310,23 +310,23 @@ pub fn inspectRequest(self: *const ReqResp, which: Protocol, bytes: []const u8, 
 pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
     try options.validate();
     const policy = try request_policy.Policy.init(&options.admission.policy);
-    var admission = try InboundAdmission.init(allocator, options.admission.limits, options.peers);
+    var admission = try InboundAdmission.init(allocator, options.admission.limits, options.connections);
     errdefer admission.deinit(allocator);
 
     const outbound = try allocator.alloc(Client, options.outbound_max);
     errdefer allocator.free(outbound);
     @memset(outbound, .{});
     const receive = ReceiveLayout.init(&policy);
-    const inbound = try allocator.alloc(Server, @as(usize, options.peers) * ReceiveLayout.slots_per_peer);
+    const inbound = try allocator.alloc(Server, @as(usize, options.connections) * ReceiveLayout.slots_per_connection);
     errdefer allocator.free(inbound);
     @memset(inbound, .{});
 
-    const request_sinks = try allocator.alloc(u8, @as(usize, options.peers) * receive.sink_bytes);
+    const request_sinks = try allocator.alloc(u8, @as(usize, options.connections) * receive.sink_bytes);
     errdefer allocator.free(request_sinks);
 
     const outbound_bytes = @as(usize, options.outbound_max - options.outbound_control_reserved) * RequestIO.bufferBytes(false) +
         @as(usize, options.outbound_control_reserved) * RequestIO.bufferBytes(true);
-    const inbound_bytes = @as(usize, options.peers) * receive.io_bytes;
+    const inbound_bytes = @as(usize, options.connections) * receive.io_bytes;
     const arena = try allocator.alloc(u8, outbound_bytes + inbound_bytes);
     errdefer allocator.free(arena);
     var cursor: usize = 0;
@@ -338,26 +338,26 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
     }
     assert(cursor == arena.len);
 
-    var serving = try ServingPool.init(allocator, options.inbound_max, options.inbound_control_reserved, options.serving_per_peer_max);
+    var serving = try ServingPool.init(allocator, options.serving_max, options.serving_control_reserved, options.serving_per_peer_max);
     errdefer serving.deinit(allocator);
     const links = try allocator.alloc(SlotLinks, outbound.len + inbound.len);
     errdefer allocator.free(links);
     @memset(links, .{});
     var deadlines = try DeadlineHeap.init(allocator, @intCast(links.len));
     errdefer deadlines.deinit(allocator);
-    const outbound_by_connection = try allocator.alloc(index_list.List, options.peers);
+    const outbound_by_connection = try allocator.alloc(index_list.List, options.connections);
     errdefer allocator.free(outbound_by_connection);
     @memset(outbound_by_connection, .{});
 
     var result: ReqResp = .{
         .allocator = allocator,
         .options = .{
-            .peers = options.peers,
+            .connections = options.connections,
             .outbound_control_reserved = options.outbound_control_reserved,
-            .inbound_control_reserved = options.inbound_control_reserved,
-            .outbound_per_peer_max = options.outbound_per_peer_max,
-            .inbound_per_peer_max = options.inbound_per_peer_max,
-            .inbound_application_per_peer_max = options.inbound_application_per_peer_max,
+            .serving_control_reserved = options.serving_control_reserved,
+            .outbound_per_connection_max = options.outbound_per_connection_max,
+            .inbound_per_connection_max = options.inbound_per_connection_max,
+            .inbound_application_per_connection_max = options.inbound_application_per_connection_max,
             .progress_timeout_ms = options.progress_timeout_ms,
             .host_timeout_ms = options.host_timeout_ms,
             .quota_timeout_ms = options.quota_timeout_ms,
@@ -438,7 +438,7 @@ pub fn request(
     const bounds = self.requestBounds(which);
     const identity = engine.peerId(conn) orelse return error.StaleHandle;
     try self.validateTransportCapacity(engine);
-    if (conn.index >= self.options.peers) return error.InvalidCapacity;
+    if (conn.index >= self.options.connections) return error.InvalidCapacity;
     inline for (.{ "negotiation", "request", "response" }) |field| {
         const duration = @field(request_options.timeouts, field);
         if (duration.nanoseconds <= 0 or duration.nanoseconds > std.Io.Duration.fromSeconds(60).nanoseconds) return error.InvalidRequestOptions;
@@ -452,8 +452,8 @@ pub fn request(
     if (self.outboundProtocolPendingCount(conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
         return error.TooManyRequests;
     }
-    if (!which.isControl() and self.options.outbound_per_peer_max > 0 and
-        self.outboundApplicationOccupiedCount(conn) >= self.options.outbound_per_peer_max)
+    if (!which.isControl() and self.options.outbound_per_connection_max > 0 and
+        self.outboundApplicationOccupiedCount(conn) >= self.options.outbound_per_connection_max)
         return error.TooManyRequests;
     const index = self.availableOutboundFor(which) orelse return error.SlotsExhausted;
     const slot = &self.outbound[index];
@@ -490,9 +490,14 @@ pub fn negotiationResult(self: *ReqResp, router: *Router, engine: *Engine, outco
     }
     switch (outcome.result) {
         .ready => |selection| _ = self.accept(engine, outcome.stream, selection, now) catch |err| {
-            if (err == error.ProtocolConcurrency) {
-                const message = std.fmt.comptimePrint("Rate limited: already {d} active requests for this protocol", .{constants.MAX_CONCURRENT_REQUESTS});
-                var wire: [codec.encodedLengthMax(message.len)]u8 = undefined;
+            const refusal: ?[]const u8 = switch (err) {
+                error.ProtocolConcurrency => std.fmt.comptimePrint("Rate limited: already {d} active requests for this protocol", .{constants.MAX_CONCURRENT_REQUESTS}),
+                error.TooManyRequests => "Rate limited: identity capacity exhausted",
+                error.ConnectionSlotsExhausted, error.SlotsExhausted => "Rate limited: connection receive capacity exhausted",
+                else => null,
+            };
+            if (refusal) |message| {
+                var wire: [codec.encodedLengthMax(codec.error_message_max)]u8 = undefined;
                 const response = codec.encodeChunk(constants.result_rate_limited, null, message, &wire) catch unreachable;
                 if (router.finishSelected(engine, outcome.stream, response, now)) return;
             }
@@ -643,7 +648,7 @@ pub fn errorMessage(self: *const ReqResp, handle: RequestHandle) []const u8 {
 /// Reads may latch failures, so the cleanup barrier runs even outside pump.
 pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *Router, conn: Handle, now: Now) ?u64 {
     defer self.cleanupPending(engine, router);
-    if (conn.index >= self.options.peers) return null;
+    if (conn.index >= self.options.connections) return null;
     const first = ReceiveLayout.first(conn.index, .goodbye_v1);
     for (first..first + constants.MAX_CONCURRENT_REQUESTS) |position| {
         const index: u16 = @intCast(position);
@@ -657,7 +662,7 @@ pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *Router, conn: Ha
 
 /// Fails the connection's slots: its outbound list and its inbound block of the receive layout.
 pub fn connectionClosed(self: *ReqResp, conn: Handle, now: Now) void {
-    if (conn.index >= self.options.peers) return;
+    if (conn.index >= self.options.connections) return;
     const list = &self.outbound_by_connection[conn.index];
     var cursor = list.head;
     for (0..self.outbound.len) |_| {
@@ -669,7 +674,7 @@ pub fn connectionClosed(self: *ReqResp, conn: Handle, now: Now) void {
         slot.fail(self, index, .connection_closed, now);
     }
     const first = ReceiveLayout.first(conn.index, @enumFromInt(0));
-    for (first..first + ReceiveLayout.slots_per_peer) |position| {
+    for (first..first + ReceiveLayout.slots_per_connection) |position| {
         const index: u16 = @intCast(position);
         const slot = &self.inbound[index];
         if (!slot.request.awaitingTerminal() or !std.meta.eql(slot.request.conn, conn)) continue;
@@ -768,7 +773,7 @@ pub fn schedule(self: *const ReqResp, capacities: Capacities) types.Schedule {
 
 /// Checks that the receive layout covers every possible transport connection.
 pub fn validateTransportCapacity(self: *const ReqResp, engine: *const Engine) error{InvalidCapacity}!void {
-    if (engine.limits.connections_max > self.options.peers) return error.InvalidCapacity;
+    if (engine.limits.connections_max > self.options.connections) return error.InvalidCapacity;
 }
 
 fn inboundId(self: *const ReqResp, index: u16) u32 {
@@ -1149,7 +1154,7 @@ fn inboundSlot(self: *ReqResp, handle: RequestHandle) ?*Server {
 
 pub fn outboundProtocolPendingCount(self: *const ReqResp, conn: Handle, which: Protocol) u8 {
     var count: u8 = 0;
-    var cursor = if (conn.index < self.options.peers) self.outbound_by_connection[conn.index].head else index_list.none;
+    var cursor = if (conn.index < self.options.connections) self.outbound_by_connection[conn.index].head else index_list.none;
     for (0..self.outbound.len) |_| {
         if (cursor == index_list.none) break;
         const slot = &self.outbound[cursor];
@@ -1163,7 +1168,7 @@ pub fn outboundProtocolPendingCount(self: *const ReqResp, conn: Handle, which: P
 
 pub fn outboundApplicationOccupiedCount(self: *const ReqResp, conn: Handle) u16 {
     var count: u16 = 0;
-    var cursor = if (conn.index < self.options.peers) self.outbound_by_connection[conn.index].head else index_list.none;
+    var cursor = if (conn.index < self.options.connections) self.outbound_by_connection[conn.index].head else index_list.none;
     for (0..self.outbound.len) |_| {
         if (cursor == index_list.none) break;
         const slot = &self.outbound[cursor];
@@ -1176,8 +1181,8 @@ pub fn outboundApplicationOccupiedCount(self: *const ReqResp, conn: Handle) u16 
 
 /// The connection's block of the receive layout.
 fn inboundOf(self: *const ReqResp, conn: Handle) []const Server {
-    if (conn.index >= self.options.peers) return &.{};
-    return self.inbound[ReceiveLayout.first(conn.index, @enumFromInt(0))..][0..ReceiveLayout.slots_per_peer];
+    if (conn.index >= self.options.connections) return &.{};
+    return self.inbound[ReceiveLayout.first(conn.index, @enumFromInt(0))..][0..ReceiveLayout.slots_per_connection];
 }
 
 pub fn inboundApplicationOccupiedCount(self: *const ReqResp, conn: Handle) u16 {

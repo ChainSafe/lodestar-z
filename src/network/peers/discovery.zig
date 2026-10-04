@@ -5,6 +5,7 @@ const std = @import("std");
 const d = @import("discv5");
 const adapter = @import("enr.zig");
 const types = @import("types.zig");
+const control_values = @import("../control_values.zig");
 const advertisement = @import("../advertisement.zig");
 
 const Storage = struct {
@@ -14,12 +15,6 @@ const Storage = struct {
 };
 
 pub const Discovery = struct {
-    pub const ForkSchedule = struct {
-        fulu_scheduled: bool = false,
-        next_version: [4]u8 = @splat(0),
-        next_epoch: u64 = std.math.maxInt(u64),
-        next_digest: [4]u8 = @splat(0),
-    };
     /// Lookup queries touch many one-off nodes. Idle expiry keeps the discv5 session store at recent
     /// contacts instead of pinning it at capacity; routing-table peers are revalidated every 300 s.
     pub const discovery_session_capacity: usize = 2_048;
@@ -112,7 +107,7 @@ pub const Discovery = struct {
     lookup_published: u64 = 0,
     empty_lookups: u3 = 0,
 
-    pub fn init(self: *Discovery, allocator: std.mem.Allocator, io: std.Io, options: Config, buffers: @import("udp").Sockets.Buffers, host: *const @import("../wire/keys.zig").KeyPair, local: *const types.LocalState, fork_schedule: ForkSchedule, quic: [2]?types.Address, now_ms: u64) !void {
+    pub fn init(self: *Discovery, allocator: std.mem.Allocator, io: std.Io, options: Config, buffers: @import("udp").Sockets.Buffers, host: *const @import("../wire/keys.zig").KeyPair, local: *const types.LocalState, fork_schedule: control_values.ForkSchedule, quic: [2]?types.Address, now_ms: u64) !void {
         var sockets = try @import("udp").Sockets.bind(io, options.bind);
         errdefer sockets.close(io);
         @import("../configuration.zig").requestBuffers(&sockets, io, buffers, .network_discovery);
@@ -276,7 +271,7 @@ pub const Discovery = struct {
     /// Supports hosts that drive this owner's Transport themselves. Consume every result exactly
     /// once before another Transport advance, including results containing failure. The host answers
     /// TALK requests itself; advance supplies the unsupported-protocol response. No slice escapes.
-    pub fn consume(self: *Discovery, progress: *const d.Transport.StepResult, expiries: []const d.CallTable.Expired, out: []adapter.Candidate) Result {
+    pub fn consume(self: *Discovery, progress: *const d.Transport.AdvanceResult, expiries: []const d.CallTable.Expired, out: []adapter.Candidate) Result {
         std.debug.assert(expiries.len == progress.calls_expired and expiries.len <= d.CallTable.capacity_max);
         var result = Result{ .datagrams = @intFromBool(progress.datagram != .timeout), .cancelled = progress.cancelled, .failure = if (progress.failure) |failure| .{ .cause = failure.cause, .stage = failure.stage } else null };
         if (self.stopped) return result;
@@ -369,7 +364,7 @@ pub const Discovery = struct {
         if (started.failure) |err| if (err != error.DestinationUnreachable) return err;
     }
 
-    fn consumeEvent(self: *Discovery, progress: *const d.Transport.StepResult, out: []adapter.Candidate, result: *Result) void {
+    fn consumeEvent(self: *Discovery, progress: *const d.Transport.AdvanceResult, out: []adapter.Candidate, result: *Result) void {
         switch (progress.event) {
             .response, .failed => {},
             else => return,
@@ -466,7 +461,7 @@ pub const Discovery = struct {
     }
 };
 
-pub fn advertisementFor(local: *const types.LocalState, schedule: Discovery.ForkSchedule, endpoints: advertisement.Endpoints) adapter.LocalAdvertisement {
+pub fn advertisementFor(local: *const types.LocalState, schedule: control_values.ForkSchedule, endpoints: advertisement.Endpoints) adapter.LocalAdvertisement {
     return .{
         .fork = .{ .digest = local.fork.digest, .next_version = schedule.next_version, .next_epoch = schedule.next_epoch },
         .next_fork_digest = if (schedule.fulu_scheduled or local.fork.fork.gte(.fulu)) schedule.next_digest else null,

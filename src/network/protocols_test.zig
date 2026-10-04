@@ -12,8 +12,8 @@ const protobuf = @import("gossipsub/protobuf.zig");
 fn rrOptions() !@import("protocols.zig").Protocols.Options {
     return .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
         .outbound_max = 4,
-        .inbound_max = 4,
-        .inbound_per_peer_max = 4,
+        .serving_max = 4,
+        .inbound_per_connection_max = 4,
         .forks = &.{},
         .admission = try rr.ReqResp.Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 4),
     } };
@@ -84,7 +84,7 @@ test "protocol stack handles native stream events past empty request capacity" {
     var client = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
         .forks = &.{},
         .outbound_max = 64,
-        .inbound_max = 64,
+        .serving_max = 64,
         .work_per_pump_max = 1,
         .admission = try rr.ReqResp.Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 64),
     } }, &pair.client);

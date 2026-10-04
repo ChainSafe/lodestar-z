@@ -128,7 +128,7 @@ function incoming(name = "start") {
     finish: vi.fn(() => Promise.resolve()),
     name,
     peerId: "peer",
-    protocol: "/eth2/beacon_chain/req/ping/1/ssz_snappy",
+    protocol: "/eth2/beacon_chain/req/ping/1/ssz_snappy" as const,
     ready: vi.fn(() => Promise.resolve()),
     respond: vi.fn(() => Promise.resolve()),
     retainUntil: vi.fn((_retired: Promise<void>): void => undefined),
@@ -158,11 +158,13 @@ function fixture() {
     fail: vi.fn((site: string, _reason: string): never => {
       throw new Escalated(site);
     }),
-    scheduler: null as unknown,
+    get scheduler(): TurnScheduler {
+      return scheduler;
+    },
     state: "running",
   };
   // The pump outlives every test, so its turns never drain without it.
-  runtime.scheduler = new TurnScheduler(runtime);
+  const scheduler = new TurnScheduler(runtime);
   const host = {
     capacity: vi.fn((): {ordinary: boolean; serving: number} | null => ({ordinary: true, serving: 32})),
     checkDependencies: vi.fn((checks: readonly DependencyCheck[]): readonly boolean[] => checks.map(() => true)),

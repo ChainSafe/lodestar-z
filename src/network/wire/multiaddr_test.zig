@@ -67,3 +67,14 @@ test "multiaddr rejects unsupported shapes" {
     const parsed = try multiaddr.Multiaddr.parse("/ip4/1.2.3.4/udp/1/quic-v1");
     try std.testing.expectError(error.BufferTooSmall, parsed.encode(&small));
 }
+
+test "multiaddr rejects IPv6 interface scope without losing endpoint identity" {
+    var endpoint = try multiaddr.Multiaddr.parse("/ip6/fe80::1/udp/9000/quic-v1");
+    endpoint.address.ip6.interface = 7;
+    var binary: [multiaddr.binary_length_max]u8 = undefined;
+    var text: [multiaddr.text_length_max]u8 = undefined;
+    try std.testing.expectError(error.InvalidMultiaddr, endpoint.encode(&binary));
+    try std.testing.expectError(error.InvalidMultiaddr, endpoint.toText(&text));
+    try std.testing.expectEqual(@as(u32, 7), endpoint.address.ip6.interface);
+    try std.testing.expectError(error.InvalidMultiaddr, multiaddr.Multiaddr.parse("/ip6/fe80::1%7/udp/9000/quic-v1"));
+}

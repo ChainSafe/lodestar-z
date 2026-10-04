@@ -48,7 +48,13 @@ test("metrics are available through startup and remain readable after close", as
     );
     expect(metrics.get("lodestar_native_gossip_expired_executing")).toBe(0);
     expect(metrics.get('lodestar_native_gossip_processor_items{kind="beacon_block",state="queued"}')).toBe(0);
-    for (const reason of ["peer_capacity", "protocol_concurrency", "peer_quota", "global_quota", "identity_capacity"]) {
+    for (const reason of [
+      "connection_capacity",
+      "protocol_concurrency",
+      "peer_quota",
+      "global_quota",
+      "identity_capacity",
+    ]) {
       expect(metrics.get(`lodestar_native_reqresp_admission_refusals_total{method="status",reason="${reason}"}`)).toBe(
         0
       );

@@ -112,7 +112,7 @@ fn statusVerdict(local: *const t.LocalState, remote: *const t.Status, slot: u64)
     var bytes: [w.status_size_max]u8 = undefined;
     const len = try w.encodeStatus(protocol, remote, &bytes);
     const request: rr.ReqResp.RequestHandle = .{ .index = 0, .generation = 1, .direction = .inbound };
-    control.requested(&catalog, peer, &.{ .request = request, .peer = conn, .protocol = protocol, .bytes = bytes[0..len] }, local, now, slot);
+    control.requested(&catalog, peer, &.{ .request = request, .conn = conn, .protocol = protocol, .bytes = bytes[0..len] }, local, now, slot);
     const snapshot = catalog.get(peer).?;
     if (snapshot.disconnect_reason) |reason| {
         try std.testing.expect(snapshot.status == null);

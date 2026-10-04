@@ -182,7 +182,7 @@ pub const ControlProtocol = struct {
             unreachable;
         };
         response.peer = peer;
-        response.conn = event.peer;
+        response.conn = event.conn;
         const len: usize = switch (event.protocol) {
             .status_v1, .status_v2 => wire.encodeStatus(event.protocol, &local.status, &response.bytes) catch {
                 _ = reqresp.cancel(event.request, now);

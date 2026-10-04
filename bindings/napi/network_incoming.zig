@@ -445,7 +445,7 @@ pub fn captureLocked(runtime: *Runtime, event: rr.ReqResp.Event, now: n.Now) !vo
 fn admitLocked(runtime: *Runtime, request: @FieldType(rr.ReqResp.Event, "request"), now: n.Now) !void {
     const table = &runtime.incoming.?;
     const core = &runtime.heavy.?.core;
-    const identity = core.peerIdentity(request.peer) orelse {
+    const identity = core.peerIdentity(request.conn) orelse {
         _ = core.cancelRequest(request.request, now);
         return;
     };
@@ -462,7 +462,7 @@ fn admitLocked(runtime: *Runtime, request: @FieldType(rr.ReqResp.Event, "request
     try table.allocate(token, request.bytes);
     const cell = table.get(token).?;
     cell.identity = identity;
-    cell.connection = request.peer;
+    cell.connection = request.conn;
     cell.handle = request.request;
     cell.native = true;
     cell.serving = core.retainServing(request.request) orelse unreachable;

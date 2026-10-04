@@ -43,3 +43,12 @@ test "each address family resolves pins and listener ports independently" {
     try std.testing.expectEqual(@as(?u16, 443), plan.endpoints.udp6);
     try std.testing.expectEqual(@as(?u16, 19001), plan.endpoints.quic6);
 }
+
+test "advertisement never drops a listener IPv6 scope when copying its address" {
+    const scoped: [2]?Address = .{ null, .{ .ip6 = .{ .octets = .{ 0x20, 1 } ++ .{0} ** 13 ++ .{1}, .port = 9000, .interface = 7 } } };
+    try std.testing.expectError(error.InvalidAdvertisement, ad.resolve(null, &.{}, &scoped, &scoped));
+    const fixed: ad.Endpoints = .{ .ip6 = .{ 0x20, 1 } ++ .{0} ** 13 ++ .{2} };
+    const resolved = try ad.resolve(null, &fixed, &scoped, &scoped);
+    try std.testing.expectEqual(fixed.ip6, resolved.endpoints.ip6);
+    try std.testing.expectEqual(@as(?u16, 9000), resolved.endpoints.udp6);
+}
