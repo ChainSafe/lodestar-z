@@ -126,6 +126,6 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
       previous = handle;
     }
   } finally {
-    await Promise.all([client.close(), closedBy(native, settleOnly)]);
+    await Promise.all([client.stop(), closedBy(native, settleOnly)]);
   }
 }, 15000);

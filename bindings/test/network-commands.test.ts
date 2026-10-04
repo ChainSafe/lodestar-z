@@ -2,7 +2,7 @@ import {expect, test} from "vitest";
 import type {NativeNetworkApplicationRuntime} from "../src/network-runtime.js";
 import {applicationConfig, localIntent, startRuntime, topicName, unreachableConnect} from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
-import {startPeer} from "./utils/network-peer.js";
+import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
 
 const PUBLISH = {allowZeroPeers: true, ignoreDuplicate: true};
 
@@ -11,8 +11,9 @@ test("every command kind completes with its typed result", async () => {
   const remoteConfig = applicationConfig();
   remoteConfig.identitySecretKey[31] = 2;
   const runtime = startRuntime(config);
-  const remote = await startPeer(remoteConfig);
+  let remote: PeerRuntime | undefined;
   try {
+    remote = await startPeer(remoteConfig);
     const peer = await remote.identity;
     await remote.applyIntent(localIntent(remoteConfig), 100n);
     const sequence = expect.any(BigInt);
@@ -48,7 +49,7 @@ test("every command kind completes with its typed result", async () => {
     });
     expect(await runtime.disconnect(peer.peerId)).toBeUndefined();
   } finally {
-    await Promise.all([runtime.close(), remote.close()]);
+    await Promise.all([runtime.close(), remote?.stop()]);
   }
 }, 20000);
 

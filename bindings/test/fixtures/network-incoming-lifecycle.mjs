@@ -102,5 +102,5 @@ try {
   await pending;
   console.log("incoming-lifecycle", mode, "ok");
 } finally {
-  await Promise.allSettled([left?.close(), right?.close()]);
+  await Promise.allSettled([left?.stop(), right?.close()]);
 }

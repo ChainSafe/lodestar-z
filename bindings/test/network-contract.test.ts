@@ -148,7 +148,7 @@ test("a rejected response acknowledgement leaves the stream serving for later va
     await incoming.finish();
     expect(await stream.next()).toEqual({done: true, value: undefined});
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 20000);
 
@@ -192,6 +192,6 @@ test("a terminal while an acknowledgement is pending delivers the acknowledgemen
     expect(cancelled.order[1]).toBe("closed");
     await cancelled.first.catch(() => undefined);
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 20000);

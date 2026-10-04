@@ -22,6 +22,7 @@ export type PeerRuntime = Omit<
   readonly state: Promise<NativeNetworkApplicationRuntime["state"]>;
   request: NativeNetworkApplicationRuntime["request"];
   takeIncomingRequest(): Promise<NativeIncomingRequest | null>;
+  /** Closes the runtime and waits for the child process to exit. */
   stop(): Promise<void>;
 };
 
@@ -49,7 +50,10 @@ export async function startPeer(config: NativeApplicationConfig): Promise<PeerRu
     else request.resolve(message.value);
     if (pending.size === 0) child.channel?.unref();
   });
+  let didExit = false;
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   child.on("exit", (code, signal) => {
+    didExit = true;
     for (const request of pending.values()) {
       clearTimeout(request.timer);
       request.reject(new Error(`Network peer exited: ${code ?? signal}`));
@@ -61,7 +65,7 @@ export async function startPeer(config: NativeApplicationConfig): Promise<PeerRu
     child.kill();
   };
   process.once("exit", kill);
-  function call<T>(method: string, args: unknown[] = []): Promise<T> {
+  function call<T>(method: string, args: unknown[] = [], timeoutMs = 65000): Promise<T> {
     if (!child.connected) return Promise.reject(new Error("Network peer disconnected"));
     if (pending.size >= 256) return Promise.reject(new Error("Network peer command capacity"));
     const id = ++sequence;
@@ -71,10 +75,39 @@ export async function startPeer(config: NativeApplicationConfig): Promise<PeerRu
         pending.delete(id);
         reject(new Error(`Network peer timeout: ${method}`));
         child.kill();
-      }, 65000);
+      }, timeoutMs);
       pending.set(id, {reject, resolve: (value) => resolve(value as T), timer});
       child.send({args, id, method});
     });
+  }
+  async function terminate(): Promise<void> {
+    if (didExit) return;
+    child.ref();
+    child.kill();
+    const killTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
+    let exitTimer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        exited,
+        new Promise<never>((_, reject) => {
+          exitTimer = setTimeout(() => reject(new Error("Network peer did not exit")), 5000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(killTimer);
+      clearTimeout(exitTimer);
+    }
+  }
+  let stopping: Promise<void> | undefined;
+  function stop(): Promise<void> {
+    stopping ??= (async () => {
+      try {
+        if (child.connected) await call("close", [], 5000);
+      } finally {
+        await terminate();
+      }
+    })();
+    return stopping;
   }
   try {
     const identity = await call<NativeIdentity>("initialize", [config, configuredChain()]);
@@ -102,14 +135,7 @@ export async function startPeer(config: NativeApplicationConfig): Promise<PeerRu
           },
         };
       },
-      async stop() {
-        try {
-          await call("close");
-        } finally {
-          process.removeListener("exit", kill);
-          child.kill();
-        }
-      },
+      stop,
       async takeIncomingRequest(): Promise<NativeIncomingRequest | null> {
         const descriptor = await call<{
           id: number;
@@ -121,7 +147,7 @@ export async function startPeer(config: NativeApplicationConfig): Promise<PeerRu
         if (!descriptor) return null;
         const closed = call<void>("incomingClosed", [descriptor.id]);
         let retained = false;
-        const release = () => call<void>("incomingRelease", [descriptor.id]);
+        const release = () => (stopping ? Promise.resolve() : call<void>("incomingRelease", [descriptor.id]));
         const releaseUnretained = () => {
           if (!retained) return release();
         };
@@ -159,8 +185,7 @@ export async function startPeer(config: NativeApplicationConfig): Promise<PeerRu
       },
     }) as unknown as PeerRuntime;
   } catch (error) {
-    process.removeListener("exit", kill);
-    child.kill();
+    await terminate();
     throw error;
   }
 }

@@ -208,21 +208,56 @@ stockTest(
     const {runtime, peer, id} = await connected();
     try {
       const {payload} = await import("../../test/interop/codec.mjs");
+      runtime.setLogLevel("debug");
+      const logs: string[] = [];
+      async function requestEvent(event: "request_started" | "request_failed", handle?: string): Promise<string> {
+        let index = -1;
+        await expect
+          .poll(
+            () => {
+              logs.push(...runtime.drainLogs(32).records.map((record) => record.message));
+              expect(logs.length).toBeLessThan(128);
+              index = logs.findIndex(
+                (message) =>
+                  message.startsWith(`${event} direction=outbound `) &&
+                  message.includes("method=blocks_by_root_v2 ") &&
+                  (handle === undefined || message.includes(` request=${handle} `))
+              );
+              return index;
+            },
+            {timeout: 5000}
+          )
+          .toBeGreaterThanOrEqual(0);
+        const message = logs.splice(index, 1)[0];
+        if (event === "request_failed") expect(message).toContain("phase=response reason=host_timeout ");
+        const matched = message.match(/ request=(\d+:\d+) /);
+        if (!matched) throw Error(`Missing native request handle: ${message}`);
+        return matched[1];
+      }
+
       const copied = runtime.request(id, BLOCKS, new Uint8Array(64), {responseTimeoutMs: 100});
       const held = await copied.next();
-      await new Promise((resolve) => setTimeout(resolve, 180));
-
+      const copiedHandle = await requestEvent("request_started");
+      await requestEvent("request_failed", copiedHandle);
       await expect(copied.next()).rejects.toMatchObject({
         code: "NetworkRequestFailed",
         phase: "response",
         reason: "host_timeout",
       });
-      expect(held.value.data).toEqual(Uint8Array.from(payload(4000, 71)));
+
       const queued = runtime.request(id, BLOCKS, new Uint8Array(64), {responseTimeoutMs: 100});
-      await new Promise((resolve) => setTimeout(resolve, 180));
+      const queuedHandle = await requestEvent("request_started");
+      await requestEvent("request_failed", queuedHandle);
+      await peer.command("scenario", {length: 4096, scenario: "chunks"});
       const replacement = runtime.request(id, BLOCKS, new Uint8Array(64));
-      expect((await replacement.next()).value.data).toEqual(Uint8Array.from(payload(4000, 71)));
+      expect((await replacement.next()).value.data).toEqual(Uint8Array.from(payload(4096, 71)));
+      const replacementHandle = await requestEvent("request_started");
+      const [queuedIndex, queuedGeneration] = queuedHandle.split(":");
+      const [replacementIndex, replacementGeneration] = replacementHandle.split(":");
+      expect(replacementIndex).toBe(queuedIndex);
+      expect(BigInt(replacementGeneration)).toBeGreaterThan(BigInt(queuedGeneration));
       await replacement.return?.();
+      expect(held.value.data).toEqual(Uint8Array.from(payload(4000, 71)));
       expect((await queued.next()).value.data).toEqual(Uint8Array.from(payload(4000, 71)));
       await expect(queued.next()).rejects.toMatchObject({phase: "response", reason: "host_timeout"});
     } finally {
@@ -467,9 +502,11 @@ test.skipIf(!NATIVE_PEER)(
       const id = peerIdFromHex(remote.peer);
       await runtime.connect(id, [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: Number(parts[4])}], 5000n);
       // The peer must serve the control exchange, not only the request below.
-      for (let i = 0; i < 500 && !(await runtime.getPeers()).peers[0]?.metadata; i++)
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      expect((await runtime.getPeers()).peers[0]?.metadata).not.toBeNull();
+      await expect
+        .poll(async () => (await runtime.getPeers()).peers.find((peer) => peer.identity === id)?.metadata ?? null, {
+          timeout: 5000,
+        })
+        .not.toBeNull();
       const stream = runtime.request(id, "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy", rangeRequest());
       const first = await stream.next();
       expect(first.value.fork).toBe("deneb");
@@ -579,9 +616,15 @@ stockTest(
 /** A pair whose in-process runtime requests from a child peer, which serves each request the test takes from it. */
 async function servedPair() {
   const pair = await incomingPair();
-  const {waitFor} = await import("../../test/interop/child.mjs");
-  await waitFor(async () => (await pair.right.getPeers()).peers[0]?.status != null);
-  return {...pair, peer: pair.identity.peerId};
+  try {
+    await expect
+      .poll(async () => (await pair.right.getPeers()).peers[0]?.status ?? null, {timeout: 10000})
+      .not.toBeNull();
+    return {...pair, peer: pair.identity.peerId};
+  } catch (error) {
+    await Promise.allSettled([pair.left.stop(), pair.right.close()]);
+    throw error;
+  }
 }
 
 /**
@@ -628,7 +671,7 @@ test("a final chunk waits for a delayed pull, and an outcome that arrives with n
     expect(await timed.next()).toEqual(done);
     expect(value?.data).toEqual(chunk(9));
   } finally {
-    await Promise.all([left.close(), right.close()]);
+    await Promise.all([left.stop(), right.close()]);
   }
 }, 20000);
 
@@ -673,7 +716,7 @@ test("a return racing a delivered chunk or a pending pull settles the pull first
     expect(settled).toEqual(["pull", "return"]);
   } finally {
     holdSettling(right, false);
-    await Promise.all([left.close(), right.close()]);
+    await Promise.all([left.stop(), right.close()]);
   }
 }, 20000);
 
@@ -703,7 +746,7 @@ test("every return or throw shares the first retirement, which settles after the
     await expect(ended.next()).rejects.toMatchObject({reason: "disconnected"});
     await expect(ended.throw?.(value)).rejects.toBe(value);
   } finally {
-    await Promise.all([left.close(), right.close()]);
+    await Promise.all([left.stop(), right.close()]);
   }
 }, 20000);
 
@@ -727,7 +770,7 @@ test("close hands each unpulled request's outcome to its iterator, whose next pu
       expect(await stream.return?.()).toEqual(done);
     }
   } finally {
-    await Promise.all([left.close(), right.close()]);
+    await Promise.all([left.stop(), right.close()]);
   }
 }, 20000);
 

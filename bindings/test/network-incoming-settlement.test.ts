@@ -83,7 +83,7 @@ test("a serving start the binding cannot wrap is cancelled alone while the drain
     expect(await right.close()).toEqual({reason: "requested"});
   } finally {
     facades.failures = 0;
-    await Promise.allSettled([left.close(), right.close()]);
+    await Promise.allSettled([left.stop(), right.close()]);
   }
 }, 20000);
 

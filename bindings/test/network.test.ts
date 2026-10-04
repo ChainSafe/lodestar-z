@@ -450,7 +450,7 @@ it("initializes signed discovery without waiting for bootstrap reachability", as
       const secondIdentity = await second.identity;
       expect(secondIdentity.localEnr).toBeInstanceOf(Uint8Array);
     } finally {
-      await second.close();
+      await second.stop();
     }
   } finally {
     await first.close();

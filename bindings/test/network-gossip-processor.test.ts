@@ -212,7 +212,7 @@ test("native processor retains dependencies, protects blocks, batches ready work
       .toBe(1);
     expect(exchange(pair.right, {...settleOnly, checks: 64}).checks).toEqual([]);
   } finally {
-    await Promise.allSettled([pair.left.close(), pair.right.close()]);
+    await Promise.allSettled([pair.left.stop(), pair.right.close()]);
   }
 }, 30000);
 
@@ -266,6 +266,6 @@ test("expired validation execution remains visible until late host completion", 
     for (let i = 0; i < 1000 && pair.right.getMetrics().includes(expiredSample); i++) await delay(5);
     expect(pair.right.getMetrics()).toContain("lodestar_native_gossip_expired_executing 0\n");
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 20000);

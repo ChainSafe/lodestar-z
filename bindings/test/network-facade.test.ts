@@ -94,7 +94,7 @@ async function facadeWithPeers(
     ]);
     return {network, peers, remote};
   } catch (error) {
-    await Promise.allSettled([network?.close(), ...peers.map((peer) => peer.close())]);
+    await Promise.allSettled([network?.close(), ...peers.map((peer) => peer.stop())]);
     throw error;
   }
 }
@@ -180,7 +180,7 @@ test("a job's deferred handler runs only after the owner applied its verdicts, a
     await vi.waitFor(() => expect(failures).toEqual([{byte: COUNT, code: "NetworkClosed"}]));
     expect(handled).toHaveLength(COUNT);
   } finally {
-    await Promise.allSettled([network.close(), ...peers.map((peer) => peer.close())]);
+    await Promise.allSettled([network.close(), ...peers.map((peer) => peer.stop())]);
   }
 }, 60000);
 
@@ -221,7 +221,7 @@ test("reports resolve through expiry and cell reuse", async () => {
     expect(accepted()).toBe(10);
     expect(failures).toEqual([]);
   } finally {
-    await Promise.allSettled([network.close(), publisher.close()]);
+    await Promise.allSettled([network.close(), publisher.stop()]);
   }
 }, 60000);
 
@@ -252,7 +252,7 @@ test("serving capacity stays charged after the stream closes until serve settles
     await expect.poll(retiring, {timeout: 5000}).toBe(0);
   } finally {
     retire();
-    await Promise.allSettled([network.close(), client.close()]);
+    await Promise.allSettled([network.close(), client.stop()]);
   }
 }, 30000);
 
@@ -286,7 +286,7 @@ test("a serve that outlives the network's close retires quietly after it", async
     await pending;
   } finally {
     retire();
-    await Promise.allSettled([network.close(), client.close()]);
+    await Promise.allSettled([network.close(), client.stop()]);
   }
 }, 30000);
 
@@ -322,7 +322,7 @@ test.each([
     expect(await network.closed).toEqual({error: failure, reason: "failed"});
     if (mode === "after the host's cleanup") await expect(cleanup).resolves.toMatchObject({peers: expect.any(Array)});
   } finally {
-    await Promise.allSettled([network?.close(), peer.close()]);
+    await Promise.allSettled([network?.close(), peer.stop()]);
   }
 }, 30000);
 

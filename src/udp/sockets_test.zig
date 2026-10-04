@@ -200,9 +200,9 @@ test "UDP records the kernel's socket buffer sizes and receive drops after a req
     const largest: Sockets.Buffers = .{ .receive = Sockets.Buffers.bytes_max, .send = Sockets.Buffers.bytes_max };
     const short = sockets.requestBuffers(std.testing.io, largest);
     const full: u64 = if (os == .linux) 2 * @as(u64, Sockets.Buffers.bytes_max) else Sockets.Buffers.bytes_max;
-    for (plain.values, sockets.buffers, short) |socket, reported, below| {
-        try std.testing.expect(reported.?.receive.? >= try kernelSize(socket.?.handle, std.posix.SO.RCVBUF));
-        try std.testing.expect(reported.?.send.? >= try kernelSize(socket.?.handle, std.posix.SO.SNDBUF));
+    for (sockets.values, sockets.buffers, short) |socket, reported, below| {
+        try std.testing.expectEqual(try kernelSize(socket.?.handle, std.posix.SO.RCVBUF), reported.?.receive.?);
+        try std.testing.expectEqual(try kernelSize(socket.?.handle, std.posix.SO.SNDBUF), reported.?.send.?);
         try std.testing.expectEqual(reported.?.receive.? < full or reported.?.send.? < full, below);
     }
     try std.testing.expectEqual([2]?Sockets.Buffers.Reported{ null, null }, plain.buffers);

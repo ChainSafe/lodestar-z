@@ -1,15 +1,15 @@
-const schedule_test_support = @import("../schedule_test_support.zig");
-const gossip_test = @import("test_support.zig");
+const schedule_test_support = @import("schedule_test_support.zig");
+const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
-const Service = @import("../service.zig").Service;
-const topic_mod = @import("topic.zig");
-const Engine = @import("../quic/Engine.zig");
-const support = @import("../quic/test_support.zig");
+const Service = @import("service.zig").Service;
+const topic_mod = @import("gossipsub/topic.zig");
+const Engine = @import("quic/Engine.zig");
+const support = @import("quic/test_support.zig");
 
 const digest = topic_mod.ForkDigest{ 0x6a, 0x95, 0xa1, 0xa9 };
-const heartbeat = @import("constants.zig").heartbeat_interval_ms;
+const heartbeat = @import("gossipsub/constants.zig").heartbeat_interval_ms;
 
-const Pair = @import("test_pair.zig").Pair;
+const Pair = @import("gossipsub/test_pair.zig").Pair;
 
 test "gossipsub service composes the mesh and delivers a message" {
     var setup: Pair = .{};
@@ -65,7 +65,7 @@ test "gossipsub service does not retry a closed outbound stream" {
 }
 
 test "gossipsub direct send timeout retries once after a bounded delay" {
-    const driver = @import("session_io.zig");
+    const driver = @import("gossipsub/session_io.zig");
     const Recovery = enum { resume_stream, negotiation_timeout, remove_direct };
     for ([_]Recovery{ .resume_stream, .negotiation_timeout, .remove_direct }) |recovery| {
         var setup: Pair = .{};
@@ -112,7 +112,7 @@ test "gossipsub direct send timeout retries once after a bounded delay" {
         } else {
             if (recovery == .negotiation_timeout) {
                 try std.testing.expectEqual(started + 1, g.counters.negotiation_started);
-                setup.shared.pair.advance(@import("../negotiate.zig").Negotiator.negotiate_timeout_ms + 1);
+                setup.shared.pair.advance(@import("negotiate.zig").Negotiator.negotiate_timeout_ms + 1);
                 _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
             }
             try std.testing.expect(g.sessions.rows[index].outbound == .none);
@@ -126,7 +126,7 @@ test "gossipsub direct send timeout retries once after a bounded delay" {
 
 fn propose(pair: *support.Pair, conn: Engine.Handle, version: []const u8, payload: []const u8) !Engine.StreamHandle {
     const stream = try pair.client.openStream(conn);
-    const dialer = try @import("../wire/multistream.zig").Dialer.init(version);
+    const dialer = try @import("wire/multistream.zig").Dialer.init(version);
     var bytes: [512]u8 = undefined;
     const hello = try dialer.initialWrite(&bytes);
     @memcpy(bytes[hello.len..][0..payload.len], payload);
@@ -147,9 +147,9 @@ test "gossipsub replacement resets a partial frame and keeps directional version
     const first = try propose(&setup.shared.pair, setup.shared.handles.client, "/meshsub/1.1.0", &.{ 0x80, 0x01, 0x08 });
     for (0..8) |_| try setup.pumpOnce();
     try std.testing.expectEqual(@as(?usize, 128), setup.shared.server.gossipsub.sessions.rows[index].io.reader.declaredLen());
-    try std.testing.expectEqual(@import("sessions.zig").Version.v1_2, setup.shared.server.gossipsub.sessions.rows[index].outbound.live.version);
+    try std.testing.expectEqual(@import("gossipsub/sessions.zig").Version.v1_2, setup.shared.server.gossipsub.sessions.rows[index].outbound.live.version);
     var bytes: [160]u8 = undefined;
-    const protobuf = @import("protobuf.zig");
+    const protobuf = @import("gossipsub/protobuf.zig");
     var writer = protobuf.Writer.init(&bytes);
     writer.varint(protobuf.subscriptionSize(topic));
     protobuf.writeSubscription(&writer, true, topic);
@@ -164,7 +164,7 @@ test "gossipsub service negotiates with a v1.1-only peer" {
     try setup.init();
     defer setup.deinit();
     setup.shared.server.deinit();
-    setup.shared.server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .admission = try @import("../reqresp/ReqResp.zig").Options.Admission.defaults(&@import("../reqresp/policy_fixture.zig").config(), 4, 4, 1) }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } }, &setup.shared.pair.server);
+    setup.shared.server = try @import("service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .admission = try @import("reqresp/ReqResp.zig").Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 4, 4, 1) }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } }, &setup.shared.pair.server);
     setup.shared.server_inbox.attach(setup.shared.server.gossipsub);
     _ = setup.shared.server.gossipsub.peerConnected(&setup.shared.pair.server, setup.shared.handles.server, false, setup.shared.pair.now);
     for (0..24) |_| try setup.pumpOnce();
@@ -172,8 +172,8 @@ test "gossipsub service negotiates with a v1.1-only peer" {
     const server_index = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
     try std.testing.expect(setup.shared.client.gossipsub.sessions.outStream(client_index) != null);
     try std.testing.expect(setup.shared.server.gossipsub.sessions.outStream(server_index) != null);
-    try std.testing.expectEqual(@import("sessions.zig").Version.v1_1, setup.shared.client.gossipsub.sessions.rows[client_index].outbound.live.version);
-    try std.testing.expectEqual(@import("sessions.zig").Version.v1_1, setup.shared.server.gossipsub.sessions.rows[server_index].outbound.live.version);
+    try std.testing.expectEqual(@import("gossipsub/sessions.zig").Version.v1_1, setup.shared.client.gossipsub.sessions.rows[client_index].outbound.live.version);
+    try std.testing.expectEqual(@import("gossipsub/sessions.zig").Version.v1_1, setup.shared.server.gossipsub.sessions.rows[server_index].outbound.live.version);
 }
 
 test "gossipsub service subscribes only after negotiation and retirement cancels the router" {
@@ -191,7 +191,7 @@ test "gossipsub service subscribes only after negotiation and retirement cancels
     setup.shared.pair.advance(6);
     _ = setup.shared.client.gossipsub.pump(&setup.shared.client.router, &setup.shared.pair.client, setup.shared.pair.now);
     try std.testing.expect(setup.shared.client.gossipsub.admitted(setup.shared.handles.client));
-    @import("session_io.zig").retirePeer(setup.shared.client.gossipsub, &setup.shared.client.router, &setup.shared.pair.client, index);
+    @import("gossipsub/session_io.zig").retirePeer(setup.shared.client.gossipsub, &setup.shared.client.router, &setup.shared.pair.client, index);
     try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.shared.client.router.schedule(16), setup.shared.pair.now.millis()));
     try std.testing.expect(setup.shared.pair.client.peerId(setup.shared.handles.client) != null);
 }
@@ -228,11 +228,11 @@ test "gossipsub service ignores stale outcomes after connection and peer slot re
     }, setup.shared.pair.now);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.shared.pair.now, .{});
     try std.testing.expectEqual(live, setup.shared.client.gossipsub.sessions.outStream(index).?);
-    try std.testing.expectEqual(@import("sessions.zig").Version.v1_2, setup.shared.client.gossipsub.sessions.rows[index].outbound.live.version);
+    try std.testing.expectEqual(@import("gossipsub/sessions.zig").Version.v1_2, setup.shared.client.gossipsub.sessions.rows[index].outbound.live.version);
     const peer = setup.shared.client.gossipsub.peers.rows[setup.shared.client.gossipsub.sessions.rows[index].logical.index];
     try std.testing.expectEqual(setup.shared.pair.client.peerId(handles.client).?, peer.identity);
     try std.testing.expectEqual(setup.shared.pair.client.direction(handles.client).?, peer.direction);
-    try std.testing.expectEqual(@import("peer_book.zig").normalize(setup.shared.pair.client.peerAddress(handles.client).?), peer.address);
+    try std.testing.expectEqual(@import("gossipsub/peer_book.zig").normalize(setup.shared.pair.client.peerAddress(handles.client).?), peer.address);
 }
 
 test "gossipsub service detects an idle stop and reopens only on a new inbound stream" {
@@ -259,7 +259,7 @@ test "gossipsub service detects an idle stop and reopens only on a new inbound s
     try std.testing.expectEqual(started, setup.shared.client.gossipsub.counters.negotiation_started);
     try std.testing.expect(setup.shared.client.gossipsub.sessions.outStream(client_index) == null);
     const stream = try setup.shared.pair.server.openStream(setup.shared.handles.server);
-    const dialer = try @import("../wire/multistream.zig").Dialer.init("/meshsub/1.2.0");
+    const dialer = try @import("wire/multistream.zig").Dialer.init("/meshsub/1.2.0");
     var hello_buffer: [512]u8 = undefined;
     const hello = try dialer.initialWrite(&hello_buffer);
     try std.testing.expectEqual(hello.len, try setup.shared.pair.server.write(stream, hello, false));
@@ -298,8 +298,8 @@ test "gossipsub service preserves a remotely half-closed outbound stream without
 }
 
 fn compositionAllocationPrefix(allocator: std.mem.Allocator) !void {
-    const resolved = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = @import("../reqresp/policy_fixture.zig").config() });
-    var service = try Service.init(allocator, .{ .reqresp = resolved.core.service.reqresp, .gossipsub = resolved.core.service.gossipsub, .router = .{ .negotiations_max = 2 } }, &try @import("../service_test_support.zig").fixtureLocal(.{}));
+    const resolved = try @import("configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
+    var service = try Service.init(allocator, .{ .reqresp = resolved.core.service.reqresp, .gossipsub = resolved.core.service.gossipsub, .router = .{ .negotiations_max = 2 } }, &try @import("service_test_support.zig").fixtureLocal(.{}));
     defer service.deinit();
     try std.testing.expectEqual(@as(usize, 12), service.gossipsub.sessions.rows.len);
     try std.testing.expectEqual(@as(usize, 2), service.router.negotiator.entries.len);
@@ -314,9 +314,9 @@ test "gossipsub rejected negotiation stays terminal without new inbound evidence
     try setup.init();
     defer setup.deinit();
     setup.shared.client.router.deinit();
-    setup.shared.client.router = try @import("../router.zig").Router.init(std.testing.allocator, .{ .meshsub_versions = &.{.v1_2} });
+    setup.shared.client.router = try @import("router.zig").Router.init(std.testing.allocator, .{ .meshsub_versions = &.{.v1_2} });
     setup.shared.server.router.deinit();
-    setup.shared.server.router = try @import("../router.zig").Router.init(std.testing.allocator, .{ .meshsub_versions = &.{.v1_1} });
+    setup.shared.server.router = try @import("router.zig").Router.init(std.testing.allocator, .{ .meshsub_versions = &.{.v1_1} });
     for (0..32) |_| try setup.pumpOnce();
     try std.testing.expectEqual(@as(u64, 1), setup.shared.client.gossipsub.counters.negotiation_started);
     const index = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
@@ -336,7 +336,7 @@ test "gossipsub negotiation timeout releases resources without creating a retry 
     setup.shared.client.gossipsub.markDirect(setup.shared.handles.client);
     try gossip_test.subscribe(setup.shared.client.gossipsub, "/eth2/6a95a1a9/beacon_block/ssz_snappy");
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
-    setup.shared.pair.advance(@import("../negotiate.zig").Negotiator.negotiate_timeout_ms + 1);
+    setup.shared.pair.advance(@import("negotiate.zig").Negotiator.negotiate_timeout_ms + 1);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(setup.shared.client.router.schedule(16), setup.shared.pair.now.millis()) == null);

@@ -30,7 +30,7 @@ export async function incomingPair(
     await left.connect(remote.peerId, [remote.localEndpoint], 5000n);
     return {identity, left, leftConfig, remote, right, rightConfig};
   } catch (error) {
-    await Promise.allSettled([left?.close(), right?.close()]);
+    await Promise.allSettled([left?.stop(), right?.close()]);
     throw error;
   }
 }
