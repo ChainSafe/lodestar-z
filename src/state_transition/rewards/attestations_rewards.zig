@@ -40,7 +40,6 @@ const AttestationsPenalty = struct {
 /// while an empty slice selects none. Serialize with other EpochTransitionCache borrowers.
 pub fn computeAttestationsRewards(
     allocator: std.mem.Allocator,
-    io: std.Io,
     state: *CachedBeaconState,
     validator_indices: ?[]const u64,
 ) !AttestationsRewards {
@@ -48,7 +47,7 @@ pub fn computeAttestationsRewards(
     if (fork == .phase0) return error.AttestationsRewardsUnsupportedFork;
     if (validator_indices) |indices| std.debug.assert(std.sort.isSorted(u64, indices, {}, std.sort.asc(u64)));
 
-    var cache = try EpochTransitionCache.init(allocator, io, state.config, state.epoch_cache, state.state);
+    var cache = try EpochTransitionCache.init(allocator, state.config, state.epoch_cache, state.state);
     defer cache.deinit();
 
     const max_balance: u64 = if (fork.gte(.electra)) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;

@@ -1715,7 +1715,7 @@ pub fn computeAttestationsRewards(self: *BeaconStateView, validator_ids: ?js.Val
     if (cached_state.state.forkSeq() == .phase0) return error.AttestationsRewardsUnsupportedFork;
     const filters = try parseAttestationRewardFilters(allocator, validator_ids);
     defer if (filters) |indices| allocator.free(indices);
-    const rewards = try st.computeAttestationsRewards(allocator, js.io(), cached_state, filters);
+    const rewards = try st.computeAttestationsRewards(allocator, cached_state, filters);
     defer rewards.deinit(allocator);
 
     const env = js.env();
