@@ -73,8 +73,8 @@ pub const ValidatorFlatCache = struct {
         return self.fields.len;
     }
 
-    pub fn byteSize(self: *const ValidatorFlatCache) usize {
-        return self.len() * (5 * @sizeOf(u64) + @sizeOf(ValidatorFields.Bits));
+    pub fn capacityInBytes(self: *const ValidatorFlatCache) usize {
+        return @TypeOf(self.fields).capacityInBytes(self.fields.capacity);
     }
 
     /// Bring the cache in line with the validators list rooted at `root`.

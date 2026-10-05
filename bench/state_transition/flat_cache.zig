@@ -169,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("cold fill: {d:.1} ms, patched={}, cache={d:.1} MiB\n", .{
             cold.us / 1000.0,
             cold.patched,
-            @as(f64, @floatFromInt(flat_cache.byteSize())) / (1024.0 * 1024.0),
+            @as(f64, @floatFromInt(flat_cache.capacityInBytes())) / (1024.0 * 1024.0),
         });
     }
 

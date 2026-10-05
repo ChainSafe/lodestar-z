@@ -336,9 +336,9 @@ pub const EpochTransitionCache = struct {
         if (fork_seq.gte(.electra)) {
             try reused_cache.is_compounding_validator_arr.resize(reused_cache.allocator, validator_count);
         }
-        const flat_entries = validator_flat_cache.entries.slice();
+        const cached_fields = validator_flat_cache.fields.slice();
         for (0..validator_count) |i| {
-            const validator = flat_entries.get(i);
+            const validator = cached_fields.get(i);
             var flag: u8 = 0;
 
             if (validator.bits.slashed) {

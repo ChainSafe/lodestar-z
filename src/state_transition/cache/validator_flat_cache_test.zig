@@ -13,11 +13,11 @@ const ValidatorFields = flat.ValidatorFields;
 pub fn countMismatches(cache: *const ValidatorFlatCache, root: Node.Id, list_len: usize) !usize {
     if (cache.len() != list_len) return std.math.maxInt(usize);
     var mismatches: usize = 0;
-    const entries = cache.entries.slice();
+    const fields = cache.fields.slice();
     var it = Node.DepthIterator.init(cache.pool, root, @intCast(flat.validators_depth), 0);
     for (0..list_len) |i| {
         const v = try Validator.tree.getValuePtr(try it.next(), cache.pool);
-        if (!std.meta.eql(entries.get(i), ValidatorFields.fromValidator(v))) mismatches += 1;
+        if (!std.meta.eql(fields.get(i), ValidatorFields.fromValidator(v))) mismatches += 1;
     }
     return mismatches;
 }
