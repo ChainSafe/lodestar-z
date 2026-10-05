@@ -81,7 +81,7 @@ storage are out of scope.
 | Fork choice | Blocks have passed full state transition, attestations have passed their applicable validation, external statuses are accurate, and local time is trusted. Fork choice still owns its specified ancestry, timing, vote, invalidation, and bound checks. |
 | Zig to native dependencies | Lodestar-z owns representation, cardinality, validation flags, pointer lifetime, and ABI compatibility. Pinned dependencies are trusted only within their documented contracts. |
 | Shared native state | Ownership, synchronization, bounds, worker visibility, and teardown must be defined for every shared pool or cache. |
-| Build and release | Dependency resolution, automation credentials, and artifact publication must preserve provenance from reviewed source to the published native addon. |
+| Build and release | Dependency resolution, automation credentials, and artifact publication must preserve provenance from reviewed source to the published native addon. Release jobs build and publish from one checkout using pinned inputs. Package assembly relies on the release runner, toolchains, and zapi honoring their contracts. |
 
 ## BeaconState trust
 

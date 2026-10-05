@@ -4,9 +4,6 @@ The native addon, zig-out/lib/bindings.node in the main package or bindings.node
 @chainsafe/lodestar-z-<target> platform package, statically links the components below. Each
 section names one component and reproduces its license and notices.
 
-scripts/lodestar_package_provenance.json in the lodestar-z repository records these components
-and scripts/lodestar_package_provenance.mjs checks this file against it.
-
 === zig:blst/blst: supranational/blst v0.3.16 (Apache-2.0)
 
                                  Apache License
