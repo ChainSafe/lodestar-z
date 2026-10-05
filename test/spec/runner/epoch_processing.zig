@@ -44,9 +44,9 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: std.mem.Allocator, dir: std.Io.Dir) !void {
             const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
-            var pool = try Node.Pool.init(allocator, pool_size);
+            var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
             defer pool.deinit();
 
             var tc = try Self.init(allocator, &pool, dir);
@@ -55,7 +55,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
@@ -77,7 +77,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
                 post.deinit();
                 self.pre.allocator.destroy(post);
             }
-            state_transition.deinitStateTransition();
+            state_transition.deinitReusedEpochTransitionCache();
         }
 
         fn runTest(self: *Self) !void {
@@ -122,12 +122,12 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
                 .participation_record_updates => try state_transition.processParticipationRecordUpdates(fork, fork_state),
                 .randao_mixes_reset => try state_transition.processRandaoMixesReset(fork, fork_state, &epoch_transition_cache),
                 .registry_updates => try state_transition.processRegistryUpdates(fork, config, epoch_cache, fork_state, &epoch_transition_cache),
-                .rewards_and_penalties => try state_transition.processRewardsAndPenalties(fork, allocator, config, epoch_cache, fork_state, &epoch_transition_cache, null),
-                .slashings => _ = try state_transition.processSlashings(fork, allocator, epoch_cache, fork_state, &epoch_transition_cache, true),
+                .rewards_and_penalties => try state_transition.processRewardsAndPenalties(fork, config, epoch_cache, fork_state, &epoch_transition_cache, null),
+                .slashings => _ = try state_transition.processSlashings(fork, epoch_cache, fork_state, &epoch_transition_cache, true),
                 .slashings_reset => try state_transition.processSlashingsReset(fork, epoch_cache, fork_state, &epoch_transition_cache),
                 .sync_committee_updates => try state_transition.processSyncCommitteeUpdates(fork, allocator, epoch_cache, fork_state),
                 .historical_summaries_update => try state_transition.processHistoricalSummariesUpdate(fork, fork_state, &epoch_transition_cache),
-                .pending_deposits => try state_transition.processPendingDeposits(fork, allocator, config, epoch_cache, fork_state, &epoch_transition_cache),
+                .pending_deposits => try state_transition.processPendingDeposits(fork, allocator, std.testing.io, config, epoch_cache, fork_state, &epoch_transition_cache),
                 .pending_consolidations => try state_transition.processPendingConsolidations(fork, epoch_cache, fork_state, &epoch_transition_cache),
                 .proposer_lookahead => {
                     try state_transition.processProposerLookahead(fork, allocator, epoch_cache, fork_state, &epoch_transition_cache);

@@ -14,9 +14,33 @@ pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST
         const bytes = try hex.hexToBytes(bytes_buf, yaml_bytes);
         out.* = ST.Type{ .data = bytes[0..ST.byte_length].* };
         return;
-    } else if (comptime ssz.isBitListType(ST)) {
-        const bytes_buf = try allocator.alloc(u8, ((ST.limit + 7) / 8) + 2);
+    } else if (comptime ST.kind == .compatible_union) {
+        const map = try y.docs.items[0].asMap();
+
+        // Parse selector field
+        y.docs.items[0] = map.get("selector").?;
+        const selector_str = try y.parse(allocator, []const u8);
+        const selector = try std.fmt.parseInt(u8, selector_str, 10);
+
+        // Parse data field based on selector
+        y.docs.items[0] = map.get("data").?;
+        inline for (ST._union_options) |option| {
+            const option_selector = option.@"0";
+            if (selector == option_selector) {
+                const option_type = option.@"1";
+                const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option_selector});
+
+                // Initialize union field and parse in-place to avoid intermediate copy
+                out.* = @unionInit(ST.Type, field_name, option_type.default_value);
+                try parseYaml(option_type, allocator, y, &@field(out.*, field_name));
+
+                return;
+            }
+        }
+        return error.InvalidSelector;
+    } else if (comptime ssz.isBitListType(ST) or ssz.isProgressiveBitListType(ST)) {
         const yaml_bytes = try y.parse(allocator, []const u8);
+        const bytes_buf = try allocator.alloc(u8, hex.hexByteLen(yaml_bytes));
         const data = try hex.hexToBytes(bytes_buf, yaml_bytes);
         // we need to find the padding bit to find the bit_len, and then remove it
         // do this manually, otherwise we're testing the deserialization codepath against itself
@@ -39,14 +63,14 @@ pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST
 
         out.* = bl;
         return;
-    } else if (ST.kind == .container) {
+    } else if (ST.kind == .container or ST.kind == .progressive_container) {
         const map = try y.docs.items[0].asMap();
         inline for (ST.fields) |field| {
             y.docs.items[0] = map.get(field.name).?;
             try parseYaml(field.type, allocator, y, &@field(out, field.name));
         }
         return;
-    } else if (ST.kind == .list) {
+    } else if (ST.kind == .list or ST.kind == .progressive_list) {
         if (comptime ssz.isByteListType(ST)) {
             const hex_bytes = try y.parse(allocator, []u8);
             const bytes_buf = try allocator.alloc(u8, (hex_bytes.len - 2) / 2);
@@ -125,19 +149,19 @@ pub fn parseYamlToJson(allocator: Allocator, y: yaml.Yaml.Value, writer: anytype
     }
 }
 
-pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_file_name: []const u8) !void {
+pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_file_name: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
+    const io = std.testing.io;
 
     // read expected root
 
-    const meta_file = try path.openFile(meta_file_name, .{});
-    defer meta_file.close();
+    const meta_bytes = try path.readFileAlloc(io, meta_file_name, allocator, .unlimited);
+
     const Meta = struct {
         root: []const u8,
     };
-    const meta_bytes = try meta_file.readToEndAlloc(allocator, 1_000);
 
     var meta_yaml = yaml.Yaml{ .source = meta_bytes };
     try meta_yaml.load(allocator);
@@ -147,36 +171,34 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
 
     // read yaml
 
-    const value_file = try path.openFile("value.yaml", .{});
-    defer value_file.close();
-    const value_bytes = try value_file.readToEndAlloc(allocator, 100_000_000);
+    const value_bytes = try path.readFileAlloc(io, "value.yaml", allocator, .unlimited);
 
     var value_yaml = yaml.Yaml{ .source = value_bytes };
     value_yaml.load(allocator) catch |e| {
-        value_yaml.parse_errors.renderToStdErr(.{ .ttyconf = .no_color });
+        value_yaml.parse_errors.renderToStderr(std.testing.io, .{}, .off) catch {};
         return e;
     };
 
     // read expected json
 
-    var expected_json = std.ArrayList(u8).init(allocator);
-    defer expected_json.deinit();
-    var write_stream = std.json.writeStream(expected_json.writer(), .{});
-    defer write_stream.deinit();
+    var expected_json_aw: std.Io.Writer.Allocating = .init(allocator);
+    defer expected_json_aw.deinit();
+    var write_stream: std.json.Stringify = .{ .writer = &expected_json_aw.writer };
 
     try parseYamlToJson(allocator, value_yaml.docs.items[0], &write_stream);
+
+    const expected_json = try expected_json_aw.toOwnedSlice();
+    defer allocator.free(expected_json);
 
     // read expected value
 
     const value_expected = try allocator.create(ST.Type);
-    value_expected.* = ST.default_value;
+    value_expected.* = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
     try parseYaml(ST, allocator, value_yaml, value_expected);
 
     // read expected serialized
 
-    const serialized_file = try path.openFile("serialized.ssz_snappy", .{});
-    defer serialized_file.close();
-    const serialized_snappy_bytes = try serialized_file.readToEndAlloc(allocator, 100_000_000);
+    const serialized_snappy_bytes = try path.readFileAlloc(io, "serialized.ssz_snappy", allocator, .unlimited);
 
     const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(serialized_snappy_bytes));
     const serialized_len = try snappy.uncompress(serialized_snappy_bytes, serialized_buf);
@@ -200,7 +222,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
         try ST.serialized.validate(serialized_expected);
 
         const value_actual = try allocator.create(ST.Type);
-        value_actual.* = ST.default_value;
+        value_actual.* = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
 
         if (comptime ssz.isFixedType(ST)) {
             try ST.deserializeFromBytes(serialized_expected, value_actual);
@@ -213,10 +235,9 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     // test serialization - value to json
 
     {
-        var serialized_actual = std.ArrayList(u8).init(allocator);
-        defer serialized_actual.deinit();
-        var write_stream_actual = std.json.writeStream(serialized_actual.writer(), .{});
-        defer write_stream_actual.deinit();
+        var aw_actual: std.Io.Writer.Allocating = .init(allocator);
+        defer aw_actual.deinit();
+        var write_stream_actual: std.json.Stringify = .{ .writer = &aw_actual.writer };
 
         if (comptime ssz.isFixedType(ST)) {
             try ST.serializeIntoJson(&write_stream_actual, value_expected);
@@ -224,15 +245,18 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
             try ST.serializeIntoJson(allocator, &write_stream_actual, value_expected);
         }
 
-        try std.testing.expectEqualSlices(u8, expected_json.items, serialized_actual.items);
+        const serialized_json_actual = try aw_actual.toOwnedSlice();
+        defer allocator.free(serialized_json_actual);
+
+        try std.testing.expectEqualSlices(u8, expected_json, serialized_json_actual);
     }
 
     // test deserialization - json to value
     {
         const value_actual = try allocator.create(ST.Type);
-        value_actual.* = ST.default_value;
+        value_actual.* = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
 
-        var scanner = std.json.Scanner.initCompleteInput(allocator, expected_json.items);
+        var scanner = std.json.Scanner.initCompleteInput(allocator, expected_json);
         defer scanner.deinit();
 
         if (comptime ssz.isFixedType(ST)) {
@@ -268,7 +292,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     try Hasher.hash(&hash_scratch, value_expected, &root_actual);
     try std.testing.expectEqualSlices(u8, &root_expected, &root_actual);
 
-    var pool = try Node.Pool.init(gpa, 1_000_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = gpa, .allocator = gpa, .pool_size = 1_000_000 });
     defer pool.deinit();
 
     // test conversion between tree and value
@@ -279,7 +303,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
         try std.testing.expectEqualSlices(u8, &root_expected, node.getRoot(&pool));
 
         const value_from_tree = try allocator.create(ST.Type);
-        value_from_tree.* = ST.default_value;
+        value_from_tree.* = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
 
         if (comptime ssz.isFixedType(ST)) {
             try ST.tree.toValue(node, &pool, value_from_tree);
@@ -304,16 +328,15 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     }
 }
 
-pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir) !void {
+pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
+    const io = std.testing.io;
 
     // read expected serialized
 
-    const serialized_file = try path.openFile("serialized.ssz_snappy", .{});
-    defer serialized_file.close();
-    const serialized_snappy_bytes = try serialized_file.readToEndAlloc(allocator, 1_000_000);
+    const serialized_snappy_bytes = try path.readFileAlloc(io, "serialized.ssz_snappy", allocator, .unlimited);
 
     const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(serialized_snappy_bytes));
     const serialized_len = try snappy.uncompress(serialized_snappy_bytes, serialized_buf);
@@ -323,9 +346,42 @@ pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir) !voi
 
     try std.testing.expectError(error.InvalidSSZ, validate(ST, serialized_expected));
 
-    var value_actual = ST.default_value;
+    var value_actual: ST.Type = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
 
     try std.testing.expectError(error.InvalidSSZ, deserialize(ST, allocator, serialized_expected, &value_actual));
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = gpa,
+        .allocator = gpa,
+        .pool_size = 1_000_000,
+    });
+    defer pool.deinit();
+
+    try std.testing.expectError(error.InvalidSSZ, deserializeTree(ST, &pool, serialized_expected));
+}
+
+fn deserializeTree(comptime ST: type, pool: *Node.Pool, serialized: []const u8) !void {
+    const node = ST.tree.deserializeFromBytes(pool, serialized) catch |err| switch (@as(anyerror, err)) {
+        error.OutOfMemory, error.PoolExhausted, error.RefCountOverflow => return err,
+        else => return error.InvalidSSZ,
+    };
+    defer pool.unref(node);
+}
+
+test "tree invalid-case normalization preserves resource errors" {
+    var pool = try Node.Pool.init(.{
+        .page_allocator = std.testing.allocator,
+        .allocator = std.testing.failing_allocator,
+        .pool_size = 0,
+    });
+    defer pool.deinit();
+
+    try std.testing.expectError(error.PoolExhausted, deserializeTree(ssz.BoolType(), &pool, &.{1}));
+    try std.testing.expectError(error.InvalidSSZ, deserializeTree(ssz.BoolType(), &pool, &.{2}));
+    try std.testing.expectError(
+        error.OutOfMemory,
+        deserializeTree(ssz.FixedProgressiveListType(ssz.BoolType()), &pool, &.{1}),
+    );
 }
 
 // Wrap validate with a single error type

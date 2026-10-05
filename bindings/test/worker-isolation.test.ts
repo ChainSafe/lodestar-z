@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import {Worker} from "node:worker_threads";
 import {describe, expect, it} from "vitest";
 import {PublicKey, SecretKey, Signature, verify} from "../src/blst.js";
+import {pubkeyCache} from "../src/pubkeys.js";
+import type {IsolationScenario} from "./fixtures/workerIsolation.js";
 
 /**
  * Tests that the per-context instance data (blst InstanceData) and
@@ -21,7 +23,7 @@ describe("worker isolation", () => {
     expect(verify(msg, pk, sig)).toBe(true);
 
     // 2. Spawn a worker that loads bindings, does blst work, then exits
-    const workerResult = await runWorker();
+    const workerResult = await runBlstWorker();
     expect(workerResult).toBe("ok");
 
     // 3. After the worker's env teardown + cleanup hooks have fired,
@@ -45,47 +47,65 @@ describe("worker isolation", () => {
     const sig = sk.sign(msg);
 
     for (let i = 0; i < 3; i++) {
-      const result = await runWorker();
+      const result = await runBlstWorker();
       expect(result).toBe("ok");
 
       // Main thread still works after each worker teardown
       expect(verify(msg, pk, sig)).toBe(true);
     }
   });
+
+  it("shares cache reads with workers but restricts administration to the control environment", async () => {
+    const ikm = new Uint8Array(32);
+    ikm[0] = 1;
+    const expected = SecretKey.fromKeygen(ikm).toPublicKey().toBytes();
+    pubkeyCache.reset();
+    pubkeyCache.append(0, expected);
+
+    const result = await runWorker<{
+      pubkey: Uint8Array;
+      save: string | null;
+      load: string | null;
+      reset: string | null;
+    }>("pubkeys");
+
+    expect(result).toEqual({
+      load: "PubkeyCacheControlEnvironmentOnly",
+      pubkey: expected,
+      reset: "PubkeyCacheControlEnvironmentOnly",
+      save: "PubkeyCacheControlEnvironmentOnly",
+    });
+    expect(pubkeyCache.size).toBe(1);
+    expect(pubkeyCache.getOrThrow(0).toBytes()).toEqual(expected);
+  });
 });
 
-const blstModulePath = new URL("../src/blst.js", import.meta.url).href;
+function runBlstWorker(): Promise<string> {
+  return runWorker("blst");
+}
 
-function runWorker(): Promise<string> {
+function runWorker<T>(scenario: IsolationScenario): Promise<T> {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(
-      `
-      import crypto from "node:crypto";
-      import {parentPort} from "node:worker_threads";
-      import {SecretKey, verify} from "${blstModulePath}";
+    let received = false;
+    let result: T;
+    const worker = new Worker(new URL("./fixtures/workerIsolation.ts", import.meta.url), {
+      execArgv: ["--import", "tsx"],
+      workerData: scenario,
+    });
 
-      try {
-        const sk = SecretKey.fromKeygen(crypto.randomBytes(32));
-        const pk = sk.toPublicKey();
-        const msg = crypto.randomBytes(32);
-        const sig = sk.sign(msg);
-
-        if (!verify(msg, pk, sig)) {
-          parentPort.postMessage("verify failed in worker");
-        } else {
-          parentPort.postMessage("ok");
-        }
-      } catch (e) {
-        parentPort.postMessage("error: " + e.message);
-      }
-      `,
-      {eval: true}
-    );
-
-    worker.on("message", resolve);
+    worker.on("message", (message: T) => {
+      received = true;
+      result = message;
+    });
     worker.on("error", reject);
     worker.on("exit", (code) => {
-      if (code !== 0) reject(new Error(`Worker exited with code ${code}`));
+      if (code !== 0) {
+        reject(new Error(`Worker exited with code ${code}`));
+      } else if (!received) {
+        reject(new Error("Worker exited without a result"));
+      } else {
+        resolve(result);
+      }
     });
   });
 }

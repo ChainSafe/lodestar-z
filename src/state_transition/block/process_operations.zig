@@ -1,7 +1,10 @@
 const std = @import("std");
+const metrics = @import("../metrics.zig");
+const time = @import("time");
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 const BeaconState = @import("fork_types").BeaconState;
 const BlockType = @import("fork_types").BlockType;
 const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
@@ -25,68 +28,135 @@ const ProcessBlockOpts = @import("./process_block.zig").ProcessBlockOpts;
 pub fn processOperations(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
+    proposer_rewards: *ProposerRewards,
     slashings_cache: *SlashingsCache,
     comptime block_type: BlockType,
     body: *const BeaconBlockBody(block_type, fork),
     opts: ProcessBlockOpts,
 ) !void {
-    // verify that outstanding deposits are processed up to the maximum number of deposits
-    const max_deposits = try getEth1DepositCount(fork, state, null);
+    // verify that outstanding deposits are processed up to the maximum number of deposits.
+    // Fulu removes support for the former (Eth1 bridge) deposit mechanism: `body.deposits` must be empty.
+    const max_deposits: u64 = if (comptime fork.gte(.fulu)) 0 else try getEth1DepositCount(fork, state, null);
     if (body.inner.deposits.items.len != max_deposits) {
         return error.InvalidDepositCount;
     }
 
     const current_epoch = epoch_cache.epoch;
 
-    for (body.inner.proposer_slashings.items) |*proposer_slashing| {
-        try processProposerSlashing(fork, allocator, config, epoch_cache, state, slashings_cache, proposer_slashing, opts.verify_signature);
-    }
-
-    for (body.inner.attester_slashings.items) |*attester_slashing| {
-        try processAttesterSlashing(
-            fork,
-            allocator,
-            config,
-            epoch_cache,
-            state,
-            slashings_cache,
-            current_epoch,
-            attester_slashing,
-            opts.verify_signature,
+    {
+        const timer = time.start(io);
+        for (body.inner.proposer_slashings.items) |*proposer_slashing| {
+            try processProposerSlashing(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, proposer_slashing, opts.verify_signature);
+        }
+        try metrics.state_transition.process_operations_step.observe(
+            .{ .step = .processProposerSlashing },
+            time.durationSeconds(time.since(io, timer)),
         );
     }
 
-    try processAttestations(fork, allocator, config, epoch_cache, state, slashings_cache, body.inner.attestations.items, opts.verify_signature);
-
-    for (body.inner.deposits.items) |*deposit| {
-        try processDeposit(fork, allocator, config, epoch_cache, state, deposit);
+    {
+        const timer = time.start(io);
+        for (body.inner.attester_slashings.items) |*attester_slashing| {
+            try processAttesterSlashing(
+                fork,
+                allocator,
+                io,
+                config,
+                epoch_cache,
+                state,
+                proposer_rewards,
+                slashings_cache,
+                current_epoch,
+                attester_slashing,
+                opts.verify_signature,
+            );
+        }
+        try metrics.state_transition.process_operations_step.observe(
+            .{ .step = .processAttesterSlashing },
+            time.durationSeconds(time.since(io, timer)),
+        );
     }
 
-    for (body.inner.voluntary_exits.items) |*voluntary_exit| {
-        try processVoluntaryExit(fork, config, epoch_cache, state, voluntary_exit, opts.verify_signature);
+    {
+        const timer = time.start(io);
+        try processAttestations(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, body.inner.attestations.items, opts.verify_signature);
+        try metrics.state_transition.process_operations_step.observe(
+            .{ .step = .processAttestations },
+            time.durationSeconds(time.since(io, timer)),
+        );
+    }
+
+    {
+        const timer = time.start(io);
+        for (body.inner.deposits.items) |*deposit| {
+            try processDeposit(fork, io, config, epoch_cache, state, deposit);
+        }
+        try metrics.state_transition.process_operations_step.observe(
+            .{ .step = .processDeposit },
+            time.durationSeconds(time.since(io, timer)),
+        );
+    }
+
+    {
+        const timer = time.start(io);
+        for (body.inner.voluntary_exits.items) |*voluntary_exit| {
+            try processVoluntaryExit(fork, io, config, epoch_cache, state, voluntary_exit, opts.verify_signature);
+        }
+        try metrics.state_transition.process_operations_step.observe(
+            .{ .step = .processVoluntaryExit },
+            time.durationSeconds(time.since(io, timer)),
+        );
     }
 
     if (comptime fork.gte(.capella)) {
+        const timer = time.start(io);
         for (body.inner.bls_to_execution_changes.items) |*bls_to_execution_change| {
             try processBlsToExecutionChange(fork, config, state, bls_to_execution_change);
         }
+        try metrics.state_transition.process_operations_step.observe(
+            .{ .step = .processBlsToExecutionChange },
+            time.durationSeconds(time.since(io, timer)),
+        );
     }
 
-    if (comptime fork.gte(.electra)) {
+    // Gloas (ePBS): execution_requests moved to ExecutionPayloadEnvelope
+    if (comptime fork.gte(.electra) and fork.lt(.gloas)) {
         const execution_requests = &body.inner.execution_requests;
-        for (execution_requests.deposits.items) |*deposit_request| {
-            try processDepositRequest(fork, state, deposit_request);
+        {
+            const timer = time.start(io);
+            for (execution_requests.deposits.items) |*deposit_request| {
+                try processDepositRequest(fork, state, deposit_request);
+            }
+            try metrics.state_transition.process_operations_step.observe(
+                .{ .step = .processDepositRequest },
+                time.durationSeconds(time.since(io, timer)),
+            );
         }
 
-        for (execution_requests.withdrawals.items) |*withdrawal_request| {
-            try processWithdrawalRequest(fork, config, epoch_cache, state, withdrawal_request);
+        {
+            const timer = time.start(io);
+            for (execution_requests.withdrawals.items) |*withdrawal_request| {
+                try processWithdrawalRequest(fork, io, config, epoch_cache, state, withdrawal_request);
+            }
+            try metrics.state_transition.process_operations_step.observe(
+                .{ .step = .processWithdrawalRequest },
+                time.durationSeconds(time.since(io, timer)),
+            );
         }
 
-        for (execution_requests.consolidations.items) |*consolidation_request| {
-            try processConsolidationRequest(fork, config, epoch_cache, state, consolidation_request);
+        {
+            const timer = time.start(io);
+            for (execution_requests.consolidations.items) |*consolidation_request| {
+                try processConsolidationRequest(fork, io, config, epoch_cache, state, consolidation_request);
+            }
+            try metrics.state_transition.process_operations_step.observe(
+                .{ .step = .processConsolidationRequest },
+                time.durationSeconds(time.since(io, timer)),
+            );
         }
     }
 }
@@ -96,8 +166,8 @@ const AnyBeaconBlock = @import("fork_types").AnyBeaconBlock;
 
 test "process operations" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    const pool_size = 180_000;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
@@ -109,9 +179,11 @@ test "process operations" {
     try processOperations(
         .electra,
         allocator,
+        std.testing.io,
         test_state.cached_state.config,
         test_state.cached_state.epoch_cache,
         try test_state.cached_state.state.tryCastToFork(.electra),
+        &test_state.cached_state.proposer_rewards,
         &test_state.cached_state.slashings_cache,
         .full,
         beacon_block.beaconBlockBody().castToFork(.full, .electra),

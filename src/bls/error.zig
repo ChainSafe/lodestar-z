@@ -1,6 +1,4 @@
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("root.zig").c;
 
 pub const BlstError = error{
     BadEncoding,
@@ -11,30 +9,22 @@ pub const BlstError = error{
     PkIsInfinity,
     BadScalar,
     MergeError,
+    EmptyAggregate,
+    TooManyItems,
+    InsufficientScratchSpace,
+    UnknownError,
 };
-
-pub fn intFromError(e: BlstError) c_uint {
-    return switch (e) {
-        BlstError.BadEncoding => c.BLST_BAD_ENCODING,
-        BlstError.PointNotOnCurve => c.BLST_POINT_NOT_ON_CURVE,
-        BlstError.PointNotInGroup => c.BLST_POINT_NOT_IN_GROUP,
-        BlstError.AggrTypeMismatch => c.BLST_AGGR_TYPE_MISMATCH,
-        BlstError.VerifyFail => c.BLST_VERIFY_FAIL,
-        BlstError.PkIsInfinity => c.BLST_PK_IS_INFINITY,
-        BlstError.BadScalar => c.BLST_BAD_SCALAR,
-        BlstError.MergeError => c.BLST_BAD_SCALAR + 1,
-    };
-}
 
 pub fn errorFromInt(err: c_uint) BlstError!void {
     switch (err) {
-        c.BLST_BAD_ENCODING => return BlstError.BadEncoding,
-        c.BLST_POINT_NOT_ON_CURVE => return BlstError.PointNotOnCurve,
-        c.BLST_POINT_NOT_IN_GROUP => return BlstError.PointNotInGroup,
-        c.BLST_AGGR_TYPE_MISMATCH => return BlstError.AggrTypeMismatch,
-        c.BLST_VERIFY_FAIL => return BlstError.VerifyFail,
-        c.BLST_PK_IS_INFINITY => return BlstError.PkIsInfinity,
-        c.BLST_BAD_SCALAR => return BlstError.BadScalar,
-        else => return,
+        c.BLST_SUCCESS => return,
+        c.BLST_BAD_ENCODING => return error.BadEncoding,
+        c.BLST_POINT_NOT_ON_CURVE => return error.PointNotOnCurve,
+        c.BLST_POINT_NOT_IN_GROUP => return error.PointNotInGroup,
+        c.BLST_AGGR_TYPE_MISMATCH => return error.AggrTypeMismatch,
+        c.BLST_VERIFY_FAIL => return error.VerifyFail,
+        c.BLST_PK_IS_INFINITY => return error.PkIsInfinity,
+        c.BLST_BAD_SCALAR => return error.BadScalar,
+        else => return error.UnknownError,
     }
 }

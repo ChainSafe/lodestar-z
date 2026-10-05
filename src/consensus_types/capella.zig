@@ -59,21 +59,21 @@ pub const Transactions = bellatrix.Transactions;
 pub const LightClientHeader = ssz.VariableContainerType(struct {
     beacon: BeaconBlockHeader,
     execution: ExecutionPayloadHeader,
-    execution_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.EXECUTION_PAYLOAD_GINDEX)),
+    execution_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.EXECUTION_PAYLOAD_GINDEX), .{}),
 });
 
 pub const LightClientBootstrap = ssz.VariableContainerType(struct {
     header: LightClientHeader,
     current_sync_committee: SyncCommittee,
-    current_sync_committee_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.CURRENT_SYNC_COMMITTEE_GINDEX)),
+    current_sync_committee_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.CURRENT_SYNC_COMMITTEE_GINDEX), .{}),
 });
 
 pub const LightClientUpdate = ssz.VariableContainerType(struct {
     attested_header: LightClientHeader,
     next_sync_committee: SyncCommittee,
-    next_sync_committee_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.NEXT_SYNC_COMMITTEE_GINDEX)),
+    next_sync_committee_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.NEXT_SYNC_COMMITTEE_GINDEX), .{}),
     finalized_header: LightClientHeader,
-    finality_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.FINALIZED_ROOT_GINDEX)),
+    finality_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.FINALIZED_ROOT_GINDEX), .{}),
     sync_aggregate: SyncAggregate,
     signature_slot: p.Slot,
 });
@@ -81,7 +81,7 @@ pub const LightClientUpdate = ssz.VariableContainerType(struct {
 pub const LightClientFinalityUpdate = ssz.VariableContainerType(struct {
     attested_header: LightClientHeader,
     finalized_header: LightClientHeader,
-    finality_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.FINALIZED_ROOT_GINDEX)),
+    finality_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.FINALIZED_ROOT_GINDEX), .{}),
     sync_aggregate: SyncAggregate,
     signature_slot: p.Slot,
 });
@@ -110,14 +110,14 @@ pub const SignedBLSToExecutionChange = ssz.FixedContainerType(struct {
     signature: p.BLSSignature,
 });
 
-pub const SignedBLSToExecutionChanges = ssz.FixedListType(SignedBLSToExecutionChange, preset.MAX_BLS_TO_EXECUTION_CHANGES);
+pub const SignedBLSToExecutionChanges = ssz.FixedListType(SignedBLSToExecutionChange, preset.MAX_BLS_TO_EXECUTION_CHANGES, .{});
 
 pub const HistoricalSummary = ssz.FixedContainerType(struct {
     block_summary_root: p.Root,
     state_summary_root: p.Root,
 });
 
-pub const Withdrawals = ssz.FixedListType(Withdrawal, preset.MAX_WITHDRAWALS_PER_PAYLOAD);
+pub const Withdrawals = ssz.FixedListType(Withdrawal, preset.MAX_WITHDRAWALS_PER_PAYLOAD, .{});
 
 pub const ExecutionPayload = ssz.VariableContainerType(struct {
     parent_hash: p.Bytes32,
@@ -181,14 +181,14 @@ pub const BlindedBeaconBlockBody = ssz.VariableContainerType(struct {
     randao_reveal: p.BLSSignature,
     eth1_data: Eth1Data,
     graffiti: p.Bytes32,
-    proposer_slashings: ssz.FixedListType(ProposerSlashing, preset.MAX_PROPOSER_SLASHINGS),
+    proposer_slashings: ssz.FixedListType(ProposerSlashing, preset.MAX_PROPOSER_SLASHINGS, .{}),
     attester_slashings: ssz.VariableListType(AttesterSlashing, preset.MAX_ATTESTER_SLASHINGS),
     attestations: ssz.VariableListType(Attestation, preset.MAX_ATTESTATIONS),
-    deposits: ssz.FixedListType(Deposit, preset.MAX_DEPOSITS),
-    voluntary_exits: ssz.FixedListType(SignedVoluntaryExit, preset.MAX_VOLUNTARY_EXITS),
+    deposits: ssz.FixedListType(Deposit, preset.MAX_DEPOSITS, .{}),
+    voluntary_exits: ssz.FixedListType(SignedVoluntaryExit, preset.MAX_VOLUNTARY_EXITS, .{}),
     sync_aggregate: SyncAggregate,
     execution_payload_header: ExecutionPayloadHeader,
-    bls_to_execution_changes: ssz.FixedListType(SignedBLSToExecutionChange, preset.MAX_BLS_TO_EXECUTION_CHANGES),
+    bls_to_execution_changes: ssz.FixedListType(SignedBLSToExecutionChange, preset.MAX_BLS_TO_EXECUTION_CHANGES, .{}),
 });
 
 pub const BlindedBeaconBlock = ssz.VariableContainerType(struct {
@@ -204,7 +204,7 @@ pub const SignedBlindedBeaconBlock = ssz.VariableContainerType(struct {
     signature: p.BLSSignature,
 });
 
-pub const HistoricalSummaries = ssz.FixedListType(HistoricalSummary, preset.HISTORICAL_ROOTS_LIMIT);
+pub const HistoricalSummaries = ssz.FixedListType(HistoricalSummary, preset.HISTORICAL_ROOTS_LIMIT, .{});
 
 pub const BeaconState = ssz.VariableContainerType(struct {
     genesis_time: p.Uint64,

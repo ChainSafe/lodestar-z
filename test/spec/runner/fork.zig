@@ -43,21 +43,21 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
 
         const Self = @This();
 
-        pub fn execute(allocator: Allocator, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: Allocator, dir: std.Io.Dir) !void {
             const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
-            var pool = try Node.Pool.init(allocator, pool_size);
+            var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
             defer pool.deinit();
 
             var tc = try Self.init(allocator, &pool, dir);
             defer {
                 tc.deinit();
-                state_transition.deinitStateTransition();
+                state_transition.deinitReusedEpochTransitionCache();
             }
 
             try tc.runTest();
         }
 
-        fn init(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+        fn init(allocator: Allocator, pool: *Node.Pool, dir: std.Io.Dir) !Self {
             const meta_fork = try loadTargetFork(allocator, dir);
             if (meta_fork != target_fork) return error.InvalidMetaFile;
 
@@ -159,16 +159,14 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
     };
 }
 
-fn loadTargetFork(allocator: Allocator, dir: std.fs.Dir) !ForkSeq {
-    var meta_file = try dir.openFile("meta.yaml", .{});
-    defer meta_file.close();
-    const contents = try meta_file.readToEndAlloc(allocator, 256);
+fn loadTargetFork(allocator: Allocator, dir: std.Io.Dir) !ForkSeq {
+    const contents = try dir.readFileAlloc(std.testing.io, "meta.yaml", allocator, .unlimited);
     defer allocator.free(contents);
 
     const key = "fork: ";
-    if (std.mem.indexOf(u8, contents, key)) |start| {
+    if (std.mem.find(u8, contents, key)) |start| {
         const after_key = contents[start + key.len ..];
-        const end = std.mem.indexOf(u8, after_key, "}") orelse return error.InvalidMetaFile;
+        const end = std.mem.find(u8, after_key, "}") orelse return error.InvalidMetaFile;
         const fork_slice = after_key[0..end];
         if (fork_slice.len == 0) return error.InvalidMetaFile;
         return ForkSeq.fromName(fork_slice);

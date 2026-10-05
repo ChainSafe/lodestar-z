@@ -7,6 +7,8 @@ const ExecutionPayload = @import("./execution_payload.zig").ExecutionPayload;
 const ExecutionPayloadHeader = @import("./execution_payload.zig").ExecutionPayloadHeader;
 
 pub fn SignedBeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
+    if (bt == .blinded and f.gte(.gloas)) @compileError("ePBS forks (gloas+) don't have blinded blocks");
+
     return struct {
         const Self = @This();
 
@@ -25,6 +27,8 @@ pub fn SignedBeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
 }
 
 pub fn BeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
+    if (bt == .blinded and f.gte(.gloas)) @compileError("ePBS forks (gloas+) don't have blinded blocks");
+
     return struct {
         const Self = @This();
 
@@ -55,6 +59,8 @@ pub fn BeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
 }
 
 pub fn BeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
+    if (bt == .blinded and f.gte(.gloas)) @compileError("ePBS forks (gloas+) don't have blinded blocks");
+
     return struct {
         const Self = @This();
 
@@ -81,6 +87,9 @@ pub fn BeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
             if (bt != .full) {
                 @compileError("executionPayload is only available for full blocks");
             }
+            if (f.gte(.gloas)) {
+                @compileError("executionPayload is not available for ePBS forks (gloas+)");
+            }
 
             return @ptrCast(&self.inner.execution_payload);
         }
@@ -88,6 +97,9 @@ pub fn BeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
         pub inline fn executionPayloadHeader(self: *const Self) *const ExecutionPayloadHeader(f) {
             if (bt != .blinded) {
                 @compileError("executionPayloadHeader is only available for blinded blocks");
+            }
+            if (f.gte(.gloas)) {
+                @compileError("executionPayloadHeader is not available for ePBS forks (gloas+)");
             }
 
             return @ptrCast(&self.inner.execution_payload_header);
@@ -107,6 +119,9 @@ pub fn BeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
         pub inline fn blobKzgCommitments(self: *const Self) []const [48]u8 {
             if (f.lt(.deneb)) {
                 @compileError("blobKzgCommitments is only available for deneb and later forks");
+            }
+            if (f.gte(.gloas)) {
+                @compileError("blobKzgCommitments is not available for ePBS forks (gloas+)");
             }
             return self.inner.blob_kzg_commitments.items;
         }

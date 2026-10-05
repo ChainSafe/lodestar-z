@@ -28,7 +28,7 @@ pub fn processSyncCommitteeUpdates(
 
         // Rotate syncCommittee cache
         // next_sync_committee_indices ownership is transferred to epoch_cache
-        try epoch_cache.rotateSyncCommitteeIndexed(allocator, &next_sync_committee_info.indices);
+        try epoch_cache.rotateSyncCommitteeIndexed(&next_sync_committee_info.indices);
     }
 }
 
@@ -36,8 +36,8 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "processSyncCommitteeUpdates - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    const pool_size = 200_000;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);

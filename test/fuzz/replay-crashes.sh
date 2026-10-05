@@ -12,7 +12,7 @@ FUZZ_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="${FUZZ_DIR}/zig-out/bin"
 AFL_OUT="${FUZZ_DIR}/afl-out"
 
-ssz_targets=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists)
+ssz_targets=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists ssz_chunked_leaf_set)
 bls_targets=(bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig)
 targets=("${ssz_targets[@]}" "${bls_targets[@]}")
 

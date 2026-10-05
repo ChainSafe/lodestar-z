@@ -23,13 +23,36 @@ pub fn RefCount(comptime T: type) type {
         /// the last remaining reference counted instance of T.
         ///
         /// Consumer should call unref() instead.
+        ///
+        /// Dispatches to either `T.deinit(self)` or `T.deinit(self, allocator)`
+        /// depending on the wrapped type's signature. This is needed because
+        /// 0.16 unmanaged ArrayList uses the 2-arg form while many project
+        /// types still expose the 1-arg form.
         fn deinit(self: *@This()) void {
-            self.instance.deinit();
+            const BaseT = switch (@typeInfo(T)) {
+                .pointer => |p| p.child,
+                else => T,
+            };
+            const deinit_params = @typeInfo(@TypeOf(BaseT.deinit)).@"fn".params;
+            if (comptime deinit_params.len > 1) {
+                self.instance.deinit(self.allocator);
+            } else {
+                self.instance.deinit();
+            }
             self.allocator.destroy(self);
         }
 
         pub fn get(self: *@This()) T {
             return self.instance;
+        }
+
+        /// Mutable access to the instance when the caller holds the only reference, else null.
+        ///
+        /// The caller must ensure exclusive access to `self` and its instance
+        /// for the lifetime of the returned pointer.
+        pub fn getMutIfUnique(self: *@This()) ?*T {
+            if (self._ref_count.load(.acquire) != 1) return null;
+            return &self.instance;
         }
 
         pub fn ref(self: *@This()) *@This() {
@@ -46,40 +69,6 @@ pub fn RefCount(comptime T: type) type {
     };
 }
 
-test "RefCount - *std.ArrayList(u32)" {
-    const allocator = std.testing.allocator;
-    const WrappedArrayList = RefCount(*std.ArrayList(u32));
-
-    var array_list = std.ArrayList(u32).init(allocator);
-    try array_list.append(1);
-    try array_list.append(2);
-
-    // ref_count = 1
-    var wrapped_array_list = try WrappedArrayList.init(allocator, &array_list);
-    // ref_count = 2
-    _ = wrapped_array_list.ref();
-
-    // ref_count = 1
-    wrapped_array_list.unref();
-    // ref_count = 0 ===> deinit
-    wrapped_array_list.unref();
-
-    // the test does not leak any memory because array_list.deinit() is automatically called
-}
-
-test "RefCount - std.ArrayList(u32)" {
-    const allocator = std.testing.allocator;
-    const WrappedArrayList = RefCount(std.ArrayList(u32));
-
-    // ref_count = 1
-    var wrapped_array_list = try WrappedArrayList.init(allocator, std.ArrayList(u32).init(allocator));
-    // ref_count = 2
-    _ = wrapped_array_list.ref();
-
-    // ref_count = 1
-    wrapped_array_list.unref();
-    // ref_count = 0 ===> deinit
-    wrapped_array_list.unref();
-
-    // the test does not leak any memory because array_list.deinit() is automatically called
+test {
+    _ = @import("ref_count_test.zig");
 }

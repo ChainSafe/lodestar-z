@@ -1,7 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
-const config = @import("config");
 const ForkSeq = @import("config").ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
 const BeaconState = @import("fork_types").BeaconState;
@@ -75,7 +74,7 @@ pub fn blockToHeader(allocator: Allocator, signed_block: AnySignedBeaconBlock, o
     out.proposer_index = block.proposerIndex();
     out.parent_root = block.parentRoot().*;
     out.state_root = block.stateRoot().*;
-    try block.hashTreeRoot(allocator, &out.body_root);
+    try block.beaconBlockBody().hashTreeRoot(allocator, &out.body_root);
 }
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
@@ -83,13 +82,13 @@ const preset = @import("preset").preset;
 
 test "process block header - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    const pool_size = 180_000;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
-    const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
+    const slot = try test_state.cached_state.state.slot();
 
     const proposers = test_state.cached_state.epoch_cache.proposers;
 

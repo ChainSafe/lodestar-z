@@ -21,20 +21,20 @@ pub fn Transition(comptime fork: ForkSeq) type {
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: std.mem.Allocator, dir: std.Io.Dir) !void {
             const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
-            var pool = try Node.Pool.init(allocator, pool_size);
+            var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
             defer pool.deinit();
 
             var tc = try Self.init(allocator, &pool, dir);
             defer {
                 tc.deinit();
-                state_transition.deinitStateTransition();
+                state_transition.deinitReusedEpochTransitionCache();
             }
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
@@ -42,16 +42,14 @@ pub fn Transition(comptime fork: ForkSeq) type {
             };
 
             // Load meta.yaml for blocks_count
-            var meta_file = try dir.openFile("meta.yaml", .{});
-            defer meta_file.close();
-            const meta_content = try meta_file.readToEndAlloc(allocator, 1024);
+            const meta_content = try dir.readFileAlloc(std.testing.io, "meta.yaml", allocator, .unlimited);
             defer allocator.free(meta_content);
             const meta_content_one_line = std.mem.trim(u8, meta_content, " \n");
             // sample content of meta.yaml: {post_fork: electra, fork_epoch: 2, blocks_count: 96, fork_block: 62}
             // Parse YAML for fork_epoch (simplified; assume "fork_epoch: N")
-            const fork_epoch = if (std.mem.indexOf(u8, meta_content_one_line, "fork_epoch: ")) |start| blk: {
+            const fork_epoch = if (std.mem.find(u8, meta_content_one_line, "fork_epoch: ")) |start| blk: {
                 const str = meta_content_one_line[start + "fork_epoch: ".len ..];
-                if (std.mem.indexOf(u8, str, ",")) |end| {
+                if (std.mem.find(u8, str, ",")) |end| {
                     const num_str = str[0..end];
                     break :blk std.fmt.parseInt(usize, std.mem.trim(u8, num_str, " "), 10) catch 1;
                 } else unreachable;
@@ -59,17 +57,17 @@ pub fn Transition(comptime fork: ForkSeq) type {
 
             // block_count could be ended with "," or "}"
             // for example: {post_fork: altair, fork_epoch: 6, blocks_count: 2}
-            const blocks_count = if (std.mem.indexOf(u8, meta_content_one_line, "blocks_count: ")) |start| blk: {
+            const blocks_count = if (std.mem.find(u8, meta_content_one_line, "blocks_count: ")) |start| blk: {
                 const str = meta_content_one_line[start + "blocks_count: ".len ..];
-                const end = std.mem.indexOf(u8, str, ",") orelse std.mem.indexOf(u8, str, "}") orelse unreachable;
+                const end = std.mem.find(u8, str, ",") orelse std.mem.find(u8, str, "}") orelse unreachable;
                 const num_str = str[0..end];
                 break :blk std.fmt.parseInt(usize, std.mem.trim(u8, num_str, " "), 10) catch 1;
             } else unreachable;
 
             // fork_block is optional
-            const fork_block_idx = if (std.mem.indexOf(u8, meta_content_one_line, "fork_block: ")) |start| blk: {
+            const fork_block_idx = if (std.mem.find(u8, meta_content_one_line, "fork_block: ")) |start| blk: {
                 const str = meta_content_one_line[start + "fork_block: ".len ..];
-                if (std.mem.indexOf(u8, str, "}")) |end| {
+                if (std.mem.find(u8, str, "}")) |end| {
                     const num_str = str[0..end];
                     break :blk std.fmt.parseInt(u64, std.mem.trim(u8, num_str, " "), 10) catch 0;
                 } else unreachable;
@@ -127,6 +125,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
                 }
                 const new_result = try state_transition.state_transition.stateTransition(
                     self.pre.allocator,
+                    std.testing.io,
                     input_cached_state,
                     beacon_block,
                     .{
@@ -134,6 +133,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
                         .verify_proposer = true,
                         .verify_signatures = true,
                     },
+                    null,
                 );
 
                 if (result) |res| {

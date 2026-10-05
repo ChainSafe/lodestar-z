@@ -39,9 +39,13 @@ ELECTRA_FORK_EPOCH: u64,
 // FULU (assuming it's a future fork, standard pattern)
 FULU_FORK_VERSION: [4]u8,
 FULU_FORK_EPOCH: u64,
+// GLOAS
+GLOAS_FORK_VERSION: [4]u8,
+GLOAS_FORK_EPOCH: u64,
 
 // Time parameters
 SECONDS_PER_SLOT: u64,
+SLOT_DURATION_MS: u64,
 SECONDS_PER_ETH1_BLOCK: u64,
 MIN_VALIDATOR_WITHDRAWABILITY_DELAY: u64,
 SHARD_COMMITTEE_PERIOD: u64,
@@ -62,6 +66,22 @@ PROPOSER_SCORE_BOOST: u64,
 REORG_HEAD_WEIGHT_THRESHOLD: u64,
 REORG_PARENT_WEIGHT_THRESHOLD: u64,
 REORG_MAX_EPOCHS_SINCE_FINALIZATION: u64,
+PROPOSER_REORG_CUTOFF_BPS: u64,
+
+// Timing (basis points of slot duration)
+ATTESTATION_DUE_BPS: u64,
+ATTESTATION_DUE_BPS_GLOAS: u64,
+
+// Gloas (EIP-7732)
+AGGREGATE_DUE_BPS_GLOAS: u64,
+SYNC_MESSAGE_DUE_BPS_GLOAS: u64,
+CONTRIBUTION_DUE_BPS_GLOAS: u64,
+PAYLOAD_DUE_BPS: u64,
+PAYLOAD_ATTESTATION_DUE_BPS: u64,
+MIN_BUILDER_WITHDRAWABILITY_DELAY: u64,
+CHURN_LIMIT_QUOTIENT_GLOAS: u64,
+CONSOLIDATION_CHURN_LIMIT_QUOTIENT: u64,
+MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS: u64,
 
 // Deposit contract
 DEPOSIT_CHAIN_ID: u64,
@@ -124,24 +144,19 @@ fn Optional(comptime T: type) type {
         @compileError("Optional can only be used with struct types");
     }
     const t_fields = type_info.@"struct".fields;
-    var optional_fields: [t_fields.len]std.builtin.Type.StructField = undefined;
+    var names: [t_fields.len][:0]const u8 = undefined;
+    var types: [t_fields.len]type = undefined;
+    var attrs: [t_fields.len]std.builtin.Type.StructField.Attributes = undefined;
     inline for (t_fields, 0..) |field, i| {
-        const optional_type = @Type(.{ .optional = .{ .child = field.type } });
-        optional_fields[i] = .{
-            .name = field.name,
-            .type = optional_type,
+        const optional_type = ?field.type;
+        names[i] = field.name;
+        types[i] = optional_type;
+        attrs[i] = .{
             .default_value_ptr = &@as(optional_type, null),
-            .is_comptime = false,
-            .alignment = field.alignment,
         };
     }
 
-    return @Type(.{ .@"struct" = .{
-        .layout = .auto,
-        .fields = &optional_fields,
-        .decls = &[_]std.builtin.Type.Declaration{},
-        .is_tuple = false,
-    } });
+    return @Struct(.auto, null, &names, &types, &attrs);
 }
 
 test merge {

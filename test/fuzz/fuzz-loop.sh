@@ -7,7 +7,7 @@ CORPUS_DIR="${FUZZ_DIR}/corpus"
 AFL_OUT="${FUZZ_DIR}/afl-out"
 LOGS_DIR="${FUZZ_DIR}/logs"
 
-SSZ_TARGETS=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists)
+SSZ_TARGETS=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists ssz_chunked_leaf_set)
 BLS_TARGETS=(bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig)
 ALL_TARGETS=("${SSZ_TARGETS[@]}" "${BLS_TARGETS[@]}")
 

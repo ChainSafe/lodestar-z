@@ -21,7 +21,7 @@ pub fn processPendingConsolidations(
     var pending_consolidations_it = pending_consolidations.iteratorReadonly(0);
     const pending_consolidations_length = try pending_consolidations.length();
     for (0..pending_consolidations_length) |_| {
-        const pending_consolidation = try pending_consolidations_it.nextValue(undefined);
+        const pending_consolidation = try pending_consolidations_it.nextValue();
         const source_index = pending_consolidation.source_index;
         const target_index = pending_consolidation.target_index;
         var source_validator = try validators.get(source_index);
@@ -61,8 +61,8 @@ const Node = @import("persistent_merkle_tree").Node;
 
 test "processPendingConsolidations - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    const pool_size = 200_000;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
