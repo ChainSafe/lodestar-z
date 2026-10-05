@@ -1,5 +1,4 @@
-# The Rust that builds quiche for every target, releases included; rust-src carries its standard library's notices.
+# The Rust toolchain used to build quiche.
 [toolchain]
 channel = "1.91.1"
-components = ["rust-src"]
 profile = "minimal"

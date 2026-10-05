@@ -12,21 +12,14 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  ZIG_VERSION: "0.16.0"
   NODE_VERSION: "24"
 
 jobs:
-  # Both publishing jobs publish these artifacts, built on the release image and qualified on every target.
-  bindings-platforms:
-    name: bindings platforms
-    permissions:
-      contents: read
-    uses: ./.github/workflows/bindings-platforms.yml
-
   # npm trusted publishing validates this caller's workflow filename, so keep
   # dev publishing behind this workflow rather than adding a separate trigger.
   publish-dev-bindings:
     name: publish dev bindings
-    needs: bindings-platforms
     permissions:
       contents: read
       id-token: write
@@ -47,7 +40,7 @@ jobs:
 
   publish-bindings:
     name: publish bindings
-    needs: [release-please, bindings-platforms]
+    needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     # [Lodestar CI] still runs on Ubuntu 22.04, which ships an incompatible GLIBC version
     # compared to ubuntu-latest runners.
@@ -73,19 +66,18 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
           cache: pnpm
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-22.04-${{ env.ZIG_VERSION }}
+      - name: Install Rust targets
+        run: |
+          rustup toolchain install
+          rustup target add $(node -p 'require("./package.json").zapi.targets.join(" ")')
       - name: Install dependencies
         run: |
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Download qualified artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: bindings-artifacts
-          path: artifacts
-      - name: Download the qualification evidence
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: qualification-*
-          path: qualification
       - name: Determine npm dist tag
         id: detect_dist_tag
         run: |
@@ -100,10 +92,10 @@ jobs:
             echo "Stable version $VERSION -> npm default dist-tag"
             echo "tag_flag=" >> "$GITHUB_OUTPUT"
           fi
-      - name: Publish to npm
+      - name: Build and publish to npm
         run: |
+          scripts/zig-cross.sh pnpm zapi build-artifacts --optimize ReleaseSafe
           pnpm zapi prepublish
-          node scripts/lodestar_package.mjs notices --package-dir .
-          node scripts/release_artifacts.mjs verify --qualification qualification
+          node scripts/package_notices.mjs
           rm -rf zig-out/lib
           pnpm zapi publish --access public -- --ignore-scripts --provenance ${{ steps.detect_dist_tag.outputs.tag_flag }}

@@ -39,9 +39,6 @@ importers:
       '@libp2p/peer-id':
         specifier: 6.0.15
         version: 6.0.15
-      '@libp2p/ping':
-        specifier: 3.1.13
-        version: 3.1.13
       '@lodestar/config':
         specifier: ^1.39.1
         version: 1.39.1
@@ -877,9 +874,6 @@ packages:
 
   '@libp2p/peer-store@12.0.28':
     resolution: {integrity: sha512-dj4qRhN01kml/It5/4P4DVcjfEZXJ2uZVVItCrs2YBGG2HLEYfWQZYROVbTCXDOCWwZK46aJ8eSLt4orsefq7Q==}
-
-  '@libp2p/ping@3.1.13':
-    resolution: {integrity: sha512-zB0TYbxWD73z3kqHrC2PDk7CAX0wQ0smz6mZ9okE4MoFgJv+XtMaIB2pB/4eT7xjWwdc2w3mYRmq+lMyXl3nXQ==}
 
   '@libp2p/utils@7.4.1':
     resolution: {integrity: sha512-e9cZeop+awI0rFczG4DvAwVeHqBhuCZfTyskvgONfKQrsT7L0BSlTlTTzZoFF8Dnb+QrzHsoIpnl0PrCr0h+Hg==}
@@ -3140,15 +3134,6 @@ snapshots:
       mortice: 3.3.1
       multiformats: 14.0.5
       protons-runtime: 7.0.0
-      uint8arraylist: 3.0.2
-      uint8arrays: 6.1.1
-
-  '@libp2p/ping@3.1.13':
-    dependencies:
-      '@libp2p/interface': 3.3.0
-      '@libp2p/interface-internal': 3.1.13
-      p-event: 7.1.0
-      race-signal: 2.0.0
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
 
