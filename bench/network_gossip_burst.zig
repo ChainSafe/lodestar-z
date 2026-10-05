@@ -102,7 +102,7 @@ const Parsed = struct { name: []const u8, options: Options };
 fn parse(args: []const []const u8) !Parsed {
     var result: Parsed = .{ .name = presets[0][0], .options = presets[0][1] };
     for (args, 0..) |arg, index| {
-        const split = std.mem.indexOfScalar(u8, arg, '=') orelse {
+        const split = std.mem.findScalar(u8, arg, '=') orelse {
             if (index != 0) return error.InvalidOptions;
             for (presets) |entry| {
                 if (std.mem.eql(u8, entry[0], arg)) result = .{ .name = entry[0], .options = entry[1] };

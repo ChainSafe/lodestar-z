@@ -8,7 +8,7 @@ test "request IDs preserve length and reject more than eight bytes" {
     const short = try message.RequestId.init(&.{ 0x01, 0x00 });
     try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x00 }, short.slice());
     try std.testing.expectError(
-        message.Error.InvalidMessage,
+        error.InvalidMessage,
         message.RequestId.init(&([_]u8{0} ** 9)),
     );
 }
@@ -56,13 +56,13 @@ test "message decoder rejects trailing fields and bytes" {
     with_trailing[encoded.len] = 0x80;
     var scratch: message.DecodeScratch = .{};
     try std.testing.expectError(
-        message.Error.InvalidEncoding,
+        error.InvalidEncoding,
         message.Message.decode(with_trailing[0 .. encoded.len + 1], &scratch),
     );
 
     const extra_field = [_]u8{ 0x01, 0xc3, 0x01, 0x02, 0x80 };
     try std.testing.expectError(
-        message.Error.InvalidEncoding,
+        error.InvalidEncoding,
         message.Message.decode(&extra_field, &scratch),
     );
 }
@@ -82,7 +82,7 @@ test "FINDNODE rejects any invalid distance and scratch remains reusable" {
     var scratch: message.DecodeScratch = .{};
 
     try std.testing.expectError(
-        message.Error.InvalidMessage,
+        error.InvalidMessage,
         message.Message.decode(encoded[0..encoded_length], &scratch),
     );
     const valid: message.Message = .{ .find_node = .{ .request_id = try .init(&.{1}), .distances = &.{ 2, 3 } } };
@@ -99,7 +99,7 @@ test "NODES enforces the bounded ENR count" {
         .enrs = &enrs,
     } };
     var encoded: [constants.ordinary_plaintext_size_max]u8 = undefined;
-    try std.testing.expectError(message.Error.InvalidMessage, nodes.encode(&encoded));
+    try std.testing.expectError(error.InvalidMessage, nodes.encode(&encoded));
 }
 
 test "message decoder rejects invalid PONG endpoints and excessive NODES records" {
@@ -163,7 +163,7 @@ test "FINDNODE decoder bounds large duplicate lists by distinct values" {
         .request_id = try message.RequestId.init(&.{0x01}),
         .distances = &([_]u16{0} ** (types.distance_count + 1)),
     } };
-    try std.testing.expectError(message.Error.InvalidMessage, outbound.encode(&encoded));
+    try std.testing.expectError(error.InvalidMessage, outbound.encode(&encoded));
 }
 
 fn expectMessageEqual(expected: *const message.Message, actual: *const message.Message) !void {

@@ -2,7 +2,6 @@ const bls = @import("bls");
 
 const Signature = bls.Signature;
 const AggregateSignature = bls.AggregateSignature;
-const BlstError = bls.BlstError;
 const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 
 pub export fn zig_fuzz_init() callconv(.c) void {}
@@ -33,7 +32,7 @@ fn fuzzAggregate(input: []const u8) void {
     if (count == 0) return;
 
     _ = AggregateSignature.aggregate(sigs[0..count], false) catch |err| {
-        if (err != BlstError.AggrTypeMismatch) {
+        if (err != error.AggrTypeMismatch) {
             @panic("unexpected aggregate signature error");
         }
     };

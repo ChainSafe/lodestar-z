@@ -141,7 +141,7 @@ pub fn init(
     local_record: enr.Record,
     config: Config,
 ) InitError!void {
-    if (config.request_timeout_ms == 0) return InitError.InvalidTimeout;
+    if (config.request_timeout_ms == 0) return error.InvalidTimeout;
     try self.channel.init(allocator, local_key, local_record, .{
         .session_capacity = config.session_capacity,
         .challenge_capacity = config.challenge_capacity,
@@ -213,7 +213,7 @@ pub fn startCall(
     entropy: *const StartEntropy,
 ) Error!StartResult {
     if (!std.mem.eql(u8, &peer.node_id, &remote_record.node_id))
-        return Error.InvalidRemoteRecord;
+        return error.InvalidRemoteRecord;
     const deadline_ms = try deadline(now_ms, self.config.request_timeout_ms);
     const handle = self.calls.begin(
         peer,
@@ -223,17 +223,17 @@ pub fn startCall(
         try self.channel.requestCapacity(peer),
     ) catch |err| switch (err) {
         // The request would fit an established session but not a handshake packet.
-        CallTable.Error.RequestTooLarge => return if (self.channel.hasSession(peer))
+        error.RequestTooLarge => return if (self.channel.hasSession(peer))
             err
         else
-            Error.SessionRequired,
+            error.SessionRequired,
         else => return err,
     };
     errdefer {
         const cancelled = self.calls.cancel(handle);
         std.debug.assert(cancelled);
     }
-    const plaintext = self.calls.requestBytes(handle) orelse return Error.MissingCall;
+    const plaintext = self.calls.requestBytes(handle) orelse return error.MissingCall;
     const sealed = try self.channel.seal(out, peer, plaintext, entropy, now_ms);
     try self.calls.markSent(handle, &sealed.nonce, deadline_ms);
     return .{ .handle = handle, .packet_length = sealed.packet_length };
@@ -276,7 +276,7 @@ pub fn prepareStandardResponse(
                 records.len,
             );
         },
-        .talk_request => Error.ApplicationResponseRequired,
+        .talk_request => error.ApplicationResponseRequired,
     };
 }
 
@@ -476,7 +476,7 @@ fn recoverCall(
         whoareyou.from,
         &whoareyou.request_nonce,
         args.now_ms,
-    )) orelse return Error.UnexpectedChallenge;
+    )) orelse return error.UnexpectedChallenge;
     const peer = self.calls.endpoint(handle) orelse unreachable;
     const packet_length = self.recoverAcceptedCall(out, handle, peer, whoareyou, args) catch |err| {
         return .{ .accepted = .{ .event = self.failCall(handle, err) } };
@@ -493,8 +493,8 @@ fn recoverAcceptedCall(
     args: ReceiveArgs,
 ) Error!u16 {
     const remote_public_key = self.calls.remotePublicKey(handle) orelse
-        return Error.MissingCall;
-    const plaintext = self.calls.requestBytes(handle) orelse return Error.MissingCall;
+        return error.MissingCall;
+    const plaintext = self.calls.requestBytes(handle) orelse return error.MissingCall;
     const deadline_ms = try deadline(args.now_ms, self.config.request_timeout_ms);
     // Reserve the nonce before encoding so a collision cannot leave a session behind for a
     // cancelled call.
@@ -553,7 +553,7 @@ fn dispatchResponse(
     const parsed_records = switch (decoded) {
         .nodes => |nodes| blk: {
             if (nodes.enrs.len != 0 and !self.channel.admission.allowRecords(&peer.address, @intCast(nodes.enrs.len), now_ms))
-                return Error.RecordAdmissionLimited;
+                return error.RecordAdmissionLimited;
             break :blk try validateNodeRecords(nodes.enrs, scratch);
         },
         else => &.{},
@@ -601,30 +601,30 @@ fn routeAuthenticated(
 // Admission pressure and invalid input become values here. Unmapped errors are local failures.
 fn rejectReason(err: Error) ?types.RejectReason {
     return switch (err) {
-        Error.AdmissionLimited => .admission_limited,
-        Error.RecordAdmissionLimited => .record_admission_limited,
-        Error.InvalidMessage,
-        Error.UnsupportedMessage,
-        Error.InvalidEncoding,
-        Error.Overflow,
-        Error.UnexpectedType,
+        error.AdmissionLimited => .admission_limited,
+        error.RecordAdmissionLimited => .record_admission_limited,
+        error.InvalidMessage,
+        error.UnsupportedMessage,
+        error.InvalidEncoding,
+        error.Overflow,
+        error.UnexpectedType,
         => .malformed_message,
-        Error.InvalidRecord,
-        Error.TooManyFields,
-        Error.UnsupportedScheme,
-        Error.InvalidSignature,
-        Error.InvalidPublicKey,
-        Error.InvalidRemoteRecord,
+        error.InvalidRecord,
+        error.TooManyFields,
+        error.UnsupportedScheme,
+        error.InvalidSignature,
+        error.InvalidPublicKey,
+        error.InvalidRemoteRecord,
         => .invalid_record,
-        Error.UnexpectedChallenge, Error.HandshakeAttempted => .unexpected_challenge,
-        Error.RequestTooLargeForHandshake => .request_too_large,
-        Error.UnknownCall,
-        Error.CallExpired,
-        Error.RequestIdMismatch,
-        Error.UnexpectedResponse,
+        error.UnexpectedChallenge, error.HandshakeAttempted => .unexpected_challenge,
+        error.RequestTooLargeForHandshake => .request_too_large,
+        error.UnknownCall,
+        error.CallExpired,
+        error.RequestIdMismatch,
+        error.UnexpectedResponse,
         => .unsolicited_response,
-        Error.InvalidResponseCount, Error.InvalidNodeCount => .invalid_response,
-        Error.DuplicateResponse => .duplicate_response,
+        error.InvalidResponseCount, error.InvalidNodeCount => .invalid_response,
+        error.DuplicateResponse => .duplicate_response,
         else => null,
     };
 }
@@ -637,7 +637,7 @@ fn validateNodeRecords(
     raw_records: []const []const u8,
     scratch: *Scratch,
 ) Error![]const enr.Record {
-    if (raw_records.len > scratch.node_records.len) return Error.InvalidMessage;
+    if (raw_records.len > scratch.node_records.len) return error.InvalidMessage;
     for (raw_records, scratch.node_records[0..raw_records.len]) |raw, *record| {
         record.* = try enr.Record.init(raw);
     }
@@ -675,7 +675,7 @@ fn retainAcceptedNodeRecords(
 
 fn deadline(now_ms: u64, timeout_ms: u64) Error!u64 {
     std.debug.assert(timeout_ms != 0);
-    return std.math.add(u64, now_ms, timeout_ms) catch Error.ClockOverflow;
+    return std.math.add(u64, now_ms, timeout_ms) catch error.ClockOverflow;
 }
 
 fn validateResponse(value: *const message.Message) Error!void {
@@ -683,12 +683,12 @@ fn validateResponse(value: *const message.Message) Error!void {
         .pong, .talk_response => {},
         .nodes => |nodes| {
             if (nodes.total == 0 or nodes.total > types.findnode_response_packets_max)
-                return Error.InvalidResponseCount;
+                return error.InvalidResponseCount;
             if (nodes.enrs.len > types.findnode_result_max)
-                return Error.InvalidMessage;
+                return error.InvalidMessage;
             for (nodes.enrs) |raw| _ = try enr.Record.init(raw);
         },
-        else => return Error.UnexpectedResponse,
+        else => return error.UnexpectedResponse,
     }
 }
 

@@ -1294,7 +1294,7 @@ test "ListBasicTreeView chunked_leaf: property test cross-commit set + push sequ
     var prng = std.Random.DefaultPrng.init(0xCAFE_BEEF_DEAD_BABE);
     const rand = prng.random();
 
-    var reference: std.ArrayListUnmanaged(u64) = .empty;
+    var reference: std.ArrayList(u64) = .empty;
     defer reference.deinit(allocator);
     for (0..K * items_per_chunk + 7) |i| try reference.append(allocator, @as(u64, @intCast(i * 31 + 7)));
 
@@ -1594,4 +1594,90 @@ test "ListBasicTreeView chunked_leaf: packed edits agree with plain trees for ev
         try std.testing.expectEqual(nonzero, try snapshot.get(0));
         try std.testing.expectEqual(ST.default_value, try snapshot.get(boundary));
     }
+}
+
+test "memory_safety: list_basic init only allocates the view and preserves caller ownership on OOM" {
+    const allocator = std.testing.allocator;
+    const ListType = FixedListType(UintType(64), 16, .{});
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
+    defer pool.deinit();
+
+    var value: ListType.Type = .empty;
+    defer value.deinit(allocator);
+    try value.append(allocator, 7);
+
+    const root = try ListType.tree.fromValue(&pool, &value);
+    try pool.ref(root);
+    defer pool.unref(root);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, ListType.TreeView.init(failing.allocator(), &pool, root));
+    try std.testing.expectEqual(@as(u32, 1), root.getState(&pool).refCount());
+
+    failing.fail_index = 1;
+    {
+        const view = try ListType.TreeView.init(failing.allocator(), &pool, root);
+        defer view.deinit();
+        try std.testing.expectEqual(@as(usize, 1), try view.length());
+        try std.testing.expectEqual(@as(usize, 1), failing.alloc_index);
+        try std.testing.expectEqual(@as(u32, 2), root.getState(&pool).refCount());
+    }
+    try std.testing.expectEqual(@as(u32, 1), root.getState(&pool).refCount());
+}
+
+test "memory_safety: failed list commit preserves unrelated reused pool slots" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4 });
+    defer pool.deinit();
+
+    const List = FixedListType(UintType(64), 8, .{});
+    const view = try List.TreeView.fromValue(allocator, &pool, &.empty);
+    var view_live = true;
+    defer if (view_live) view.deinit();
+    const original_root = view.getRoot();
+    try view.push(42);
+    try std.testing.expectError(error.PoolExhausted, view.commit());
+    try std.testing.expectEqual(original_root, view.getRoot());
+
+    const unrelated = try pool.createLeafFromUint(99);
+    defer pool.unref(unrelated);
+    view.deinit();
+    view_live = false;
+    try std.testing.expect(!unrelated.getState(&pool).isFree());
+    try std.testing.expectEqual(@as(u64, 99), std.mem.readInt(u64, unrelated.getRoot(&pool)[0..8], .little));
+}
+
+test "memory_safety: failed list commit preserves pending edits for retry" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 6 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+
+    {
+        const List = FixedListType(UintType(64), 8, .{});
+        const view = try List.TreeView.fromValue(allocator, &pool, &.empty);
+        defer view.deinit();
+        const original_root = view.getRoot();
+        const blockers = [_]Node.Id{ try pool.createLeafFromUint(0), try pool.createLeafFromUint(0) };
+        var blockers_live = true;
+        defer if (blockers_live) for (blockers) |node| pool.unref(node);
+
+        try view.push(42);
+        try std.testing.expectError(error.PoolExhausted, view.commit());
+        try std.testing.expectEqual(original_root, view.getRoot());
+        try std.testing.expectEqual(@as(u64, 42), try view.get(0));
+        for (blockers) |node| pool.unref(node);
+        blockers_live = false;
+
+        try view.set(0, 43);
+        try view.commit();
+        var value: List.Type = .empty;
+        defer value.deinit(allocator);
+        try view.toValue(allocator, &value);
+        try std.testing.expectEqualSlices(u64, &.{43}, value.items);
+        var expected_root: [32]u8 = undefined;
+        try List.hashTreeRoot(allocator, &value, &expected_root);
+        try std.testing.expectEqualSlices(u8, &expected_root, try view.hashTreeRoot());
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }

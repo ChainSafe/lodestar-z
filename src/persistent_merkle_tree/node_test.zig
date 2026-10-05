@@ -210,6 +210,25 @@ test "Pool - fixed capacity exhausts, reuses slots, and keeps columns stable" {
     try std.testing.expectEqual(max_depth, pool.getNodesInUse());
 }
 
+test "Pool - live occupancy counts shared nodes and chunked payloads once" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4 });
+    defer pool.deinit();
+
+    const leaf = try pool.createChunkedLeafEmpty(1);
+    const first = try pool.createBranch(leaf, leaf);
+    const second = try pool.createBranch(leaf, leaf);
+    try std.testing.expectEqual(max_depth + 3, pool.getNodesInUse());
+
+    pool.unref(first);
+    try std.testing.expectEqual(max_depth + 2, pool.getNodesInUse());
+    pool.unref(first);
+    pool.unref(@enumFromInt(0));
+    try std.testing.expectEqual(max_depth + 2, pool.getNodesInUse());
+    pool.unref(second);
+    try std.testing.expectEqual(max_depth, pool.getNodesInUse());
+}
+
 test "Pool - invalid capacity fails before allocation" {
     for ([_]u32{
         Node.State.next_free_mask - max_depth + 1,
@@ -249,13 +268,13 @@ test "Navigation - invalid node access is rejected" {
     // A freshly‑minted leaf has no children
     const leaf = try pool.createLeafFromUint(42);
     defer pool.unref(leaf);
-    try std.testing.expectError(Node.Error.InvalidNode, leaf.getLeft(p));
-    try std.testing.expectError(Node.Error.InvalidNode, leaf.getRight(p));
+    try std.testing.expectError(error.InvalidNode, leaf.getLeft(p));
+    try std.testing.expectError(error.InvalidNode, leaf.getRight(p));
 
     // The depth‑0 zero‑hash node (Id 0) likewise has no children
     const zero0: Node.Id = @enumFromInt(0);
-    try std.testing.expectError(Node.Error.InvalidNode, zero0.getLeft(p));
-    try std.testing.expectError(Node.Error.InvalidNode, zero0.getRight(p));
+    try std.testing.expectError(error.InvalidNode, zero0.getLeft(p));
+    try std.testing.expectError(error.InvalidNode, zero0.getRight(p));
 }
 
 test "Pool.alloc returns unique nodes and restores partial allocations on exhaustion" {
@@ -398,7 +417,7 @@ test "setNodesAtDepth - early-iteration error frees cleanly without leaking or c
     var leaves = [_]Node.Id{ @enumFromInt(0), @enumFromInt(0) };
     const indices = [_]usize{ 0, 1 };
     try std.testing.expectError(
-        Node.Error.InvalidNode,
+        error.InvalidNode,
         root.setNodesAtDepth(p, 2, &indices, &leaves),
     );
 
@@ -516,7 +535,7 @@ test "setNodes - later pool exhaustion rolls back without panicking on a freed s
 
 test "Node.State - refcount overflow saturates at rc_mask without corrupting kind" {
     var at_max = Node.State.initInUse(.leaf, Node.State.rc_mask);
-    try std.testing.expectError(Node.Error.RefCountOverflow, at_max.incRefCount());
+    try std.testing.expectError(error.RefCountOverflow, at_max.incRefCount());
     try std.testing.expectEqual(Node.NodeKind.leaf, at_max.kind());
     try std.testing.expectEqual(Node.State.rc_mask, at_max.refCount());
 

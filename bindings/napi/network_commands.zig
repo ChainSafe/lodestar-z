@@ -26,7 +26,7 @@ pub const Cell = struct {
 pub const Table = struct {
     cells: [capacity]Cell = @splat(.{}),
     /// The terminal cells, whose completions an exchange delivers. `transition` keeps it current.
-    terminal: std.StaticBitSet(capacity) = .initEmpty(),
+    terminal: std.StaticBitSet(capacity) = .empty,
     /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
     settle_cursor: usize = 0,
     stores: [3][2]bool = @splat(@splat(false)),

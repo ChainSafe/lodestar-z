@@ -20,15 +20,15 @@ fn handleError(errptr: ?[*:0]u8) Error!void {
         defer leveldb.leveldb_free(state);
         const msg = std.mem.span(state);
         if (std.mem.startsWith(u8, msg, "Corruption")) {
-            return Error.Corruption;
+            return error.Corruption;
         } else if (std.mem.startsWith(u8, msg, "Not implemented")) {
-            return Error.NotImplemented;
+            return error.NotImplemented;
         } else if (std.mem.startsWith(u8, msg, "Invalid argument")) {
-            return Error.InvalidArgument;
+            return error.InvalidArgument;
         } else if (std.mem.startsWith(u8, msg, "IO error")) {
-            return Error.IOError;
+            return error.IOError;
         } else {
-            return Error.Unknown;
+            return error.Unknown;
         }
     }
 }

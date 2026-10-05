@@ -94,7 +94,7 @@ pub const Recovery = struct {
             ids[unique] = id;
             unique += 1;
         }
-        var requested = std.StaticBitSet(constants.max_ihave_ids_per_heartbeat).initEmpty();
+        var requested = std.StaticBitSet(constants.max_ihave_ids_per_heartbeat).empty;
         var pending: usize = 0;
         for (self.batches[0..self.batch_len]) |batch| {
             if (!std.meta.eql(batch.peer, peer)) continue;

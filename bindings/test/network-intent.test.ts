@@ -140,7 +140,7 @@ test("bounded generated masks agree with the configured subnet limits", async ()
 
 test("startup rejects a scheduled three-boundary topic overflow", () => {
   const config = applicationConfig();
-  configureChain({
+  configureChain(config, {
     BLOB_SCHEDULE: [
       {EPOCH: 2001, MAX_BLOBS_PER_BLOCK: 33},
       {EPOCH: 2002, MAX_BLOBS_PER_BLOCK: 66},
@@ -151,7 +151,7 @@ test("startup rejects a scheduled three-boundary topic overflow", () => {
 
 test("three-boundary overlap refuses capacity without partially changing subscriptions", async () => {
   const config = applicationConfig();
-  const chain = configureChain({
+  const chain = configureChain(config, {
     BLOB_SCHEDULE: [
       {EPOCH: 2010, MAX_BLOBS_PER_BLOCK: 33},
       {EPOCH: 2020, MAX_BLOBS_PER_BLOCK: 66},
@@ -208,7 +208,7 @@ test("host intents preserve native advertisement and reject endpoint overrides",
 
 test("namespace-sized residents allow delayed replacement and diagnose rows above the live limit", async () => {
   const config = applicationConfig();
-  const chain = configureChain({
+  const chain = configureChain(config, {
     BLOB_SCHEDULE: [
       {EPOCH: 2010, MAX_BLOBS_PER_BLOCK: 33},
       {EPOCH: 2014, MAX_BLOBS_PER_BLOCK: 66},

@@ -77,8 +77,8 @@ pub const Event = union(enum) {
 pub const Coverage = struct {
     attnets: u64 = 0,
     syncnets: u4 = 0,
-    groups: custody.Groups = .initEmpty(),
-    custody_groups: custody.Groups = .initEmpty(),
+    groups: custody.Groups = .empty,
+    custody_groups: custody.Groups = .empty,
 };
 /// Desired coverage persists until replacement; the host owns validator duty expiry.
 pub const Demand = struct {

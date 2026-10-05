@@ -5,7 +5,7 @@ pub const Client = enum { Lighthouse, Nimbus, Teku, Prysm, Lodestar, Grandine, U
 pub const count = @typeInfo(Client).@"enum".fields.len;
 
 pub fn kind(agent_version: []const u8) Client {
-    const prefix = agent_version[0 .. std.mem.indexOfScalar(u8, agent_version, '/') orelse agent_version.len];
+    const prefix = agent_version[0 .. std.mem.findScalar(u8, agent_version, '/') orelse agent_version.len];
     inline for (@typeInfo(Client).@"enum".fields) |field| {
         if (std.ascii.eqlIgnoreCase(prefix, field.name)) return @enumFromInt(field.value);
     }

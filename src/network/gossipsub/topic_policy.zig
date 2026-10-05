@@ -18,7 +18,7 @@ pub const Error = error{InvalidTopicPolicy};
 pub const Subnets = struct {
     attnets: u64 = 0,
     syncnets: u4 = 0,
-    columns: std.StaticBitSet(128) = .initEmpty(),
+    columns: std.StaticBitSet(128) = .empty,
     column_subnet_count: u16 = 0,
 
     pub fn add(self: *Subnets, name: topic.Name) void {
@@ -205,7 +205,7 @@ pub const Namespace = struct {
 
     pub fn initializeSubscribers(self: *const Namespace, ordinal: u16, out: *PeerSet) void {
         assert(ordinal < self.topic_count);
-        out.* = .initEmpty();
+        out.* = .empty;
         for (0..self.connected_capacity) |peer| if (self.subscribed(@intCast(peer), ordinal)) out.set(peer);
     }
 };

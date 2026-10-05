@@ -1,4 +1,4 @@
-//! Process-wide validator monitor shared by the NAPI bindings.
+//! Each N-API environment owns its validator monitor and metrics.
 //!
 //! This file is intentionally NOT exported as a JS module in `root.zig`:
 //! it only holds native state. JS interacts with it through
@@ -18,14 +18,15 @@ else
 /// Fed by `BeaconStateView.processSlots`/`stateTransition` on every epoch
 /// transition. Only records metrics for validators registered via
 /// `metrics.registerLocalValidator()`.
-var monitor = state_transition.ValidatorMonitor.init(allocator);
+threadlocal var monitor = state_transition.ValidatorMonitor.init(allocator);
 
-/// Returns the process-wide validator monitor.
+/// Returns this environment's validator monitor.
 pub fn get() *state_transition.ValidatorMonitor {
     return &monitor;
 }
 
-/// Frees all monitor state. Meant to be called once on module cleanup.
+/// Frees this environment's monitor state.
 pub fn deinit() void {
     monitor.deinit();
+    monitor = state_transition.ValidatorMonitor.init(allocator);
 }

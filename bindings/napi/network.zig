@@ -1,6 +1,8 @@
 const std = @import("std");
 const zapi = @import("zapi:zapi");
 const js = zapi.js;
+const BeaconConfig = @import("BeaconConfig.zig");
+const AddonIdentity = @import("zapi_addon_identity");
 const napi = zapi.napi;
 const r = @import("network_runtime.zig");
 const Runtime = r.Runtime;
@@ -41,7 +43,10 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     errdefer runtime.disposeJsReferences();
     runtime.heavy = try r.allocator.create(r.Owner);
     runtime.heavy.?.* = .{};
-    try application_cfg.parse(config.val, &runtime.heavy.?.config, &runtime.heavy.?.application);
+    const beacon_value = try decode.get(config.val, "beaconConfig");
+    if (try beacon_value.typeof() != .object) return error.TypeMismatch;
+    const beacon_config = try js.convertArg(*const BeaconConfig, AddonIdentity, beacon_value.value, beacon_value.env);
+    try application_cfg.parse(config.val, &beacon_config.config_rc.instance.config, &runtime.heavy.?.config, &runtime.heavy.?.application);
     runtime.logs.configure(runtime.heavy.?.application.log_level);
     try network_owner.prepareConfiguration(runtime);
     try network_storage.initialize(runtime, &runtime.heavy.?.application);

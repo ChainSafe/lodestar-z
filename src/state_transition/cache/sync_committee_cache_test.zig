@@ -21,11 +21,11 @@ test "memory_safety: initValidatorIndices should release cloned indices on init 
 test "phase0 sync-committee lookups return an error instead of aborting" {
     var cache = SyncCommitteeCache.initEmpty();
     try std.testing.expectError(
-        SyncCommitteeCache.Error.SyncCommitteeNotAvailable,
+        error.SyncCommitteeNotAvailable,
         cache.getValidatorIndices(),
     );
     try std.testing.expectError(
-        SyncCommitteeCache.Error.SyncCommitteeNotAvailable,
+        error.SyncCommitteeNotAvailable,
         cache.getValidatorIndexMap(),
     );
 }

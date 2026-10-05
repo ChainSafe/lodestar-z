@@ -67,7 +67,7 @@ pub const Writer = struct {
         var prefix: [9]u8 = undefined;
         const prefix_length = encodeLengthPrefix(&prefix, 0x80, 0xb7, data.len);
         const encoded_length = std.math.add(usize, prefix_length, data.len) catch
-            return Error.Overflow;
+            return error.Overflow;
         try self.ensureUnused(encoded_length);
         @memcpy(self.buffer[self.length..][0..prefix_length], prefix[0..prefix_length]);
         self.length += prefix_length;
@@ -78,7 +78,7 @@ pub const Writer = struct {
     pub fn writeRawItem(self: *Writer, encoded: []const u8) Error!void {
         var reader = Reader.init(encoded);
         _ = try reader.readRawItem();
-        if (!reader.atEnd()) return Error.InvalidEncoding;
+        if (!reader.atEnd()) return error.InvalidEncoding;
         try self.ensureUnused(encoded.len);
         @memcpy(self.buffer[self.length..][0..encoded.len], encoded);
         self.length += encoded.len;
@@ -95,7 +95,7 @@ pub const Writer = struct {
 
     fn ensureUnused(self: *const Writer, count: usize) Error!void {
         std.debug.assert(self.length <= self.buffer.len);
-        if (count > self.buffer.len - self.length) return Error.BufferTooSmall;
+        if (count > self.buffer.len - self.length) return error.BufferTooSmall;
     }
 };
 
@@ -114,13 +114,13 @@ pub const Reader = struct {
 
     pub fn readBytes(self: *Reader) Error![]const u8 {
         const item = try self.readItem();
-        if (item.kind != .string) return Error.UnexpectedType;
+        if (item.kind != .string) return error.UnexpectedType;
         return self.data[item.payload_start..item.payload_end];
     }
 
     pub fn readList(self: *Reader) Error!Reader {
         const item = try self.readItem();
-        if (item.kind != .list) return Error.UnexpectedType;
+        if (item.kind != .list) return error.UnexpectedType;
         return Reader.init(self.data[item.payload_start..item.payload_end]);
     }
 
@@ -133,8 +133,8 @@ pub const Reader = struct {
     pub fn readUint(self: *Reader) Error!u64 {
         const bytes = try self.readBytes();
         if (bytes.len == 0) return 0;
-        if (bytes.len > @sizeOf(u64)) return Error.Overflow;
-        if (bytes[0] == 0) return Error.InvalidEncoding;
+        if (bytes.len > @sizeOf(u64)) return error.Overflow;
+        if (bytes[0] == 0) return error.InvalidEncoding;
 
         var value: u64 = 0;
         for (bytes) |byte| value = (value << 8) | byte;
@@ -152,7 +152,7 @@ pub const Reader = struct {
     // Non-canonical forms are rejected. That covers a prefixed single byte, a long form for a
     // payload under 56 bytes, and a length with leading zeros.
     fn readItem(self: *Reader) Error!Item {
-        if (self.position == self.data.len) return Error.InvalidEncoding;
+        if (self.position == self.data.len) return error.InvalidEncoding;
         const prefix = self.data[self.position];
         if (prefix < 0x80) return self.readSingleByte();
         if (prefix < 0xb8) return self.readShort(.string, prefix - 0x80);
@@ -170,10 +170,10 @@ pub const Reader = struct {
     fn readShort(self: *Reader, kind: Kind, payload_length_u8: u8) Error!Item {
         const payload_length: usize = payload_length_u8;
         const payload_start = self.position + 1;
-        if (payload_length > self.data.len - payload_start) return Error.InvalidEncoding;
+        if (payload_length > self.data.len - payload_start) return error.InvalidEncoding;
         const payload_end = payload_start + payload_length;
         if (kind == .string and payload_length == 1) {
-            if (self.data[payload_start] < 0x80) return Error.InvalidEncoding;
+            if (self.data[payload_start] < 0x80) return error.InvalidEncoding;
         }
         self.position = payload_end;
         return .{ .kind = kind, .payload_start = payload_start, .payload_end = payload_end };
@@ -182,16 +182,16 @@ pub const Reader = struct {
     fn readLong(self: *Reader, kind: Kind, length_size_u8: u8) Error!Item {
         const length_size: usize = length_size_u8;
         const length_start = self.position + 1;
-        if (length_size == 0) return Error.InvalidEncoding;
-        if (length_size > @sizeOf(usize)) return Error.InvalidEncoding;
-        if (length_size > self.data.len - length_start) return Error.InvalidEncoding;
+        if (length_size == 0) return error.InvalidEncoding;
+        if (length_size > @sizeOf(usize)) return error.InvalidEncoding;
+        if (length_size > self.data.len - length_start) return error.InvalidEncoding;
         const length_bytes = self.data[length_start..][0..length_size];
-        if (length_bytes[0] == 0) return Error.InvalidEncoding;
+        if (length_bytes[0] == 0) return error.InvalidEncoding;
 
         const payload_length = try readLength(length_bytes);
-        if (payload_length < 56) return Error.InvalidEncoding;
+        if (payload_length < 56) return error.InvalidEncoding;
         const payload_start = length_start + length_size;
-        if (payload_length > self.data.len - payload_start) return Error.InvalidEncoding;
+        if (payload_length > self.data.len - payload_start) return error.InvalidEncoding;
         const payload_end = payload_start + payload_length;
         self.position = payload_end;
         return .{ .kind = kind, .payload_start = payload_start, .payload_end = payload_end };
@@ -236,8 +236,8 @@ fn readLength(bytes: []const u8) Error!usize {
     std.debug.assert(bytes.len <= @sizeOf(usize));
     var value: usize = 0;
     for (bytes) |byte| {
-        value = std.math.mul(usize, value, 256) catch return Error.Overflow;
-        value = std.math.add(usize, value, @as(usize, byte)) catch return Error.Overflow;
+        value = std.math.mul(usize, value, 256) catch return error.Overflow;
+        value = std.math.add(usize, value, @as(usize, byte)) catch return error.Overflow;
     }
     return value;
 }

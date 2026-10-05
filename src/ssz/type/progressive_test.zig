@@ -47,3 +47,16 @@ test "progressive Merkleization matches tree roots without scratch allocation" {
         for (chunks, 0..) |chunk, i| try std.testing.expectEqual([_]u8{@truncate(i)} ** 32, chunk);
     }
 }
+
+test "progressive accumulator enforces length and finish state" {
+    var accumulator = try progressive.MerkleAccumulator.init(2);
+    var root: [32]u8 = undefined;
+    try std.testing.expectError(error.InvalidLength, accumulator.finish(&root));
+    try accumulator.append(&@as([32]u8, @splat(1)));
+    try accumulator.append(&@as([32]u8, @splat(2)));
+    try std.testing.expectError(error.InputTooLong, accumulator.append(&root));
+    try accumulator.finish(&root);
+    try std.testing.expectError(error.InvalidState, accumulator.finish(&root));
+    try std.testing.expectError(error.InvalidState, accumulator.append(&root));
+    try std.testing.expectError(error.InputTooLong, progressive.MerkleAccumulator.init(std.math.maxInt(usize)));
+}

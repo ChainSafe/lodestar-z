@@ -77,7 +77,7 @@ pub const capacity_max = 32;
 pub const Table = struct {
     cells: []Cell,
     /// The cells whose completion is due now. `refresh` keeps it current after each change to a cell.
-    due: std.StaticBitSet(capacity_max) = .initEmpty(),
+    due: std.StaticBitSet(capacity_max) = .empty,
     /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
     settle_cursor: usize = 0,
     backing: std.mem.Allocator,

@@ -84,7 +84,7 @@ fn refill(
                 operation,
                 &result.progress,
             ) catch |err| switch (err) {
-                CallTable.Error.PeerBusy, CallTable.Error.TableFull => continue,
+                error.PeerBusy, error.TableFull => continue,
                 error.DestinationUnreachable => {
                     progressed = true;
                     continue;

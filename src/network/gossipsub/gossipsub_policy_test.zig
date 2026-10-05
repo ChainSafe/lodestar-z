@@ -543,7 +543,7 @@ test "local intent reclaimed history answers actual IWANT with original wire top
         _ = io.tx.advance(&g.messages.store, segment.len);
     }
     try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
-    try std.testing.expect(std.mem.indexOf(u8, wire[0..used], name) != null);
+    try std.testing.expect(std.mem.find(u8, wire[0..used], name) != null);
     var decompressed: [64]u8 = undefined;
     const size = try snappy.raw.uncompress(g.messages.store.segment(message, g.messages.store.cursor(message)), &decompressed);
     try std.testing.expectEqualStrings("original payload", decompressed[0..size]);
@@ -566,7 +566,7 @@ test "gossip advertisements sample the whole burst independently for each recipi
         _ = try g.publish(name, &bytes, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     }
     for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
-    g.overlay.rows[t].fanout = .initEmpty();
+    g.overlay.rows[t].fanout = .empty;
     const context = g.overlayContext(1);
     g.cycle.begin(context.sessions, context.peers, context.now, false);
     Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = context.now, .unix_s = 0 }));

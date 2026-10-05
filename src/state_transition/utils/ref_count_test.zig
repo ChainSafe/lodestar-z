@@ -40,3 +40,19 @@ test "RefCount - std.ArrayList(u32)" {
 
     // the test does not leak any memory because array_list.deinit() is automatically called
 }
+
+test "RefCount - getMutIfUnique" {
+    const allocator = std.testing.allocator;
+    const rc = try RefCount(std.ArrayList(u32)).init(allocator, .empty);
+    defer rc.unref();
+
+    const list = rc.getMutIfUnique() orelse return error.ExpectedUnique;
+    try list.append(allocator, 7);
+    try std.testing.expectEqualSlices(u32, &.{7}, rc.get().items);
+
+    const other = rc.ref();
+    try std.testing.expectEqual(null, rc.getMutIfUnique());
+
+    other.unref();
+    try std.testing.expect(rc.getMutIfUnique() != null);
+}

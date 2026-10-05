@@ -27,7 +27,7 @@ test("running application advances fork state only when the host updates intent"
   config.initialSlot = boundarySlot - 1n;
   config.local.status.headSlot = config.initialSlot;
   config.discovery = discoveryConfig().discovery;
-  configureChain({ELECTRA_FORK_EPOCH: Number(boundarySlot / slotsPerEpoch)});
+  configureChain(config, {ELECTRA_FORK_EPOCH: Number(boundarySlot / slotsPerEpoch)});
   const runtime = startRuntime(config, () => undefined);
   try {
     const identity = await runtime.identity;
@@ -53,7 +53,7 @@ test("owned chain config follows Fulu and BPO with Lodestar topics", async () =>
   const runtime = startRuntime(config, () => undefined);
   try {
     let identity = await runtime.identity;
-    configureChain({BLOB_SCHEDULE: [], ELECTRA_FORK_EPOCH: Infinity, FULU_FORK_EPOCH: Infinity});
+    configureChain(config, {BLOB_SCHEDULE: [], ELECTRA_FORK_EPOCH: Infinity, FULU_FORK_EPOCH: Infinity});
     const epochs = [testChain.FULU_FORK_EPOCH, testChain.BLOB_SCHEDULE[0].EPOCH];
     for (const [i, epoch] of epochs.entries()) {
       const slot = BigInt(epoch * (process.env.LODESTAR_PRESET === "minimal" ? 8 : 32));
@@ -150,7 +150,7 @@ test("Status-only updates copy inputs and preserve advertisement and subscriptio
 
 test("Status-only validation uses the active fork and leaves rejected updates unpublished", async () => {
   const config = applicationConfig();
-  configureChain({ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0});
+  configureChain(config, {ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0});
   config.local.status.earliestAvailableSlot = 0n;
   const runtime = startRuntime(config, () => undefined);
   try {
@@ -506,7 +506,7 @@ test("identity reads the current signed ENR and copied intent ignores later inpu
 test("incomplete early metadata rejects the whole intent without publishing local state", async () => {
   const config = applicationConfig();
   config.discovery = discoveryConfig().discovery;
-  configureChain({BLOB_SCHEDULE: [], FULU_FORK_EPOCH: Infinity});
+  configureChain(config, {BLOB_SCHEDULE: [], FULU_FORK_EPOCH: Infinity});
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;

@@ -17,7 +17,7 @@ test "peer discovery uses the configured custody minimum only for an absent ENR 
     defer catalog.deinit(a);
     const candidates = catalog.rows[0..q.options.capacity];
     const context: t.ForkContext = .{ .fork = .fulu, .custody_requirement = 4, .minimum_sampling_groups = 8 };
-    const wanted: t.Coverage = .{ .custody_groups = .initFull() };
+    const wanted: t.Coverage = .{ .custody_groups = .full };
     var candidate = try discovered(1, 0);
     try q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, 0);
     try std.testing.expectEqual(@as(u64, 4), candidates[0].custody_work.?.custody_count);

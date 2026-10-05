@@ -27,7 +27,7 @@ pub const Derivation = struct {
     config: Config,
     requested: u16,
     hashes: u16 = 0,
-    groups: Groups = .initEmpty(),
+    groups: Groups = .empty,
     exhausted: bool = false,
 
     pub fn init(node_id: *const [32]u8, config: Config, count: u64) !Derivation {
@@ -58,7 +58,7 @@ pub const Derivation = struct {
             if (self.groups.count() == self.requested) return self.groups;
         }
         if (self.hashes == hashes_max) {
-            self.groups = .initEmpty();
+            self.groups = .empty;
             self.exhausted = true;
             return error.WorkLimit;
         }

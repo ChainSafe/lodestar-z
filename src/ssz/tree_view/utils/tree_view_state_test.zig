@@ -150,3 +150,88 @@ test "memory_safety: editChunkedLeaf pool exhaustion preserves values and owners
         try std.testing.expectEqualSlices(u8, &original_hash, root.getRoot(&pool));
     }
 }
+
+test "memory_safety: commitNodes restores acquired references when a later retain fails" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+
+    {
+        var state: TreeViewState = undefined;
+        try state.init(allocator, &pool, @enumFromInt(1));
+        defer state.deinit();
+        const first = try pool.createLeafFromUint(1);
+        const saturated = try pool.createLeafFromUint(2);
+        try state.setChildNode(@enumFromInt(2), first);
+        try state.setChildNode(@enumFromInt(3), saturated);
+        const saturated_state = &pool.nodes.items(.state)[@intFromEnum(saturated)];
+        saturated_state.* = Node.State.initInUse(.leaf, Node.max_ref_count);
+        defer saturated_state.* = Node.State.initInUse(.leaf, 0);
+
+        try std.testing.expectError(error.RefCountOverflow, state.commitNodes());
+        try std.testing.expectEqual(@as(Node.Id, @enumFromInt(1)), state.root);
+        try std.testing.expectEqual(@as(u32, 0), first.getState(&pool).refCount());
+        try std.testing.expect(!first.getState(&pool).isFree());
+        try std.testing.expectEqual(Node.max_ref_count, saturated_state.refCount());
+        try std.testing.expectEqual(@as(usize, 2), state.changed.count());
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "memory_safety: commitNodes balances duplicate replacement references" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 3 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+
+    {
+        var state: TreeViewState = undefined;
+        try state.init(allocator, &pool, @enumFromInt(1));
+        defer state.deinit();
+        const replacement = try pool.createLeafFromUint(42);
+        try state.setChildNode(@enumFromInt(2), replacement);
+        try state.setChildNode(@enumFromInt(3), replacement);
+        try state.commitNodes();
+        try std.testing.expectEqual(@as(u32, 2), replacement.getState(&pool).refCount());
+        try std.testing.expectEqual(replacement, try state.root.getNode(&pool, @enumFromInt(2)));
+        try std.testing.expectEqual(replacement, try state.root.getNode(&pool, @enumFromInt(3)));
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "memory_safety: commitNodes retains a borrowed replacement through root publication" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+
+    {
+        const child = try pool.createLeafFromUint(42);
+        const root = try pool.createBranch(child, @enumFromInt(0));
+        var state: TreeViewState = undefined;
+        try state.init(allocator, &pool, root);
+        defer state.deinit();
+        try state.setChildNode(@enumFromInt(1), child);
+        try state.commitNodes();
+        try std.testing.expectEqual(child, state.root);
+        try std.testing.expectEqual(@as(u32, 1), child.getState(&pool).refCount());
+        try std.testing.expect(root.getState(&pool).isFree());
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "commitNodes preserves changed lookups after failed sorted commit" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
+    defer pool.deinit();
+    var state: TreeViewState = undefined;
+    try state.init(allocator, &pool, @enumFromInt(5));
+    defer state.deinit();
+    for (0..32) |i| {
+        const gindex = Gindex.fromDepth(5, 31 - i);
+        try state.setChildNode(gindex, try pool.createLeafFromUint(i));
+    }
+    try std.testing.expectError(error.PoolExhausted, state.commitNodes());
+    for (0..32) |i| try std.testing.expect(state.changed.contains(Gindex.fromDepth(5, i)));
+}

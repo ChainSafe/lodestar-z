@@ -28,7 +28,7 @@ pub fn add(self: *Self, other: *const PublicKey) void {
 ///
 /// Returns an error if the slice is empty or if any public key validation fails.
 pub fn aggregate(pks: []const PublicKey, pks_validate: bool) BlstError!Self {
-    if (pks.len == 0) return BlstError.AggrTypeMismatch;
+    if (pks.len == 0) return error.AggrTypeMismatch;
     if (pks_validate) for (pks) |pk| try pk.validate();
 
     var agg_pk = Self{};

@@ -25,7 +25,7 @@ test "peer policy separates sampling routes from custody service deficits" {
 test "peer policy protects scarce custodians and duties before broad publication redundancy" {
     var demand: t.Demand = .{ .attnets = 1, .group_targets = @splat(1) };
     demand.custody_group_targets[0] = 1;
-    var inputs = [_]p.Input{ .{}, .{ .coverage = .{ .attnets = 1 } }, .{ .coverage = .{ .groups = .initFull() } } };
+    var inputs = [_]p.Input{ .{}, .{ .coverage = .{ .attnets = 1 } }, .{ .coverage = .{ .groups = .full } } };
     inputs[0].coverage.custody_groups.set(0);
     const result = p.select(&inputs, &demand, .{ .target_peers = 2, .max_peers = 4, .min_outbound = 0 }, 1);
     try expect(result.retained.isSet(0));

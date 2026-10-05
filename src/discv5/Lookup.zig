@@ -82,7 +82,7 @@ pub fn init(
     seeds: []const RoutingTable.Entry,
     ip_mode: types.Mode,
 ) Error!void {
-    if (seeds.len > result_max) return Error.TooManySeeds;
+    if (seeds.len > result_max) return error.TooManySeeds;
     self.* = .{
         .local_id = local_id,
         .ip_mode = ip_mode,
@@ -182,9 +182,9 @@ pub fn onEvent(
     };
     const index = self.waitingIndex(response.matched.handle) orelse return .{};
     errdefer self.failCandidate(core, index, response.matched.handle);
-    if (response.matched.response != .nodes) return Error.UnexpectedResponse;
+    if (response.matched.response != .nodes) return error.UnexpectedResponse;
     if (!response.peer.eql(&self.candidates[index].peer))
-        return Error.UnknownQuery;
+        return error.UnknownQuery;
     const result = Engine.Event.Consumption{
         .consumed = true,
         .responder = if (response.matched.terminal) self.candidates[index].record else null,
@@ -244,7 +244,7 @@ pub fn cancel(self: *Lookup, core: *Engine) void {
 
 fn addSeed(self: *Lookup, seed: *const RoutingTable.Entry) Error!void {
     if (!std.mem.eql(u8, &seed.peer.node_id, &seed.record.node_id))
-        return Error.InvalidSeed;
+        return error.InvalidSeed;
     if (std.mem.eql(u8, &seed.peer.node_id, &self.local_id)) return;
     if (self.findCandidate(&seed.peer.node_id) != null) return;
     var peer = seed.peer;

@@ -137,10 +137,6 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
             try self.chunks.set(index, value);
         }
 
-        pub fn getAllReadonly(self: *Self, allocator: Allocator) ![]Element {
-            return self.chunks.getAllReadonly(allocator, length);
-        }
-
         pub fn getAllReadonlyValues(self: *Self, allocator: Allocator) ![]ST.Element.Type {
             return self.chunks.getAllValues(allocator, length);
         }

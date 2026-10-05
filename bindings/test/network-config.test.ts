@@ -1,8 +1,37 @@
 import {expect, it} from "vitest";
+import bindings from "../src/index.js";
 import type {NativeApplicationConfig} from "../src/network.js";
-import {applicationConfig, configureChain, discoveryConfig, startRuntime} from "./utils/network.js";
+import {applicationConfig, configureChain, discoveryConfig, startRuntime, testChain} from "./utils/network.js";
 
 const cases: readonly [string, (config: NativeApplicationConfig) => void, string][] = [
+  [
+    "missing BeaconConfig",
+    (c) => {
+      Reflect.deleteProperty(c, "beaconConfig");
+    },
+    "TypeMismatch",
+  ],
+  [
+    "null BeaconConfig",
+    (c) => {
+      Object.assign(c, {beaconConfig: null});
+    },
+    "TypeMismatch",
+  ],
+  [
+    "plain object instead of BeaconConfig",
+    (c) => {
+      Object.assign(c, {beaconConfig: {}});
+    },
+    "TypeMismatch",
+  ],
+  [
+    "forged BeaconConfig instance",
+    (c) => {
+      Object.assign(c, {beaconConfig: Object.create(bindings.BeaconConfig.prototype)});
+    },
+    "TypeMismatch",
+  ],
   [
     "target without peer headroom",
     (c) => {
@@ -252,7 +281,7 @@ it.each([
 
 it.each([0, 129])("rejects chain custody group bound %s", (groups) => {
   const config = applicationConfig();
-  configureChain({NUMBER_OF_CUSTODY_GROUPS: groups});
+  configureChain(config, {NUMBER_OF_CUSTODY_GROUPS: groups});
   expect(() => startRuntime(config, () => undefined)).toThrow("InvalidNetworkChain");
 });
 
@@ -263,14 +292,42 @@ it.each([
   Number.MAX_SAFE_INTEGER,
 ])("rejects unsupported fork at epoch %s before owner allocation", (epoch) => {
   const config = applicationConfig();
-  configureChain({ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0, GLOAS_FORK_EPOCH: epoch});
+  configureChain(config, {ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0, GLOAS_FORK_EPOCH: epoch});
   expect(() => startRuntime(config)).toThrow("UnsupportedNetworkFork");
 });
 
-it("derives the Fulu availability requirement from shared chain configuration", () => {
+it("derives the Fulu availability requirement from its BeaconConfig", () => {
   const config = applicationConfig();
-  configureChain({ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0});
+  configureChain(config, {ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0});
   expect(() => startRuntime(config, () => undefined)).toThrow("MissingAvailability");
+});
+
+it("selects its BeaconConfig independently of later configurations", async () => {
+  const config = applicationConfig();
+  const other = applicationConfig();
+  configureChain(other, {ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0});
+  expect(() => startRuntime(other)).toThrow("MissingAvailability");
+  const runtime = startRuntime(config);
+  try {
+    expect(runtime.state).toBe("running");
+  } finally {
+    await runtime.close();
+  }
+});
+
+it("copies the genesis root from its BeaconConfig", async () => {
+  const config = applicationConfig();
+  const root = new Uint8Array(32).fill(42);
+  config.beaconConfig = new bindings.BeaconConfig(testChain, root);
+  const runtime = startRuntime(config);
+  try {
+    config.beaconConfig = applicationConfig().beaconConfig;
+    root.fill(0);
+    global.gc?.();
+    expect((await runtime.getRememberedPeers()).genesisValidatorsRoot).toEqual(new Uint8Array(32).fill(42));
+  } finally {
+    await runtime.close();
+  }
 });
 
 it.each([
@@ -279,7 +336,7 @@ it.each([
   [true, 1n],
 ] as const)("validates startup custody with unscheduled Fulu=%s, custody=%s", async (unscheduled, custody) => {
   const config = applicationConfig();
-  if (unscheduled) configureChain({BLOB_SCHEDULE: [], FULU_FORK_EPOCH: Infinity});
+  if (unscheduled) configureChain(config, {BLOB_SCHEDULE: [], FULU_FORK_EPOCH: Infinity});
   Reflect.set(config.local.metadata, "custodyGroupCount", custody);
   if (custody === null) {
     expect(() => startRuntime(config)).toThrow("MissingCustodyAdvertisement");

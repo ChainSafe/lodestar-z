@@ -51,7 +51,7 @@ pub fn processAttestationPhase0(
     try epoch_pending_attestations.pushValue(&pending_attestation);
 
     var indexed_attestation: types.phase0.IndexedAttestation.Type = undefined;
-    try epoch_cache.computeIndexedAttestationPhase0(attestation, &indexed_attestation);
+    try epoch_cache.computeIndexedAttestationPhase0(allocator, attestation, &indexed_attestation);
     defer types.phase0.IndexedAttestation.deinit(allocator, &indexed_attestation);
 
     if (!try isValidIndexedAttestation(

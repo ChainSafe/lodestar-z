@@ -37,7 +37,7 @@ pub const Turn = struct {
     large_used: bool = false,
     large_copy_used: bool = false,
     sink: ?*const MessageSink = null,
-    deferred: Budgets = .initEmpty(),
+    deferred: Budgets = .empty,
 
     pub fn exhausted(self: *const Turn) Budgets {
         var result = self.deferred;

@@ -62,30 +62,31 @@ test "rotateEpochParticipation preserves transferred view after pool exhaustion"
     }
 }
 
-test "rotateEpochParticipation preserves transferred view after replacement allocation failure" {
+test "memory_safety: rotateEpochParticipation preserves ownership across allocation failures" {
     const allocator = std.testing.allocator;
-    for (1..3) |successful_allocations| {
-        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
-        defer pool.deinit();
-        const initial_nodes = pool.getNodesInUse();
-        var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
+    defer pool.deinit();
 
-        {
-            var state = try initParticipationState(failing.allocator(), &pool);
+    try std.testing.checkAllAllocationFailures(allocator, struct {
+        fn run(failing_allocator: std.mem.Allocator, node_pool: *Node.Pool) !void {
+            const initial_nodes = node_pool.getNodesInUse();
+            defer std.debug.assert(node_pool.getNodesInUse() == initial_nodes);
+
+            var state = try initParticipationState(failing_allocator, node_pool);
             defer state.deinit();
-            const nodes_before = pool.getNodesInUse();
 
-            failing.fail_index = failing.alloc_index + successful_allocations;
-            try std.testing.expectError(error.OutOfMemory, state.rotateEpochParticipation());
-            failing.fail_index = std.math.maxInt(usize);
-
-            try std.testing.expectEqual(nodes_before, pool.getNodesInUse());
+            const previous_root = (try state.inner.getFieldRoot("previous_epoch_participation")).*;
+            const current_root = (try state.inner.getFieldRoot("current_epoch_participation")).*;
+            state.rotateEpochParticipation() catch |err| {
+                try std.testing.expectEqualSlices(u8, &current_root, try state.inner.getFieldRoot("current_epoch_participation"));
+                const previous_after = try state.inner.getFieldRoot("previous_epoch_participation");
+                try std.testing.expect(std.mem.eql(u8, &previous_root, previous_after) or
+                    std.mem.eql(u8, &current_root, previous_after));
+                return err;
+            };
             try expectPreviousParticipation(&state);
         }
-
-        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-        try std.testing.expectEqual(initial_nodes, pool.getNodesInUse());
-    }
+    }.run, .{&pool});
 }
 
 test "rotateEpochParticipation moves flags and resets current participation" {

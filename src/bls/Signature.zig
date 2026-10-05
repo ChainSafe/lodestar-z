@@ -17,8 +17,8 @@ pub const COMPRESS_SIZE = 96;
 ///
 /// Returns `BlstError` if validation fails.
 pub fn validate(self: *const Self, sig_infcheck: bool) BlstError!void {
-    if (sig_infcheck and c.blst_p2_affine_is_inf(&self.point)) return BlstError.PkIsInfinity;
-    if (!c.blst_p2_affine_in_g2(&self.point)) return BlstError.PointNotInGroup;
+    if (sig_infcheck and c.blst_p2_affine_is_inf(&self.point)) return error.PkIsInfinity;
+    if (!c.blst_p2_affine_in_g2(&self.point)) return error.PointNotInGroup;
 }
 
 /// Validate a serialized signature.
@@ -46,7 +46,7 @@ pub fn verify(
     if (pk_validate) try pk.validate();
 
     if (dst.len == 0) {
-        return BlstError.BadEncoding;
+        return error.BadEncoding;
     }
 
     const chk = errorFromInt(c.blst_core_verify_pk_in_g1(
@@ -78,7 +78,7 @@ pub fn aggregateVerify(
 ) BlstError!bool {
     const n_elems = pks.len;
     if (n_elems == 0 or msgs.len != n_elems) {
-        return BlstError.VerifyFail;
+        return error.VerifyFail;
     }
     var pairing = Pairing.init(buffer, true, dst);
     try pairing.aggregate(
@@ -186,7 +186,7 @@ pub fn uncompress(sig_comp: []const u8) BlstError!Self {
         return sig;
     }
 
-    return BlstError.BadEncoding;
+    return error.BadEncoding;
 }
 
 /// Deserialize a `Signature` from bytes.
@@ -201,7 +201,7 @@ pub fn deserialize(sig_in: []const u8) BlstError!Self {
         return sig;
     }
 
-    return BlstError.BadEncoding;
+    return error.BadEncoding;
 }
 
 /// Check if the `Signature` is in the correct subgroup.

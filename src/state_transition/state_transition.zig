@@ -1,4 +1,5 @@
 const std = @import("std");
+const Diagnostics = @import("diagnostics").Diagnostics;
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const metrics = @import("metrics.zig");
@@ -69,12 +70,11 @@ pub fn processSlots(
             var timer = time.start(io);
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
-                io,
                 config,
                 epoch_cache,
                 state,
             );
-            defer epoch_transition_cache.deinit(allocator);
+            defer epoch_transition_cache.deinit();
             try observeEpochTransitionStep(.{ .step = .before_process_epoch }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
             switch (state.forkSeq()) {
@@ -153,6 +153,7 @@ pub fn processSlots(
 }
 
 pub const TransitionOpts = struct {
+    diagnostics: ?*Diagnostics = null,
     verify_state_root: bool = true,
     verify_proposer: bool = true,
     /// NOTE: verifying BLS signatures is expensive - make sure to turn this off for tests.
@@ -228,7 +229,9 @@ pub fn stateTransition(
                     if (comptime (bt == .blinded and f.lt(.bellatrix)) or (bt == .blinded and f.gte(.gloas))) {
                         return error.InvalidBlockTypeForFork;
                     } else {
-                        try processBlock(
+                        var block_diagnostics: Diagnostics = .{};
+                        const diagnostics = opts.diagnostics orelse &block_diagnostics;
+                        processBlock(
                             f,
                             allocator,
                             io,
@@ -240,8 +243,13 @@ pub fn stateTransition(
                             bt,
                             block.castToFork(bt, f),
                             opts.block_external_data,
-                            .{ .verify_signature = opts.verify_signatures },
-                        );
+                            .{ .verify_signature = opts.verify_signatures, .diagnostics = diagnostics },
+                        ) catch |err| {
+                            if (diagnostics.detail) |*detail| {
+                                std.log.warn("Block processing failed at slot {d}: {f}", .{ block_slot, detail });
+                            }
+                            return err;
+                        };
                     }
                 },
             }

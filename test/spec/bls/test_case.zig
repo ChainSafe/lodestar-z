@@ -38,7 +38,7 @@ pub fn aggregate(gpa: Allocator, path: std.Io.Dir) !void {
         // yaml library parses `null` as a string
         if (std.mem.eql(u8, aggregate_test_data.output, "null")) {
             // expect failure
-            try std.testing.expectError(bls.BlstError.AggrTypeMismatch, bls.AggregateSignature.aggregate(signatures, true));
+            try std.testing.expectError(error.AggrTypeMismatch, bls.AggregateSignature.aggregate(signatures, true));
         } else {
             const expected = try std.fmt.hexToBytes(
                 &sig_buf,

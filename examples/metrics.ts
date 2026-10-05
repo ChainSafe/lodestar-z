@@ -31,7 +31,7 @@ import { config } from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import bindings from "../bindings/src/index.js";
 import { getFirstEraFilePath, getEraFilePaths } from "../bindings/test/eraFiles.ts";
-import { getPubkeyCacheCapacityForState } from "../bindings/test/serializedState.ts";
+import { getPubkeyCacheCapacityForState, getSerializedGenesisValidatorsRoot } from "../bindings/test/serializedState.ts";
 
 const PORT = 8008;
 const PKIX_FILE = "./mainnet.pkix";
@@ -76,7 +76,8 @@ if (!loadedPkix || bindings.pubkeys.capacity() < requiredPubkeyCapacity) {
 
 const cachedPubkeyCount = bindings.pubkeys.size();
 console.log("Creating BeaconStateView...");
-var state = bindings.BeaconStateView.createFromBytes(stateBytes);
+const nativeConfig = new bindings.BeaconConfig(config, getSerializedGenesisValidatorsRoot(stateBytes));
+var state = bindings.BeaconStateView.createFromBytes(stateBytes, nativeConfig);
 pkixNeedsSave ||= bindings.pubkeys.size() !== cachedPubkeyCount;
 
 if (pkixNeedsSave) {

@@ -70,8 +70,12 @@ test "BitVector - intersectValues" {
         var values: [16]u8 = undefined;
         for (0..tc.bit_len) |i| values[i] = @intCast(i);
 
-        var actual = try b.intersectValues(u8, allocator, &values);
+        var actual = try b.intersectValuesAlloc(u8, allocator, &values);
         defer actual.deinit(allocator);
         try std.testing.expectEqualSlices(u8, tc.expected, actual.items);
+
+        var out: [16]u8 = undefined;
+        const actual_no_alloc = b.intersectValues(u8, &values, &out);
+        try std.testing.expectEqualSlices(u8, tc.expected, actual_no_alloc);
     }
 }

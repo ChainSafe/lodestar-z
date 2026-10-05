@@ -19,5 +19,5 @@ test "peer population metrics count direction, client and connection age" {
     var writer = std.Io.Writer.fixed(&buffer);
     var encoder: prom.Encoder = .{ .writer = &writer };
     try snapshot.write(&encoder);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "lodestar_peer_connection_seconds_count 2\n") != null);
+    try std.testing.expect(std.mem.find(u8, writer.buffered(), "lodestar_peer_connection_seconds_count 2\n") != null);
 }

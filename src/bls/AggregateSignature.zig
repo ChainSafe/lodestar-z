@@ -13,7 +13,7 @@ pub const RandomizedSignature = struct {
 
 /// Validates that the aggregate signature is in the correct subgroup (G2).
 pub fn validate(self: *const Self) BlstError!void {
-    if (!c.blst_p2_in_g2(&self.point)) return BlstError.PointNotInGroup;
+    if (!c.blst_p2_in_g2(&self.point)) return error.PointNotInGroup;
 }
 
 /// Converts an aggregate signature back to a regular signature.
@@ -29,7 +29,7 @@ pub fn toSignature(self: *const Self) Signature {
 /// Validates each signature before aggregation if `sigs_groupcheck` is true.
 /// Errors if the `sigs` slice is empty or if any signature validation fails.
 pub fn aggregate(sigs: []const Signature, sigs_groupcheck: bool) BlstError!Self {
-    if (sigs.len == 0) return BlstError.AggrTypeMismatch;
+    if (sigs.len == 0) return error.AggrTypeMismatch;
     if (sigs_groupcheck) for (sigs) |sig| try sig.validate(false);
 
     var agg_sig = Self{};

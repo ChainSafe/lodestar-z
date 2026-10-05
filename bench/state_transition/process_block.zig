@@ -82,6 +82,7 @@ fn ProcessWithdrawalsBench(comptime fork: ForkSeq) type {
                 state,
                 withdrawals_result,
                 payload_withdrawals_root,
+                null,
             ) catch unreachable;
         }
     };
@@ -113,9 +114,7 @@ fn ProcessRandaoBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
         body: *const BeaconBlockBody(.full, fork),
         io: std.Io,
 
-        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            _ = allocator;
-
+        pub fn run(self: *@This(), _: std.mem.Allocator) void {
             state_transition.processRandao(
                 fork,
                 self.io,
@@ -135,9 +134,7 @@ fn ProcessEth1DataBench(comptime fork: ForkSeq) type {
     return struct {
         body: *const BeaconBlockBody(.full, fork),
 
-        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            _ = allocator;
-
+        pub fn run(self: *@This(), _: std.mem.Allocator) void {
             state_transition.processEth1Data(
                 fork,
                 BenchState.cloned_cached_state.state.castToFork(fork),
@@ -176,9 +173,9 @@ fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) t
         io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
+            _ = allocator;
             state_transition.processSyncAggregate(
                 fork,
-                allocator,
                 self.io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
@@ -343,6 +340,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                     state,
                     withdrawals_result,
                     payload_withdrawals_root,
+                    null,
                 ) catch unreachable;
                 recordSegment(.withdrawals, @as(u64, @intCast(time.since(io, withdrawals_start).nanoseconds)));
             }
@@ -405,7 +403,6 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 const sync_start = time.start(io);
                 state_transition.processSyncAggregate(
                     fork,
-                    allocator,
                     io,
                     BenchState.cloned_cached_state.config,
                     epoch_cache,

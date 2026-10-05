@@ -94,7 +94,7 @@ test "metrics registry collectors share one snapshot and isolate repeated gather
     @memcpy(original[0..length], writer.buffered());
     writer.end = 0;
     try registry.write(&second, &writer);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "events_total 7\n") != null);
+    try std.testing.expect(std.mem.find(u8, writer.buffered(), "events_total 7\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "active 0\n"));
     writer.end = 0;
     try registry.write(&first, &writer);
@@ -114,6 +114,6 @@ test "metrics registry formats finite histogram bounds without a decimal scratch
         .help = "Values",
     }, Histogram);
     try metric.histogram(.{}, &value);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "values_bucket{le=\"+Inf\"} 1\n") != null);
+    try std.testing.expect(std.mem.find(u8, writer.buffered(), "values_bucket{le=\"+Inf\"} 1\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "values_count 1\n"));
 }

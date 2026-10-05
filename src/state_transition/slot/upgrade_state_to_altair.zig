@@ -170,7 +170,7 @@ test "memory_safety: translateParticipation should release participation on allo
 
             try std.testing.expectEqual(count, participation.items.len);
             for (participation.items, 0..) |flags, i| {
-                const expected: u8 = if (std.mem.indexOfScalar(ValidatorIndex, participants, i) != null)
+                const expected: u8 = if (std.mem.findScalar(ValidatorIndex, participants, i) != null)
                     (1 << constants.TIMELY_SOURCE_FLAG_INDEX) | (1 << constants.TIMELY_TARGET_FLAG_INDEX) | (1 << constants.TIMELY_HEAD_FLAG_INDEX)
                 else
                     0;

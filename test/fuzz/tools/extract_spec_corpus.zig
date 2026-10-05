@@ -239,7 +239,7 @@ fn findUintSelector(name: []const u8) ?u8 {
     }
     const rest = name["uint_".len..];
     // Find end of bits number
-    const sep = std.mem.indexOfScalar(u8, rest, '_') orelse
+    const sep = std.mem.findScalar(u8, rest, '_') orelse
         return null;
     const bits = rest[0..sep];
     for (uint_selectors) |entry| {
@@ -438,7 +438,7 @@ fn findPrefixSelector(
         return null;
     }
     const rest = name[prefix.len..];
-    const sep = std.mem.indexOfScalar(u8, rest, '_') orelse
+    const sep = std.mem.findScalar(u8, rest, '_') orelse
         return null;
     const key = rest[0..sep];
     for (selectors) |entry| {

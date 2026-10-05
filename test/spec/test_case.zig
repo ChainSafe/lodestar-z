@@ -116,11 +116,11 @@ pub fn loadBlsSetting(allocator: std.mem.Allocator, dir: std.Io.Dir) BlsSetting 
     const contents = dir.readFileAlloc(io, "meta.yaml", allocator, .unlimited) catch return .default;
     defer allocator.free(contents);
 
-    if (std.mem.indexOf(u8, contents, "bls_setting: 0") != null) {
+    if (std.mem.find(u8, contents, "bls_setting: 0") != null) {
         return .default;
-    } else if (std.mem.indexOf(u8, contents, "bls_setting: 1") != null) {
+    } else if (std.mem.find(u8, contents, "bls_setting: 1") != null) {
         return .required;
-    } else if (std.mem.indexOf(u8, contents, "bls_setting: 2") != null) {
+    } else if (std.mem.find(u8, contents, "bls_setting: 2") != null) {
         return .ignored;
     } else {
         return .default;

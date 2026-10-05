@@ -77,7 +77,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
                 post.deinit();
                 self.pre.allocator.destroy(post);
             }
-            state_transition.deinitReusedEpochTransitionCache(std.testing.io);
+            state_transition.deinitReusedEpochTransitionCache();
         }
 
         fn runTest(self: *Self) !void {
@@ -104,12 +104,11 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
 
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
-                std.testing.io,
                 config,
                 epoch_cache,
                 state,
             );
-            defer epoch_transition_cache.deinit(allocator);
+            defer epoch_transition_cache.deinit();
 
             const fork_state = state.castToFork(fork);
 
@@ -123,7 +122,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
                 .participation_record_updates => try state_transition.processParticipationRecordUpdates(fork, fork_state),
                 .randao_mixes_reset => try state_transition.processRandaoMixesReset(fork, fork_state, &epoch_transition_cache),
                 .registry_updates => try state_transition.processRegistryUpdates(fork, config, epoch_cache, fork_state, &epoch_transition_cache),
-                .rewards_and_penalties => try state_transition.processRewardsAndPenalties(fork, allocator, config, epoch_cache, fork_state, &epoch_transition_cache, null),
+                .rewards_and_penalties => try state_transition.processRewardsAndPenalties(fork, config, epoch_cache, fork_state, &epoch_transition_cache, null),
                 .slashings => _ = try state_transition.processSlashings(fork, epoch_cache, fork_state, &epoch_transition_cache, true),
                 .slashings_reset => try state_transition.processSlashingsReset(fork, epoch_cache, fork_state, &epoch_transition_cache),
                 .sync_committee_updates => try state_transition.processSyncCommitteeUpdates(fork, allocator, epoch_cache, fork_state),

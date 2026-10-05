@@ -65,9 +65,9 @@ pub fn init(
     challenge_capacity: usize,
 ) InitError!void {
     if (session_capacity == 0 or session_capacity > session_capacity_max)
-        return InitError.InvalidCapacity;
+        return error.InvalidCapacity;
     if (challenge_capacity == 0 or challenge_capacity > challenge_capacity_max)
-        return InitError.InvalidCapacity;
+        return error.InvalidCapacity;
 
     var sessions: SessionMap = .empty;
     try sessions.ensureTotalCapacity(allocator, @intCast(session_capacity));
@@ -125,7 +125,7 @@ pub fn outbound(
         const removed = self.sessions.remove(peer);
         std.debug.assert(removed);
         if (self.sessions.count() == 0) self.oldest_session_ms = null;
-        return Error.NonceExhausted;
+        return error.NonceExhausted;
     };
     const nonce = makeNonce(counter, random_tail);
     stored.value.nonce_counter = counter;

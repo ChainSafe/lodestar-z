@@ -132,11 +132,11 @@ pub fn init(
 ) InitError!void {
     const public_key = crypto.compressedPublicKey(&local_key);
     if (!std.mem.eql(u8, &public_key, &local_record.public_key))
-        return InitError.InvalidLocalRecord;
+        return error.InvalidLocalRecord;
     if (config.challenge_timeout_ms == 0 or config.session_idle_timeout_ms == 0)
-        return InitError.InvalidTimeout;
+        return error.InvalidTimeout;
     if (config.challenge_capacity == 0 or config.challenge_capacity > SessionStore.challenge_capacity_max)
-        return InitError.InvalidCapacity;
+        return error.InvalidCapacity;
     var resolved = config;
     resolved.challenge_capacity = @intCast(@min(config.challenge_capacity, Admission.global_quota.maximumDuring(config.challenge_timeout_ms)));
     try self.sessions.init(allocator, resolved.session_capacity, resolved.challenge_capacity);
@@ -161,11 +161,11 @@ pub fn hasSession(self: *const Channel, peer: types.Endpoint) bool {
 /// Installs an immutable authenticated Record from an ENR constructor. Identity and freshness
 /// remain channel invariants; hostile encoded bytes must pass Record.init before this call.
 pub fn updateLocalRecord(self: *Channel, record: *const enr.Record) Error!void {
-    if (record.length > record.bytes.len) return Error.InvalidLocalRecord;
+    if (record.length > record.bytes.len) return error.InvalidLocalRecord;
     const public_key = crypto.compressedPublicKey(&self.local_key);
-    if (!std.mem.eql(u8, &public_key, &record.public_key)) return Error.InvalidLocalRecord;
-    if (!std.mem.eql(u8, &record.node_id, &self.local_record.node_id)) return Error.InvalidLocalRecord;
-    if (record.sequence <= self.local_record.sequence) return Error.StaleLocalRecord;
+    if (!std.mem.eql(u8, &public_key, &record.public_key)) return error.InvalidLocalRecord;
+    if (!std.mem.eql(u8, &record.node_id, &self.local_record.node_id)) return error.InvalidLocalRecord;
+    if (record.sequence <= self.local_record.sequence) return error.StaleLocalRecord;
     self.local_record = record.*;
 }
 
@@ -187,7 +187,7 @@ pub fn seal(
     now_ms: u64,
 ) Error!Sealed {
     if (out.len < try packet.ordinaryPacketLength(plaintext.len))
-        return Error.BufferTooSmall;
+        return error.BufferTooSmall;
     var outbound = try self.sessions.outbound(peer, &entropy.nonce_tail, now_ms);
     defer if (outbound) |*active| {
         std.crypto.secureZero(u8, std.mem.asBytes(active));
@@ -208,9 +208,9 @@ pub fn sealEstablished(
     now_ms: u64,
 ) Error!Sealed {
     if (out.len < try packet.ordinaryPacketLength(plaintext.len))
-        return Error.BufferTooSmall;
+        return error.BufferTooSmall;
     var outbound = (try self.sessions.outbound(peer, &entropy.nonce_tail, now_ms)) orelse
-        return Error.MissingSession;
+        return error.MissingSession;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&outbound));
     return self.encodeOrdinary(
         out,
@@ -270,8 +270,8 @@ pub fn challenge(
     now_ms: u64,
 ) Error!?u16 {
     if (self.liveChallenge(peer, now_ms) != null) return null;
-    if (out.len < constants.whoareyou_packet_size) return Error.BufferTooSmall;
-    if (!self.admission.allow(.challenge, &peer.address, now_ms)) return Error.AdmissionLimited;
+    if (out.len < constants.whoareyou_packet_size) return error.BufferTooSmall;
+    if (!self.admission.allow(.challenge, &peer.address, now_ms)) return error.AdmissionLimited;
     var challenge_data: [constants.whoareyou_packet_size]u8 = undefined;
     const encoded = try packet.encodeWhoareyou(out, .{
         .masking_iv = &entropy.masking_iv,
@@ -293,7 +293,7 @@ pub fn answerChallenge(self: *Channel, out: []u8, args: HandshakeArgs) Error!Sea
     else
         &.{};
     if (args.plaintext.len > try packet.handshakePlaintextCapacity(local_enr.len))
-        return Error.RequestTooLargeForHandshake;
+        return error.RequestTooLargeForHandshake;
     var ephemeral_key = try crypto.keyPairFromSecret(&args.entropy.ephemeral_secret);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&ephemeral_key));
     const ephemeral_public_key = crypto.compressedPublicKey(&ephemeral_key);
@@ -367,13 +367,13 @@ fn receiveOrdinary(
         &read_key,
         &scratch.packet_decrypt,
     ) catch |err| retry: switch (err) {
-        packet.Error.DecryptionFailed => {
+        error.DecryptionFailed => {
             var alternate_key = self.sessions.alternateReadKey(peer) orelse
                 return unauthenticated(decoded, peer);
             defer std.crypto.secureZero(u8, &alternate_key);
             break :retry packet.decrypt(decoded, &alternate_key, &scratch.packet_decrypt) catch |alternate_err|
                 return switch (alternate_err) {
-                    packet.Error.DecryptionFailed => unauthenticated(decoded, peer),
+                    error.DecryptionFailed => unauthenticated(decoded, peer),
                     else => rejected(.malformed_packet),
                 };
         },
@@ -404,7 +404,7 @@ fn receiveHandshake(
     self.sessions.removeChallenge(peer);
     const identity = selectIdentity(authdata.enr, stored.known, &peer.node_id) catch |err|
         return rejected(switch (err) {
-            IdentityError.MissingIdentity => .invalid_handshake,
+            error.MissingIdentity => .invalid_handshake,
             else => .invalid_record,
         });
     handshake.verifyProof(
@@ -493,12 +493,12 @@ fn selectIdentity(
     if (encoded) |raw| {
         const record = try enr.Record.init(raw);
         if (!std.mem.eql(u8, &record.node_id, expected_id)) {
-            return IdentityError.InvalidRemoteRecord;
+            return error.InvalidRemoteRecord;
         }
         const newer = if (known) |identity| record.sequence > identity.sequence else true;
         if (newer) return .{ .public_key = record.public_key, .update = record };
     }
-    const identity = known orelse return IdentityError.MissingIdentity;
+    const identity = known orelse return error.MissingIdentity;
     return .{ .public_key = identity.public_key, .update = null };
 }
 

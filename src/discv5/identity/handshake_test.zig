@@ -92,7 +92,7 @@ test "official identity proof signature vector" {
     var invalid = signature;
     invalid[0] ^= 1;
     try std.testing.expectError(
-        crypto.Error.InvalidSignature,
+        error.InvalidSignature,
         handshake.verifyProof(
             &invalid,
             &public_key,
@@ -115,7 +115,7 @@ fn expectRejectsMalleable(
     const s = std.mem.readInt(u256, malleable[32..64], .big);
     std.mem.writeInt(u256, malleable[32..64], order - s, .big);
     try std.testing.expectError(
-        crypto.Error.InvalidSignature,
+        error.InvalidSignature,
         handshake.verifyProof(
             &malleable,
             public_key,

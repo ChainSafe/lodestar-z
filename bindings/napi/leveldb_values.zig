@@ -70,7 +70,7 @@ pub fn path(value: Value, buffer: *[path_bytes_max + 1]u8) ![:0]const u8 {
     try napi.status.check(napi.c.napi_get_value_string_utf8(value.env, value.value, null, 0, &size));
     if (size == 0 or size > path_bytes_max) return error.InvalidPath;
     const result = try value.getValueStringUtf8(buffer);
-    if (result.len != size or std.mem.indexOfScalar(u8, result, 0) != null) return error.InvalidPath;
+    if (result.len != size or std.mem.findScalar(u8, result, 0) != null) return error.InvalidPath;
     return buffer[0..size :0];
 }
 

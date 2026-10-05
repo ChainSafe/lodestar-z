@@ -139,9 +139,9 @@ test "bridge snapshot renders recorded calls, deliveries and processor state" {
         "lodestar_native_gossip_processor_refusals_total{kind=\"data_column_sidecar\",reason=\"source_full\"} 2\n",
         "lodestar_native_gossip_processor_execution_credit_limit{kind=\"data_column_sidecar\",credit=\"items\"} 2\n",
         "lodestar_native_gossip_processor_execution_credit_limit{kind=\"data_column_sidecar\",credit=\"bytes\"} 4096\n",
-    }) |expected| try std.testing.expect(std.mem.indexOf(u8, output, expected) != null);
+    }) |expected| try std.testing.expect(std.mem.find(u8, output, expected) != null);
     writer = std.Io.Writer.fixed(&buffer);
     encoder = .{ .writer = &writer };
     try write(&snapshot, false, &encoder);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "state=\"waiting\"} 5\n") == null);
+    try std.testing.expect(std.mem.find(u8, writer.buffered(), "state=\"waiting\"} 5\n") == null);
 }

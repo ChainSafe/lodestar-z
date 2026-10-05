@@ -3,7 +3,6 @@ const assert = std.debug.assert;
 const bls = @import("bls");
 
 const Signature = bls.Signature;
-const BlstError = bls.BlstError;
 
 pub export fn zig_fuzz_init() callconv(.c) void {}
 
@@ -16,14 +15,14 @@ pub export fn zig_fuzz_test(
 
     const sig = Signature.deserialize(input) catch |err| {
         switch (err) {
-            BlstError.BadEncoding, BlstError.PointNotOnCurve, BlstError.PointNotInGroup, BlstError.PkIsInfinity => return,
+            error.BadEncoding, error.PointNotOnCurve, error.PointNotInGroup, error.PkIsInfinity => return,
             else => @panic("unexpected signature decode error"),
         }
     };
 
     sig.validate(true) catch |err| {
         switch (err) {
-            BlstError.PointNotInGroup, BlstError.PkIsInfinity => return,
+            error.PointNotInGroup, error.PkIsInfinity => return,
             else => @panic("unexpected signature validation error"),
         }
     };
@@ -31,13 +30,13 @@ pub export fn zig_fuzz_test(
     const encoded = sig.serialize();
     const sig2 = Signature.deserialize(&encoded) catch |err| {
         switch (err) {
-            BlstError.BadEncoding, BlstError.PointNotOnCurve, BlstError.PointNotInGroup, BlstError.PkIsInfinity => return,
+            error.BadEncoding, error.PointNotOnCurve, error.PointNotInGroup, error.PkIsInfinity => return,
             else => @panic("unexpected signature roundtrip error"),
         }
     };
     sig2.validate(true) catch |err| {
         switch (err) {
-            BlstError.PointNotInGroup, BlstError.PkIsInfinity => return,
+            error.PointNotInGroup, error.PkIsInfinity => return,
             else => @panic("unexpected signature validation error"),
         }
     };

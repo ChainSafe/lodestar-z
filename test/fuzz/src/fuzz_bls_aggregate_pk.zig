@@ -2,7 +2,6 @@ const bls = @import("bls");
 
 const PublicKey = bls.PublicKey;
 const AggregatePublicKey = bls.AggregatePublicKey;
-const blstError = bls.BlstError;
 const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 
 pub export fn zig_fuzz_init() callconv(.c) void {}
@@ -35,7 +34,7 @@ fn fuzzAggregate(input: []const u8) void {
     if (count == 0) return;
 
     _ = AggregatePublicKey.aggregate(pks[0..count], false) catch |err| {
-        if (err != blstError.AggrTypeMismatch) {
+        if (err != error.AggrTypeMismatch) {
             @panic("unexpected aggregate public key error");
         }
     };

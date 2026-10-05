@@ -134,7 +134,7 @@ pub fn writeTests(
             defer arena.deinit();
             const a = arena.allocator();
 
-            var keys: std.ArrayListUnmanaged(Key) = .empty;
+            var keys: std.ArrayList(Key) = .empty;
 
             for (presets) |preset| {
                 try collectCases(io, a, root_dir, preset, fork_path, comptime handler.suiteName(), comptime kind.hasSuiteCase(), &keys);
@@ -169,7 +169,7 @@ fn collectCases(
     fork_path: []const u8,
     suite_name: []const u8,
     has_suite_case: bool,
-    out: *std.ArrayListUnmanaged(Key),
+    out: *std.ArrayList(Key),
 ) !void {
     var preset_dir = root.openDir(io, preset, .{}) catch |err| switch (err) {
         error.FileNotFound => return,

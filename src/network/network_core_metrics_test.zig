@@ -57,7 +57,7 @@ const Fixture = struct {
 };
 
 fn contains(text: []const u8, expected: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, text, expected) != null);
+    try std.testing.expect(std.mem.find(u8, text, expected) != null);
 }
 
 const Series = struct {
@@ -190,7 +190,7 @@ const contract = [_]Series{
 fn hasSeries(output: []const u8, series: Series) bool {
     var buffer: [256]u8 = undefined;
     const type_line = std.fmt.bufPrint(&buffer, "# TYPE {s} {s}\n", .{ series.name, series.kind }) catch return false;
-    if (std.mem.indexOf(u8, output, type_line) == null) return false;
+    if (std.mem.find(u8, output, type_line) == null) return false;
     const labels = sampleLabels(output, series.name, std.mem.eql(u8, series.kind, "histogram")) orelse return false;
     for (series.labels) |label| if (!hasLabel(labels, label)) return false;
     return true;
@@ -205,14 +205,14 @@ fn sampleLabels(output: []const u8, name: []const u8, histogram: bool) ?[]const 
         if (!std.mem.startsWith(u8, rest, suffix)) continue;
         const after = rest[suffix.len..];
         if (std.mem.startsWith(u8, after, " ")) return "";
-        if (std.mem.startsWith(u8, after, "{")) return after[0 .. std.mem.indexOfScalar(u8, after, '}') orelse after.len];
+        if (std.mem.startsWith(u8, after, "{")) return after[0 .. std.mem.findScalar(u8, after, '}') orelse after.len];
     }
     return null;
 }
 
 fn hasLabel(labels: []const u8, label: []const u8) bool {
     var start: usize = 0;
-    while (std.mem.indexOfPos(u8, labels, start, label)) |at| {
+    while (std.mem.findPos(u8, labels, start, label)) |at| {
         const opens = at > 0 and (labels[at - 1] == '{' or labels[at - 1] == ',');
         if (opens and std.mem.startsWith(u8, labels[at + label.len ..], "=\"")) return true;
         start = at + 1;
@@ -251,9 +251,9 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     try contains(output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method=\"status\"} 2\n");
     try contains(output, "lodestar_native_gossip_expired_executing 3\n");
     try contains(output, "lodestar_native_network_metrics_updated_timestamp_seconds 123456\n");
-    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_peer_manager_starved_bool") == null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_discovery_total_dial_attempts") == null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "_total_total") == null);
+    try std.testing.expect(std.mem.find(u8, output, "lodestar_peer_manager_starved_bool") == null);
+    try std.testing.expect(std.mem.find(u8, output, "lodestar_discovery_total_dial_attempts") == null);
+    try std.testing.expect(std.mem.find(u8, output, "_total_total") == null);
     _ = try f.render(true);
     try std.testing.expectEqualDeep(original, node.peer_manager.counters);
     const stopped = try f.render(false);
@@ -280,7 +280,7 @@ test "metrics include remote subscriptions without overlay rows and follow local
     try contains(output, "lodestar_gossip_mesh_peers_by_data_column_subnet_count{subnet=\"9\",boundary=\"fulu_100\"} 0\n");
     try contains(output, "lodestar_native_gossip_subscriptions_by_data_column_subnet_count{subnet=\"9\",boundary=\"fulu_100\"} 0\n");
     try contains(output, "lodestar_gossip_topic_peers_by_beacon_attestation_subnet_count{subnet=\"00\",boundary=\"fulu_100\"} 0\n");
-    try std.testing.expect(std.mem.indexOf(u8, output, "fulu_200") == null);
+    try std.testing.expect(std.mem.find(u8, output, "fulu_200") == null);
     const future = "/eth2/01010101/beacon_block/ssz_snappy";
     try gossip_test.subscribe(g, future);
     output = try f.render(true);
@@ -288,7 +288,7 @@ test "metrics include remote subscriptions without overlay rows and follow local
     try contains(output, "lodestar_native_gossip_subscriptions_by_type_count{type=\"beacon_block\",boundary=\"fulu_200\"} 1\n");
     try gossip_test.unsubscribe(g, future);
     output = try f.render(true);
-    try std.testing.expect(std.mem.indexOf(u8, output, "fulu_200") == null);
+    try std.testing.expect(std.mem.find(u8, output, "fulu_200") == null);
     ns.clearPeer(0);
     ns.clearPeer(0);
     output = try f.render(true);
@@ -393,7 +393,7 @@ test "metrics render exactly the measurement contract families with their types 
     var lines = std.mem.splitScalar(u8, output, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "# TYPE ")) continue;
-        const name = line["# TYPE ".len..std.mem.lastIndexOfScalar(u8, line, ' ').?];
+        const name = line["# TYPE ".len..std.mem.findScalarLast(u8, line, ' ').?];
         for (contract) |series| {
             if (std.mem.eql(u8, series.name, name)) break;
         } else {
@@ -421,10 +421,10 @@ test "metrics report the kernel's buffer sizes and drops for every UDP socket" {
         // Linux kernels without SO_MEMINFO report no drop count.
         if (role[1].drops()[0] != null) try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_drops_total{{role=\"{s}\",family=\"ip4\"}} 0\n", .{role[0]}));
     }
-    try std.testing.expect(std.mem.indexOf(u8, output, "family=\"ip6\"") == null);
+    try std.testing.expect(std.mem.find(u8, output, "family=\"ip6\"") == null);
     f.node.discovery.?.transport.sockets.buffers[0].?.receive = null;
     const unknown = try f.render(true);
-    try std.testing.expect(std.mem.indexOf(u8, unknown, "role=\"discovery\",family=\"ip4\",direction=\"receive\"") == null);
+    try std.testing.expect(std.mem.find(u8, unknown, "role=\"discovery\",family=\"ip4\",direction=\"receive\"") == null);
     try contains(unknown, "role=\"discovery\",family=\"ip4\",direction=\"send\"");
 }
 
@@ -485,7 +485,7 @@ test "metrics export stock per-topic gossipsub peer gauges under full topic stri
     try contains(output, "gossipsub_mesh_peer_count{topicStr=\"" ++ column ++ "\"} 0\n");
     try contains(output, "gossipsub_mesh_peer_count{topicStr=\"/eth2/00000000/beacon_attestation_63/ssz_snappy\"} 0\n");
     try std.testing.expectEqual(@as(usize, 333), std.mem.count(u8, output, "gossipsub_topic_peer_count{topicStr=\"/eth2/00000000/"));
-    try std.testing.expect(std.mem.indexOf(u8, output, "/eth2/01010101/") == null);
+    try std.testing.expect(std.mem.find(u8, output, "/eth2/01010101/") == null);
     const future = "/eth2/01010101/beacon_block/ssz_snappy";
     try gossip_test.subscribe(g, future);
     output = try f.render(true);
@@ -503,11 +503,11 @@ test "metrics export gossip score populations only while running and omit empty 
     try contains(running, "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"nonnegative\"} 0\n");
     try contains(running, "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"all\"} 0\n");
     try contains(running, "lodestar_native_gossip_score{scope=\"connected\",stat=\"max\"} -10\n");
-    try std.testing.expect(std.mem.indexOf(u8, running, "lodestar_native_gossip_score{scope=\"mesh\"") == null);
+    try std.testing.expect(std.mem.find(u8, running, "lodestar_native_gossip_score{scope=\"mesh\"") == null);
     const stopped = try f.render(false);
     try contains(stopped, "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"all\"} 0\n");
     try contains(stopped, "# TYPE lodestar_native_gossip_score gauge\n");
-    try std.testing.expect(std.mem.indexOf(u8, stopped, "lodestar_native_gossip_score{") == null);
+    try std.testing.expect(std.mem.find(u8, stopped, "lodestar_native_gossip_score{") == null);
 }
 
 test "metrics export gossip message, mesh change, penalty and promise counters through shutdown" {

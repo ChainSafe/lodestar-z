@@ -7,7 +7,7 @@ const decode = @import("network_js_input.zig");
 const t = n.peers.types;
 const enr_max = d.wire.constants.enr_size_max;
 const bootstrap_max = n.peers.Discovery.bootstrap_max;
-const config = @import("config.zig");
+const BeaconConfig = @import("config").BeaconConfig;
 
 pub const Config = struct {
     profile: n.configuration.Profile,
@@ -51,7 +51,7 @@ pub fn bindings(value: Value) !n.udp.Sockets.Bindings {
     } };
 }
 
-pub fn parse(value: Value, out: *Config) !void {
+pub fn parse(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
     out.* = .{
         .profile = .small,
         .secret = @splat(0),
@@ -80,7 +80,7 @@ pub fn parse(value: Value, out: *Config) !void {
     out.bind = try bindings(try decode.get(value, "bind"));
     out.slot = try decode.bigint(try decode.get(value, "initialSlot"));
     try parseLocal(try decode.get(value, "local"), &out.local);
-    out.chain = try n.chain.Config.init(&config.state.config, try decode.boolean(try decode.get(value, "serveLightClients")));
+    out.chain = try n.chain.Config.init(beacon, try decode.boolean(try decode.get(value, "serveLightClients")));
     const update = try out.chain.update(out.local, null, out.slot);
     out.local = update.local;
     out.schedule = update.schedule;

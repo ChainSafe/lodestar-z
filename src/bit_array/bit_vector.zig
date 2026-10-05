@@ -115,7 +115,7 @@ pub fn BitVector(comptime _length: comptime_int) type {
         }
 
         /// Returns values whose corresponding bit is set. Caller owns the returned list.
-        pub fn intersectValues(
+        pub fn intersectValuesAlloc(
             self: *const @This(),
             comptime T: type,
             allocator: std.mem.Allocator,
@@ -136,6 +136,31 @@ pub fn BitVector(comptime _length: comptime_int) type {
                 }
             }
             return indices;
+        }
+
+        /// Returns a slice into `out` of values whose corresponding bit is set.
+        pub fn intersectValues(
+            self: *const @This(),
+            comptime T: type,
+            values: *const [length]T,
+            out: *[length]T,
+        ) []T {
+            var i: usize = 0;
+            for (0..byte_len) |i_byte| {
+                var b = self.data[i_byte];
+                // Kernighan's algorithm to count the set bits instead of going through 0..8 for every byte
+                while (b != 0) {
+                    const lsb: usize = @as(u8, @ctz(b)); // Get the index of least significant bit
+                    const bit_index = i_byte * 8 + lsb;
+                    out[i] = values[bit_index];
+                    i += 1;
+                    // The `b - 1` flips the bits starting from `lsb` index
+                    // And `&` will reset the last bit at `lsb` index
+                    b &= b - 1;
+                }
+            }
+
+            return out[0..i];
         }
     };
 }

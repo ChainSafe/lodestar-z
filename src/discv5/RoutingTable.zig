@@ -272,11 +272,11 @@ pub fn resolveRevalidation(
     now_ms: u64,
 ) Error!ResolveResult {
     const index = bucketIndex(types.logDistance(&self.local_id, node_id));
-    const candidate = self.pending[index] orelse return Error.NoPendingRevalidation;
+    const candidate = self.pending[index] orelse return error.NoPendingRevalidation;
     if (!std.mem.eql(u8, &candidate.replace_id, node_id))
-        return Error.NoPendingRevalidation;
+        return error.NoPendingRevalidation;
     const position = self.findInBucket(index, node_id) orelse
-        return Error.NoPendingRevalidation;
+        return error.NoPendingRevalidation;
     self.pending[index] = null;
     if (alive) {
         self.touch(index, position, now_ms);
@@ -304,10 +304,10 @@ pub fn findNodes(
     out: []enr.Record,
 ) Error![]enr.Record {
     std.debug.assert(std.mem.eql(u8, &local_record.node_id, &self.local_id));
-    if (distances.len > types.distance_count) return Error.TooManyDistances;
+    if (distances.len > types.distance_count) return error.TooManyDistances;
     var requested = [_]bool{false} ** types.distance_count;
     for (distances) |distance| {
-        if (distance > types.distance_max) return Error.InvalidDistance;
+        if (distance > types.distance_max) return error.InvalidDistance;
         requested[distance] = true;
     }
 
@@ -420,7 +420,7 @@ fn requireAddressCapacity(
         }
     }
     if (bucket_matches >= bucket_subnet_limit or table_matches >= table_subnet_limit)
-        return Error.AddressLimit;
+        return error.AddressLimit;
 }
 
 fn findInBucket(
@@ -465,12 +465,12 @@ fn validateEntry(
     peer: *const types.Endpoint,
     record: *const enr.Record,
 ) Error!void {
-    if (std.mem.eql(u8, local_id, &peer.node_id)) return Error.SelfEntry;
+    if (std.mem.eql(u8, local_id, &peer.node_id)) return error.SelfEntry;
     if (!std.mem.eql(u8, &peer.node_id, &record.node_id))
-        return Error.InvalidRemoteRecord;
-    if (record.length > record.bytes.len) return Error.InvalidRecord;
-    if (!recordHasAddress(record, peer.address)) return Error.InvalidRemoteRecord;
-    if (!peer.address.isUsable()) return Error.InvalidRemoteRecord;
+        return error.InvalidRemoteRecord;
+    if (record.length > record.bytes.len) return error.InvalidRecord;
+    if (!recordHasAddress(record, peer.address)) return error.InvalidRemoteRecord;
+    if (!peer.address.isUsable()) return error.InvalidRemoteRecord;
 }
 
 fn entryNodeId(entry: *const Entry) *const types.NodeId {

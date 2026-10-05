@@ -64,9 +64,9 @@ test "ProgressiveContainerType - variable" {
     }, &[_]u1{ 1, 1, 0, 1 });
 
     var f: Foo.Type = undefined;
-    f.a = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
-    f.b = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
-    f.c = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
+    f.a = try std.ArrayList(u8).initCapacity(allocator, 10);
+    f.b = try std.ArrayList(u8).initCapacity(allocator, 10);
+    f.c = try std.ArrayList(u8).initCapacity(allocator, 10);
     defer f.a.deinit(allocator);
     defer f.b.deinit(allocator);
     defer f.c.deinit(allocator);
@@ -199,4 +199,38 @@ test "memory_safety: variable progressive container byte deserialization preserv
     );
     try std.testing.expectEqual(@as(u8, 7), out.a);
     try std.testing.expectEqualSlices(bool, &.{ false, false }, out.items.items);
+}
+
+test "progressive container hashing streams sparse fields without allocation" {
+    const allocator = std.testing.allocator;
+    const active = comptime blk: {
+        var flags: [256]u1 = @splat(0);
+        flags[0] = 1;
+        flags[85] = 1;
+        flags[255] = 1;
+        break :blk flags;
+    };
+    const Fixed = FixedProgressiveContainerType(struct { a: UintType(64), b: BoolType(), c: UintType(8) }, &active);
+    const Variable = VariableProgressiveContainerType(struct { a: UintType(64), b: FixedListType(UintType(8), 32, .{}), c: UintType(8) }, &active);
+    inline for (.{ Fixed, Variable }) |ST| {
+        var value = ST.default_value;
+        defer if (ST == Variable) ST.deinit(allocator, &value);
+        value.a = 123;
+        value.c = 45;
+        if (ST == Fixed) value.b = true else try value.b.appendSlice(allocator, &.{ 2, 3, 4 });
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
+        defer pool.deinit();
+        const root = try ST.tree.fromValue(&pool, &value);
+        defer pool.unref(root);
+        const bytes = try allocator.alloc(u8, ST.serializedSize(&value));
+        defer allocator.free(bytes);
+        _ = ST.serializeIntoBytes(&value, bytes);
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        var actual: [32]u8 = undefined;
+        if (ST == Fixed) try ST.hashTreeRoot(&value, &actual) else try ST.hashTreeRoot(failing.allocator(), &value, &actual);
+        try std.testing.expectEqualSlices(u8, root.getRoot(&pool), &actual);
+        if (ST == Fixed) try ST.serialized.hashTreeRoot(bytes, &actual) else try ST.serialized.hashTreeRoot(failing.allocator(), bytes, &actual);
+        try std.testing.expectEqualSlices(u8, root.getRoot(&pool), &actual);
+        try std.testing.expect(!failing.has_induced_failure);
+    }
 }

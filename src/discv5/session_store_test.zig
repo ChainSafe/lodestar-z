@@ -28,15 +28,15 @@ test "session table keeps key direction and bounded nonces" {
 test "session table rejects zero and excessive configured capacities" {
     var table: SessionStore = undefined;
     try std.testing.expectError(
-        SessionStore.InitError.InvalidCapacity,
+        error.InvalidCapacity,
         table.init(std.testing.allocator, 0, 1),
     );
     try std.testing.expectError(
-        SessionStore.InitError.InvalidCapacity,
+        error.InvalidCapacity,
         table.init(std.testing.allocator, SessionStore.session_capacity_max + 1, 1),
     );
     try std.testing.expectError(
-        SessionStore.InitError.InvalidCapacity,
+        error.InvalidCapacity,
         table.init(std.testing.allocator, 1, SessionStore.challenge_capacity_max + 1),
     );
 }
@@ -54,7 +54,7 @@ test "nonce exhaustion retires the unusable session" {
     };
     table.install(peer, &active, 1);
     try std.testing.expectError(
-        SessionStore.Error.NonceExhausted,
+        error.NonceExhausted,
         table.outbound(peer, &([_]u8{0x22} ** 8), 2),
     );
     try std.testing.expectEqual(@as(usize, 0), table.sessionCount());

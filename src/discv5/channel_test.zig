@@ -177,7 +177,7 @@ test "challenge admission shares source credit across ports and node identities"
     }
     peer.node_id[0] += 1;
     peer.address.ip4.port += 1;
-    try std.testing.expectError(Channel.Error.AdmissionLimited, pair.node_b.challenge(&pair.b_to_a, peer, &nonce, null, &entropy, 249));
+    try std.testing.expectError(error.AdmissionLimited, pair.node_b.challenge(&pair.b_to_a, peer, &nonce, null, &entropy, 249));
     try std.testing.expect((try pair.node_b.challenge(&pair.b_to_a, peer, &nonce, null, &entropy, 250)) != null);
     try std.testing.expectEqual(@as(usize, channelConfig().challenge_capacity), pair.node_b.sessions.challengeCount());
 }
@@ -285,7 +285,7 @@ test "handshake rejects a request that cannot fit beside the local record" {
     const who = try pair.challenge(&plaintext, null, 1);
     const entropy = handshakeEntropy(0x30);
     try std.testing.expectError(
-        Channel.Error.RequestTooLargeForHandshake,
+        error.RequestTooLargeForHandshake,
         pair.node_a.answerChallenge(
             &pair.a_to_b,
             .{
@@ -309,7 +309,7 @@ test "established seal requires a session" {
 
     const entropy = sealEntropy(0x10);
     try std.testing.expectError(
-        Channel.Error.MissingSession,
+        error.MissingSession,
         pair.node_a.sealEstablished(&pair.a_to_b, pair.peerB(), "ping", &entropy, 1),
     );
 }
@@ -339,13 +339,13 @@ test "channel rejects a foreign local record and zero timeouts" {
     const record_b = try enr.Record.create(&key_b, 1, loopback(2, 9_002));
     var invalid: Channel = undefined;
     try std.testing.expectError(
-        Channel.InitError.InvalidLocalRecord,
+        error.InvalidLocalRecord,
         invalid.init(std.testing.allocator, key_a, record_b, channelConfig()),
     );
     var config = channelConfig();
     config.session_idle_timeout_ms = 0;
     try std.testing.expectError(
-        Channel.InitError.InvalidTimeout,
+        error.InvalidTimeout,
         invalid.init(std.testing.allocator, key_b, record_b, config),
     );
 }
@@ -502,14 +502,14 @@ test "local record updates require a newer authenticated value from the local ke
     const updated = try enr.Record.create(&try keyPair(0x11), 2, loopback(3, 9_003));
     try pair.node_a.updateLocalRecord(&updated);
     try std.testing.expectEqualSlices(u8, updated.slice(), pair.node_a.local_record.slice());
-    try std.testing.expectError(Channel.Error.StaleLocalRecord, pair.node_a.updateLocalRecord(&pair.record_a));
-    try std.testing.expectError(Channel.Error.StaleLocalRecord, pair.node_a.updateLocalRecord(&updated));
-    try std.testing.expectError(Channel.Error.InvalidLocalRecord, pair.node_a.updateLocalRecord(&pair.record_b));
+    try std.testing.expectError(error.StaleLocalRecord, pair.node_a.updateLocalRecord(&pair.record_a));
+    try std.testing.expectError(error.StaleLocalRecord, pair.node_a.updateLocalRecord(&updated));
+    try std.testing.expectError(error.InvalidLocalRecord, pair.node_a.updateLocalRecord(&pair.record_b));
     var corrupted = try enr.Record.create(&try keyPair(0x11), 3, pair.address_a);
     corrupted.bytes[10] ^= 1;
     try std.testing.expectError(error.InvalidSignature, enr.Record.init(corrupted.slice()));
     corrupted.length = constants.enr_size_max + 1;
-    try std.testing.expectError(Channel.Error.InvalidLocalRecord, pair.node_a.updateLocalRecord(&corrupted));
+    try std.testing.expectError(error.InvalidLocalRecord, pair.node_a.updateLocalRecord(&corrupted));
     try std.testing.expectEqualSlices(u8, updated.slice(), pair.node_a.local_record.slice());
 
     const length = try pair.challengeAndHandshake("ping", pair.identityA(), 1);
