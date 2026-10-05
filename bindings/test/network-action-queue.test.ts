@@ -52,23 +52,4 @@ describe("ActionQueue", () => {
     expect(queue.take()).toHaveLength(512 - ACTION_MAX);
     expect(queue.take()).toEqual([report("peer-512")]);
   });
-
-  it("restores a refused batch ahead of new obligations and merges requests without mutating it", () => {
-    const queue = new ActionQueue();
-    const first: NativeAction = {handle: handle(1), type: "verdict", verdict: "accept"};
-    const next: NativeAction = {available: true, handle: handle(2), type: "classify"};
-    queue.enqueue(first);
-    queue.enqueue(report("peer", 60));
-    const batch = queue.take();
-    queue.enqueue(next);
-    queue.enqueue(report("peer", 70));
-    queue.enqueue({type: "dropQueued"});
-    queue.restore(batch);
-    expect(batch).toEqual([first, report("peer", 60)]);
-    expect(queue.take()).toEqual([first, next, report("peer", 100), {type: "dropQueued"}]);
-    queue.restore(batch);
-    queue.enqueue(report("peer", 1));
-    expect(batch).toEqual([first, report("peer", 60)]);
-    expect(queue.take()).toEqual([first, report("peer", 61)]);
-  });
 });

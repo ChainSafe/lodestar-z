@@ -9,7 +9,6 @@ const idle: NativeExchange = {
   closed: null,
   completions: [],
   disabledWaiting: false,
-  failure: null,
   gossip: null,
   more: false,
   parked: {ordinary: false, serving: false},
@@ -23,11 +22,11 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-it("without a live pump, turns drain control while native reports more, and escalate a third failed drain", () => {
+it("without a live pump, turns drain control while native reports more, and escalate a failed drain", () => {
   vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
   const queued = immediates();
   const failure = new Error("exchange failed");
-  const results: (NativeExchange | Error)[] = [{...idle, more: true}, idle, failure, failure, failure];
+  const results: (NativeExchange | Error)[] = [{...idle, more: true}, idle, failure];
   const route = {
     exchange: vi.fn((_actions: readonly NativeAction[], _demand: NativeExchangeDemand): NativeExchange => {
       const result = results.shift() ?? idle;
@@ -46,14 +45,14 @@ it("without a live pump, turns drain control while native reports more, and esca
     [[], control],
     [[], control],
   ]);
-  // Only a notification brings the next drain, and failed ones retry on the timer.
+  // Only a notification brings the next drain, a refusal escalates immediately.
   scheduler.schedule();
   expect(runUntilEscalated(queued, 20)).toBe(true);
-  expect(route.exchange).toHaveBeenCalledTimes(5);
-  expect(route.fail).toHaveBeenCalledExactlyOnceWith("failed_turns", "exchange failed");
+  expect(route.exchange).toHaveBeenCalledTimes(3);
+  expect(route.fail).toHaveBeenCalledExactlyOnceWith("generated_batch", "exchange failed");
 });
 
-it.each(["now", "later", "retry", "idle"] as const)("schedules the pump's %s continuation", (next) => {
+it.each(["now", "later", "idle"] as const)("schedules the pump's %s continuation", (next) => {
   vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
   const timers = vi.spyOn(globalThis, "setTimeout");
   const queued = immediates();
@@ -71,9 +70,9 @@ it.each(["now", "later", "retry", "idle"] as const)("schedules the pump's %s con
   expect(pump.turn).toHaveBeenCalledOnce();
   expect(route.exchange).not.toHaveBeenCalled();
   expect(queued.length).toBe(next === "now" ? 1 : 0);
-  expect(timers).toHaveBeenCalledTimes(next === "later" || next === "retry" ? 1 : 0);
-  if (next === "later" || next === "retry") {
-    expect(timers.mock.results[0].value.hasRef()).toBe(next === "retry");
+  expect(timers).toHaveBeenCalledTimes(next === "later" ? 1 : 0);
+  if (next === "later") {
+    expect(timers.mock.results[0].value.hasRef()).toBe(false);
     vi.advanceTimersByTime(25);
     expect(queued).toHaveLength(1);
   }

@@ -327,9 +327,8 @@ pub const Transport = struct {
         return false;
     }
 
-    /// Returns cancellation immediately, or the first destination failure after failing its owner. QUIC already accounts
-    /// for produced packets as sent: local pressure drops their bytes without rolling back packet
-    /// state or closing connections, so loss timers can retransmit the frames.
+    /// QUIC already accounts for produced packets as sent. Local pressure and transient routing failures on
+    /// authenticated connections drop bytes for loss recovery; unreachable handshakes fail immediately.
     fn submit(self: *Transport, io: std.Io, result: *Progress) ?Sockets.SendError {
         const count = self.batch_len;
         if (count == 0) return null;
@@ -353,10 +352,16 @@ pub const Transport = struct {
                 break;
             }
             if (err == error.Canceled) return error.Canceled;
-            first = first orelse err;
             const owner = self.batch.owners[begin];
-            if (self.engine.failSend(owner)) result.send_failures += 1;
-            begin += 1;
+            var end = begin + 1;
+            while (end < count and std.meta.eql(self.batch.owners[end], owner)) : (end += 1) {}
+            if (Sockets.destinationUnreachable(err) and self.engine.peerId(owner) != null) {
+                for (self.batch.outgoing[begin..end]) |unsent| self.send_drops.add(.destination_unreachable, unsent.bytes.len);
+            } else {
+                first = first orelse err;
+                if (self.engine.failSend(owner)) result.send_failures += 1;
+            }
+            begin = end;
         }
         return first;
     }

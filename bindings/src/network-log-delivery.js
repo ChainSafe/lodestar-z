@@ -62,6 +62,14 @@ export class LogDelivery {
       if (batch.records.length > 0 || loss !== null) {
         try {
           this.#host.logs(batch.records, loss);
+          if (loss !== null) {
+            this.#logLoss = {
+              at: performance.now(),
+              dropped: batch.dropped,
+              suppressed: batch.suppressed,
+              truncated: batch.truncated,
+            };
+          }
         } catch {
           this.#logErrors += batch.records.length;
         }
@@ -70,13 +78,17 @@ export class LogDelivery {
     }
   }
 
-  /** Record loss since the last report, once dropped or truncated records grew, at most every `LOG_LOSS_MS`. */
+  /** Record loss since the last report, at most every `LOG_LOSS_MS` while running. */
   #lostLogs(batch) {
     const reported = this.#logLoss;
-    if (batch.dropped === reported.dropped && batch.truncated === reported.truncated) return null;
+    if (
+      batch.dropped === reported.dropped &&
+      batch.suppressed === reported.suppressed &&
+      batch.truncated === reported.truncated
+    )
+      return null;
     const now = performance.now();
-    if (now - reported.at < LOG_LOSS_MS) return null;
-    this.#logLoss = {at: now, dropped: batch.dropped, suppressed: batch.suppressed, truncated: batch.truncated};
+    if (!this.#stopped && now - reported.at < LOG_LOSS_MS) return null;
     return {
       dropped: batch.dropped - reported.dropped,
       suppressed: batch.suppressed - reported.suppressed,

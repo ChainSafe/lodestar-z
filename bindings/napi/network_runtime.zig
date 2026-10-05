@@ -23,23 +23,8 @@ pub const allocator = std.heap.c_allocator;
 pub const State = enum { running, stopping, closed, failed };
 pub const Reason = enum { requested, failed };
 pub const Notify = napi.ThreadSafeFunction(Runtime, void);
-pub const bridge = n.metrics.bridge;
+const processor_metrics = n.metrics.processor;
 var runtime_live = std.atomic.Value(bool).init(false);
-
-/// A JS-thread native call, timed from `call` to `end`.
-pub const Call = struct {
-    runtime: ?*Runtime,
-    entry: bridge.Entry,
-    started_ns: u64,
-
-    pub fn end(self: Call) void {
-        if (self.runtime) |runtime| runtime.bridge.calls[@intFromEnum(self.entry)].observe(bridge.now() -| self.started_ns);
-    }
-};
-
-pub fn call(runtime: ?*Runtime, entry: bridge.Entry) Call {
-    return .{ .runtime = runtime, .entry = entry, .started_ns = bridge.now() };
-}
 
 /// Claims the one live runtime per process. The last `Runtime.release` returns the claim, also after a failed initialization.
 pub fn create(env: napi.Env) !*Runtime {
@@ -65,7 +50,6 @@ pub const Capacity = struct { serving: u32 = 0, ordinary: bool = false };
 pub const Runtime = struct {
     logs: n.logging.Sink = .{},
     metrics: network_metrics.Export = .{},
-    bridge: bridge.Recorder = .{},
     metrics_due_ms: u64 = 0,
     health_log_due_ms: u64 = 0,
     refs: std.atomic.Value(u32) = .init(1),
@@ -157,9 +141,9 @@ pub const Runtime = struct {
             if (heavy.core_live) {
                 heavy.core.shutdown((n.Now.read(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now));
                 if (self.metrics.allocatedBytes() > 0) {
-                    self.captureBridgeLocked(&heavy.bridge);
+                    self.captureProcessorLocked(&heavy.processor_metrics);
                     var context = n.metrics.Context.init(&heavy.core, (n.Now.read(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now), false);
-                    context.bridge = &heavy.bridge;
+                    context.processor = &heavy.processor_metrics;
                     if (self.metrics.render(&context)) |index| {
                         self.metrics.published = index;
                         self.metrics.failure = null;
@@ -175,9 +159,8 @@ pub const Runtime = struct {
             self.heavy = null;
         }
     }
-    /// Copies the bridge measurements and the tables' exported state for one render.
-    pub fn captureBridgeLocked(self: *const Runtime, into: *bridge.Snapshot) void {
-        self.bridge.snapshot(into);
+    /// Copies the processor state for one metrics render.
+    pub fn captureProcessorLocked(self: *const Runtime, into: *processor_metrics.Snapshot) void {
         if (self.gossip) |*table| into.captureProcessor(table);
     }
     pub fn lock(self: *Runtime) void {
@@ -234,7 +217,7 @@ pub const Runtime = struct {
         self.terminal_error = err;
         self.state = .failed;
     }
-    /// Where `kind` belongs now. Neither checks nor serving starts are served after a stop, no claim after
+    /// Where `kind` belongs now. No new host work is served after a stop, no claim after
     /// quiescence, and nothing once the close result was delivered, so a host may stop exchanging.
     pub fn wantLocked(self: *Runtime, kind: DeliveryKind) Place {
         switch (kind) {
@@ -251,7 +234,7 @@ pub const Runtime = struct {
             },
             .gossip => {
                 const table = if (self.gossip) |*table| table else return .none;
-                if (self.quiescent) return .none;
+                if (self.stop or self.quiescent) return .none;
                 const work = table.readiness();
                 if (work.urgent or (work.ordinary and self.capacity.ordinary)) return .payload;
                 return if (work.ordinary) .parked else .none;
@@ -305,6 +288,7 @@ pub const Runtime = struct {
     pub fn abandon(self: *Runtime) void {
         self.lock();
         self.graceful = false;
+        if (self.stop and !self.quiescent) self.signalLocked();
         self.unlock();
         self.requestStop();
         self.join();

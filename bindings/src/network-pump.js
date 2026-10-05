@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import {ActionQueue} from "./network-action-queue.js";
 import {LogDelivery} from "./network-log-delivery.js";
-import {CONTROL, FAILURES_MAX, SETTLE_CELLS, escalate} from "./network-turn-scheduler.js";
+import {CONTROL, SETTLE_CELLS, escalate} from "./network-turn-scheduler.js";
 
 /**
  * @typedef {import("./network-turn-scheduler.js").Continuation} Continuation
@@ -125,8 +125,8 @@ class IncomingRequest {
  * Drains one runtime for one host: native exchanges in bounded macrotasks, each sending queued obligations first,
  * then coalesced requests, and handing peers, serving starts, dependency checks and gossip jobs to the host in that
  * order. It turns again at once while native reports more, actions or held deliveries remain, or the time budget left
- * ordinary work, and after the retry timer while work waits for external capacity or a disabled service, or after
- * a failed turn. A null host capacity, or a closing facade, leaves settlement and acknowledgements only, until native
+ * ordinary work, and after the retry timer while work waits for external capacity or a disabled service.
+ * A null host capacity, or a closing facade, leaves settlement and acknowledgements only, until native
  * reports closed. A broken bridge contract escalates through native `fail`, which terminates the process.
  *
  * The runtime's scheduler and the closed observation hold the pump weakly, so a dropped facade and host can be collected.
@@ -142,8 +142,6 @@ export class NativePump {
   #weak = new WeakRef(this);
   #closing = false;
   #stopped = false;
-  /** Consecutive exchanges that could not run. */
-  #failures = 0;
   /** A delivery failure was arbitrated, and the host's `failed` received the first. */
   #arbitrated = false;
   #notified = false;
@@ -336,7 +334,7 @@ export class NativePump {
   }
 
   /**
-   * One of the runtime's turns. Returns when the next is due: now, later, on the retry timer, or idle.
+   * One of the runtime's turns. Returns when the next is due: now, later, or idle.
    * @returns {Continuation}
    */
   turn() {
@@ -344,8 +342,7 @@ export class NativePump {
     const started = performance.now();
     try {
       const next = this.#turn(started + BUDGET_MS);
-      // Actions queued while the turn ran need one too, unless its exchange failed.
-      return next !== "retry" && this.#actions.pending() ? "now" : next;
+      return this.#actions.pending() ? "now" : next;
     } finally {
       // The burst end is queued first, so it covers only this turn.
       setImmediate(NativePump.#burstEnd, this.#weak, started);
@@ -401,21 +398,11 @@ export class NativePump {
     try {
       result = this.#runtime.exchange(batch, demand ?? CONTROL);
     } catch (error) {
-      // Native refuses only an invalid batch or a nested exchange, so a refusal of this generated batch is a
-      // broken contract. Anything else left native untouched: the batch requeues and the turn retries.
-      const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-      if (typeof code === "string") this.#escalate("generated_batch", code);
-      this.#actions.restore(batch);
-      if (++this.#failures >= FAILURES_MAX) this.#escalate("failed_turns", error);
-      this.#error(error);
-      return "retry";
+      this.#escalate("generated_batch", error);
     }
-    this.#failures = 0;
     this.#acknowledge(result.acknowledged);
     let held = false;
-    // A serving start native could not hand over is decided before delivery and its cleanup.
-    let deliveryFailed = result.failure !== null;
-    if (deliveryFailed) this.#arbitrate(result.failure);
+    let deliveryFailed = false;
     try {
       if (demand !== null) held = this.#deliver(result, deadline);
     } catch {

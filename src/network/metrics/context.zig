@@ -2,7 +2,7 @@ const std = @import("std");
 const NetworkCore = @import("../network_core.zig").NetworkCore;
 const Population = @import("../peers/population.zig").Population;
 const Now = @import("../types.zig").Now;
-const bridge_mod = @import("bridge.zig");
+const processor_metrics = @import("processor.zig");
 
 /// Borrowed only on the network owner while it is not advancing protocol state.
 pub const Context = struct {
@@ -10,8 +10,8 @@ pub const Context = struct {
     now: Now,
     running: bool,
     expired_executing: usize = 0,
-    /// The host's bridge measurements, copied under its runtime mutex. Null renders zeros.
-    bridge: ?*const bridge_mod.Snapshot = null,
+    /// The host processor state, copied under its runtime mutex. Null renders zeros.
+    processor: ?*const processor_metrics.Snapshot = null,
     population: Population = .{},
     /// Kernel drop totals per family of the QUIC and discovery UDP sockets. Reading them extends
     /// each socket's 32-bit kernel count, so `init` takes the owner mutably.

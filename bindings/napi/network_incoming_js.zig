@@ -62,8 +62,9 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
         return err;
     };
     if (runtime.stop or !cell.native or cell.action != .none) {
+        const err = if (runtime.stop) error.NetworkClosed else error.NetworkIncomingClosed;
         runtime.unlock();
-        return error.NetworkIncomingClosed;
+        return err;
     }
     if (cell.response_awaited or cell.permission_awaited or cell.state != .serving) {
         runtime.unlock();
@@ -87,15 +88,17 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
         cell.state = if (cell.native) .serving else .terminal;
         runtime.incoming.?.releasePayload(cell);
         runtime.incoming.?.refresh(cell);
+        runtime.recomputeLocked(.completions);
         runtime.unlock();
     }
     const copy = try r.allocator.alloc(u8, len);
     errdefer r.allocator.free(copy);
     try decode.bytes(data, copy);
     runtime.lock();
-    if (runtime.stop or !cell.native) {
+    if (runtime.stop or !cell.native or cell.action != .none) {
+        const err = if (runtime.stop) error.NetworkClosed else error.NetworkIncomingClosed;
         runtime.unlock();
-        return error.NetworkClosed;
+        return err;
     }
     cell.response = copy;
     cell.context = context;

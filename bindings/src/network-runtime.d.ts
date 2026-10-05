@@ -78,8 +78,6 @@ export interface NativeExchange {
   /** Work waits for capacity the host reported as zero, or for a service this demand disabled. */
   readonly parked: {readonly serving: boolean; readonly ordinary: boolean};
   readonly disabledWaiting: boolean;
-  /** Null, or why a serving start could not be handed over; it was cancelled and released, and `more` is true. */
-  readonly failure: unknown;
   /**
    * Completed publications and commands, requests' chunks and terminal outcomes, and incoming streams'
    * acknowledgements, closes and permissions. Each settles its operation's promise, or its stream's pending calls and
@@ -158,11 +156,11 @@ export type NativeCommandCompletion = {
 }[keyof NativeCommandResults];
 
 /**
- * A fatal site JavaScript raises: `generated_batch`, an exchange refused a batch or demand the pump generated;
- * `failed_turns`, a third consecutive exchange could not run; `completion_contract`, a completion matched no record the
- * completion owner installed, or native closed with promised completions missing.
+ * A fatal site JavaScript raises: `generated_batch`, an exchange threw while processing the pump's batch and demand;
+ * `completion_contract`, a completion matched no record the completion owner installed, or native closed with
+ * promised completions missing.
  */
-export type NativeEscalation = "generated_batch" | "failed_turns" | "completion_contract";
+export type NativeEscalation = "generated_batch" | "completion_contract";
 
 export interface NativeNetworkApplicationRuntime {
   drainLogs(maxRecords?: number): NativeLogBatch;
@@ -209,7 +207,7 @@ export interface NativeNetworkApplicationRuntime {
    * One host turn: applies up to 256 `actions`, delivers up to `demand.settleCells` publication, command, request and
    * incoming completions per family in `completions`, then the close result once nothing else awaits delivery, and
    * delivers the payload `demand` asks for. It throws only for invalid input or a nested call, before applying anything. Actions after
-   * close are ignored; unknown penalized identities count in peerReportsIgnored.
+   * a stop are ignored; unknown penalized identities count in peerReportsIgnored.
    */
   exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): NativeExchange;
   /** Terminates the process at a fatal site. `reason` is at most 64 printable ASCII characters. */

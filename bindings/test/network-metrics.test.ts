@@ -133,10 +133,6 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
         expect(left.get(incoming)).toBe(0);
         expect(right.get(incoming)).toBe(1);
         expect(right.get(outgoing)).toBe(0);
-        expect(right.get('lodestar_native_bridge_call_seconds_count{entry="exchange"}')).toBeGreaterThanOrEqual(1);
-        expect(right.get('lodestar_native_bridge_delivered_items_total{kind="serving_start"}')).toBe(1);
-        expect(right.get('lodestar_native_bridge_delivered_items_total{kind="completion"}')).toBeGreaterThan(0);
-        expect(right.get('lodestar_native_bridge_delivered_items_total{kind="gossip_message"}')).toBe(0);
       },
       {timeout: 5000}
     );

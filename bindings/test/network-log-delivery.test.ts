@@ -84,7 +84,7 @@ describe("native log delivery", () => {
     expect(node.host.logs).toHaveBeenCalledTimes(4);
   });
 
-  it("reports the records native lost since the last report once dropped or truncated ones grew, at most every 30 s despite wall clock corrections", () => {
+  it("reports all native log loss at most every 30 s despite wall clock corrections, then flushes on close", () => {
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
     let now = 1_000_000;
     let wall = now;
@@ -105,9 +105,25 @@ describe("native log delivery", () => {
     now += 1_000;
     wall -= 120_000;
     expect(deliver({dropped: 5n, suppressed: 4n, truncated: 1n})).toEqual({dropped: 2n, suppressed: 3n, truncated: 1n});
-    // Suppression alone is not reported.
     now += 30_000;
-    deliver({dropped: 5n, suppressed: 9n, truncated: 1n});
-    expect(node.host.logs).toHaveBeenCalledTimes(reports + 1);
+    expect(deliver({dropped: 5n, suppressed: 9n, truncated: 1n})).toEqual({dropped: 0n, suppressed: 5n, truncated: 0n});
+    expect(node.host.logs).toHaveBeenCalledTimes(reports + 2);
+    node.runtime.drainLogs.mockReturnValueOnce({...noLogs, dropped: 6n, suppressed: 10n, truncated: 1n});
+    node.logs.stop();
+    expect(node.host.logs).toHaveBeenLastCalledWith([], {dropped: 1n, suppressed: 1n, truncated: 0n});
+  });
+
+  it("keeps a loss report pending when the host logger throws", () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    const node = fixture();
+    node.runtime.drainLogs.mockReturnValue({...noLogs, suppressed: 7n});
+    node.host.logs.mockImplementationOnce(() => {
+      throw new Error("logger failed");
+    });
+    vi.advanceTimersByTime(2 * LOG_MS);
+    expect(node.host.logs).toHaveBeenCalledTimes(2);
+    expect(node.host.logs).toHaveBeenLastCalledWith([], {dropped: 0n, suppressed: 7n, truncated: 0n});
+    vi.advanceTimersByTime(LOG_MS);
+    expect(node.host.logs).toHaveBeenCalledTimes(2);
   });
 });

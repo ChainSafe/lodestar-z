@@ -534,6 +534,7 @@ pub const Overlay = struct {
     }
 
     pub fn onGraft(self: *Overlay, context: *const Context, topic: u16, peer: u16) void {
+        if (!self.subscribed(topic)) return;
         const row = &context.sessions.rows[peer];
         const backoff = context.peers.backoff(row.logical, topic);
         const blocked = backoff.topic_generation == self.rows[topic].generation and context.now < backoff.until;
@@ -542,7 +543,7 @@ pub const Overlay = struct {
             if (backoff.until -| context.now > c.prune_backoff_ms - c.graft_flood_threshold_ms) context.peers.scores.penalizeFor(row.logical.index, .graft_flood);
         }
         if (row.outStream() == null) return;
-        const refused = !self.subscribed(topic) or context.peers.rows[row.logical.index].direct or blocked or context.peers.score(row.logical, context.now) < 0 or
+        const refused = context.peers.rows[row.logical.index].direct or blocked or context.peers.score(row.logical, context.now) < 0 or
             (!self.mesh(topic).isSet(peer) and self.mesh(topic).count() >= c.mesh_d_high and !outbound(context, peer));
         if (refused) return self.prune(context, topic, peer, c.prune_backoff_ms, .refused_graft);
         if (self.mesh(topic).isSet(peer)) return;

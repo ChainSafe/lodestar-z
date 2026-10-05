@@ -82,6 +82,41 @@ test "a payload release while the owner waits for budget wakes the owner once" {
     try runtime.wake.?.drain();
 }
 
+test "abandon wakes an owner already stopping gracefully" {
+    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
+    runtime.wake = try network_wake.Wake.init();
+    defer runtime.wake.?.deinit();
+    runtime.requestStop();
+    try runtime.wake.?.drain();
+    var readable = [_]std.c.pollfd{.{ .fd = runtime.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
+    try std.testing.expectEqual(@as(c_int, 0), std.c.poll(&readable, 1, 0));
+    runtime.abandon();
+    try std.testing.expect(!runtime.graceful);
+    try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&readable, 1, 0));
+    try runtime.wake.?.drain();
+}
+
+test "a requested stop removes queued gossip from host delivery" {
+    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
+    runtime.gossip = try n.gossip_processor.GossipProcessor.init(std.testing.allocator, .{
+        .limits = @splat(.{ .items = 4, .bytes = 4096 }),
+    });
+    defer {
+        runtime.gossip.?.close();
+        runtime.gossip.?.deinit();
+    }
+    const table = &runtime.gossip.?;
+    const token = try table.reserve(.beacon_block, 1);
+    const cell = table.get(token).?;
+    cell.admitted_ms = 1;
+    cell.deadline = 101;
+    table.install(token, "x");
+    try std.testing.expectEqual(.payload, runtime.wantLocked(.gossip));
+    runtime.requestStop();
+    try std.testing.expectEqual(.none, runtime.wantLocked(.gossip));
+    try std.testing.expect(!runtime.quiescent);
+}
+
 test "an owner completion notifies once while armed and leaves settlement to the exchange" {
     var runtime: Runtime = .{ .env = undefined };
     const before = support.notifications.load(.acquire);
@@ -206,24 +241,20 @@ test "a pull that makes a completion due notifies once while armed, and only an 
     cell.native = .{ .index = 0, .generation = 1, .direction = .outbound };
     cell.chunk = .{ .len = 4, .fork = null };
     const before = support.notifications.load(.acquire);
-    const pull = r.call(&runtime, .request_pull);
     runtime.lock();
     try std.testing.expect(!runtime.settleableLocked());
     requests_mod.armPull(&runtime, cell);
     try std.testing.expect(runtime.settleableLocked());
     runtime.unlock();
-    pull.end();
     try std.testing.expect(cell.pulling and cell.chunk != null and !cell.delivered);
     try std.testing.expectEqual(before + 1, support.notifications.load(.acquire));
     try std.testing.expect(!runtime.readiness.armed);
     // Disarmed, a retirement adds no notification. It wins over the undelivered chunk: the pull waits for the
     // cancellation's terminal outcome.
-    const retire = r.call(&runtime, .request_retire);
     runtime.lock();
     requests_mod.armRetirement(&runtime, cell, true);
     try std.testing.expect(!runtime.settleableLocked());
     runtime.unlock();
-    retire.end();
     try std.testing.expect(cell.retiring and cell.cancel and cell.retirement_awaited and cell.pulling);
     try std.testing.expectEqual(before + 1, support.notifications.load(.acquire));
     cell.native = null;

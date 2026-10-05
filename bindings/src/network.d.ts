@@ -423,6 +423,7 @@ export type NativeIncomingFailure =
 /** Operational request errors. Malformed arguments and allocation failures retain their existing specific errors. */
 export type NativeIncomingError = Error &
   (
+    | {code: "NetworkBridgeFull"}
     | {code: "NetworkIncomingBusy"}
     | {code: "NetworkIncomingClosed"}
     | {
@@ -592,15 +593,16 @@ export interface NativeHost {
   /** Updates replace the previous state of the same peer. A throw fails the network. */
   peers(events: readonly NativePeerObservation[]): void;
   /**
-   * The network failed with `error`, a throwing peer handler or a serving start the binding could not hand over, which
-   * the close result reports first. Payload delivery has stopped and settlement continues: finish bounded cleanup,
-   * such as the final remembered-peer snapshot, then close the network. A throw closes it at once.
+   * A throwing peer handler failed the network with `error`, which the close result reports first. Payload delivery
+   * has stopped and settlement continues: finish bounded cleanup, such as the final remembered-peer snapshot, then
+   * close the network. A throw closes it at once.
+   * An owner failure arrives through `closed` with reason `failed`.
    */
   failed(error: Error): void;
   /**
    * Native log records at or above the configured level, up to 32 every 250 ms and a final few after close, with the
-   * records native lost since the last report when that grew, at most every 30 s. A throw counts the delivery's
-   * records in lodestar_native_log_delivery_errors_total and never fails the network. Failed native drains count
+   * records native lost since the last report when that grew, at most every 30 s while running. A throw counts the
+   * delivery's records in lodestar_native_log_delivery_errors_total and never fails the network. Failed native drains count
    * separately in lodestar_native_log_drain_errors_total.
    */
   logs(records: readonly NativeLogRecord[], lost: NativeLogLoss | null): void;

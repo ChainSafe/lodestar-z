@@ -51,7 +51,11 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     try network_owner.prepareConfiguration(runtime);
     try network_storage.initialize(runtime, &runtime.heavy.?.application);
     runtime.wake = try network_wake.Wake.init();
-    errdefer if (runtime.wake) |*wake| wake.deinit();
+    errdefer {
+        if (runtime.heavy.?.core_live) runtime.heavy.?.core.setHostWake(null) catch unreachable;
+        if (runtime.wake) |*wake| wake.deinit();
+        runtime.wake = null;
+    }
     try network_owner.initialize(runtime);
     const identity = try runtime.heavy.?.readIdentity();
 
@@ -115,8 +119,6 @@ fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
 /// One host exchange (network_exchange.zig): the host's actions, then the completions or the close result, and the
 /// payload `demand` asks for, delivered in one result.
 pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value) !js.Value {
-    const call = r.call(self.runtime, .exchange);
-    defer call.end();
     const runtime = try self.owner();
     runtime.retain();
     defer runtime.release();
@@ -173,7 +175,7 @@ pub fn fail(_: *@This(), site_value: js.Value, reason_value: js.Value) !void {
     var name: [fatal.name_max]u8 = undefined;
     const site = std.meta.stringToEnum(fatal.Site, name[0..try decode.text(site_value.val, &name)]) orelse return error.InvalidNetworkConfig;
     switch (site) {
-        .generated_batch, .failed_turns, .completion_contract => {},
+        .generated_batch, .completion_contract => {},
         .exchange_build, .exchange_finish => return error.InvalidNetworkConfig,
     }
     var reason: [fatal.detail_max]u8 = undefined;
@@ -230,18 +232,21 @@ pub fn gossipSha256Backend() js.String {
     return js.String.from(@tagName(network.gossipsub.sha256.backend()));
 }
 
-pub fn getMetrics(self: *@This()) !js.String {
-    const call = r.call(self.runtime, .get_metrics);
-    defer call.end();
+pub fn getMetrics(self: *@This()) !js.Value {
     const runtime = try self.owner();
-    runtime.lock();
-    defer runtime.unlock();
-    const logs = runtime.logs.snapshot();
-    const metrics_text = runtime.metrics.text(&logs) catch |err| return switch (err) {
-        error.WriteFailed, error.MetricCapacity => error.NetworkMetricsCapacity,
-        error.DuplicateMetric => error.NetworkMetricsSchema,
+    const metrics_text = copy: {
+        runtime.lock();
+        defer runtime.unlock();
+        const logs = runtime.logs.snapshot();
+        const borrowed = runtime.metrics.text(&logs) catch |err| return switch (err) {
+            error.WriteFailed, error.MetricCapacity => error.NetworkMetricsCapacity,
+            error.DuplicateMetric => error.NetworkMetricsSchema,
+        };
+        break :copy try r.allocator.dupe(u8, borrowed);
     };
-    return js.String.from(metrics_text);
+    defer r.allocator.free(metrics_text);
+
+    return .{ .val = try runtime.env.createStringUtf8(metrics_text) };
 }
 
 pub fn drainLogs(self: *@This(), limit: js.Value) !js.Value {
@@ -289,45 +294,29 @@ pub fn getRememberedPeers(self: *@This()) !js.Value {
     return .{ .val = try command_js.submit(js.env(), try self.owner(), .getRememberedPeers, &.{}) };
 }
 pub fn requestStart(self: *@This(), peer: js.Value, protocol: js.Value, data: js.Value, options: js.Value) !js.Value {
-    const call = r.call(self.runtime, .request_start);
-    defer call.end();
     return .{ .val = try request_js.start(try self.owner(), peer.val, protocol.val, data.val, options.val) };
 }
 pub fn requestPull(self: *@This(), handle: js.Value) !void {
-    const call = r.call(self.runtime, .request_pull);
-    defer call.end();
     try request_js.pull(try self.owner(), handle.val);
 }
 pub fn requestRetire(self: *@This(), handle: js.Value, abandoned: js.Value) !void {
-    const call = r.call(self.runtime, .request_retire);
-    defer call.end();
     try request_js.retire(try self.owner(), handle.val, try decode.boolean(abandoned.val));
 }
 
 pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context: js.Value) !void {
-    const call = r.call(self.runtime, .incoming_respond);
-    defer call.end();
     try incoming_js.respond(try self.owner(), handle.val, data.val, context.val);
 }
 pub fn incomingRelease(self: *@This(), handle: js.Value) !void {
-    const call = r.call(self.runtime, .incoming_release);
-    defer call.end();
     try incoming_js.release(try self.owner(), handle.val);
 }
 pub fn incomingReady(self: *@This(), handle: js.Value) !void {
-    const call = r.call(self.runtime, .incoming_ready);
-    defer call.end();
     try incoming_js.ready(try self.owner(), handle.val);
 }
 pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, status: js.Value, message: js.Value) !void {
-    const call = r.call(self.runtime, .incoming_terminal);
-    defer call.end();
     try incoming_js.terminal(try self.owner(), handle.val, action.val, status.val, message.val);
 }
 
 pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: js.Value) !js.Value {
-    const call = r.call(self.runtime, .publish_gossip);
-    defer call.end();
     return .{ .val = try publication_js.publish(try self.owner(), topic.val, data.val, options.val) };
 }
 

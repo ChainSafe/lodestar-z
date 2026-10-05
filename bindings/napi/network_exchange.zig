@@ -233,7 +233,6 @@ fn selectServing(runtime: *Runtime, demand: *const Demand, selection: *Selection
 /// Returns whether serving starts now await closes that keep the event loop alive.
 fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
     if (selection.peer_count > 0) {
-        runtime.bridge.deliver(.peer_event, selection.peer_count);
         runtime.lane.?.commit(selection.peer_count);
         // Committed events free lane room the owner publishes into.
         selection.wake = true;
@@ -241,25 +240,21 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
     if (selection.serving_count > 0) {
         const table = &runtime.incoming.?;
         for (selection.serving[0..selection.serving_count]) |token| table.commitStart(token);
-        runtime.bridge.deliver(.serving_start, selection.serving_count);
         runtime.capacity.serving -|= @intCast(selection.serving_count);
         selection.wake = true;
     }
     if (selection.publication_count > 0) {
         const table = &runtime.publications.?;
         for (selection.publications[0..selection.publication_count]) |token| table.retire(token);
-        runtime.bridge.deliver(.completion, selection.publication_count);
         runtime.retireRequestStorageLocked();
     }
     if (selection.command_count > 0) {
         for (selection.commands[0..selection.command_count]) |token| runtime.table.retire(token);
-        runtime.bridge.deliver(.completion, selection.command_count);
         runtime.retireStoresLocked();
     }
     if (selection.request_count > 0) {
         const table = &runtime.requests.?;
         for (selection.requests[0..selection.request_count]) |completion| selection.requests_retired += @intFromBool(table.commit(completion));
-        runtime.bridge.deliver(.completion, selection.request_count);
         runtime.retireRequestStorageLocked();
     }
     if (selection.incoming_count > 0) {
@@ -268,14 +263,11 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
         for (selection.incoming[0..selection.incoming_count]) |completion| if (table.commit(completion)) {
             selection.wake = true;
         };
-        runtime.bridge.deliver(.completion, selection.incoming_count);
         runtime.retireRequestStorageLocked();
     }
-    runtime.bridge.deliver(.dependency_check, selection.checks.len);
     // Close may have freed these cells meanwhile; a freed token is ignored. Not counted as delivered items.
     if (runtime.gossip) |*table| for (selection.acknowledged[0..selection.acknowledged_count]) |token| table.acknowledge(token);
     if (selection.gossip) |*batch| {
-        runtime.bridge.deliver(.gossip_message, batch.len);
         runtime.gossip.?.finish(batch, true);
     }
     if (runtime.quiescent) if (runtime.gossip) |*table| table.trim();

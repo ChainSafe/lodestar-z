@@ -52,7 +52,6 @@ const idle: NativeExchange = {
   closed: null,
   completions: [],
   disabledWaiting: false,
-  failure: null,
   gossip: null,
   more: false,
   parked: {ordinary: false, serving: false},
@@ -436,27 +435,7 @@ describe("binding pump scheduling", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("successful settlement resets exchange failures even while capacity remains unavailable", () => {
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-    const node = fixture();
-    const queued = immediates();
-    node.host.capacity.mockImplementation(() => {
-      throw new Error("capacity failed");
-    });
-    const failure = new Error("exchange failed");
-    const results = [failure, {...idle, more: true}, failure, {...idle, more: true}, failure, idle];
-    node.runtime.exchange.mockImplementation(() => {
-      const result = results.shift() ?? idle;
-      if (result instanceof Error) throw result;
-      return result;
-    });
-    node.pump.request();
-    expect(runUntilEscalated(queued, 40)).toBe(false);
-    expect(node.runtime.exchange.mock.calls.length).toBeGreaterThanOrEqual(6);
-    expect(node.runtime.fail).not.toHaveBeenCalled();
-  });
-
-  it("still escalates consecutive exchange failures when capacity also fails", () => {
+  it("escalates the first exchange failure even when capacity also fails", () => {
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
     const node = fixture();
     const queued = immediates();
@@ -468,105 +447,14 @@ describe("binding pump scheduling", () => {
     });
     node.pump.request();
     expect(runUntilEscalated(queued, 20)).toBe(true);
-    expect(node.host.capacity).toHaveBeenCalledTimes(3);
-    expect(node.runtime.exchange).toHaveBeenCalledTimes(3);
-    expect(node.runtime.fail).toHaveBeenCalledExactlyOnceWith("failed_turns", "exchange failed");
+    expect(node.host.capacity).toHaveBeenCalledTimes(1);
+    expect(node.runtime.exchange).toHaveBeenCalledTimes(1);
+    expect(node.runtime.fail).toHaveBeenCalledExactlyOnceWith("generated_batch", "exchange failed");
   });
-
-  it("after close, an exchange that settles ends a run of failed ones", () => {
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-    const node = fixture();
-    const queued = immediates();
-    node.pump.close();
-    const failure = new Error("exchange failed");
-    const results = [failure, {...idle, more: true}, failure, {...idle, more: true}, failure, idle];
-    node.runtime.exchange.mockImplementation(() => {
-      const result = results.shift() ?? idle;
-      if (result instanceof Error) throw result;
-      return result;
-    });
-    node.pump.request();
-    expect(runUntilEscalated(queued, 40)).toBe(false);
-    expect(node.runtime.exchange).toHaveBeenCalledTimes(6);
-    expect(node.host.error).toHaveBeenCalledTimes(3);
-  });
-
-  it("a throw before phase B leaves the batch queued and retries on the timer", async () => {
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-    const node = fixture();
-    node.host.checkDependencies.mockReturnValueOnce([false]);
-    const failure = new Error("exchange failed");
-    node.runtime.exchange
-      .mockImplementationOnce(() => {
-        node.pump.reportPeer("peer", "fatal");
-        return {...idle, checks: [check(3)]};
-      })
-      .mockImplementationOnce(() => {
-        throw failure;
-      });
-    node.pump.request();
-    await macrotask();
-    await macrotask();
-    expect(node.host.error).toHaveBeenCalledExactlyOnceWith(failure);
-    expect(vi.getTimerCount()).toBe(LOG_TIMER + 1);
-    vi.advanceTimersByTime(25);
-    await macrotask();
-    expect(node.actions(2)).toEqual([
-      {available: false, handle: handle(3), type: "classify"},
-      {action: "fatal", count: 1, peerId: "peer", type: "reportPeer"},
-    ]);
-    expect(node.runtime.fail).not.toHaveBeenCalled();
-  });
-
-  it("a failed exchange keeps the process alive on its timer, also after close, which parked work does not", async () => {
-    const timers: NodeJS.Timeout[] = [];
-    const schedule = setTimeout;
-    vi.spyOn(globalThis, "setTimeout").mockImplementation(((...args: Parameters<typeof setTimeout>) => {
-      const timer = schedule(...args);
-      // The pump's retry timer.
-      if (args[1] === 25) timers.push(timer);
-      return timer;
-    }) as typeof setTimeout);
-    const node = fixture();
-    node.runtime.exchange.mockReturnValueOnce({...idle, parked: {ordinary: false, serving: true}});
-    node.pump.request();
-    await macrotask();
-    expect(timers.map((timer) => timer.hasRef())).toEqual([false]);
-    clearTimeout(timers[0]);
-    node.closed.resolve({reason: "requested"});
-    await macrotask();
-
-    const closing = fixture();
-    closing.pump.close();
-    closing.runtime.exchange.mockImplementationOnce(() => {
-      throw new Error("exchange failed");
-    });
-    closing.pump.request();
-    await macrotask();
-    expect(timers.slice(1).map((timer) => timer.hasRef())).toEqual([true]);
-    closing.closed.resolve({reason: "requested"});
-    await macrotask();
-  });
-
-  it(
-    "a close whose exchanges keep failing, with nothing else alive, settles or escalates in a child process",
-    childTestTimeout(),
-    () => {
-      // The parent enforces the deadline; exiting without the close result or the trigger-3 abort is the regression.
-      const child = spawnChild(["--import", "tsx", "bindings/test/fixtures/network-shutdown-retry.mjs"]);
-      const closed = child.status === 0 && child.stdout.includes("closed");
-      const escalated =
-        child.signal === "SIGABRT" && child.stderr.includes("native network bridge failed_turns: exchange failed");
-      expect(
-        closed || escalated,
-        JSON.stringify({signal: child.signal, status: child.status, stdout: child.stdout})
-      ).toBe(true);
-    }
-  );
 
   it.each([
     ["generated_batch", "generated_batch", "InvalidNetworkInteger"],
-    ["failed_turns", "failed_turns", "exchange failed"],
+    ["uncoded_exchange", "generated_batch", "exchange failed"],
     ["completion_contract", "completion_contract", "completed publication 0:1"],
     ["close_missing", "completion_contract", "closed with records unsettled: 1"],
   ])(
@@ -942,26 +830,15 @@ describe("binding pump delivery", () => {
     expect(delivered.cancel).toHaveBeenCalledOnce();
   });
 
-  it("fails the network for a serving start the binding could not hand over, after delivering the rest", async () => {
-    const node = fixture();
-    const failure = new Error("facade construction failed");
-    node.runtime.exchange.mockReturnValueOnce({...idle, failure, more: true, peers: [peerEvent]});
-    node.pump.request();
-    await macrotask();
-    expect(node.host.peers).toHaveBeenCalledOnce();
-    expect(node.terminal.failure).toBe(failure);
-    expect(node.host.failed).toHaveBeenCalledExactlyOnceWith(failure);
-    expect(node.runtime.close).not.toHaveBeenCalled();
-    await macrotask();
-    expect(node.calls()[1][1]).toEqual(control);
-  });
-
-  it("keeps settling after a failure until the host closes, and reports only the first failure", async () => {
+  it("keeps settling after a peer handler fails until the host closes", async () => {
     const node = fixture();
     const first = new Error("first failure");
+    node.host.peers.mockImplementationOnce(() => {
+      throw first;
+    });
     node.runtime.exchange
-      .mockReturnValueOnce({...idle, failure: first, more: true})
-      .mockReturnValueOnce({...idle, failure: new Error("second failure"), more: true})
+      .mockReturnValueOnce({...idle, more: true, peers: [peerEvent]})
+      .mockReturnValueOnce({...idle, more: true})
       .mockReturnValueOnce({...idle, more: true});
     node.pump.request();
     for (let i = 0; i < 4; i++) await macrotask();
@@ -978,7 +855,10 @@ describe("binding pump delivery", () => {
     node.host.failed.mockImplementation(() => {
       throw thrown;
     });
-    node.runtime.exchange.mockReturnValueOnce({...idle, failure: new Error("facade construction failed")});
+    node.host.peers.mockImplementationOnce(() => {
+      throw new Error("peer handler failed");
+    });
+    node.runtime.exchange.mockReturnValueOnce({...idle, peers: [peerEvent]});
     node.pump.request();
     await macrotask();
     expect(node.runtime.close).toHaveBeenCalledOnce();

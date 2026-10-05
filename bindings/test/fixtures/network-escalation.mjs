@@ -1,6 +1,6 @@
 // A real pump drains a real native runtime until the fatal site the first argument names terminates the process
 // through native `fail`: `generated_batch` sends a demand native refuses, as a pump generating an invalid one would,
-// `failed_turns` has an exchange that keeps throwing, `completion_contract` has exchanges deliver a
+// `uncoded_exchange` has an exchange that throws without a code, `completion_contract` has exchanges deliver a
 // completion the completion owner never admitted, and `close_missing` has them lose a command's completion before
 // native closes. Printing "survived" is the regression.
 import bindings from "../../src/bindings.js";
@@ -54,7 +54,7 @@ pump.attach({
   close: () => native.close(),
   drainLogs: (max) => native.drainLogs(max),
   exchange: (actions, demand) => {
-    if (site === "failed_turns") throw Error("exchange failed");
+    if (site === "uncoded_exchange") throw Error("exchange failed");
     return native.exchange(actions, site === "generated_batch" ? {...demand, settleCells: 0} : demand);
   },
   fail: (raised, reason) => native.fail(raised, reason),

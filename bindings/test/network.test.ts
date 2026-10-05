@@ -290,7 +290,7 @@ it("rejects every invalid exchange demand, oversized batch and nested exchange b
   }
 }, 20000);
 
-it.each(["generated_batch", "failed_turns"] as const)(
+it.each(["generated_batch", "completion_contract"] as const)(
   "the pump's fatal site %s terminates the process through fatalError",
   childTestTimeout(),
   (site) => {
