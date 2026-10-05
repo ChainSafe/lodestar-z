@@ -322,7 +322,6 @@ pub const EpochTransitionCache = struct {
 
         var reused_cache = try getReusedEpochTransitionCache(
             allocator,
-            io,
             validators_view.chunks.state.pool,
             validator_count,
         );
