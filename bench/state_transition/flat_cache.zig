@@ -37,14 +37,13 @@ fn ms(io: std.Io, from: std.Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(time.since(io, from).nanoseconds)) / std.time.ns_per_ms;
 }
 
-const ValidatorsRef = struct { root: Node.Id, depth: usize, len: usize };
+const ValidatorsRef = struct { root: Node.Id, len: usize };
 
 fn validatorsRef(state: *AnyBeaconState) !ValidatorsRef {
     var view = try state.validators();
     try view.commit();
     return .{
         .root = view.getRoot(),
-        .depth = view.iteratorReadonly(0).depth_iterator.base_gindex.pathLen(),
         .len = try view.length(),
     };
 }
@@ -68,7 +67,7 @@ const SyncRun = struct { us: f64, patched: usize };
 fn runSync(io: std.Io, cache: *ValidatorFlatCache, state: *AnyBeaconState) !SyncRun {
     const ref = try validatorsRef(state);
     const t = time.start(io);
-    try cache.sync(ref.root, ref.depth, ref.len);
+    try cache.sync(ref.root, ref.len);
     return .{ .us = ms(io, t) * 1000.0, .patched = cache.last_patched };
 }
 
@@ -234,7 +233,7 @@ pub fn main(init: std.process.Init) !void {
 
         if (epoch % report_every == 0) {
             const ref = try validatorsRef(head.state);
-            const mismatches = try state_transition.flatCacheCountMismatches(&flat_cache, ref.root, ref.depth, ref.len);
+            const mismatches = try state_transition.flatCacheCountMismatches(&flat_cache, ref.root, ref.len);
             if (mismatches != 0) return error.FlatCacheOutOfSync;
 
             const transition = try runTransition(allocator, io, head);

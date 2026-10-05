@@ -18,6 +18,9 @@ const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCo
 
 const Validator = types.phase0.Validator;
 
+/// Levels from a validators list root down to its elements: the chunks tree plus the length mix-in.
+pub const validators_depth: usize = @as(usize, types.phase0.Validators.chunk_depth) + 1;
+
 /// Fields that EpochTransitionCache.init needs to know about one validator.
 pub const ValidatorFields = struct {
     activation_eligibility_epoch: u64,
@@ -74,9 +77,9 @@ pub const ValidatorFlatCache = struct {
         return self.len() * (5 * @sizeOf(u64) + @sizeOf(ValidatorFields.Bits));
     }
 
-    /// Bring the cache in line with the validators list rooted at `root`, whose elements sit
-    /// `depth` levels below it. On error the cache is left empty and the next call refills it.
-    pub fn sync(self: *ValidatorFlatCache, root: Node.Id, depth: usize, new_len: usize) !void {
+    /// Bring the cache in line with the validators list rooted at `root`.
+    /// On error the cache is left empty and the next call refills it.
+    pub fn sync(self: *ValidatorFlatCache, root: Node.Id, new_len: usize) !void {
         self.last_patched = 0;
         if (self.synced_root) |old| {
             if (old == root and self.len() == new_len) return;
@@ -89,9 +92,9 @@ pub const ValidatorFlatCache = struct {
         errdefer self.pool.unref(root);
 
         if (self.synced_root) |old| {
-            try self.diffAndPatch(old, root, depth, new_len);
+            try self.diffAndPatch(old, root, new_len);
         } else {
-            var it = Node.DepthIterator.init(self.pool, root, @intCast(depth), 0);
+            var it = Node.DepthIterator.init(self.pool, root, @intCast(validators_depth), 0);
             for (0..new_len) |i| try self.patch(i, try it.next());
         }
 
@@ -113,7 +116,6 @@ pub const ValidatorFlatCache = struct {
         self: *ValidatorFlatCache,
         old_root: Node.Id,
         new_root: Node.Id,
-        depth: usize,
         new_len: usize,
     ) !void {
         const Frame = struct {
@@ -128,7 +130,7 @@ pub const ValidatorFlatCache = struct {
         var stack: BoundedArray(Frame, max_depth + 1) = .{};
 
         // Start: base of the tree
-        stack.push(.{ .old = old_root, .new = new_root, .depth = depth, .base = 0 });
+        stack.push(.{ .old = old_root, .new = new_root, .depth = validators_depth, .base = 0 });
 
         while (stack.pop()) |f| {
             if (

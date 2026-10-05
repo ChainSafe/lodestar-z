@@ -317,7 +317,6 @@ pub const EpochTransitionCache = struct {
         var validators_view = try state.validators();
         try validators_view.commit();
         const validator_count = try validators_view.length();
-        var validators_it = validators_view.iteratorReadonly(0);
 
         var reused_cache = try getReusedEpochTransitionCache(
             allocator,
@@ -325,11 +324,7 @@ pub const EpochTransitionCache = struct {
             validator_count,
         );
         const validator_flat_cache = &reused_cache.validator_flat_cache;
-        try validator_flat_cache.sync(
-            validators_view.getRoot(),
-            validators_it.depth_iterator.base_gindex.pathLen(),
-            validator_count,
-        );
+        try validator_flat_cache.sync(validators_view.getRoot(), validator_count);
 
         // Clone before being mutated in processEffectiveBalanceUpdates
         try epoch_cache.beforeEpochTransition();
