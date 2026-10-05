@@ -59,6 +59,7 @@ pub const StructContainerTreeView = tree_view.StructContainerTreeView;
 pub const ArrayBasicTreeView = tree_view.ArrayBasicTreeView;
 pub const ArrayCompositeTreeView = tree_view.ArrayCompositeTreeView;
 pub const ListBasicTreeView = tree_view.ListBasicTreeView;
+pub const ProgressiveListBasicTreeView = tree_view.ProgressiveListBasicTreeView;
 pub const ListCompositeTreeView = tree_view.ListCompositeTreeView;
 pub const CloneOpts = @import("tree_view/utils/clone_opts.zig").CloneOpts;
 

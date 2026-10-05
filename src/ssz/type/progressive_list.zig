@@ -26,6 +26,11 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
 
         pub const default_value: Type = Type.empty;
 
+        pub const TreeView = if (isBasicType(Element))
+            @import("../tree_view/progressive_list_basic.zig").ProgressiveListBasicTreeView(Self)
+        else
+            void;
+
         pub fn equals(a: *const Type, b: *const Type) bool {
             if (a.items.len != b.items.len) return false;
             for (a.items, b.items) |a_elem, b_elem| {
