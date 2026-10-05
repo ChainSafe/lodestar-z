@@ -26,7 +26,7 @@ pub const Cell = struct {
     response: []u8 = &.{},
     reservation: usize = 0,
     response_reservation: usize = 0,
-    context: ?@import("network").types.ForkEntry = null,
+    context: ?n.types.ForkEntry = null,
     copying: bool = false,
     exposed: bool = false,
     /// The host's stream awaits its close, which an exchange delivers once the stream ends.

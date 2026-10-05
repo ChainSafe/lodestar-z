@@ -3,6 +3,8 @@ const prom = @import("../metrics/registry.zig");
 const gossip = @import("root.zig");
 const Gossipsub = @import("Gossipsub.zig");
 const outbox = @import("outbox.zig");
+const StorageRefusal = @import("messages.zig").StorageRefusal;
+const IwantOutcome = @import("metrics.zig").IwantOutcome;
 
 pub fn writeCounters(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
     try w.enums(.{
@@ -10,7 +12,7 @@ pub fn writeCounters(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
         .kind = .counter,
         .help = "Gossip storage admission attempts refused by bounded resource reason",
         .labels = &.{"reason"},
-    }, @import("messages.zig").StorageRefusal, &g.messages.storage_refusals);
+    }, StorageRefusal, &g.messages.storage_refusals);
     try w.enums(.{
         .name = "lodestar_native_gossip_retention_refusals_total",
         .kind = .counter,
@@ -22,7 +24,7 @@ pub fn writeCounters(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
         .kind = .counter,
         .help = "Examined valid IWANT IDs by outcome: absent from history, or present and then suppressed by IDONTWANT, over the retransmission limit, queued, or refused for queue pressure",
         .labels = &.{"outcome"},
-    }, @import("metrics.zig").IwantOutcome, &g.iwant_outcomes);
+    }, IwantOutcome, &g.iwant_outcomes);
     try w.scalar(.{
         .name = "gossipsub_iwant_promise_broken",
         .kind = .counter,

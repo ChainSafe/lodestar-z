@@ -2,12 +2,14 @@ const TimeoutReason = @import("peer_io.zig").TimeoutReason;
 const frame = @import("frame.zig");
 const protobuf = @import("protobuf.zig");
 const std = @import("std");
+const test_support = @import("test_support.zig");
+const options_mod = @import("options.zig");
 
 test "gossip deadlines track pressure and progress through partial frame reset" {
-    var pool = try @import("test_support.zig").sessions(std.testing.allocator, 1);
+    var pool = try test_support.sessions(std.testing.allocator, 1);
     defer pool.deinit(std.testing.allocator);
     const io = &pool.rows[0].io;
-    const options: @import("options.zig").Options = .{ .pressure_timeout_ms = 100, .large_frame_timeout_ms = 50, .tx_timeout_ms = 100 };
+    const options: options_mod.Options = .{ .pressure_timeout_ms = 100, .large_frame_timeout_ms = 50, .tx_timeout_ms = 100 };
     io.frame_since = 0;
     io.progress_ms = 20;
     try std.testing.expectEqual(@as(?u64, 70), io.deadlines(&options).next());
@@ -23,7 +25,7 @@ test "gossip deadlines track pressure and progress through partial frame reset" 
 }
 
 test "gossip active RPC completion discard and reset clear frame borrows and limits" {
-    var sessions = try @import("test_support.zig").sessions(std.testing.allocator, 1);
+    var sessions = try test_support.sessions(std.testing.allocator, 1);
     defer sessions.deinit(std.testing.allocator);
     const io = &sessions.rows[0].io;
     var bytes: [64]u8 = undefined;
@@ -59,10 +61,10 @@ test "gossip active RPC completion discard and reset clear frame borrows and lim
 
 test "gossip local discard releases pages preserves the next frame and keeps the original deadline" {
     const receive = @import("receive_pool.zig");
-    var sessions = try @import("test_support.zig").sessions(std.testing.allocator, 1);
+    var sessions = try test_support.sessions(std.testing.allocator, 1);
     defer sessions.deinit(std.testing.allocator);
     const io = &sessions.rows[0].io;
-    const options: @import("options.zig").Options = .{ .large_frame_timeout_ms = 200, .pressure_timeout_ms = 300 };
+    const options: options_mod.Options = .{ .large_frame_timeout_ms = 200, .pressure_timeout_ms = 300 };
     _ = sessions.receive_pool.writable(&io.overflow).?;
     io.overflow.len = receive.page_bytes;
     io.reader.declared = io.body.len + receive.page_bytes + 5;

@@ -43,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
     defer engine.deinit();
-    const now: network.Now = @import("network").Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = fixture.unix_s });
+    const now: network.Now = network.Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = fixture.unix_s });
     const handle = try engine.dial(&remote, context.local_peer_id, now);
     const sent = engine.sendOne(handle.index, now, &buffer) orelse return error.MissingInitial;
     try write(root, io, "network_quic_receive", "initial", sent.bytes);

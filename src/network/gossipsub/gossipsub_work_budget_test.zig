@@ -11,11 +11,15 @@ const StreamHandle = Engine.StreamHandle;
 const Credits = @import("turn.zig").Credits;
 const Progress = @import("turn.zig").Progress;
 const snappy = @import("snappy");
+const test_support = @import("../quic/test_support.zig");
+const turn_mod = @import("turn.zig");
+const configuration = @import("../configuration.zig");
+const policy_fixture = @import("../reqresp/policy_fixture.zig");
 
 test "gossip turn separates credit exhaustion from host pressure and preserves event borrows" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .work_per_pump = 1, .decompress_per_peer_bytes = 1 });
     defer g.deinit();
-    const session = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     var encoded: [256]u8 = undefined;
@@ -35,7 +39,7 @@ test "gossip turn separates credit exhaustion from host pressure and preserves e
 }
 
 test "gossipsub rotates the legal atomic allowance past a duplicate flood" {
-    var pair: @import("../quic/test_support.zig").Pair = .{};
+    var pair: test_support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .decompress_per_peer_bytes = 1 });
@@ -54,8 +58,8 @@ test "gossipsub rotates the legal atomic allowance past a duplicate flood" {
     protobuf.writeMessage(&w1, compressed[0..n1], topic);
     const n2 = try snappy.raw.compress("two", &compressed);
     protobuf.writeMessage(&w2, compressed[0..n2], topic);
-    const first = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    const second = @import("test_support.zig").addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
+    const first = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const second = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
     const stream1: StreamHandle = .{ .conn = .{ .index = 0, .generation = 1 }, .slot = 0, .id = 0 };
     const stream2: StreamHandle = .{ .conn = .{ .index = 1, .generation = 1 }, .slot = 0, .id = 0 };
     g.sessions.rows[first.index].in_stream = stream1;
@@ -66,14 +70,14 @@ test "gossipsub rotates the legal atomic allowance past a duplicate flood" {
     g.sessions.rows[second.index].io.startRpc(w2.written());
     g.settle(first.index);
     g.settle(second.index);
-    try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(&g, &pair.server, pair.now));
+    try std.testing.expectEqual(@as(usize, 1), support.pump(&g, &pair.server, pair.now));
     try std.testing.expectEqualStrings("one", inbox.last().bytes);
     g.sessions.rows[first.index].in_stream = stream1;
     g.sessions.rows[first.index].io.rx_ready = true;
     g.sessions.rows[first.index].io.startRpc(w1.written());
     g.settle(first.index);
     try std.testing.expectEqual(@as(?u64, pair.now.millis()), schedule_test_support.wakeupMilliseconds(g.schedule(), pair.now.millis()));
-    try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(&g, &pair.server, pair.now));
+    try std.testing.expectEqual(@as(usize, 1), support.pump(&g, &pair.server, pair.now));
     try std.testing.expectEqualStrings("two", inbox.last().bytes);
 }
 
@@ -91,7 +95,7 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     const io = &g.sessions.rows[session.index].io;
     io.startRpc(writer.written());
     const driver = @import("session_io.zig");
-    var turn = @import("turn.zig").Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }), &.{});
+    var turn = turn_mod.Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }), &.{});
     var peer = Credits.peer(&g.options);
     turn.budget.work = 0;
     for (0..2) |_| {
@@ -117,14 +121,14 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
     try std.testing.expect(!g.sessions.finishFrame(io));
     io.startRpc(writer.written());
-    turn = @import("turn.zig").Turn.init(&g.options, turn.now, &.{});
+    turn = turn_mod.Turn.init(&g.options, turn.now, &.{});
     peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.done, try driver.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
 }
 
 test "gossipsub IHAVE maximum advertisement shares oversized allowance with data and makes progress" {
-    const small = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = @import("../reqresp/policy_fixture.zig").config() });
+    const small = try configuration.resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     var options = small.core.protocols.gossipsub;
     options.work_per_pump = 1;
     options.decompress_per_peer_bytes = 1;
@@ -160,20 +164,20 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
     defer inbox.deinit();
     inbox.attach(&g);
     var scratch: [64]u8 = undefined;
-    var turn = @import("turn.zig").Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }), &scratch);
+    var turn = turn_mod.Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }), &scratch);
     turn.sink = g.message_sink;
     var peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expect(turn.large_used);
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
     try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
-    turn = @import("turn.zig").Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }), &scratch);
+    turn = turn_mod.Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }), &scratch);
     turn.sink = g.message_sink;
     peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expect(turn.large_used);
     try std.testing.expectEqual(@as(u16, 2), io.ihave_recv);
-    turn = @import("turn.zig").Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }), &scratch);
+    turn = turn_mod.Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }), &scratch);
     turn.sink = g.message_sink;
     peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.done, try driver.processRpc(&g, session.index, &turn, &peer));

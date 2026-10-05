@@ -6,14 +6,15 @@ const decode = @import("network_js_input.zig");
 const r = @import("network_runtime.zig");
 const g = @import("network_gossip.zig");
 const Runtime = r.Runtime;
+const network_js = @import("network_js.zig");
 
 const bytes = @import("network_js.zig").bytes;
 pub fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell) !Value {
     const env = runtime.env;
     const object = try env.createObject();
-    try object.setNamedProperty("handle", try @import("network_js.zig").handle(env, token.index, token.generation));
-    try object.setNamedProperty("connection", try @import("network_js.zig").connection(env, cell.connection));
-    try object.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
+    try object.setNamedProperty("handle", try network_js.handle(env, token.index, token.generation));
+    try object.setNamedProperty("connection", try network_js.connection(env, cell.connection));
+    try object.setNamedProperty("peerId", try network_js.peerIdValue(env, &cell.identity));
     try object.setNamedProperty("topic", try env.createStringUtf8(cell.topic[0..cell.topic_len]));
     try object.setNamedProperty("id", try bytes(env, &cell.id));
     var destination: [*]u8 = undefined;
@@ -55,7 +56,7 @@ pub fn publishError(env: napi.Env, err: anyerror) !Value {
         error.NoPeersSubscribedToTopic => "no_peers_subscribed_to_topic",
         else => null,
     };
-    const object = try @import("network_js.zig").errorValue(env, if (reason != null) "NetworkGossipPublishFailed" else @errorName(err));
+    const object = try network_js.errorValue(env, if (reason != null) "NetworkGossipPublishFailed" else @errorName(err));
     if (reason) |text| try object.setNamedProperty("reason", try env.createStringUtf8(text));
     return object;
 }

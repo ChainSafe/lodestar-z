@@ -6,6 +6,16 @@ const NetworkCore = @import("network_core.zig").NetworkCore;
 const metrics = @import("metrics/export.zig");
 const policy = @import("gossipsub/topic_policy.zig");
 const protocol = @import("reqresp/root.zig").Protocol;
+const KeyPair = @import("wire/keys.zig").KeyPair;
+const logging = @import("logging.zig");
+const types = @import("peers/types.zig");
+const topic_mod = @import("gossipsub/topic.zig");
+const Sockets = @import("udp").Sockets;
+const score = @import("gossipsub/score.zig");
+const topic_fixture = @import("gossipsub/topic_fixture.zig");
+const test_support = @import("quic/test_support.zig");
+const time = @import("time.zig");
+const Dialing = @import("peers/dialing.zig").Dialing;
 
 const Fixture = struct {
     node: *NetworkCore,
@@ -18,8 +28,8 @@ const Fixture = struct {
     fn initWith(boundaries: []const policy.Boundary, discovery: ?NetworkCore.DiscoveryOptions) !Fixture {
         const node = try std.testing.allocator.create(NetworkCore);
         errdefer std.testing.allocator.destroy(node);
-        const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{93}));
-        var options = @import("network_core_test_support.zig").networkOptions(&key);
+        const key = try KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{93}));
+        var options = core_test.networkOptions(&key);
         options.resolved.core.protocols.gossipsub.topic_policy = if (boundaries.len > 0) boundaries else null;
         options.startup.discovery = discovery;
         try node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup);
@@ -40,7 +50,7 @@ const Fixture = struct {
         var writer = std.Io.Writer.fixed(self.buffer);
         try metrics.write(&context, &writer);
         var encoder: metrics.registry.Encoder = .{ .writer = &writer };
-        const logs: @import("logging.zig").Stats = .{};
+        const logs: logging.Stats = .{};
         try logs.write(&encoder);
         return writer.buffered();
     }
@@ -211,7 +221,7 @@ fn hasLabel(labels: []const u8, label: []const u8) bool {
 }
 
 fn boundary(digest: [4]u8, epoch: u64) policy.Boundary {
-    var value = @import("gossipsub/topic_fixture.zig").full(digest);
+    var value = topic_fixture.full(digest);
     value.fork = .fulu;
     value.epoch = epoch;
     return value;
@@ -232,7 +242,7 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     const original = node.peer_manager.counters;
     const output = try f.render(true);
     try contains(output, "lodestar_native_network_transport_failures_total 18446744073709551615\n");
-    const closed = @tagName(@as(@import("peers/types.zig").DisconnectReason, @enumFromInt(0)));
+    const closed = @tagName(@as(types.DisconnectReason, @enumFromInt(0)));
     var line: [128]u8 = undefined;
     const closes = try std.fmt.bufPrint(&line, "lodestar_native_peer_closes_total{{reason=\"{s}\"}} 17\n", .{closed});
     try contains(output, closes);
@@ -293,8 +303,8 @@ test "metrics maximum configured topic domain fits its startup exposition reserv
     defer f.deinit();
     const g = f.node.protocols.gossipsub;
     for (boundaries) |value| {
-        var name: [@import("gossipsub/topic.zig").topic_max_len]u8 = undefined;
-        try gossip_test.subscribe(g, @import("gossipsub/topic.zig").build(value.digest, "beacon_block", &name));
+        var name: [topic_mod.topic_max_len]u8 = undefined;
+        try gossip_test.subscribe(g, topic_mod.build(value.digest, "beacon_block", &name));
     }
     f.node.counters.dial_started = std.math.maxInt(u64);
     const output = try f.render(true);
@@ -344,7 +354,7 @@ test "metrics render retained usable coverage and suppress deficits when stopped
 test "metrics follow demand replacement and owner shutdown" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
-    const demand: @import("peers/types.zig").Demand = .{ .attnets = 3, .attestation_target = 2 };
+    const demand: types.Demand = .{ .attnets = 3, .attestation_target = 2 };
     try core_test.updateDemand(f.node, &demand, f.node.last_now);
     var result = f.node.advance(std.testing.io, .{ .now = f.node.last_now, .readiness = .{} }, .{}, .{});
     try std.testing.expect(result.failure == null);
@@ -398,7 +408,7 @@ test "metrics report the kernel's buffer sizes and drops for every UDP socket" {
     var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) } });
     defer f.deinit();
     const output = try f.render(true);
-    const roles = [_]struct { []const u8, *@import("udp").Sockets }{
+    const roles = [_]struct { []const u8, *Sockets }{
         .{ "quic", &f.node.transport.sockets },
         .{ "discovery", &f.node.discovery.?.transport.sockets },
     };
@@ -421,7 +431,7 @@ test "metrics report the kernel's buffer sizes and drops for every UDP socket" {
 test "metrics label redials after a health close in the dial retries contract series" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
-    f.node.peer_manager.dialing.retries[@intFromEnum(@import("peers/types.zig").DialFailure.health)] = 2;
+    f.node.peer_manager.dialing.retries[@intFromEnum(types.DialFailure.health)] = 2;
     try contains(try f.render(true), "lodestar_native_peer_dial_retries_total{previous=\"health\"} 2\n");
 }
 
@@ -429,7 +439,7 @@ test "metrics export dial time by outcome in seconds through shutdown" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
     const dialing = &f.node.peer_manager.dialing;
-    const connected = @intFromEnum(@import("peers/types.zig").DialOutcome.connected);
+    const connected = @intFromEnum(types.DialOutcome.connected);
     dialing.durations[connected].observe(180);
     dialing.outcomes[connected] = 1;
     for ([_]bool{ true, false }) |running| {
@@ -513,7 +523,7 @@ test "metrics export gossip message, mesh change, penalty and promise counters t
     counts.received = 5;
     counts.duplicate = 2;
     g.topic_metrics.counts[policy.kind_count].published = std.math.maxInt(u64);
-    g.peers.scores.penalties[@intFromEnum(@import("gossipsub/score.zig").Penalty.graft_flood)] = 6;
+    g.peers.scores.penalties[@intFromEnum(score.Penalty.graft_flood)] = 6;
     g.recovery.armed = 9;
     const expected = [_][]const u8{
         "lodestar_native_gossip_messages_received_total{topic=\"beacon_block\"} 5\n",
@@ -579,12 +589,12 @@ test "core metrics aggregate subnets and count distinct mesh peers" {
     try pair.initOwnersWithOptions(&.{}, opts);
     defer pair.deinit();
     var a_intent = core_test.intent(&pair.client, &.{});
-    a_intent.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{ "/eth2/00000000/beacon_block/ssz_snappy", "/eth2/00000000/blob_sidecar_0/ssz_snappy", "/eth2/00000000/blob_sidecar_1/ssz_snappy" });
+    a_intent.subscriptions = topic_fixture.subscriptions(&.{ "/eth2/00000000/beacon_block/ssz_snappy", "/eth2/00000000/blob_sidecar_0/ssz_snappy", "/eth2/00000000/blob_sidecar_1/ssz_snappy" });
     var b_intent = core_test.intent(&pair.server, &.{});
     b_intent.subscriptions = a_intent.subscriptions;
     try std.testing.expect(try pair.client.applyIntent(&a_intent, pair.client.last_now));
     try std.testing.expect(try pair.server.applyIntent(&b_intent, pair.server.last_now));
-    try pair.client.connectUntil(&pair.server.peerId(), &.{@import("quic/test_support.zig").server_address}, pair.client.last_now, @import("time.zig").milliseconds(pair.client.last_now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms));
+    try pair.client.connectUntil(&pair.server.peerId(), &.{test_support.server_address}, pair.client.last_now, time.milliseconds(pair.client.last_now.millis() +| Dialing.connect_timeout_ms));
     const start = pair.client.last_now.millis();
     var mesh_count: usize = 0;
     for (0..3000) |_| {

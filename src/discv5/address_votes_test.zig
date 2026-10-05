@@ -2,6 +2,7 @@ const std = @import("std");
 const Votes = @import("AddressVotes.zig");
 const types = @import("types.zig");
 const message = @import("wire/message.zig");
+const CallTable = @import("CallTable.zig");
 
 fn peer(id: u16) types.Endpoint {
     var node: types.NodeId = @splat(0);
@@ -48,7 +49,7 @@ test "node movement and multiple identities in one subnet cannot multiply votes"
 test "attempts do not vote and late local failure cannot erase successful evidence" {
     var votes: Votes = .{};
     votes.init(.{ .{ .enabled = true, .fixed_port = 443 }, .{} });
-    const handle: @import("CallTable.zig").Handle = .{ .index = 0, .generation = 1 };
+    const handle: CallTable.Handle = .{ .index = 0, .generation = 1 };
     votes.attempted(&peer(1), handle, 0);
     try std.testing.expectEqual(@as(usize, 0), votes.count(0, 0));
     try std.testing.expect(!votes.canProbe(&peer(1), 1));

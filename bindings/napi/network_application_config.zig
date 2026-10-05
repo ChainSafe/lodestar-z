@@ -3,6 +3,8 @@ const n = @import("network");
 const cfg = @import("network_config.zig");
 const Value = @import("zapi:zapi").napi.Value;
 const decode = @import("network_js_input.zig");
+const config = @import("config.zig");
+const network_logs = @import("network_logs.zig");
 
 pub const Config = struct {
     resources: Resources,
@@ -84,8 +86,8 @@ pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
     try decode.completeObject(identify, &.{ "agentVersion", "protocolVersion" });
     out.agent_len = @intCast(try decode.text(try decode.get(identify, "agentVersion"), &out.agent));
     out.version_len = @intCast(try decode.text(try decode.get(identify, "protocolVersion"), &out.version));
-    out.genesis_root = @import("config.zig").state.config.genesis_validator_root;
-    out.log_level = try @import("network_logs.zig").level(try decode.get(value, "logLevel"));
+    out.genesis_root = config.state.config.genesis_validator_root;
+    out.log_level = try network_logs.level(try decode.get(value, "logLevel"));
     out.remembered_count = 0;
     if (remembered) try parseRemembered(try decode.get(value, "rememberedPeers"), out);
 }

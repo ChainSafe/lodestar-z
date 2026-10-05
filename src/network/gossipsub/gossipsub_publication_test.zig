@@ -4,6 +4,15 @@ const std = @import("std");
 const Gossipsub = @import("Gossipsub.zig");
 const topic_mod = @import("topic.zig");
 const test_topic = "/eth2/01020304/beacon_block/ssz_snappy";
+const Engine = @import("../quic/Engine.zig");
+const outbox = @import("outbox.zig");
+const delivery = @import("delivery.zig");
+const message_store = @import("message_store.zig");
+const snappy = @import("snappy");
+const constants = @import("constants.zig");
+const test_pair = @import("test_pair.zig");
+const topic_fixture = @import("topic_fixture.zig");
+const protobuf = @import("protobuf.zig");
 
 test "publication refusal retry duplicate and exact expiry preserve admission" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .seen_ttl_ms = 100, .mcache_capacity = 2, .seen_capacity = 2 });
@@ -42,7 +51,7 @@ test "publication recipient policy tops up without graft and accounts unique sha
     try support.subscribe(&g, test_topic);
     const t = g.overlay.findTopic(test_topic).?;
     for (0..12) |index| {
-        const conn: @import("../quic/Engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
+        const conn: Engine.Handle = .{ .index = @intCast(index), .generation = 1 };
         const peer = support.addPeer(&g, conn, .v1_2).?;
         _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, test_topic, true);
         g.sessions.rows[peer.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
@@ -77,8 +86,8 @@ test "publication recipient policy tops up without graft and accounts unique sha
     }
     g.sessions.rows[2].outbound = .none;
     const full = &g.sessions.rows[3].io.tx;
-    for (0..@import("outbox.zig").data_capacity) |_| {
-        const origin: @import("delivery.zig").Origin = if (full.data.full()) .publication else .forward;
+    for (0..outbox.data_capacity) |_| {
+        const origin: delivery.Origin = if (full.data.full()) .publication else .forward;
         try std.testing.expectEqual(.queued, full.queueData(&g.messages.store, h, origin, .{ .bytes = g.options.tx_peer_bytes }, 2));
     }
     const flood = try g.publishWithOptions(test_topic, "flood", .{ .flood = true }, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
@@ -88,9 +97,9 @@ test "publication recipient policy tops up without graft and accounts unique sha
 test "publication failed history admission retains payloads and recovery attribution" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 1, .validation_capacity = 1 });
     defer g.deinit();
-    const conn: @import("../quic/Engine.zig").Handle = .{ .index = 0, .generation = 1 };
+    const conn: Engine.Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
-    var retained: [2]@import("message_store.zig").Handle = undefined;
+    var retained: [2]message_store.Handle = undefined;
     for ([_][]const u8{ "retained zero", "retained one" }, &retained) |payload, *h| {
         try std.testing.expectEqual(Gossipsub.PublishOutcome{}, try g.publish(test_topic, payload, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
         h.* = g.messages.history.message(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(test_topic, payload, .{})).?);
@@ -98,7 +107,7 @@ test "publication failed history admission retains payloads and recovery attribu
     }
     const id = topic_mod.validMessageId(test_topic, "retry", .{});
     const logical = g.sessions.rows[peer.index].logical;
-    const second_conn: @import("../quic/Engine.zig").Handle = .{ .index = 1, .generation = 1 };
+    const second_conn: Engine.Handle = .{ .index = 1, .generation = 1 };
     const second_peer = support.addPeer(&g, second_conn, .v1_2).?;
     const second_logical = g.sessions.rows[second_peer.index].logical;
     g.recovery.add(&g.peers, id, logical, conn, 1, 30_000);
@@ -114,7 +123,7 @@ test "publication failed history admission retains payloads and recovery attribu
     for (retained, [_][]const u8{ "retained zero", "retained one" }) |h, expected| {
         try std.testing.expectEqual(@as(u32, 1), g.messages.store.get(h).?.tx);
         var decoded: [32]u8 = undefined;
-        const size = try @import("snappy").raw.uncompress(g.messages.store.segment(h, g.messages.store.cursor(h)), &decoded);
+        const size = try snappy.raw.uncompress(g.messages.store.segment(h, g.messages.store.cursor(h)), &decoded);
         try std.testing.expectEqualStrings(expected, decoded[0..size]);
     }
     g.sessions.rows[peer.index].io.tx.cancelStream(&g.messages.store);
@@ -123,7 +132,7 @@ test "publication failed history admission retains payloads and recovery attribu
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[logical.index].pins);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[second_logical.index].pins);
     try std.testing.expectError(error.UnknownTopic, g.publish("invalid", "bytes", Now.fromMilliseconds(.{ .mono_ms = 4, .unix_s = 0 })));
-    const oversized = try std.testing.allocator.alloc(u8, @import("constants.zig").MAX_PAYLOAD_SIZE + 1);
+    const oversized = try std.testing.allocator.alloc(u8, constants.MAX_PAYLOAD_SIZE + 1);
     defer std.testing.allocator.free(oversized);
     try std.testing.expectError(error.PayloadTooLarge, g.publish(test_topic, oversized, Now.fromMilliseconds(.{ .mono_ms = 4, .unix_s = 0 })));
     try std.testing.expectEqual(@as(u64, 3), g.topic_metrics.get(test_topic).published);
@@ -136,7 +145,7 @@ test "publication empty subscribed mesh reuses bounded fanout and full mesh excl
     try support.subscribe(&g, test_topic);
     const t = g.overlay.findTopic(test_topic).?;
     for (0..10) |index| {
-        const conn: @import("../quic/Engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
+        const conn: Engine.Handle = .{ .index = @intCast(index), .generation = 1 };
         const p = support.addPeer(&g, conn, .v1_2).?;
         _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), p.index, test_topic, true);
         g.sessions.rows[p.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
@@ -156,7 +165,7 @@ test "publication empty subscribed mesh reuses bounded fanout and full mesh excl
 }
 
 test "publication local IDONTWANT cannot suppress exact bytes over QUIC" {
-    var pair: @import("test_pair.zig").Pair = .{};
+    var pair: test_pair.Pair = .{};
     try pair.init();
     defer pair.deinit();
     try support.subscribe(pair.shared.client.gossipsub, test_topic);
@@ -181,14 +190,14 @@ test "publication local IDONTWANT cannot suppress exact bytes over QUIC" {
 }
 
 test "publication distinguishes topic capacity from unknown wire names" {
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &@import("topic_fixture.zig").churn });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &topic_fixture.churn });
     defer g.deinit();
-    for (0..@import("constants.zig").topics_cap) |i| {
+    for (0..constants.topics_cap) |i| {
         var bytes: [128]u8 = undefined;
-        const name = try @import("topic_fixture.zig").churnTopic(i, &bytes);
+        const name = try topic_fixture.churnTopic(i, &bytes);
         try support.subscribe(&g, name);
     }
-    for (g.overlay.rows[@import("constants.zig").topics_cap..]) |*row| row.generation = std.math.maxInt(u64);
+    for (g.overlay.rows[constants.topics_cap..]) |*row| row.generation = std.math.maxInt(u64);
     try std.testing.expectError(error.ResourceExhausted, g.publish(test_topic, "body", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
     try std.testing.expectError(error.UnknownTopic, g.publish("invalid", "body", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
 }
@@ -198,7 +207,7 @@ test "delivery recipients count refused frames and completions by origin" {
     const Outcome = @import("metrics.zig").Delivery.Outcome;
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
-    const conn: @import("../quic/Engine.zig").Handle = .{ .index = 0, .generation = 1 };
+    const conn: Engine.Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, test_topic, true);
     g.markDirect(conn);
@@ -207,19 +216,19 @@ test "delivery recipients count refused frames and completions by origin" {
     const filler = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
     const io = &g.sessions.rows[peer.index].io;
     // Forwards fill the ordinary allowance and publications the local reserve.
-    for (1..@import("outbox.zig").data_capacity) |_| {
+    for (1..outbox.data_capacity) |_| {
         const origin: Origin = if (io.tx.data.full()) .publication else .forward;
         try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, filler, origin, .{ .bytes = g.options.tx_peer_bytes }, 1));
     }
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .pressured = 1 }, try g.publish(test_topic, "refused", Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
     var body: [32]u8 = undefined;
-    var writer = @import("protobuf.zig").Writer.init(&body);
+    var writer = protobuf.Writer.init(&body);
     writer.bytesField(1, &id);
     support.control(&g, peer.index, .{ .iwant = .{ .body = writer.written() } }, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }));
     const recipients = &g.delivery_metrics.recipients;
     try std.testing.expectEqual(@as(u64, 1), recipients[@intFromEnum(Origin.publication)][@intFromEnum(Outcome.pressured)]);
     try std.testing.expectEqual(@as(u64, 1), recipients[@intFromEnum(Origin.iwant)][@intFromEnum(Outcome.pressured)]);
-    try std.testing.expectEqual(@as(u64, 2), io.tx.drops[@intFromEnum(@import("outbox.zig").DropReason.data_descriptors)]);
+    try std.testing.expectEqual(@as(u64, 2), io.tx.drops[@intFromEnum(outbox.DropReason.data_descriptors)]);
     // The first queued frame was the publication.
     for (0..16) |_| {
         const segment = io.tx.segment(&g.messages.store);
@@ -236,7 +245,7 @@ test "publication priority belongs to each attempt: an IWANT for our publication
     const Outcome = @import("metrics.zig").Delivery.Outcome;
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
-    const conn: @import("../quic/Engine.zig").Handle = .{ .index = 0, .generation = 1 };
+    const conn: Engine.Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, test_topic, true);
     g.markDirect(conn);
@@ -244,7 +253,7 @@ test "publication priority belongs to each attempt: an IWANT for our publication
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, try g.publish(test_topic, "mine", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
     const id = topic_mod.validMessageId(test_topic, "mine", .{});
     var body: [32]u8 = undefined;
-    var writer = @import("protobuf.zig").Writer.init(&body);
+    var writer = protobuf.Writer.init(&body);
     writer.bytesField(1, &id);
     support.control(&g, peer.index, .{ .iwant = .{ .body = writer.written() } }, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 1), io.tx.data.classCount(.local));
@@ -272,7 +281,7 @@ test "gossipsub queues incompressible 64 KiB publish" {
         .random_seed = 1,
     });
     defer g.deinit();
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, topic);
     g.overlay.rows[g.overlay.findTopic(topic).?].mesh.set(peer.index);

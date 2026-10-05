@@ -5,6 +5,11 @@ const support = @import("quic/test_support.zig");
 const Engine = @import("quic/Engine.zig");
 const rr = @import("reqresp/root.zig");
 const multistream = @import("wire/multistream.zig");
+const types = @import("types.zig");
+const protocol = @import("gossipsub/protocol.zig");
+const binding = @import("quic/binding.zig");
+const protocols_test_support = @import("protocols_test_support.zig");
+const negotiate = @import("negotiate.zig");
 
 test "router selects typed outbound protocol independently of offer indexes" {
     var pair: support.Pair = .{};
@@ -22,7 +27,7 @@ test "router selects typed outbound protocol independently of offer indexes" {
         const count = pumpRouter(&client, &pair, &pair.client, pair.now, &out);
         for (out[0..count]) |outcome| {
             try std.testing.expectEqual(stream, outcome.stream);
-            try std.testing.expectEqual(@import("types.zig").Direction.outbound, outcome.direction);
+            try std.testing.expectEqual(types.Direction.outbound, outcome.direction);
             try std.testing.expectEqual(Router.Kind.reqresp, outcome.owner.?);
             try std.testing.expectEqual(rr.Protocol.ping_v1, outcome.result.ready.protocol.reqresp);
             accepted = true;
@@ -142,7 +147,7 @@ test "router capabilities validate protocol limits and preserve configured prefe
     active.receive.insert(.{ .reqresp = .ping_v1 });
     active.request.insert(.{ .meshsub = .v1_0 });
     active.request.insert(.{ .meshsub = .v1_2 });
-    var versions = [_]@import("gossipsub/protocol.zig").Version{ .v1_0, .v1_2 };
+    var versions = [_]protocol.Version{ .v1_0, .v1_2 };
     var router = try Router.init(std.testing.allocator, .{ .capabilities = active, .meshsub_versions = &versions });
     defer router.deinit();
     versions[0] = .v1_1;
@@ -250,7 +255,7 @@ test "router capabilities enable a fallback after rejecting an earlier proposal"
     try pair.pump();
     try std.testing.expectEqual(1, pumpRouter(&server, &pair, &pair.server, pair.now, &out));
     try std.testing.expect(out[0].result == .ready);
-    try std.testing.expectEqual(@import("gossipsub/protocol.zig").Version.v1_1, out[0].result.ready.protocol.meshsub);
+    try std.testing.expectEqual(protocol.Version.v1_1, out[0].result.ready.protocol.meshsub);
     try std.testing.expectEqualSlices(u8, &.{42}, out[0].result.ready.leftover);
     try std.testing.expect(out[0].result.ready.fin);
     try pair.pump();
@@ -265,7 +270,7 @@ test "router accepted selection survives capability changes while ACK is flow co
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    @import("quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 8);
+    binding.c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 8);
     const handles = try support.connectPair(&pair);
     var active: caps.Directional = .{ .receive = .initEmpty(), .request = .initEmpty() };
     active.receive.insert(.{ .reqresp = .ping_v1 });
@@ -311,8 +316,8 @@ test "router accepted selection survives capability changes while ACK is flow co
     try std.testing.expectEqualSlices(u8, hello, ack[0..ack_len]);
 }
 
-fn pumpRouter(router: *Router, pair: *support.Pair, transport: *Engine, now: @import("types.zig").Now, outcomes: []Router.Outcome) usize {
-    @import("protocols_test_support.zig").forward(pair, transport, .{ .negotiator = &router.negotiator });
+fn pumpRouter(router: *Router, pair: *support.Pair, transport: *Engine, now: types.Now, outcomes: []Router.Outcome) usize {
+    protocols_test_support.forward(pair, transport, .{ .negotiator = &router.negotiator });
     return router.pump(transport, now, outcomes);
 }
 
@@ -372,7 +377,7 @@ test "router control capacity counts pending and reported negotiations until rec
     var output: [1]Router.Outcome = undefined;
     try std.testing.expectEqual(1, router.pump(&pair.client, pair.now, &output));
     try std.testing.expectEqual(
-        @import("negotiate.zig").Negotiator.Failure.timeout,
+        negotiate.Negotiator.Failure.timeout,
         output[0].result.failed,
     );
     try std.testing.expectError(

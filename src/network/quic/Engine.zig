@@ -9,6 +9,7 @@ const retry = @import("retry.zig");
 const peer_id = @import("../wire/peer_id.zig");
 const TlsContext = @import("../tls/context.zig").Context;
 const types = @import("../types.zig");
+const logging = @import("../logging.zig");
 
 const assert = std.debug.assert;
 const c = binding.c;
@@ -987,7 +988,7 @@ fn refresh(self: *Engine, index: u16) void {
             } else {
                 slot.connected_pending = true;
                 self.connection_metrics.established[@intFromEnum(slot.direction)] +|= 1;
-                std.log.scoped(.network_quic).debug("connection_established connection={d}:{d} direction={s} peer={f}", .{ index, slot.generation, @tagName(slot.direction), @import("../logging.zig").peer(&id) });
+                std.log.scoped(.network_quic).debug("connection_established connection={d}:{d} direction={s} peer={f}", .{ index, slot.generation, @tagName(slot.direction), logging.peer(&id) });
             }
         } else {
             slot.close(.tls_failed, types.app_error_normal);

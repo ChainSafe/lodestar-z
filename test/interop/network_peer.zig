@@ -10,6 +10,7 @@ const topic = "/eth2/01000000/beacon_block/ssz_snappy";
 const ping = [_]u8{ 1, 0, 0, 0, 0, 0, 0, 0 };
 const identify_status = [_]u8{1} ++ [_]u8{0} ** 91;
 const range = [_]u8{0} ** 8 ++ ping ++ ping;
+const config = @import("config");
 
 /// A gossip message admitted through the sink, reported after the protocol turn.
 const Delivery = struct {
@@ -90,7 +91,7 @@ pub const Peer = struct {
         const stepped = network.transport_driver.step(&self.transport, self.io, &events, .{ .wait_max = .fromMilliseconds(1) });
         const result = stepped.progress;
         self.now = result.now;
-        self.now.monotonic = @import("network").time.milliseconds(self.now.millis() + self.clock_offset);
+        self.now.monotonic = network.time.milliseconds(self.now.millis() + self.clock_offset);
         if (self.held_since) |since| if (self.now.millis() -| since >= 10_000) return error.FinHoldTimeout;
         for (events[0..result.events]) |event| switch (event) {
             .connected => |c| {
@@ -318,7 +319,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const application = args.len == 2 and std.mem.eql(u8, args[1], "--application");
     var blob_schedule: [network.reqresp.request_policy.schedule_max]network.reqresp.request_policy.BlobLimit = undefined;
-    const policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule);
+    const policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&config.mainnet.config, &blob_schedule);
     var admission = try network.reqresp.ReqResp.Options.Admission.defaults(&policy, 4, 4, if (application) 6 else 1);
     for (&admission.limits.peer, &admission.limits.global) |*peer_quotas, *global_quotas| {
         peer_quotas[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 16, .period_ms = 30_000 };
@@ -351,6 +352,6 @@ pub fn main(init: std.process.Init) !void {
 
 fn applicationDigest() [4]u8 {
     var root: [32]u8 = undefined;
-    @import("config").BeaconConfig.computeForkDataRoot(.{ 4, 0, 0, 0 }, @splat(0), &root);
+    config.BeaconConfig.computeForkDataRoot(.{ 4, 0, 0, 0 }, @splat(0), &root);
     return root[0..4].*;
 }

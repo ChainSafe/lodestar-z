@@ -7,9 +7,20 @@ const options = @import("network_core_test_support.zig").networkOptions;
 const Now = @import("types.zig").Now;
 const Source = @import("wake_sources.zig").Source;
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
+const transport = @import("transport.zig");
+const time = @import("time.zig");
+const local_intent = @import("gossipsub/local_intent.zig");
+const topic_fixture = @import("gossipsub/topic_fixture.zig");
+const configuration = @import("configuration.zig");
+const policy_fixture = @import("reqresp/policy_fixture.zig");
+const network_core_test_support = @import("network_core_test_support.zig");
+const fault_io = @import("fault_io");
+const Sockets = @import("udp").Sockets;
+const udp = @import("udp");
+const PeerId = @import("wire/peer_id.zig").PeerId;
 
 fn currentTime() !Now {
-    return @import("transport.zig").Transport.currentTime(std.testing.io);
+    return transport.Transport.currentTime(std.testing.io);
 }
 
 /// A scripted host: a nonblocking wake pipe, and an apply that drains it and then runs the
@@ -41,7 +52,7 @@ const TestHost = struct {
     }
 
     fn seam(self: *TestHost, deadline_ms: ?u64) NetworkCore.Host {
-        return .{ .handler = .{ .context = self, .apply = apply }, .deadline = @import("time.zig").optionalMilliseconds(deadline_ms) };
+        return .{ .handler = .{ .context = self, .apply = apply }, .deadline = time.optionalMilliseconds(deadline_ms) };
     }
 
     fn apply(context: *anyopaque, core: *NetworkCore, now: Now) NetworkCore.HostProgress {
@@ -78,13 +89,13 @@ const Pair = struct {
         self.b_inbox.clear();
         for ([_]*NetworkCore{ &self.a, &self.b }) |node| {
             const now = try currentTime();
-            const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 1)));
+            const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 1)));
             if (result.failure) |err| return err;
         }
     }
 };
 
-fn intent(node: *const NetworkCore, subscriptions: []const @import("gossipsub/local_intent.zig").Boundary) NetworkCore.LocalIntent {
+fn intent(node: *const NetworkCore, subscriptions: []const local_intent.Boundary) NetworkCore.LocalIntent {
     return .{
         .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
         .demand = node.peer_manager.demand,
@@ -101,7 +112,7 @@ test "a host publication submitted after wait planning leaves in the turn that o
     defer std.testing.allocator.destroy(pair);
     pair.* = .{};
     var opts = options(&key_a);
-    opts.resolved.core.protocols.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(@splat(0))};
+    opts.resolved.core.protocols.gossipsub.topic_policy = &.{topic_fixture.full(@splat(0))};
     try pair.a.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer pair.a.deinit(std.testing.io);
     opts.startup.host = &key_b;
@@ -113,7 +124,7 @@ test "a host publication submitted after wait planning leaves in the turn that o
         pair.b_inbox.deinit();
         pair.a_inbox.deinit();
     }
-    const subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{topic});
+    const subscriptions = topic_fixture.subscriptions(&.{topic});
     _ = try pair.a.applyIntent(&intent(&pair.a, subscriptions), pair.a.last_now);
     _ = try pair.b.applyIntent(&intent(&pair.b, subscriptions), pair.b.last_now);
     try pair.a.addDirectPeer(&pair.b.peerId(), &.{pair.b.transport.localAddress()}, pair.a.last_now);
@@ -169,7 +180,7 @@ test "a host publication submitted after wait planning leaves in the turn that o
     var delivered = false;
     for (0..3000) |_| {
         const now = try currentTime();
-        _ = driver.step(&pair.a, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 1)));
+        _ = driver.step(&pair.a, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 1)));
         for (pair.a_inbox.messages()) |message| {
             try std.testing.expectEqualStrings("host publication", message.bytes);
             _ = pair.a.reportValidation(message.handle, .accept, pair.a.last_now);
@@ -195,7 +206,7 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
     defer node.setHostWake(null) catch unreachable;
     for (0..4) |_| {
         const now = try currentTime();
-        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
+        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
     }
     const host_source = @intFromEnum(Source.host);
 
@@ -287,7 +298,7 @@ test "a junk flood on the discovery socket costs discovery-only turns in batches
     defer node.deinit(std.testing.io);
     for (0..4) |_| {
         const now = try currentTime();
-        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
+        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
     }
     const settled = try currentTime();
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(settled, .{}).schedule(), settled.millis()).? > settled.millis());
@@ -300,7 +311,7 @@ test "a junk flood on the discovery socket costs discovery-only turns in batches
     for ([_]u16{ NetworkCore.discovery_batch_max, 40 - NetworkCore.discovery_batch_max }) |expected| {
         const before = datagramsCounted(&node);
         const now = try currentTime();
-        const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 5_000)));
+        const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 5_000)));
         try std.testing.expect(result.failure == null);
         try std.testing.expect(result.readiness.discoveryReady() and result.discovery_only);
         try std.testing.expectEqual(expected, datagramsCounted(&node) - before);
@@ -320,16 +331,16 @@ test "discovery readiness with other work due runs a full turn" {
     defer node.deinit(std.testing.io);
     for (0..4) |_| {
         const now = try currentTime();
-        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
+        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
     }
     const remote = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer remote.close(std.testing.io);
-    const destination = @import("udp").Address.fromNetwork(remote.address);
+    const destination = udp.Address.fromNetwork(remote.address);
     _ = try node.transport.engine.dial(&destination, node.peerId(), node.last_now);
     try std.testing.expect(node.transport.engine.backlog());
     try remote.send(std.testing.io, &node.discovery.?.transport.sockets.primary().address, "junk datagram");
     const now = try currentTime();
-    const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 5_000)));
+    const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 5_000)));
     try std.testing.expect(result.failure == null and result.readiness.discoveryReady());
     try std.testing.expect(!result.discovery_only);
     try std.testing.expectEqual(@as(u64, 1), datagramsCounted(&node));
@@ -337,12 +348,12 @@ test "discovery readiness with other work due runs a full turn" {
 }
 
 fn initOwner(node: *NetworkCore) !void {
-    const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{94}));
-    const resolved = try @import("configuration.zig").resolve(.{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{94}));
+    const resolved = try configuration.resolve(.{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = policy_fixture.config() });
     try node.init(std.testing.allocator, std.testing.io, &resolved, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
-        .local = @import("network_core_test_support.zig").localState(.{}),
+        .local = network_core_test_support.localState(.{}),
         .slot = 100,
     });
 }
@@ -352,13 +363,13 @@ test "owner zero-wait turns count under every due source until the owner settles
     defer std.testing.allocator.destroy(node);
     try initOwner(node);
     defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-    for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis()))).failure == null);
-    const host = @intFromEnum(@import("wake_sources.zig").Source.host);
+    const now = try transport.Transport.currentTime(std.testing.io);
+    for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis()))).failure == null);
+    const host = @intFromEnum(Source.host);
     try std.testing.expectEqual(@as(u64, 8), node.due_now_turns[host]);
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(now, .{}).schedule(), now.millis()).? > now.millis());
     const settled = node.due_now_turns;
-    try std.testing.expect(driver.step(node, std.testing.io, node.last_now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(node.last_now.millis() +| 2))).failure == null);
+    try std.testing.expect(driver.step(node, std.testing.io, node.last_now, .{}, .deadlineOnly(time.optionalMilliseconds(node.last_now.millis() +| 2))).failure == null);
     try std.testing.expectEqualDeep(settled, node.due_now_turns);
 }
 
@@ -367,16 +378,16 @@ test "owner zero-wait turn counts once under each of its two due sources" {
     defer std.testing.allocator.destroy(node);
     try initOwner(node);
     defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-    for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis()))).failure == null);
+    const now = try transport.Transport.currentTime(std.testing.io);
+    for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis()))).failure == null);
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(now, .{}).schedule(), now.millis()).? > now.millis());
-    const remote = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{95}));
+    const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{95}));
     const remote_key = remote.publicKey();
-    const peer = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote_key);
+    const peer = PeerId.fromPublicKey(&remote_key);
     // The node binds IPv4 only, so this dial fails before sending a datagram.
-    try node.connectUntil(&peer, &.{.{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } }}, now, @import("time.zig").milliseconds(now.millis() + 60_000));
+    try node.connectUntil(&peer, &.{.{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } }}, now, time.milliseconds(now.millis() + 60_000));
     const before = node.due_now_turns;
-    try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 100))).failure == null);
+    try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 100))).failure == null);
     for (before, node.due_now_turns, 0..) |previous, current, index| {
         const due = index == @intFromEnum(Source.dial) or index == @intFromEnum(Source.peer_policy);
         try std.testing.expectEqual(previous + @intFromBool(due), current);
@@ -398,7 +409,7 @@ test "a continuous QUIC flood on both families shares each receive quota and lea
     defer node.setHostWake(null) catch unreachable;
     for (0..4) |_| {
         const now = try currentTime();
-        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
+        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
     }
     const quota = node.transport.work_limits.receive_per_turn_max;
     const sockets = node.transport.sockets.values;
@@ -439,7 +450,7 @@ test "owner applies host work for a due host deadline and again for work the app
     const node = &setup.client;
     const Host = struct {
         applies: usize = 0,
-        fn apply(context: *anyopaque, _: *NetworkCore, _: @import("types.zig").Now) NetworkCore.HostProgress {
+        fn apply(context: *anyopaque, _: *NetworkCore, _: Now) NetworkCore.HostProgress {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.applies += 1;
             return .{ .runnable = self.applies == 1 };
@@ -456,22 +467,22 @@ test "owner applies host work for a due host deadline and again for work the app
 test "network owner progresses and shuts down while UDP sends are under local pressure" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{125}));
     const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{126}));
-    const identity = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote.publicKey());
+    const identity = PeerId.fromPublicKey(&remote.publicKey());
     const opts = options(&key);
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    var faults: @import("fault_io") = .{ .send = .{}, .send_failure = error.SystemResources };
+    var faults: fault_io = .{ .send = .{}, .send_failure = error.SystemResources };
     const now = node.last_now;
-    try node.connectUntil(&identity, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, now, @import("time.zig").milliseconds(now.millis() + 5_000));
-    const progress = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
+    try node.connectUntil(&identity, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, now, time.milliseconds(now.millis() + 5_000));
+    const progress = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
     try std.testing.expect(progress.failure == null);
-    try std.testing.expect(faults.send_calls > 0 and faults.send_calls <= @import("transport.zig").Transport.send_burst_max);
+    try std.testing.expect(faults.send_calls > 0 and faults.send_calls <= transport.Transport.send_burst_max);
     try std.testing.expect(node.phase() != .stopping);
-    try std.testing.expect(node.transport.send_drops.datagrams[@intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources)] > 0);
+    try std.testing.expect(node.transport.send_drops.datagrams[@intFromEnum(Sockets.SendDrops.Reason.system_resources)] > 0);
     node.shutdown(node.last_now);
     for (0..4) |_| {
-        const stopped = driver.step(&node, faults.io(), node.last_now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(node.last_now.millis())));
+        const stopped = driver.step(&node, faults.io(), node.last_now, .{}, .deadlineOnly(time.optionalMilliseconds(node.last_now.millis())));
         try std.testing.expect(stopped.failure == null);
         if (node.isClosed()) break;
     }

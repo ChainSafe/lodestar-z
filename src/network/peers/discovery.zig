@@ -7,6 +7,10 @@ const adapter = @import("enr.zig");
 const types = @import("types.zig");
 const control_values = @import("../control_values.zig");
 const advertisement = @import("../advertisement.zig");
+const Sockets = @import("udp").Sockets;
+const KeyPair = @import("../wire/keys.zig").KeyPair;
+const configuration = @import("../configuration.zig");
+const types_mod = @import("../types.zig");
 
 const Storage = struct {
     observations: d.AddressVotes,
@@ -22,7 +26,7 @@ pub const Discovery = struct {
     pub const Config = struct {
         advertisement: ?advertisement.Hints = null,
         fixed: advertisement.Endpoints = .{},
-        bind: @import("udp").Sockets.Bindings,
+        bind: Sockets.Bindings,
         sequence: u64 = 1,
         bootstrap: []const d.identity.enr.Record = &.{},
         engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
@@ -107,10 +111,10 @@ pub const Discovery = struct {
     lookup_published: u64 = 0,
     empty_lookups: u3 = 0,
 
-    pub fn init(self: *Discovery, allocator: std.mem.Allocator, io: std.Io, options: Config, buffers: @import("udp").Sockets.Buffers, host: *const @import("../wire/keys.zig").KeyPair, local: *const types.LocalState, fork_schedule: control_values.ForkSchedule, quic: [2]?types.Address, now_ms: u64) !void {
-        var sockets = try @import("udp").Sockets.bind(io, options.bind);
+    pub fn init(self: *Discovery, allocator: std.mem.Allocator, io: std.Io, options: Config, buffers: Sockets.Buffers, host: *const KeyPair, local: *const types.LocalState, fork_schedule: control_values.ForkSchedule, quic: [2]?types.Address, now_ms: u64) !void {
+        var sockets = try Sockets.bind(io, options.bind);
         errdefer sockets.close(io);
-        @import("../configuration.zig").requestBuffers(&sockets, io, buffers, .network_discovery);
+        configuration.requestBuffers(&sockets, io, buffers, .network_discovery);
         var udp_addresses: [2]?d.types.Address = .{ null, null };
         for (sockets.values, 0..) |socket, i| if (socket) |value| {
             udp_addresses[i] = d.types.Address.fromNetwork(value.address);
@@ -133,7 +137,7 @@ pub const Discovery = struct {
 
     /// Takes ownership of bound sockets on success. Records are immutable authenticated values.
     /// This entry supports hosts that construct their own initial application advertisement.
-    pub fn initBound(self: *Discovery, allocator: std.mem.Allocator, sockets: @import("udp").Sockets, key: *const d.identity.crypto.KeyPair, record: *const d.identity.enr.Record, context: *const types.ForkContext, bootstrap: []const d.identity.enr.Record, now_ms: u64, options: Options, transport_options: d.Transport.Options) !void {
+    pub fn initBound(self: *Discovery, allocator: std.mem.Allocator, sockets: Sockets, key: *const d.identity.crypto.KeyPair, record: *const d.identity.enr.Record, context: *const types.ForkContext, bootstrap: []const d.identity.enr.Record, now_ms: u64, options: Options, transport_options: d.Transport.Options) !void {
         try context.validate();
         if (options.query_interval_ms == 0 or options.query_interval_ms > 86_400_000 or options.local_retry_ms == 0 or options.local_retry_ms > 86_400_000) return error.InvalidOptions;
         if (bootstrap.len > bootstrap_max) return error.TooManyBootstraps;
@@ -229,7 +233,7 @@ pub const Discovery = struct {
         self.context = context.*;
     }
 
-    pub fn schedule(self: *const Discovery, now_ms: u64) @import("../types.zig").Schedule {
+    pub fn schedule(self: *const Discovery, now_ms: u64) types_mod.Schedule {
         if (self.stopped) return .{};
         var next = self.transport.engine.nextDeadlineMs() orelse std.math.maxInt(u64);
         if (self.maintenance.nextDeadlineMs(&self.transport.engine)) |deadline| next = @min(next, @max(deadline, self.resource_retry_ms));
@@ -476,7 +480,7 @@ pub fn advertisementFor(local: *const types.LocalState, schedule: control_values
         .quic6 = endpoints.quic6,
     };
 }
-fn validateEndpointFamilies(endpoints: advertisement.Endpoints, quic: [2]bool, udp: *const @import("udp").Sockets) error{InvalidAdvertisement}!void {
+fn validateEndpointFamilies(endpoints: advertisement.Endpoints, quic: [2]bool, udp: *const Sockets) error{InvalidAdvertisement}!void {
     if ((endpoints.quic != null and !quic[0]) or (endpoints.quic6 != null and !quic[1]) or
         (endpoints.udp != null and udp.values[0] == null) or (endpoints.ip6 != null and (endpoints.udp6 orelse endpoints.udp) != null and udp.values[1] == null)) return error.InvalidAdvertisement;
 }

@@ -13,6 +13,12 @@ const testMessage = support.message;
 const ValidationHandle = Gossipsub.ValidationHandle;
 const storage = @import("message_store.zig");
 const delivery = @import("delivery.zig");
+const StorageRefusal = @import("messages.zig").StorageRefusal;
+const Reservations = @import("../reservations.zig").Reservations;
+const QueueResult = @import("outbox.zig").QueueResult;
+const snappy = @import("snappy");
+const metrics = @import("metrics.zig");
+const turn_mod = @import("turn.zig");
 const resource_options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 3, .retained_capacity = 4, .retained_outbound_reserve = 1, .validation_capacity = 1, .mcache_capacity = 2, .seen_capacity = 4 };
 
 test "gossipsub pinned payload pressure drops the publication and releases receive pages" {
@@ -34,15 +40,15 @@ test "gossipsub pinned payload pressure drops the publication and releases recei
         if (handle != null) break;
     }
     try std.testing.expect(handle != null);
-    const refused_id = @import("topic.zig").validMessageId(test_topic, payload[0 .. 3 * 1024 * 1024], .{});
+    const refused_id = topic_mod.validMessageId(test_topic, payload[0 .. 3 * 1024 * 1024], .{});
     _ = try setup.shared.client.gossipsub.publish(test_topic, payload[0 .. 3 * 1024 * 1024], setup.shared.pair.now);
     const g = setup.shared.server.gossipsub;
     const peer = g.sessions.find(setup.shared.handles.server).?;
     for (0..2000) |_| {
         try setup.pumpOnce();
-        if (g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.payload_capacity)] != 0) break;
+        if (g.messages.storage_refusals[@intFromEnum(StorageRefusal.payload_capacity)] != 0) break;
     }
-    try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.payload_capacity)]);
+    try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(StorageRefusal.payload_capacity)]);
     try std.testing.expectEqual(@as(usize, 1), g.messages.pendingValidations());
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peer].io.overflow.pages);
     try std.testing.expect(g.sessions.rows[peer].io.rpc == null);
@@ -82,7 +88,7 @@ test "gossipsub resource snapshot starts empty" {
 }
 
 test "gossip resolved capacities allocate owner rows and reject stale ceiling handles" {
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var ledger: Reservations = .{ .backing = std.testing.allocator };
     var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
     try std.testing.expectEqual(@as(usize, 2), g.sessions.rows.len);
     try std.testing.expectEqual(@as(usize, 4), g.peers.rows.len);
@@ -95,7 +101,7 @@ test "gossip resolved capacities allocate owner rows and reject stale ceiling ha
 }
 
 test "gossip default owner memory reconciles requested allocations" {
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var ledger: Reservations = .{ .backing = std.testing.allocator };
     {
         var g = try support.init(ledger.allocator(), .{ .random_seed = 1 });
         defer g.deinit();
@@ -107,18 +113,18 @@ test "gossip default owner memory reconciles requested allocations" {
 
 test "gossip resource snapshot releases queued bytes and transmit retains with the owner" {
     var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
+    var ledger: Reservations = .{ .backing = backing.allocator() };
     var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
     defer g.deinit();
     const calls = backing.allocations;
     const conn: Handle = .{ .index = 0, .generation = 1 };
-    const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    const peer = support.addPeer(&g, conn, .v1_2).?;
     const io = &g.sessions.rows[peer.index].io;
     io.tx.cancelStream(&g.messages.store);
     const message = g.messages.store.put([_]u8{1} ** 20, "t", "abc").?;
     g.messages.store.retainHistory(message);
     g.messages.store.seal(message);
-    try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, io.tx.queueData(&g.messages.store, message, .forward, .{ .bytes = 10 }, 7));
+    try std.testing.expectEqual(QueueResult.queued, io.tx.queueData(&g.messages.store, message, .forward, .{ .bytes = 10 }, 7));
     const snapshot = g.resourceSnapshot();
     try std.testing.expectEqual(@as(usize, 3), snapshot.queued_bytes);
     try std.testing.expectEqual(@as(usize, 1), snapshot.held_tx_retains);
@@ -136,7 +142,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
     defer g.deinit();
     var rng = std.Random.DefaultPrng.init(17);
     var conn: Handle = .{ .index = 0, .generation = 1 };
-    var source = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    var source = support.addPeer(&g, conn, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     const metadata: peers_mod.Metadata = .{ .identity = g.peers.rows[g.sessions.rows[source.index].logical.index].identity, .address = .unspecified, .direction = .inbound };
@@ -235,7 +241,7 @@ test "gossip validation finishes without allocation while shared deliveries are 
     const topic = g.overlay.findTopic(test_topic).?;
     const message = g.messages.publish(@splat(1), test_topic, "retained", 0, 0).?;
     for (0..3) |i| {
-        const conn: @import("../quic/Engine.zig").Handle = .{ .index = @intCast(i), .generation = 1 };
+        const conn: Handle = .{ .index = @intCast(i), .generation = 1 };
         const session = support.addPeer(&g, conn, .v1_2).?;
         g.sessions.rows[session.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
         g.overlay.rows[topic].mesh.set(i);
@@ -250,19 +256,19 @@ test "gossip validation finishes without allocation while shared deliveries are 
     try std.testing.expectEqual(occupied.delivery_descriptors_capacity, occupied.queued_descriptors);
     allocator.fail_index = allocator.alloc_index;
     var compressed: [64]u8 = undefined;
-    const len = try @import("snappy").raw.compress("valid message", &compressed);
-    const now: @import("../types.zig").Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
+    const len = try snappy.raw.compress("valid message", &compressed);
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
     var turn = Gossipsub.beginPump(&g, now);
-    var credits = @import("turn.zig").Credits.peer(&g.options);
+    var credits = turn_mod.Credits.peer(&g.options);
     try std.testing.expectEqual(.done, g.receiveItem(g.sessions.ref(0), .{ .message = .{ .topic = test_topic, .data = compressed[0..len] } }, &turn, &credits));
     try std.testing.expectEqual(@as(usize, 1), inbox.count);
     try std.testing.expectEqualDeep(Gossipsub.ReportOutcome{ .applied = .accept }, g.report(inbox.last().handle, .accept, now));
     try std.testing.expect(g.messages.hasPayload(inbox.last().id));
     try std.testing.expectEqual(@as(usize, 0), g.resourceSnapshot().pending_validations);
-    try std.testing.expectEqual(@as(u64, 2), g.delivery_metrics.recipients[@intFromEnum(delivery.Origin.forward)][@intFromEnum(@import("metrics.zig").Delivery.Outcome.pressured)]);
+    try std.testing.expectEqual(@as(u64, 2), g.delivery_metrics.recipients[@intFromEnum(delivery.Origin.forward)][@intFromEnum(metrics.Delivery.Outcome.pressured)]);
     const old = g.sessions.ref(1);
     g.connectionClosed(g.sessions.rows[1].conn);
     const replacement = support.addPeer(&g, .{ .index = 1, .generation = 2 }, .v1_2).?;

@@ -4,6 +4,7 @@ const adapter = @import("enr.zig");
 const types = @import("types.zig");
 const vectors = @import("enr_vectors.zig").vectors;
 const context = types.ForkContext{ .digest = .{ 1, 2, 3, 4 }, .custody_groups = 128 };
+const KeyPair = @import("../wire/keys.zig").KeyPair;
 
 const support = @import("enr_test_support.zig");
 const signingKey = support.signingKey;
@@ -100,7 +101,7 @@ test "peer ENR builder matches independent bytes and refuses invalid local prepa
     try std.testing.expectEqual(std.math.maxInt(u64), exhausted.sequence);
     const candidate = try adapter.decode(&record, &context);
     try adapter.requireIdentity(&record, &candidate.peer);
-    const other = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{2}));
+    const other = try KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{2}));
     try std.testing.expectError(error.IdentityMismatch, adapter.requireIdentity(&record, &types.PeerId.fromPublicKey(&other.publicKey())));
     local.attnets = null;
     local.syncnets = null;

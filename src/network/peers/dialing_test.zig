@@ -2,6 +2,7 @@ const std = @import("std");
 const mod = @import("dialing.zig");
 const t = @import("types.zig");
 const a = std.testing.allocator;
+const time = @import("../time.zig");
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 1234 } };
 
 const support = @import("dialing_test_support.zig");
@@ -542,5 +543,5 @@ test "peer dial scheduling observes dirty intents without applying them" {
     queue.refresh(&catalog, 100);
     try std.testing.expectEqual(@as(u32, 0), catalog.dial.dirty_count);
     try std.testing.expect(!queue.schedule(&catalog, 0).runnable);
-    try std.testing.expect(queue.schedule(&catalog, 1).due(@import("../time.zig").milliseconds(100)));
+    try std.testing.expect(queue.schedule(&catalog, 1).due(time.milliseconds(100)));
 }

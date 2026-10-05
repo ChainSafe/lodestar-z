@@ -1,5 +1,6 @@
 const Handle = @import("message_store.zig").Handle;
 const Store = @import("message_store.zig").Store;
+const topic = @import("topic.zig");
 fn allocationProbe(a: std.mem.Allocator) !void {
     var store = try Store.init(a, 8, 8 * page_bytes);
     defer store.deinit(a);
@@ -132,7 +133,7 @@ test "gossip store keeps a whole inline frame contiguous and resumes it after a 
     var store = try Store.init(std.testing.allocator, 1, page_bytes);
     defer store.deinit(std.testing.allocator);
     const name = "/eth2/01020304/sync_committee_contribution_and_proof/ssz_snappy";
-    try std.testing.expectEqual(@import("topic.zig").topic_max_len, name.len);
+    try std.testing.expectEqual(topic.topic_max_len, name.len);
     const payload: [inline_bytes]u8 = @splat(7);
     const h = store.put(@splat(1), name, &payload).?;
     store.retainHistory(h);

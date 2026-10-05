@@ -4,6 +4,7 @@ const incoming = @import("network_incoming.zig");
 const Budget = @import("network_budget.zig").Budget;
 const Table = incoming.Table;
 const Cell = incoming.Cell;
+const network_requests = @import("network_requests.zig");
 
 test "incoming reservation shares exact aggregate credits and rolls back allocation failure" {
     const amount: usize = 64;
@@ -35,7 +36,7 @@ test "incoming and outbound reservations cannot each spend the aggregate remaind
     const outbound_amount = 32 + 2 * protocol.info().response_max;
     const inbound_amount: usize = 64;
     var budget: Budget = .{ .limit = outbound_amount + inbound_amount - 1 };
-    var outgoing = try @import("network_requests.zig").Table.init(std.testing.allocator, 1, &budget);
+    var outgoing = try network_requests.Table.init(std.testing.allocator, 1, &budget);
     defer outgoing.deinit();
     var inbound = try Table.init(std.testing.allocator, 1, &budget);
     defer inbound.deinit();

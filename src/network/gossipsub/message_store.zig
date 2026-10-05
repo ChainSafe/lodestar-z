@@ -3,6 +3,7 @@ const topic = @import("topic.zig");
 const protobuf = @import("protobuf.zig");
 const constants = @import("constants.zig");
 const assert = std.debug.assert;
+const gossip_limits = @import("../gossip_limits.zig");
 
 pub const page_bytes: usize = 4096;
 /// Payloads up to this length live in their entry rather than in pages.
@@ -88,11 +89,11 @@ pub const Store = struct {
     used_entries: usize = 0,
     retired_entries: usize = 0,
     free_entry: u32 = 0,
-    limits: ?@import("../gossip_limits.zig").Limits = null,
-    used_by_kind: [@import("../gossip_limits.zig").kind_count]usize = @splat(0),
-    entries_by_kind: [@import("../gossip_limits.zig").kind_count]usize = @splat(0),
-    retained_entries_by_kind: [@import("../gossip_limits.zig").kind_count]usize = @splat(0),
-    retained_by_kind: [@import("../gossip_limits.zig").kind_count]usize = @splat(0),
+    limits: ?gossip_limits.Limits = null,
+    used_by_kind: [gossip_limits.kind_count]usize = @splat(0),
+    entries_by_kind: [gossip_limits.kind_count]usize = @splat(0),
+    retained_entries_by_kind: [gossip_limits.kind_count]usize = @splat(0),
+    retained_by_kind: [gossip_limits.kind_count]usize = @splat(0),
 
     pub fn metadataBytes(capacity: usize, byte_capacity: usize) usize {
         return capacity * @sizeOf(Entry) + byte_capacity / page_bytes * @sizeOf(u32);

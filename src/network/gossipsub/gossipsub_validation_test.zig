@@ -12,6 +12,11 @@ const ReportOutcome = Gossipsub.ReportOutcome;
 const Handle = Engine.Handle;
 const receiveForTest = support.receiveMessage;
 const testMessage = support.message;
+const constants = @import("constants.zig");
+const StorageRefusal = @import("messages.zig").StorageRefusal;
+const topic_policy = @import("topic_policy.zig");
+const gossip_limits = @import("../gossip_limits.zig");
+const frame = @import("frame.zig");
 
 fn buildTopic(name: []const u8, out: []u8) []const u8 {
     return topic_mod.build(digest, name, out);
@@ -171,7 +176,7 @@ test "gossipsub uses configured message IDs on publish and wire receive" {
             var writer = protobuf.Writer.init(&rpc);
             protobuf.writeMessage(&writer, data, topic);
             var framed: [130]u8 = undefined;
-            const wire = @import("frame.zig").writeFrame(&framed, writer.written());
+            const wire = frame.writeFrame(&framed, writer.written());
             try std.testing.expectEqual(
                 wire.len,
                 try setup.shared.pair.client.write(setup.clientStream(), wire, false),
@@ -228,7 +233,7 @@ test "gossipsub tombstones suppress Seen eviction replays and expire for natural
     try std.testing.expectEqual(Gossipsub.ReportOutcome.already_resolved, setup.shared.server.gossipsub.report(current, .accept, setup.shared.pair.now));
     try std.testing.expect(setup.shared.server.gossipsub.messages.store.get(retained) == null);
     try std.testing.expectEqual(@as(usize, 1), setup.shared.server.gossipsub.messages.store.used_entries);
-    for (0..@import("constants.zig").mcache_len) |_| @import("test_support.zig").ageHistory(setup.shared.server.gossipsub);
+    for (0..constants.mcache_len) |_| support.ageHistory(setup.shared.server.gossipsub);
     try std.testing.expectEqual(@as(usize, 0), setup.shared.server.gossipsub.messages.store.used_entries);
     try std.testing.expectEqual(setup.shared.server.gossipsub.messages.store.next.len, setup.shared.server.gossipsub.messages.store.free_pages);
 }
@@ -236,7 +241,7 @@ test "gossipsub tombstones suppress Seen eviction replays and expire for natural
 test "gossipsub pending validation survives history churn and report publish event reuse" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 1, .validation_capacity = 2, .seen_capacity = 1 });
     defer g.deinit();
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, topic);
     var inbox: support.Inbox = .{};
@@ -248,7 +253,7 @@ test "gossipsub pending validation survives history churn and report publish eve
         var bytes: [8]u8 = undefined;
         std.mem.writeInt(u64, &bytes, i, .little);
         _ = try g.publish(topic, &bytes, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 1 }));
-        @import("test_support.zig").ageHistory(&g);
+        support.ageHistory(&g);
     }
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 3));
     try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(event.handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 4, .unix_s = 1 })));
@@ -269,8 +274,8 @@ test "gossipsub validation attribution cannot penalize reused source or duplicat
     defer g.deinit();
     const source_conn: Handle = .{ .index = 0, .generation = 1 };
     const duplicate_conn: Handle = .{ .index = 1, .generation = 1 };
-    const source = @import("test_support.zig").addPeer(&g, source_conn, .v1_2).?;
-    const duplicate = @import("test_support.zig").addPeer(&g, duplicate_conn, .v1_2).?;
+    const source = support.addPeer(&g, source_conn, .v1_2).?;
+    const duplicate = support.addPeer(&g, duplicate_conn, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, topic);
     var inbox: support.Inbox = .{};
@@ -281,8 +286,8 @@ test "gossipsub validation attribution cannot penalize reused source or duplicat
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, duplicate.index, "invalid", 2));
     g.connectionClosed(source_conn);
     g.connectionClosed(duplicate_conn);
-    const replacement1 = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
-    const replacement2 = @import("test_support.zig").addPeer(&g, .{ .index = 1, .generation = 2 }, .v1_2).?;
+    const replacement1 = support.addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
+    const replacement2 = support.addPeer(&g, .{ .index = 1, .generation = 2 }, .v1_2).?;
     try std.testing.expectEqual(ReportOutcome{ .applied = .reject }, g.report(handle, .reject, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 1 })));
     try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[replacement1.index].logical, 3));
     try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[replacement2.index].logical, 3));
@@ -291,7 +296,7 @@ test "gossipsub validation attribution cannot penalize reused source or duplicat
 test "gossip duplicate fast path ignores host capacity and malformed bodies receive penalties" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .validation_capacity = 1 });
     defer g.deinit();
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     var inbox: support.Inbox = .{};
@@ -302,7 +307,7 @@ test "gossip duplicate fast path ignores host capacity and malformed bodies rece
     inbox.full = true;
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 2));
     inbox.full = false;
-    try std.testing.expectEqual(@as(u64, 0), g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.processor_capacity)]);
+    try std.testing.expectEqual(@as(u64, 0), g.messages.storage_refusals[@intFromEnum(StorageRefusal.processor_capacity)]);
     _ = g.report(handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 1 }));
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 4));
     for (0..20) |_| {
@@ -314,8 +319,8 @@ test "gossip duplicate fast path ignores host capacity and malformed bodies rece
 test "gossip recent attribution survives validation slot reuse and duplicate pressure" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .validation_capacity = 1 });
     defer g.deinit();
-    const source = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    const duplicate = @import("test_support.zig").addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
+    const source = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const duplicate = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     var inbox: support.Inbox = .{};
@@ -344,10 +349,10 @@ test "gossip recent attribution survives validation slot reuse and duplicate pre
 }
 
 test "gossip pending validation quota preserves room for another peer and refunds completed work" {
-    var boundary: @import("topic_policy.zig").Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+    var boundary: topic_policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
     boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 1024 };
     for ([_]bool{ false, true }) |planned| {
-        var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = if (planned) 4 * @import("../gossip_limits.zig").kind_count else 4, .payload_limits = if (planned) @as(@import("../gossip_limits.zig").Limits, @splat(.{ .items = 4, .bytes = 4096 })) else null });
+        var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = if (planned) 4 * gossip_limits.kind_count else 4, .payload_limits = if (planned) @as(gossip_limits.Limits, @splat(.{ .items = 4, .bytes = 4096 })) else null });
         defer g.deinit();
         const first = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
         const second = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
@@ -359,7 +364,7 @@ test "gossip pending validation quota preserves room for another peer and refund
         const held = inbox.last().handle;
         try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "second", 2));
         try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, first.index, "third", 3));
-        try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.peer_validations)]);
+        try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(StorageRefusal.peer_validations)]);
         try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[first.index].logical, 3));
         try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, second.index, "other peer", 4));
         try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(held, .ignore, Now.fromMilliseconds(.{ .mono_ms = 5, .unix_s = 0 })));

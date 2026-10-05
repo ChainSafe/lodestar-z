@@ -8,6 +8,8 @@ const Handle = @import("../types.zig").Handle;
 const harness = @import("test_pair.zig");
 const policy = @import("policy_fixture.zig").config;
 const quotas = @import("admission_fixture.zig").quotas;
+const StreamHandle = @import("../types.zig").StreamHandle;
+const multistream = @import("../wire/multistream.zig");
 
 /// Two starts per second for each identity and class, so each start past a burst of two waits
 /// for a 500 ms refill. Protocol quotas stay out of the way.
@@ -496,8 +498,8 @@ test "reqresp protocol concurrency refusal preserves selection and returns a com
     }
 }
 
-fn expectRateLimitResponse(setup: *harness.Pair, stream: @import("../types.zig").StreamHandle, message: []const u8) !void {
-    var dialer = try @import("../wire/multistream.zig").Dialer.init(Protocol.blocks_by_root_v2.id());
+fn expectRateLimitResponse(setup: *harness.Pair, stream: StreamHandle, message: []const u8) !void {
+    var dialer = try multistream.Dialer.init(Protocol.blocks_by_root_v2.id());
     var selected = false;
     var wire: [1024]u8 = undefined;
     var buffered: usize = 0;

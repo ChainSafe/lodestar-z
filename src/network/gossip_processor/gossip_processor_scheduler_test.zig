@@ -3,6 +3,7 @@ const t = std.testing;
 const p = @import("root.zig");
 const lists = @import("../index_list.zig");
 const Kind = p.limits.Kind;
+const Gossipsub = @import("../gossipsub/root.zig").Gossipsub;
 
 fn add(table: *p.GossipProcessor, kind: Kind, now: u64, metadata: p.metadata.Metadata) !p.GossipProcessor.Token {
     const token = try table.reserveKind(kind, 4);
@@ -175,7 +176,7 @@ test "gossip scheduler source limits cover unfinished execution and survive peer
     defer table.close();
     const source: p.GossipProcessor.Source = .{ .index = 0, .generation = 1 };
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    var message: @import("../gossipsub/root.zig").Gossipsub.MessageEvent = .{
+    var message: Gossipsub.MessageEvent = .{
         .source = source,
         .handle = .{ .index = 0, .generation = 1 },
         .id = @splat(1),

@@ -30,6 +30,8 @@ const ReceiveLayout = @import("ReceiveLayout.zig");
 const ServingPool = @import("ServingPool.zig");
 const index_list = @import("../index_list.zig");
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
+const PeerId = @import("../wire/peer_id.zig").PeerId;
+const route_invariant = @import("route_invariant.zig");
 
 const assert = std.debug.assert;
 const Handle = Engine.Handle;
@@ -715,7 +717,7 @@ fn routedSlot(self: *const ReqResp, route: types.Route, stream: StreamHandle) ?u
 }
 
 pub const PeerFault = struct {
-    identity: *const @import("../wire/peer_id.zig").PeerId,
+    identity: *const PeerId,
     kind: RequestState.PeerFault,
 };
 
@@ -860,7 +862,7 @@ fn availableOutboundFor(self: *ReqResp, which: Protocol) ?u16 {
 
 pub const CompletionInfo = struct {
     phase_name: []const u8,
-    rejection: ?@import("Server.zig").Rejection = null,
+    rejection: ?Server.Rejection = null,
     result_code: u8 = constants.result_success,
 };
 
@@ -1116,7 +1118,7 @@ fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhaus
     assert(lengths.events[@intFromEnum(EventList.application)] == self.deliver[0].len);
     assert(lengths.events[@intFromEnum(EventList.control)] == self.deliver[1].len);
     assert(lengths.events[@intFromEnum(EventList.reported)] == self.reported.len);
-    @import("route_invariant.zig").check(engine, self.outbound, self.inbound) catch unreachable;
+    route_invariant.check(engine, self.outbound, self.inbound) catch unreachable;
 }
 
 /// A reading slot off `ready` has consumed its buffered input and read its last delivered

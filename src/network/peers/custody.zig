@@ -1,4 +1,6 @@
 const std = @import("std");
+const PeerId = @import("types.zig").PeerId;
+const discv5 = @import("discv5");
 pub const Groups = std.StaticBitSet(128);
 pub const hashes_max: u16 = 4096;
 pub const hashes_per_row: u16 = 64;
@@ -114,9 +116,9 @@ pub const SamplingDerivation = struct {
     }
 };
 
-pub fn nodeId(identity: *const @import("types.zig").PeerId) ![32]u8 {
+pub fn nodeId(identity: *const PeerId) ![32]u8 {
     const key = try identity.publicKey();
-    const uncompressed = try @import("discv5").identity.crypto.uncompressedPublicKey(&key.bytes);
+    const uncompressed = try discv5.identity.crypto.uncompressedPublicKey(&key.bytes);
     var result: [32]u8 = undefined;
     std.crypto.hash.sha3.Keccak256.hash(uncompressed[1..], &result, .{});
     return result;

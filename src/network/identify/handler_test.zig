@@ -6,9 +6,14 @@ const identify = @import("root.zig");
 const fixtures = @import("test_support.zig");
 const options = fixtures.protocolsOptions;
 const step = fixtures.step;
+const protocols_test_support = @import("../protocols_test_support.zig");
+const router_mod = @import("../router.zig");
+const PeerRef = @import("../peers/types.zig").PeerRef;
+const time = @import("../time.zig");
+const binding = @import("../quic/binding.zig");
 
 fn allocationCheck(allocator: std.mem.Allocator) !void {
-    var handler = try identify.Handler.init(allocator, .{ .inbound_max = 2, .outbound_max = 3 }, &try @import("../protocols_test_support.zig").fixtureLocal(.{}));
+    var handler = try identify.Handler.init(allocator, .{ .inbound_max = 2, .outbound_max = 3 }, &try protocols_test_support.fixtureLocal(.{}));
     defer handler.deinit();
     try std.testing.expectEqual(2 * @sizeOf(@TypeOf(handler.inbound[0])) + 3 * @sizeOf(@TypeOf(handler.outbound[0])), handler.allocatedBytes());
 }
@@ -17,13 +22,13 @@ test "identify delivers retained completions before recycled lower slots" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var router = try @import("../router.zig").Router.init(std.testing.allocator, .{});
+    var router = try router_mod.Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var handler = try identify.Handler.init(std.testing.allocator, .{ .outbound_max = 4 }, &try @import("../protocols_test_support.zig").fixtureLocal(.{}));
+    var handler = try identify.Handler.init(std.testing.allocator, .{ .outbound_max = 4 }, &try protocols_test_support.fixtureLocal(.{}));
     defer handler.deinit();
     const conn: Engine.Handle = .{ .index = 0, .generation = 1 };
     for (handler.outbound, 0..) |*slot, index| {
-        const peer: @import("../peers/types.zig").PeerRef = .{ .index = @intCast(index), .generation = 1 };
+        const peer: PeerRef = .{ .index = @intCast(index), .generation = 1 };
         slot.* = .{ .stream = .{ .conn = conn, .id = index * 4, .slot = @intCast(index) }, .peer = peer, .phase = .terminal, .result = .{ .peer = peer, .conn = conn, .outcome = .{ .success = .{} } } };
     }
     try std.testing.expectEqual(@as(usize, 0), handler.pump(&router, &pair.client, pair.now, &.{}));
@@ -33,7 +38,7 @@ test "identify delivers retained completions before recycled lower slots" {
         try std.testing.expectEqual(index, out[0].peer.index);
         try std.testing.expectEqual(@as(u64, 1), out[0].peer.generation);
         if (index == 3) break;
-        const peer: @import("../peers/types.zig").PeerRef = .{ .index = @intCast(index), .generation = 2 };
+        const peer: PeerRef = .{ .index = @intCast(index), .generation = 2 };
         handler.outbound[index] = .{ .stream = .{ .conn = conn, .id = (index + 4) * 4, .slot = @intCast(index) }, .peer = peer, .phase = .terminal, .result = .{ .peer = peer, .conn = conn, .outcome = .{ .failed = .timeout } } };
     }
     var remaining: [4]identify.Handler.Result = undefined;
@@ -48,10 +53,10 @@ test "identify delivers retained completions before recycled lower slots" {
 test "identify validates capacities and cleans every allocation prefix" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationCheck, .{});
     for ([_]u16{ 0, 65 }) |invalid| {
-        try std.testing.expectError(error.InvalidLimits, identify.Handler.init(std.testing.allocator, .{ .inbound_max = invalid }, &try @import("../protocols_test_support.zig").fixtureLocal(.{})));
-        try std.testing.expectError(error.InvalidLimits, identify.Handler.init(std.testing.allocator, .{ .outbound_max = invalid }, &try @import("../protocols_test_support.zig").fixtureLocal(.{})));
+        try std.testing.expectError(error.InvalidLimits, identify.Handler.init(std.testing.allocator, .{ .inbound_max = invalid }, &try protocols_test_support.fixtureLocal(.{})));
+        try std.testing.expectError(error.InvalidLimits, identify.Handler.init(std.testing.allocator, .{ .outbound_max = invalid }, &try protocols_test_support.fixtureLocal(.{})));
     }
-    var local = try @import("../protocols_test_support.zig").fixtureLocal(.{ .agent = "a" });
+    var local = try protocols_test_support.fixtureLocal(.{ .agent = "a" });
     var handler = try identify.Handler.init(std.testing.allocator, .{ .inbound_max = 64, .outbound_max = 64 }, &local);
     defer handler.deinit();
     local.agent = try .init("b");
@@ -65,15 +70,15 @@ test "identify deadline includes stalled negotiation and retained completion doe
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var client = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("client"), &pair.client);
+    var client = try protocols_test_support.initProtocols(std.testing.allocator, try options("client"), &pair.client);
     defer client.deinit();
     const start = pair.now.millis();
     try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
-    pair.now.monotonic = @import("../time.zig").milliseconds(start + 4999);
+    pair.now.monotonic = time.milliseconds(start + 4999);
     var results: [1]identify.Handler.Result = undefined;
     try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &results));
     try std.testing.expectEqual(start + 5000, schedule_test_support.wakeupMilliseconds(client.identify.schedule(1), pair.now.millis()).?);
-    pair.now.monotonic = @import("../time.zig").milliseconds(pair.now.millis() + 1);
+    pair.now.monotonic = time.milliseconds(pair.now.millis() + 1);
     try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &.{}));
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(client.identify.schedule(0), pair.now.millis()) == null);
     try std.testing.expectEqual(@as(usize, 1), client.identify.pump(&client.router, &pair.client, pair.now, &results));
@@ -108,11 +113,11 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    @import("../quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 96);
+    binding.c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 96);
     const handles = try support.connectPair(&pair);
-    var client = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("client"), &pair.client);
+    var client = try protocols_test_support.initProtocols(std.testing.allocator, try options("client"), &pair.client);
     defer client.deinit();
-    var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("server"), &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, try options("server"), &pair.server);
     defer server.deinit();
     try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     for (0..16) |_| {
@@ -128,8 +133,8 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
     const duplicate = try client.router.beginOutbound(&pair.client, handles.client, .identify, pair.now);
     var refused = false;
     for (0..32) |_| {
-        var outcomes: [8]@import("../router.zig").Router.Outcome = undefined;
-        @import("../protocols_test_support.zig").forward(&pair, &pair.client, .{ .negotiator = &client.router.negotiator });
+        var outcomes: [8]router_mod.Router.Outcome = undefined;
+        protocols_test_support.forward(&pair, &pair.client, .{ .negotiator = &client.router.negotiator });
         _ = client.router.pump(&pair.client, pair.now, &outcomes);
         try pair.pump();
         _ = step(&pair, &server, true, &.{});
@@ -145,7 +150,7 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
     }
     try std.testing.expect(refused);
     try std.testing.expectEqual(deadline, server.identify.inbound[0].deadline);
-    pair.now.monotonic = @import("../time.zig").milliseconds(deadline);
+    pair.now.monotonic = time.milliseconds(deadline);
     _ = server.identify.pump(&server.router, &pair.server, pair.now, &.{});
     try std.testing.expect(server.identify.inbound[0].stream == null);
     try std.testing.expect(pair.server.peerId(handles.server) != null);
@@ -160,11 +165,11 @@ test "identify remote reset and transport close retain one failed result without
         var pair: support.Pair = .{};
         try pair.init(.{}, .{});
         defer pair.deinit();
-        @import("../quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 96);
+        binding.c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 96);
         const handles = try support.connectPair(&pair);
-        var client = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("client"), &pair.client);
+        var client = try protocols_test_support.initProtocols(std.testing.allocator, try options("client"), &pair.client);
         defer client.deinit();
-        var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("server"), &pair.server);
+        var server = try protocols_test_support.initProtocols(std.testing.allocator, try options("server"), &pair.server);
         defer server.deinit();
         try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
         for (0..16) |_| {

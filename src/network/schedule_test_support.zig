@@ -1,3 +1,4 @@
+const std = @import("std");
 const Schedule = @import("schedule.zig").Schedule;
 const time = @import("time.zig");
 
@@ -9,6 +10,6 @@ pub fn wakeupMilliseconds(schedule: Schedule, now_ms: u64) ?u64 {
 
 pub fn waitMilliseconds(schedule: Schedule, now_ms: u64, maximum_ms: u32) u32 {
     const now = time.milliseconds(now_ms);
-    const maximum = @import("std").Io.Duration.fromMilliseconds(maximum_ms);
+    const maximum = std.Io.Duration.fromMilliseconds(maximum_ms);
     return time.waitMilliseconds(schedule.timeout(now, maximum).deadline, now, maximum);
 }

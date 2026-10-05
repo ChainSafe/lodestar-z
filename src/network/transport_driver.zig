@@ -3,8 +3,9 @@ const Now = @import("types.zig").Now;
 const Transport = @import("transport.zig").Transport;
 const Engine = @import("quic/Engine.zig");
 const wait = @import("wait.zig");
+const constants = @import("constants.zig");
 
-pub const Options = struct { wait_max: std.Io.Duration = .fromMilliseconds(@import("constants.zig").poll_interval_ms) };
+pub const Options = struct { wait_max: std.Io.Duration = .fromMilliseconds(constants.poll_interval_ms) };
 pub const Error = Transport.AdvanceError || wait.Error || error{ClockOutOfRange};
 pub const Result = struct { progress: Transport.Progress, cancelled: bool = false, failure: ?Error = null };
 

@@ -1,3 +1,5 @@
+const identify_mod = @import("../identify/root.zig");
+const custody = @import("custody.zig");
 pub const PeerId = @import("../wire/peer_id.zig").PeerId;
 pub const Handle = @import("../types.zig").Handle;
 pub const Direction = @import("../types.zig").Direction;
@@ -39,7 +41,7 @@ pub const DialOutcome = enum { connected, deferred, admission_refused, cancelled
 /// refusal of our Status, before the Status and Metadata exchange completed.
 pub const Rejection = enum { shutdown, fault, early_close, too_many_peers, banned };
 pub const Snapshot = struct {
-    identify: ?@import("../identify/root.zig").Metadata = null,
+    identify: ?identify_mod.Metadata = null,
     peer: PeerRef,
     identity: PeerId,
     connection: ?Handle,
@@ -51,8 +53,8 @@ pub const Snapshot = struct {
     metadata: ?Metadata,
     status_at_ms: u64,
     metadata_at_ms: u64,
-    custody_groups: ?@import("custody.zig").Groups = null,
-    sampling_groups: ?@import("custody.zig").Groups = null,
+    custody_groups: ?custody.Groups = null,
+    sampling_groups: ?custody.Groups = null,
     connected_at_ms: u64,
     direct: bool,
     score: f64,
@@ -75,8 +77,8 @@ pub const Event = union(enum) {
 pub const Coverage = struct {
     attnets: u64 = 0,
     syncnets: u4 = 0,
-    groups: @import("custody.zig").Groups = .initEmpty(),
-    custody_groups: @import("custody.zig").Groups = .initEmpty(),
+    groups: custody.Groups = .initEmpty(),
+    custody_groups: custody.Groups = .initEmpty(),
 };
 /// Desired coverage persists until replacement; the host owns validator duty expiry.
 pub const Demand = struct {

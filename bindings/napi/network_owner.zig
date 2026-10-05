@@ -13,6 +13,7 @@ const incoming_mod = @import("network_incoming.zig");
 const requests_mod = @import("network_requests.zig");
 const publications = @import("network_publications.zig");
 const bridge = r.bridge;
+const network_wake = @import("network_wake.zig");
 
 pub const Owner = struct {
     threaded_live: bool = false,
@@ -138,7 +139,7 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
     const deadline = hostDeadline(self, timestamp);
     self.unlock();
     const sequence = try self.advanceSequence();
-    const result = n.driver.step(&self.heavy.?.core, io, timestamp, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, .{ .handler = .{ .context = host, .apply = Host.apply }, .deadline = @import("network").time.optionalMilliseconds(deadline) });
+    const result = n.driver.step(&self.heavy.?.core, io, timestamp, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, .{ .handler = .{ .context = host, .apply = Host.apply }, .deadline = n.time.optionalMilliseconds(deadline) });
     if (host.failure) |err| return err;
     if (ingress.failure) |err| return err;
     // The step's clock was read after its poll, so deadlines that ended the wait are due.
@@ -360,7 +361,7 @@ test "a command queued after wait planning executes in the turn whose poll obser
         .local = .{ .metadata = .{ .custody_group_count = 1 }, .status = .{ .earliest_available_slot = 0 } },
     });
     defer owner.core.deinit(io);
-    runtime.wake = try @import("network_wake.zig").Wake.init();
+    runtime.wake = try network_wake.Wake.init();
     defer runtime.wake.?.deinit();
     try owner.core.setHostWake(runtime.wake.?.read_fd);
     runtime.payload_budget.limit = 1 << 20;

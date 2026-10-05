@@ -10,6 +10,10 @@ const Now = @import("types.zig").Now;
 const coverage = @import("peers/coverage.zig");
 const control_wire = @import("control_wire.zig");
 const control_values = @import("control_values.zig");
+const logging = @import("logging.zig");
+const ReqResp = @import("reqresp/root.zig").ReqResp;
+const identify = @import("identify/root.zig");
+const types = @import("types.zig");
 
 pub const coverage_reconcile_interval_ms = 1_000;
 pub const replacement_interval_ms = 5_000;
@@ -160,7 +164,7 @@ pub const PeerManager = struct {
                 return admission;
             },
             else => {
-                std.log.scoped(.network_peers).debug("peer_admission_refused peer={f} connection={d}:{d} reason={s}", .{ @import("logging.zig").peer(&identity), event.conn.index, event.conn.generation, @tagName(decision) });
+                std.log.scoped(.network_peers).debug("peer_admission_refused peer={f} connection={d}:{d} reason={s}", .{ logging.peer(&identity), event.conn.index, event.conn.generation, @tagName(decision) });
                 _ = self.dialing.deferConnection(&self.catalog, event.conn, now.millis());
                 return null;
             },
@@ -222,22 +226,22 @@ pub const PeerManager = struct {
     pub fn nextControl(self: *PeerManager, pass: *peers.Control.Pass, now: Now) ?peers.Control.Due {
         return self.control.nextDue(pass, &self.catalog, &self.local, now);
     }
-    pub fn controlStarted(self: *PeerManager, due: *const peers.Control.Due, identify_started: bool, request: ?@import("reqresp/root.zig").ReqResp.RequestHandle, now: Now) void {
+    pub fn controlStarted(self: *PeerManager, due: *const peers.Control.Due, identify_started: bool, request: ?ReqResp.RequestHandle, now: Now) void {
         self.control.started(&self.catalog, due, identify_started, request, now);
     }
-    pub fn controlRequested(self: *PeerManager, request: *const @FieldType(@import("reqresp/root.zig").ReqResp.Event, "request"), now: Now, slot: u64) ?t.PeerRef {
+    pub fn controlRequested(self: *PeerManager, request: *const @FieldType(ReqResp.Event, "request"), now: Now, slot: u64) ?t.PeerRef {
         const peer = self.catalog.findConnection(request.conn) orelse return null;
         self.control.requested(&self.catalog, peer, request, &self.local, now, slot);
         return peer;
     }
     /// Called before the protocol consumes the borrowed event and settles its resource token.
-    pub fn controlReplied(self: *PeerManager, reply: *const control_wire.ControlReply, event: @import("reqresp/root.zig").ReqResp.Event, now: Now, slot: u64) void {
+    pub fn controlReplied(self: *PeerManager, reply: *const control_wire.ControlReply, event: ReqResp.Event, now: Now, slot: u64) void {
         self.control.replied(&self.catalog, reply, event, &self.local, now, slot);
     }
-    pub fn identified(self: *PeerManager, results: []const @import("identify/root.zig").Handler.Result) void {
+    pub fn identified(self: *PeerManager, results: []const identify.Handler.Result) void {
         self.control.identifyResults(&self.catalog, results);
     }
-    pub fn controlSchedule(self: *const PeerManager, now: Now) @import("types.zig").Schedule {
+    pub fn controlSchedule(self: *const PeerManager, now: Now) types.Schedule {
         return self.control.schedule(&self.catalog, now);
     }
     /// Revalidates the connection at this bounded cursor after a fork change. The caller cancels
@@ -273,7 +277,7 @@ pub const PeerManager = struct {
     fn currentSelectionRevision(self: *const PeerManager, gossipsub: *const gossip.Gossipsub) SelectionRevision {
         return .{ .catalog = self.catalog.revision, .delivery = gossipsub.deliveryRevision(), .gossip = gossipsub.coverageRevision() };
     }
-    pub fn policySchedule(self: *const PeerManager, gossipsub: *const gossip.Gossipsub) @import("types.zig").Schedule {
+    pub fn policySchedule(self: *const PeerManager, gossipsub: *const gossip.Gossipsub) types.Schedule {
         const before = self.selection_revision orelse return .{ .runnable = true };
         const after = self.currentSelectionRevision(gossipsub);
         if (before.catalog != after.catalog or before.delivery != after.delivery) return .{ .runnable = true };
@@ -288,7 +292,7 @@ pub const PeerManager = struct {
         self.native_dial_room = engine.limits.connections_max -| engine.resourceSnapshot().active;
     }
 
-    pub fn peerSchedule(self: *const PeerManager, capacity: usize) @import("types.zig").Schedule {
+    pub fn peerSchedule(self: *const PeerManager, capacity: usize) types.Schedule {
         return .{ .runnable = capacity > 0 and self.catalog.eventsPending() };
     }
     /// Requires demand validated against the local fork before publication.

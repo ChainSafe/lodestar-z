@@ -5,6 +5,8 @@ const constants = @import("constants.zig");
 const assert = std.debug.assert;
 const receive = @import("receive_pool.zig");
 const Outbox = @import("outbox.zig").Outbox;
+const options_mod = @import("options.zig");
+const delivery = @import("delivery.zig");
 
 pub const TimeoutReason = enum { subscriptions, receive_frame, send_queue, send_progress };
 
@@ -36,11 +38,11 @@ pub const Deadlines = struct {
 };
 
 pub const PeerIo = struct {
-    pub fn bufferBytes(options: *const @import("options.zig").Options) usize {
+    pub fn bufferBytes(options: *const options_mod.Options) usize {
         return options.control_bytes + options.critical_bytes + options.body_buffer_bytes + constants.read_scratch_len;
     }
 
-    pub fn init(bytes: []u8, options: *const @import("options.zig").Options, deliveries: *@import("delivery.zig").Pool) PeerIo {
+    pub fn init(bytes: []u8, options: *const options_mod.Options, deliveries: *delivery.Pool) PeerIo {
         assert(bytes.len == bufferBytes(options));
         const critical = options.control_bytes;
         const body = critical + options.critical_bytes;
@@ -128,7 +130,7 @@ pub const PeerIo = struct {
         self.iwant_ids_sent = 0;
         self.idontwant_recv = 0;
     }
-    pub fn deadlines(self: *const PeerIo, options: *const @import("options.zig").Options) Deadlines {
+    pub fn deadlines(self: *const PeerIo, options: *const options_mod.Options) Deadlines {
         var result: Deadlines = .{};
         if (self.tx.subscription_since) |since| result.values[@intFromEnum(TimeoutReason.subscriptions)] = since +| options.pressure_timeout_ms;
         if (self.frame_since) |since| {

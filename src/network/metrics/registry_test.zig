@@ -4,6 +4,7 @@ const Registry = @import("registry.zig").Registry;
 const Writer = std.Io.Writer;
 const family_capacity = @import("registry.zig").family_capacity;
 const std = @import("std");
+const histogram = @import("histogram.zig");
 
 test "metrics registry rejects duplicate families and histogram sample collisions" {
     var bytes: [4096]u8 = undefined;
@@ -101,7 +102,7 @@ test "metrics registry collectors share one snapshot and isolate repeated gather
 }
 
 test "metrics registry formats finite histogram bounds without a decimal scratch limit" {
-    const Histogram = @import("histogram.zig").Histogram(f64, &.{1e100}, .{});
+    const Histogram = histogram.Histogram(f64, &.{1e100}, .{});
     var value: Histogram = .{};
     value.observe(1);
     var bytes: [1024]u8 = undefined;

@@ -6,10 +6,13 @@ const protocol = @import("protocol.zig");
 const response_bounds = @import("response_bounds.zig");
 const reqresp = @import("ReqResp.zig");
 const harness = @import("test_pair.zig");
+const ForkEntry = @import("../types.zig").ForkEntry;
+const StreamHandle = @import("../quic/Engine.zig").StreamHandle;
+const control_fixture = @import("control_fixture.zig");
 
-const first: @import("../types.zig").ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
-const second: @import("../types.zig").ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
-const phase0: @import("../types.zig").ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
+const first: ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
+const second: ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
+const phase0: ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
 
 /// Admission refusals for `reason`, summed over every method.
 fn refusals(owner: *const reqresp, reason: reqresp.metrics.AdmissionRefusal) u64 {
@@ -34,7 +37,7 @@ test "reqresp active new methods enforce request ceilings through real exchanges
     try setup.init(.{ .outbound_max = 1, .forks = &.{ first, second, phase0 } }, .{ .serving_max = 1, .inbound_per_connection_max = 1, .forks = &.{ first, second, phase0 } });
     defer setup.deinit();
     inline for (cases) |case| {
-        for ([_]@import("../types.zig").ForkEntry{ first, second }) |context| {
+        for ([_]ForkEntry{ first, second }) |context| {
             var bytes = [_]u8{0} ** case[1];
             if (case[0] == .blocks_by_head_v1) std.mem.writeInt(u64, bytes[32..40], 2, .little);
             var payload = [_]u8{0} ** (case[3] + 1);
@@ -148,7 +151,7 @@ test "reqresp active light client bounds select each actual fork type before dec
 
 test "reqresp active hostile coalesced context rejects before sink writes with one terminal" {
     const cases = .{
-        .{ @import("../types.zig").ForkEntry{ .digest = .{ 99, 99, 99, 99 }, .fork = .fulu }, reqresp.Failure{ .unknown_context = .{ 99, 99, 99, 99 } } },
+        .{ ForkEntry{ .digest = .{ 99, 99, 99, 99 }, .fork = .fulu }, reqresp.Failure{ .unknown_context = .{ 99, 99, 99, 99 } } },
         .{ phase0, reqresp.Failure{ .invalid_response = error.InvalidResponseContext } },
         .{ first, reqresp.Failure{ .invalid_response = error.LengthOutOfBounds } },
     };
@@ -162,7 +165,7 @@ test "reqresp active hostile coalesced context rejects before sink writes with o
             @memset(sink, 0xaa);
             _ = try request(&setup, .light_client_optimistic_update_v1, "", sink, .{});
             const bytes = [_]u8{0} ++ case[0].digest ++ [_]u8{ 1, 0xff, 6, 0, 0 };
-            var stream: ?@import("../quic/Engine.zig").StreamHandle = null;
+            var stream: ?StreamHandle = null;
             var sent_suffix = false;
             var failed = false;
             for (0..40) |_| {
@@ -296,7 +299,7 @@ test "reqresp active light client traffic preserves control reserve and cancella
     const handles = try support.connectPair(&pair);
     var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var owner = try reqresp.init(std.testing.allocator, try @import("control_fixture.zig").reservedOptions());
+    var owner = try reqresp.init(std.testing.allocator, try control_fixture.reservedOptions());
     defer owner.deinit();
     const which = protocol.Protocol.light_client_finality_update_v1;
     const capacity = protocol.Protocol.light_client_updates_by_range_v1.info().response_max;

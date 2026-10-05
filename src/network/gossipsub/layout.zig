@@ -3,6 +3,13 @@ const storage = @import("message_store.zig");
 const delivery = @import("delivery.zig");
 const policy = @import("topic_policy.zig");
 const Options = @import("options.zig").Options;
+const PeerIo = @import("peer_io.zig").PeerIo;
+const Gossipsub = @import("Gossipsub.zig");
+const sessions_mod = @import("sessions.zig");
+const overlay = @import("overlay.zig");
+const local_intent = @import("local_intent.zig");
+const messages = @import("messages.zig");
+const recovery = @import("recovery.zig");
 
 pub const Plan = struct {
     retained_bytes: usize,
@@ -51,7 +58,7 @@ pub const Layout = struct {
             .payload_bytes = options.mcache_arena_bytes / storage.page_bytes * storage.page_bytes,
             .deliveries = delivery.Pool.capacity(options.connected_capacity, options.validation_capacity),
             .receive_arena_bytes = options.receive_arena_bytes,
-            .session_buffer_bytes = @import("peer_io.zig").PeerIo.bufferBytes(options),
+            .session_buffer_bytes = PeerIo.bufferBytes(options),
             .namespace_bytes = if (options.topic_policy) |boundaries| policy.Namespace.backingBytes(boundaries, options.connected_capacity) else 0,
         };
     }
@@ -71,14 +78,14 @@ pub const Layout = struct {
 
     pub fn plan(self: *const Layout) Plan {
         const peers = @import("peer_book.zig");
-        const metadata = @sizeOf(@import("Gossipsub.zig")) +
-            @sizeOf(@import("sessions.zig").Sessions) + @sizeOf(@import("overlay.zig").Overlay) +
-            @import("sessions.zig").Sessions.metadataBytes(self) +
+        const metadata = @sizeOf(Gossipsub) +
+            @sizeOf(sessions_mod.Sessions) + @sizeOf(overlay.Overlay) +
+            sessions_mod.Sessions.metadataBytes(self) +
             peers.PeerBook.backingBytesForTopics(self.retained, self.topics) +
-            @as(usize, self.topics) * @sizeOf(@import("overlay.zig").Row) +
-            @import("local_intent.zig").topicSetBytes(self.topics) +
-            @import("messages.zig").Messages.metadataBytes(self) +
-            @import("recovery.zig").Recovery.backingBytes() + self.namespace_bytes;
+            @as(usize, self.topics) * @sizeOf(overlay.Row) +
+            local_intent.topicSetBytes(self.topics) +
+            messages.Messages.metadataBytes(self) +
+            recovery.Recovery.backingBytes() + self.namespace_bytes;
         const frames = self.receive_arena_bytes + constants.GOSSIP_MAX_SIZE;
         const buffers = self.sessions * self.session_buffer_bytes;
         return .{

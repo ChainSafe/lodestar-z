@@ -10,6 +10,9 @@ const Pair = @import("transport_test_support.zig").Pair;
 const types = @import("types.zig");
 const endpoint = test_support.endpoint;
 const keyPair = test_support.keyPair;
+const driver = @import("driver.zig");
+const constants = @import("wire/constants.zig");
+const fault_io = @import("fault_io");
 
 test "maintenance retains a routing incumbent that answers through Transport" {
     var pair: Pair = undefined;
@@ -25,9 +28,9 @@ test "maintenance retains a routing incumbent that answers through Transport" {
     const started = (try controller.startNext(&pair.transport_a.engine, &out, try .init(&.{1}), now_ms, &test_support.sealEntropy(10))).?;
     try pair.transport_a.transmit(std.testing.io, started.peer.address, out[0..started.call.packet_length]);
     var expired: [4]CallTable.Expired = undefined;
-    const answered = try @import("driver.zig").step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const answered = try driver.step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
-    const completed = try @import("driver.zig").step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const completed = try driver.step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(completed.event == .response);
     try std.testing.expect(controller.onEvent(&pair.transport_a.engine, &completed.event, completed.now_ms).consumed);
     try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.routing.pendingCount());
@@ -47,11 +50,11 @@ test "transport completes a cold call through challenge and handshake" {
     } };
     const handle = try pair.transport_a.startCall(std.testing.io, endpoint(&pair.record_b), &pair.record_b, &request, try Transport.monotonicMilliseconds(std.testing.io));
     var expired: [4]CallTable.Expired = undefined;
-    try std.testing.expect((try @import("driver.zig").step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) })).event == .none);
-    try std.testing.expect((try @import("driver.zig").step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) })).event == .none);
-    const request_step = try @import("driver.zig").step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
+    try std.testing.expect((try driver.step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) })).event == .none);
+    try std.testing.expect((try driver.step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) })).event == .none);
+    const request_step = try driver.step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expectEqual(@as(u8, 1), request_step.progress.standard_responses);
-    const response_step = try @import("driver.zig").step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const response_step = try driver.step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(response_step.event == .response);
     try std.testing.expectEqual(handle, response_step.event.response.matched.handle);
     try std.testing.expect(response_step.event.response.matched.response == .pong);
@@ -71,7 +74,7 @@ test "transport leaves TALK response policy with the application" {
     } };
     const handle = try pair.transport_a.startCall(std.testing.io, endpoint(&pair.record_b), &pair.record_b, &request, try Transport.monotonicMilliseconds(std.testing.io));
     var expired: [4]CallTable.Expired = undefined;
-    const received = try @import("driver.zig").step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const received = try driver.step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(received.event == .request);
     try std.testing.expect(received.event.request.message == .talk_request);
     try std.testing.expectEqual(@as(u8, 0), received.progress.standard_responses);
@@ -81,7 +84,7 @@ test "transport leaves TALK response policy with the application" {
         .response = "response",
     } };
     try pair.transport_b.sendResponse(std.testing.io, endpoint(&pair.record_a), &response, try Transport.monotonicMilliseconds(std.testing.io));
-    const completed = try @import("driver.zig").step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const completed = try driver.step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(completed.event == .response);
     try std.testing.expectEqual(handle, completed.event.response.matched.handle);
     try std.testing.expectEqualStrings(
@@ -99,10 +102,10 @@ test "transport releases a malformed datagram before the next step" {
         std.testing.io,
         pair.transport_a.localAddress(),
         &.{0xff},
-        @import("wire/constants.zig").packet_size_max,
+        constants.packet_size_max,
     );
     var expired: [4]CallTable.Expired = undefined;
-    const rejected = try @import("driver.zig").step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const rejected = try driver.step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(rejected.datagram == .rejected);
     try std.testing.expectEqual(types.RejectReason.malformed_packet, rejected.datagram.rejected);
 
@@ -111,9 +114,9 @@ test "transport releases a malformed datagram before the next step" {
         .enr_sequence = pair.record_b.sequence,
     } };
     const handle = try pair.transport_b.startCall(std.testing.io, endpoint(&pair.record_a), &pair.record_a, &request, try Transport.monotonicMilliseconds(std.testing.io));
-    const answered = try @import("driver.zig").step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const answered = try driver.step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
-    const completed = try @import("driver.zig").step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const completed = try driver.step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(completed.event == .response);
     try std.testing.expectEqual(handle, completed.event.response.matched.handle);
 }
@@ -138,9 +141,9 @@ test "transport drops replies its destination refuses and keeps the step's expir
         );
         _ = try pair.transport_b.startCall(std.testing.io, endpoint(&pair.record_a), &pair.record_a, &request, try Transport.monotonicMilliseconds(std.testing.io));
         // A challenge answers the cold request and a PONG the established one.
-        var host = @import("fault_io"){ .send = .{ .socket = pair.transport_a.sockets.primary().handle } };
+        var host = fault_io{ .send = .{ .socket = pair.transport_a.sockets.primary().handle } };
         var expired: [4]CallTable.Expired = undefined;
-        const result = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
+        const result = try driver.step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
         try std.testing.expectEqual(@as(?Transport.Failure, null), result.failure);
         try std.testing.expect(result.datagram == .accepted);
         try std.testing.expect(result.event == .none);
@@ -168,13 +171,13 @@ test "transport fails a call whose handshake is not sent so maintenance keeps th
         try std.testing.expectEqual(endpoint(&pair.record_b), started.peer);
         try pair.transport_a.transmit(std.testing.io, started.peer.address, out[0..started.call.packet_length]);
         var expired: [4]CallTable.Expired = undefined;
-        const challenged = try @import("driver.zig").step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
+        const challenged = try driver.step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
         try std.testing.expect(challenged.failure == null and challenged.datagram == .accepted);
-        var host = @import("fault_io"){ .send = .{ .socket = pair.transport_a.sockets.primary().handle }, .send_failure = send_failure };
-        const unsent = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
+        var host = fault_io{ .send = .{ .socket = pair.transport_a.sockets.primary().handle }, .send_failure = send_failure };
+        const unsent = try driver.step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
         try std.testing.expectEqual(if (send_failure == error.SystemResources) @as(?Transport.Error, error.SystemResources) else null, @as(?Transport.Error, if (unsent.failure) |failure| failure.cause else null));
         const dropped = &pair.transport_a.send_drops;
-        const pressure = @intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources);
+        const pressure = @intFromEnum(Sockets.SendDrops.Reason.system_resources);
         try std.testing.expectEqual(@as(u64, @intFromBool(send_failure == error.SystemResources)), dropped.datagrams[pressure]);
         try std.testing.expectEqual(send_failure == error.SystemResources, dropped.bytes[pressure] > 0);
         try std.testing.expectEqual(@as(usize, 1), host.send_calls);
@@ -206,7 +209,7 @@ test "discovery ready steps expire calls with no eligible socket and preserve la
         .request_id = try .init(&.{0x55}),
         .enr_sequence = pair.record_a.sequence,
     } }, 0, &test_support.sealEntropy(0x33));
-    var faults: @import("fault_io") = .{ .receive = .{} };
+    var faults: fault_io = .{ .receive = .{} };
     var eligible: [2]bool = @splat(false);
     var expired: [4]CallTable.Expired = undefined;
     const result = try pair.transport_a.advance(faults.io(), try Transport.monotonicMilliseconds(faults.io()), &expired, pair.transport_a.receive(faults.io(), &eligible));
@@ -236,7 +239,7 @@ test "discovery ready steps retain one family mask through the drain" {
     defer transport.deinit(std.testing.allocator, std.testing.io);
     const addresses = transport.sockets.localAddresses();
     for (addresses) |address| try transport.sockets.sendTo(std.testing.io, address.?, &.{0xff}, 1280);
-    var faults: @import("fault_io") = .{ .receive = .{ .socket = transport.sockets.values[1].?.handle } };
+    var faults: fault_io = .{ .receive = .{ .socket = transport.sockets.values[1].?.handle } };
     var eligible: [2]bool = .{ true, false };
     var expired: [4]CallTable.Expired = undefined;
     const first = try transport.advance(faults.io(), try Transport.monotonicMilliseconds(faults.io()), &expired, transport.receive(faults.io(), &eligible));

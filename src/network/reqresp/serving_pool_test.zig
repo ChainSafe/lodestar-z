@@ -33,7 +33,7 @@ test "control writers isolate two hundred identities with small scratch and boun
 }
 
 test "reqresp admission lifecycle a blocked control writer cannot take another peer's execution reserve" {
-    var pool = try @import("ServingPool.zig").init(std.testing.allocator, 6, 2, 4);
+    var pool = try Pool.init(std.testing.allocator, 6, 2, 4);
     defer pool.deinit(std.testing.allocator);
     const first: PeerId = .{ .bytes = @splat(1) };
     const second: PeerId = .{ .bytes = @splat(2) };

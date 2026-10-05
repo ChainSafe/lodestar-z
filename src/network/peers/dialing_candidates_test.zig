@@ -3,6 +3,7 @@ const mod = @import("dialing.zig");
 const catalog_mod = @import("catalog.zig");
 const t = @import("types.zig");
 const a = std.testing.allocator;
+const discovery = @import("discovery.zig");
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 1234 } };
 
 const support = @import("dialing_test_support.zig");
@@ -170,8 +171,8 @@ test "peer dial equal ENR merges authorized endpoint observations without changi
     public.addresses = .{ dual.addresses[1], .unspecified };
     public.address_count = 1;
     const public_source: t.Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 9000 } };
-    try std.testing.expect(!@import("discovery.zig").relayAllowed(public_source, dual.addresses[0]));
-    try std.testing.expect(@import("discovery.zig").relayAllowed(public_source, public.addresses[0]));
+    try std.testing.expect(!discovery.relayAllowed(public_source, dual.addresses[0]));
+    try std.testing.expect(discovery.relayAllowed(public_source, public.addresses[0]));
 
     for (0..4) |mode| {
         var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });

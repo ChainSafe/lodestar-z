@@ -4,6 +4,9 @@ const rr = @import("../reqresp/root.zig");
 const prom = @import("registry.zig");
 const peer_metrics = @import("../peers/metrics_export.zig");
 const gossip_metrics = @import("../gossipsub/metrics_export.zig");
+const timing = @import("timing.zig");
+const topic_metrics = @import("../gossipsub/topic_metrics.zig");
+const policy_metrics = @import("../peers/policy_metrics.zig");
 
 const Context = @import("context.zig").Context;
 pub const registry = prom.Registry(Context, .{
@@ -44,7 +47,7 @@ fn writeRuntime(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.scalar(.{ .name = "lodestar_native_network_running", .kind = .gauge, .help = "Network owner is running" }, @intFromBool(self.running));
     try w.scalar(.{ .name = "lodestar_native_network_transport_failures_total", .kind = .counter, .help = "Failed owner clock reads and transport receive steps" }, self.owner.counters.transport_failures);
     try w.scalar(.{ .name = "lodestar_native_network_readiness_failures_total", .kind = .counter, .help = "Failed owner readiness polls" }, self.owner.counters.readiness_failures);
-    const steps = try w.histograms(.{ .name = "lodestar_native_network_step_seconds", .kind = .histogram, .help = "Network step duration after native readiness polling, covering transport, protocols and discovery", .unit = .seconds }, @import("timing.zig").Duration);
+    const steps = try w.histograms(.{ .name = "lodestar_native_network_step_seconds", .kind = .histogram, .help = "Network step duration after native readiness polling, covering transport, protocols and discovery", .unit = .seconds }, timing.Duration);
     try steps.histogram(.{}, &self.owner.step_duration);
 }
 
@@ -156,7 +159,7 @@ fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!voi
 }
 
 fn writeTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try @import("../gossipsub/topic_metrics.zig").write(self.owner.protocols.gossipsub, self.running, self.owner.peer_manager.local.fork.digest, w);
+    try topic_metrics.write(self.owner.protocols.gossipsub, self.running, self.owner.peer_manager.local.fork.digest, w);
 }
 
 fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -292,5 +295,5 @@ fn writePeerEvents(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try peer_metrics.writePeerEvents(&self.owner.peer_manager, w);
 }
 fn writePeerPolicy(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try @import("../peers/policy_metrics.zig").write(&self.owner.peer_manager, self.running, w);
+    try policy_metrics.write(&self.owner.peer_manager, self.running, w);
 }

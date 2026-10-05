@@ -3,6 +3,7 @@ const capabilities = @import("capabilities.zig");
 const Protocol = @import("protocol.zig").Protocol;
 const rr = @import("reqresp/protocol.zig");
 const ForkSeq = @import("config").ForkSeq;
+const protocol_mod = @import("gossipsub/protocol.zig");
 
 test "capabilities value set owns independent directional membership" {
     var active: capabilities.Directional = .{ .receive = .initEmpty(), .request = .initEmpty() };
@@ -36,7 +37,7 @@ test "capabilities iteration snapshots sparse membership and stays exhausted" {
 test "capabilities iteration returns every protocol exactly once" {
     var set: capabilities.Set = .initEmpty();
     for (std.enums.values(rr.Protocol)) |which| set.insert(.{ .reqresp = which });
-    for (std.enums.values(@import("gossipsub/protocol.zig").Version)) |version| set.insert(.{ .meshsub = version });
+    for (std.enums.values(protocol_mod.Version)) |version| set.insert(.{ .meshsub = version });
     set.insert(.identify);
     var iterator = set.iterator();
     var seen: capabilities.Set = .initEmpty();

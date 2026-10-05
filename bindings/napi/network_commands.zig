@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const network_runtime = @import("network_runtime.zig");
 
 pub const capacity = 32;
 pub const connect_max = 16;
@@ -18,7 +19,7 @@ pub const Cell = struct {
     sequence: u64 = 0,
     boolean: bool = false,
     deadline: u64 = 0,
-    identity: @import("network_runtime.zig").Identity = undefined,
+    identity: network_runtime.Identity = undefined,
     count: usize = 0,
     counts: n.PeerManager.PeerCounts = undefined,
 };

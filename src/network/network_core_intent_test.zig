@@ -12,11 +12,27 @@ const options = @import("network_core_test_support.zig").networkOptions;
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
 const Now = @import("types.zig").Now;
 const Setup = @import("network_core_test_support.zig").Setup;
+const topic_policy = @import("gossipsub/topic_policy.zig");
+const local_intent = @import("gossipsub/local_intent.zig");
+const transport = @import("transport.zig");
+const time = @import("time.zig");
+const reqresp = @import("reqresp/root.zig");
+const capabilities_mod = @import("capabilities.zig");
+const identify_mod = @import("identify/root.zig");
+const topic_fixture = @import("gossipsub/topic_fixture.zig");
+const topic_mod = @import("gossipsub/topic.zig");
+const enr = @import("peers/enr.zig");
+const constants = @import("gossipsub/constants.zig");
+const ForkEntry = @import("types.zig").ForkEntry;
+const configuration = @import("configuration.zig");
+const policy_fixture = @import("reqresp/policy_fixture.zig");
+const Multiaddr = @import("wire/multiaddr.zig").Multiaddr;
+const admission_fixture = @import("reqresp/admission_fixture.zig");
 
 /// Applies a local update through the host intent path with the current subscriptions and demand.
 fn applyLocal(node: *NetworkCore, update: *const control_values.LocalUpdate, now: Now) !bool {
-    var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
-    var desired = core_test.intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
+    var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
+    var desired = core_test.intent(node, try gossip_test.subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
     desired.update = update.*;
     return node.applyIntent(&desired, now);
 }
@@ -31,8 +47,8 @@ fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: control
 
 /// Steps at the current time with a host that only bounds the wait at `wait_ms`.
 fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
-    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-    return driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| wait_ms)));
+    const now = try transport.Transport.currentTime(std.testing.io);
+    return driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| wait_ms)));
 }
 
 fn intentFor(node: *const NetworkCore) NetworkCore.LocalIntent {
@@ -48,7 +64,7 @@ const IntentPair = struct {
     b: NetworkCore = undefined,
     a_inbox: Inbox = .{},
     b_inbox: Inbox = .{},
-    b_app: [4]@import("reqresp/root.zig").ReqResp.Event = undefined,
+    b_app: [4]reqresp.ReqResp.Event = undefined,
 
     fn attachInboxes(self: *IntentPair) void {
         self.a_inbox.attach(self.a.protocols.gossipsub);
@@ -64,10 +80,10 @@ const IntentPair = struct {
     fn pump(self: *IntentPair) !struct { a: NetworkCore.Result, b: NetworkCore.Result } {
         self.a_inbox.clear();
         self.b_inbox.clear();
-        const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-        const a = driver.step(&self.a, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 1)));
+        const now = try transport.Transport.currentTime(std.testing.io);
+        const a = driver.step(&self.a, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 1)));
         if (a.failure) |err| return err;
-        const b = driver.step(&self.b, std.testing.io, now, .{ .application = &self.b_app }, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 1)));
+        const b = driver.step(&self.b, std.testing.io, now, .{ .application = &self.b_app }, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 1)));
         if (b.failure) |err| return err;
         return .{ .a = a, .b = b };
     }
@@ -77,10 +93,10 @@ const ActivationSnapshot = struct {
     local: t.LocalState,
     schedule: control_values.ForkSchedule,
     endpoints: ?advertisement.Endpoints,
-    capabilities: @import("capabilities.zig").Directional,
+    capabilities: capabilities_mod.Directional,
     request_fork: t.ForkSeq,
     record: d.identity.enr.Record,
-    identify: @import("identify/root.zig").Local,
+    identify: identify_mod.Local,
 
     fn capture(node: *const NetworkCore) ActivationSnapshot {
         return .{
@@ -108,7 +124,7 @@ const ActivationSnapshot = struct {
 
 fn intentBorrowUpdate(node: *NetworkCore, desired: *NetworkCore.LocalIntent) !void {
     desired.demand.attnets ^= 1;
-    desired.subscriptions = if (desired.demand.attnets == 1) @import("gossipsub/topic_fixture.zig").subscriptions(&.{ "/eth2/05060708/beacon_block/ssz_snappy", "/eth2/05060708/voluntary_exit/ssz_snappy" }) else @import("gossipsub/topic_fixture.zig").subscriptions(&.{ "/eth2/05060708/beacon_block/ssz_snappy", "/eth2/05060708/proposer_slashing/ssz_snappy" });
+    desired.subscriptions = if (desired.demand.attnets == 1) topic_fixture.subscriptions(&.{ "/eth2/05060708/beacon_block/ssz_snappy", "/eth2/05060708/voluntary_exit/ssz_snappy" }) else topic_fixture.subscriptions(&.{ "/eth2/05060708/beacon_block/ssz_snappy", "/eth2/05060708/proposer_slashing/ssz_snappy" });
     try std.testing.expect(try node.applyIntent(desired, node.last_now));
     var invalid = desired.*;
     invalid.update.local.metadata.attnets[0] ^= 1;
@@ -119,7 +135,7 @@ fn intentBorrowUpdate(node: *NetworkCore, desired: *NetworkCore.LocalIntent) !vo
 }
 
 const BoundaryUnion = struct {
-    entries: [3]@import("gossipsub/local_intent.zig").Boundary = undefined,
+    entries: [3]local_intent.Boundary = undefined,
     len: usize = 0,
 
     fn fill(self: *BoundaryUnion, columns: u16) !void {
@@ -127,8 +143,8 @@ const BoundaryUnion = struct {
         self.len = 0;
         for (&self.entries, [_][4]u8{ @splat(0), .{ 1, 2, 3, 4 }, .{ 5, 6, 7, 8 } }) |*entry, digest| {
             entry.* = .{ .digest = digest };
-            for (0..@import("gossipsub/topic_policy.zig").kind_count) |k| {
-                const kind: @import("gossipsub/topic.zig").Kind = @enumFromInt(k);
+            for (0..topic_policy.kind_count) |k| {
+                const kind: topic_mod.Kind = @enumFromInt(k);
                 const count: u16 = switch (kind) {
                     .blob_sidecar => 0,
                     .data_column_sidecar => columns,
@@ -153,9 +169,9 @@ test "core local transaction sequences no-op schedule and rollback" {
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
+    const now = try transport.Transport.currentTime(std.testing.io);
     const initial = node.localRecord().?.*;
-    try @import("peers/enr.zig").requireIdentity(&initial, &node.peerId());
+    try enr.requireIdentity(&initial, &node.peerId());
     var local = node.localState();
     try std.testing.expect(!try updateLocal(&node, &local, .{}, now));
     try std.testing.expectEqual(initial.sequence, node.localRecord().?.sequence);
@@ -175,7 +191,7 @@ test "core local transaction sequences no-op schedule and rollback" {
     try std.testing.expectEqualSlices(u8, before.slice(), node.localRecord().?.slice());
     local.metadata.custody_group_count = 1;
     try std.testing.expect(try updateLocal(&node, &local, scheduled, now));
-    const candidate = try @import("peers/enr.zig").decode(node.localRecord().?, &local.fork);
+    const candidate = try enr.decode(node.localRecord().?, &local.fork);
     try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, candidate.next_fork_digest.?);
     try std.testing.expectEqual(@as(u64, 1), candidate.custody_group_count.?);
     const invalid: control_values.ForkSchedule = .{ .fulu_scheduled = true, .next_digest = .{ 1, 2, 3, 4 } };
@@ -190,7 +206,7 @@ test "core sequence exhaustion rolls back and future fork hints stay advisory" {
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
+    const now = try transport.Transport.currentTime(std.testing.io);
     const before = node.localState();
     const record = node.localRecord().?.*;
     var desired = before;
@@ -216,7 +232,7 @@ test "core explicit advertisement is independent and atomic" {
     opts.startup.discovery.?.fixed = .{ .ip4 = .{ 127, 0, 0, 1 }, .udp = 19000, .quic = 19001 };
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
+    const now = try transport.Transport.currentTime(std.testing.io);
     const before = node.localRecord().?.*;
     var local = node.localState();
     var endpoints = node.advertisementEndpoints().?;
@@ -248,7 +264,7 @@ test "core explicit advertisement is independent and atomic" {
 test "core subscriptions use copied startup policy and reject atomically" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var opts = options(&key);
-    opts.resolved.core.protocols.gossipsub.topic_policy = &@import("gossipsub/topic_fixture.zig").churn;
+    opts.resolved.core.protocols.gossipsub.topic_policy = &topic_fixture.churn;
     opts.resolved.core.protocols.gossipsub.topic_params = @splat(.{ .params = .{ .weight = 2 } });
     var node: NetworkCore = undefined;
     var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
@@ -268,13 +284,13 @@ test "core subscriptions use copied startup policy and reject atomically" {
     try std.testing.expectError(error.InvalidTopic, core_test.subscribe(&node, "bad"));
     try std.testing.expectEqual(revision, owner.peers.scores.revision);
     try std.testing.expectEqual(@as(u64, 1), owner.overlay.rows[0].generation);
-    var name: [@import("gossipsub/topic.zig").topic_max_len]u8 = undefined;
-    for (0..@import("gossipsub/constants.zig").topics_cap - 1) |index| {
-        const topic = try @import("gossipsub/topic_fixture.zig").churnTopic(index, &name);
+    var name: [topic_mod.topic_max_len]u8 = undefined;
+    for (0..constants.topics_cap - 1) |index| {
+        const topic = try topic_fixture.churnTopic(index, &name);
         try core_test.subscribe(&node, topic);
     }
     const full_revision = owner.peers.scores.revision;
-    const excess = try @import("gossipsub/topic_fixture.zig").churnTopic(511, &name);
+    const excess = try topic_fixture.churnTopic(511, &name);
     try std.testing.expectError(error.TopicCapacity, core_test.subscribe(&node, excess));
     try std.testing.expectEqual(full_revision, owner.peers.scores.revision);
     node.shutdown(node.last_now);
@@ -284,10 +300,10 @@ test "core subscriptions use copied startup policy and reject atomically" {
 }
 
 test "core BPO same-fork digest transition updates status and advertisement" {
-    const first: @import("types.zig").ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
-    const second: @import("types.zig").ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
+    const first: ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
+    const second: ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
-    const resolved = try @import("configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{ first, second }, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
+    const resolved = try configuration.resolve(.{ .profile = .small, .seed = 1, .forks = &.{ first, second }, .admission_policy = policy_fixture.config() });
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &resolved, .{
         .host = &key,
@@ -306,15 +322,15 @@ test "core BPO same-fork digest transition updates status and advertisement" {
     try std.testing.expectEqual(first.fork, node.protocols.reqresp.request_fork);
     local.fork.digest = second.digest;
     local.status.fork_digest = second.digest;
-    try std.testing.expect(try updateLocal(&node, &local, .{}, try @import("transport.zig").Transport.currentTime(std.testing.io)));
+    try std.testing.expect(try updateLocal(&node, &local, .{}, try transport.Transport.currentTime(std.testing.io)));
     try std.testing.expectEqual(second.digest, node.localState().status.fork_digest);
     try std.testing.expectEqual(second.digest, node.localState().fork.digest);
     try std.testing.expectEqual(second.fork, node.localState().fork.fork);
     try std.testing.expectEqual(second.fork, node.protocols.reqresp.request_fork);
     try std.testing.expectEqual(initial + 1, node.localRecord().?.sequence);
-    const candidate = try @import("peers/enr.zig").decode(node.localRecord().?, &local.fork);
+    const candidate = try enr.decode(node.localRecord().?, &local.fork);
     try std.testing.expectEqual(second.digest, candidate.fork.digest);
-    for ([_]@import("types.zig").ForkEntry{
+    for ([_]ForkEntry{
         .{ .digest = .{ 9, 9, 9, 9 }, .fork = .fulu },
         .{ .digest = second.digest, .fork = .gloas },
     }) |invalid| {
@@ -341,7 +357,7 @@ test "core request admission selector commits with validated local fork" {
     local.status.fork_digest = local.fork.digest;
     local.status.earliest_available_slot = 0;
     local.metadata.custody_group_count = 1;
-    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
+    const now = try transport.Transport.currentTime(std.testing.io);
     try std.testing.expect(try updateLocal(&node, &local, .{}, now));
     try std.testing.expectEqual(t.ForkSeq.fulu, node.protocols.reqresp.request_fork);
     local.fork.fork = .gloas;
@@ -398,9 +414,9 @@ test "core capabilities activation commits fork BPO and copied directional value
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{25}));
     var opts = options(&key);
     opts.startup.local.metadata.custody_group_count = 1;
-    const quotas = @import("reqresp/admission_fixture.zig").quotas(2048, 1000);
+    const quotas = admission_fixture.quotas(2048, 1000);
 
-    opts.resolved.core.protocols.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } };
+    opts.resolved.core.protocols.reqresp.admission = .{ .policy = policy_fixture.config(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } };
     opts.resolved.core.protocols.router.capabilities = try caps.forFork(.phase0, true, &.{ .v1_2, .v1_1 });
     opts.resolved.core.protocols.reqresp.forks = &.{
         .{ .digest = @splat(0), .fork = .phase0 },
@@ -469,14 +485,14 @@ test "identify advertisement follows committed endpoints and rejected updates pr
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const initial = node.protocols.identify.local;
-    const address = try @import("wire/multiaddr.zig").Multiaddr.decode(initial.addresses[0].bytes[0..initial.addresses[0].len]);
+    const address = try Multiaddr.decode(initial.addresses[0].bytes[0..initial.addresses[0].len]);
     try std.testing.expectEqual(node.transport.localAddress(), address.address);
     var endpoints = node.advertisementEndpoints().?;
     endpoints.quic = 443;
     const now = node.last_now;
     try std.testing.expect(try updateLocalWithEndpoints(&node, &node.peer_manager.local, node.schedule, endpoints, now));
     const updated = node.protocols.identify.local;
-    const next = try @import("wire/multiaddr.zig").Multiaddr.decode(updated.addresses[0].bytes[0..updated.addresses[0].len]);
+    const next = try Multiaddr.decode(updated.addresses[0].bytes[0..updated.addresses[0].len]);
     try std.testing.expectEqual(@as(u16, 443), next.address.port());
     endpoints.quic = 0;
     try std.testing.expectError(error.InvalidAdvertisement, updateLocalWithEndpoints(&node, &node.peer_manager.local, node.schedule, endpoints, now));
@@ -488,13 +504,13 @@ test "core complete local intent rejects invalid last topic atomically" {
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     opts.resolved.core.protocols.identify = .{ .agent = "local-intent" };
-    opts.resolved.core.protocols.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
+    opts.resolved.core.protocols.gossipsub.topic_policy = &.{topic_fixture.full(.{ 1, 2, 3, 4 })};
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const block_topic = "/eth2/01020304/beacon_block/ssz_snappy";
     const update: control_values.LocalUpdate = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() };
-    var desired: NetworkCore.LocalIntent = .{ .update = update, .demand = .{}, .subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{block_topic}) };
+    var desired: NetworkCore.LocalIntent = .{ .update = update, .demand = .{}, .subscriptions = topic_fixture.subscriptions(&.{block_topic}) };
     const now = node.last_now;
     try std.testing.expect(try node.applyIntent(&desired, now));
     try std.testing.expect(!(try node.applyIntent(&desired, now)));
@@ -521,14 +537,14 @@ test "core Status-only update preserves local owners and permits a regressing he
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
     opts.startup.local.metadata.seq_number = std.math.maxInt(u64);
     opts.resolved.core.protocols.identify = .{ .agent = "status-only" };
-    opts.resolved.core.protocols.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
+    opts.resolved.core.protocols.gossipsub.topic_policy = &.{topic_fixture.full(.{ 1, 2, 3, 4 })};
     var node: NetworkCore = undefined;
     var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     try node.init(backing_node.allocator(), std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     var desired = intentFor(&node);
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    desired.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{name});
+    desired.subscriptions = topic_fixture.subscriptions(&.{name});
     desired.demand = .{ .attnets = 7, .syncnets = 3 };
     try std.testing.expect(try node.applyIntent(&desired, node.last_now));
     var expected = ActivationSnapshot.capture(&node);
@@ -591,7 +607,7 @@ test "core local intent demand candidate sequence and stopped refusals" {
         opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = if (exhausted == 0) std.math.maxInt(u64) else 1 };
         if (exhausted == 1) opts.startup.local.metadata.seq_number = std.math.maxInt(u64);
         opts.resolved.core.protocols.identify = .{ .agent = "local-intent" };
-        opts.resolved.core.protocols.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
+        opts.resolved.core.protocols.gossipsub.topic_policy = &.{topic_fixture.full(.{ 1, 2, 3, 4 })};
         var node: NetworkCore = undefined;
         try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
         defer node.deinit(std.testing.io);
@@ -600,7 +616,7 @@ test "core local intent demand candidate sequence and stopped refusals" {
         const g = node.protocols.gossipsub;
         const revision = g.peers.scores.revision;
         var desired = intentFor(&node);
-        desired.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{"/eth2/01020304/beacon_block/ssz_snappy"});
+        desired.subscriptions = topic_fixture.subscriptions(&.{"/eth2/01020304/beacon_block/ssz_snappy"});
         desired.update.local.fork.custody_groups = 1;
         desired.demand.group_targets[1] = 1;
         try desired.demand.validate(&node.peer_manager.local.fork, node.peer_manager.catalog.options.max_peers);
@@ -626,7 +642,7 @@ test "core local intent topic demand no-op preserves Status scheduling and count
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{43}));
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
-    opts.resolved.core.protocols.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
+    opts.resolved.core.protocols.gossipsub.topic_policy = &.{topic_fixture.full(.{ 1, 2, 3, 4 })};
     var node: NetworkCore = undefined;
     var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     try node.init(backing_node.allocator(), std.testing.io, &opts.resolved, opts.startup);
@@ -640,7 +656,7 @@ test "core local intent topic demand no-op preserves Status scheduling and count
     const schedule = node.peer_manager.control.connections[0];
     defer node.peer_manager.control.connections[0].peer = null;
     var desired = intentFor(&node);
-    desired.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{name});
+    desired.subscriptions = topic_fixture.subscriptions(&.{name});
     try std.testing.expect(try node.applyIntent(&desired, node.last_now));
     const row = g.overlay.findTopic(name).?;
     g.peers.scores.invalid(0, row);
@@ -692,9 +708,9 @@ test "core local intent fork BPO announcements remembered peer and event borrows
     defer pair.b.deinit(std.testing.io);
     pair.attachInboxes();
     var a_intent = intentFor(&pair.a);
-    a_intent.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{ old, active, bpo });
+    a_intent.subscriptions = topic_fixture.subscriptions(&.{ old, active, bpo });
     var b_intent = intentFor(&pair.b);
-    b_intent.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{old});
+    b_intent.subscriptions = topic_fixture.subscriptions(&.{old});
     try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
     try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
     try pair.a.addDirectPeer(&pair.b.peerId(), &.{pair.b.transport.localAddress()}, pair.a.last_now);
@@ -718,9 +734,9 @@ test "core local intent fork BPO announcements remembered peer and event borrows
         intent.update.local.fork.digest = .{ 1, 2, 3, 4 };
         intent.update.local.status.fork_digest = intent.update.local.fork.digest;
         intent.update.local.status.earliest_available_slot = 0;
-        intent.update.capabilities = try @import("capabilities.zig").forFork(.fulu, false, &.{ .v1_2, .v1_1 });
+        intent.update.capabilities = try capabilities_mod.forFork(.fulu, false, &.{ .v1_2, .v1_1 });
     }
-    b_intent.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{active});
+    b_intent.subscriptions = topic_fixture.subscriptions(&.{active});
     try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
     try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
     const activated = gb.overlay.findTopic(active).?;
@@ -744,7 +760,7 @@ test "core local intent fork BPO announcements remembered peer and event borrows
         intent.update.local.fork.digest = .{ 5, 6, 7, 8 };
         intent.update.local.status.fork_digest = intent.update.local.fork.digest;
     }
-    b_intent.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{bpo});
+    b_intent.subscriptions = topic_fixture.subscriptions(&.{bpo});
     try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
     try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
     for (0..3000) |_| {
@@ -756,7 +772,7 @@ test "core local intent fork BPO announcements remembered peer and event borrows
     var request: [24]u8 = @splat(0);
     request[8] = 1;
     request[16] = 1;
-    const sink = try std.testing.allocator.alloc(u8, @import("reqresp/root.zig").Protocol.blocks_by_range_v2.info().response_max);
+    const sink = try std.testing.allocator.alloc(u8, reqresp.Protocol.blocks_by_range_v2.info().response_max);
     defer std.testing.allocator.free(sink);
     _ = try pair.a.sendReqRespRequest(&pair.b.peerId(), .blocks_by_range_v2, &request, sink, .{}, pair.a.last_now);
     _ = try pair.a.publishGossipWithOptions(bpo, "borrowed gossip", .{}, pair.a.last_now);
@@ -856,10 +872,10 @@ test "local intent failing at ENR sequence exhaustion preserves control state re
     const capabilities = node.protocols.router.capabilities();
     const record = node.localRecord().?.*;
     const slot = node.current_slot;
-    var before: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
+    var before: [topic_policy.boundary_max]local_intent.Boundary = undefined;
     const subscribed = try gossip_test.subscriptionUpdate(node.protocols.gossipsub, null, false, &before);
-    var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
-    var desired = @import("network_core_test_support.zig").intent(node, try gossip_test.subscriptionUpdate(node.protocols.gossipsub, "/eth2/00000000/beacon_block/ssz_snappy", true, &boundaries));
+    var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
+    var desired = core_test.intent(node, try gossip_test.subscriptionUpdate(node.protocols.gossipsub, "/eth2/00000000/beacon_block/ssz_snappy", true, &boundaries));
     desired.update.local.fork = .{ .fork = .fulu, .digest = @splat(1) };
     desired.update.local.status.fork_digest = @splat(1);
     desired.update.local.metadata.attnets[0] = 1;
@@ -878,7 +894,7 @@ test "local intent failing at ENR sequence exhaustion preserves control state re
     try std.testing.expectEqualDeep(capabilities, node.protocols.router.capabilities());
     try std.testing.expectEqualSlices(u8, record.slice(), node.localRecord().?.slice());
     try std.testing.expectEqual(slot, node.current_slot);
-    var after: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
+    var after: [topic_policy.boundary_max]local_intent.Boundary = undefined;
     try std.testing.expectEqualDeep(subscribed, try gossip_test.subscriptionUpdate(node.protocols.gossipsub, null, false, &after));
     // The same intent without the advertisement change commits every participant.
     desired.update.local.metadata.attnets[0] = local.metadata.attnets[0];

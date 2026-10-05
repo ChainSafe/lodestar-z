@@ -8,6 +8,7 @@ const Index = mcache.IdIndex(MessageId);
 const PeerRef = @import("peer_book.zig").Ref;
 const storage = @import("message_store.zig");
 const constants = @import("constants.zig");
+const topic = @import("topic.zig");
 
 test "gossip history visits only matching topics and keeps owned keys through eviction and replacement" {
     const a = std.testing.allocator;
@@ -350,8 +351,8 @@ test "gossip retention reclaims its own kind's old copies however many other mes
     const attestation = "/eth2/01020304/beacon_attestation_1/ssz_snappy";
     const exit = "/eth2/01020304/voluntary_exit/ssz_snappy";
     var limits: limits_mod.Limits = @splat(.{ .items = 2, .bytes = storage.page_bytes });
-    limits[@intFromEnum(@import("topic.zig").Kind.beacon_attestation)].items = 9000;
-    limits[@intFromEnum(@import("topic.zig").Kind.voluntary_exit)].items = 8;
+    limits[@intFromEnum(topic.Kind.beacon_attestation)].items = 9000;
+    limits[@intFromEnum(topic.Kind.voluntary_exit)].items = 8;
     // The old 8,192-entry history and one holding the whole retention window admit the same exits:
     // the smaller one ages the first exits out by capacity, the larger reclaims one by retention.
     for ([_]usize{ 8192, 8300 }, [_]usize{ 8192, 8264 }) |capacity, retained| {

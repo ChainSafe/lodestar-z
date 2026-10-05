@@ -7,9 +7,17 @@ const t = @import("peers/types.zig");
 const wire = @import("control_wire.zig");
 const rr = @import("reqresp/root.zig");
 const Engine = @import("quic/Engine.zig");
+const NetworkCore = @import("network_core.zig").NetworkCore;
+const control_protocol = @import("control_protocol.zig");
+const Now = @import("types.zig").Now;
+const network_core_test_support = @import("network_core_test_support.zig");
+const goodbye = @import("peers/goodbye.zig");
+const InboundPhase = @import("reqresp/metrics.zig").InboundPhase;
+const capabilities_mod = @import("capabilities.zig");
+const time = @import("time.zig");
 
 /// Hands peer control a reply the remote did not send, as the owner hands it a real one, and rekeys.
-fn reply(node: *@import("network_core.zig").NetworkCore, op: *const @import("control_protocol.zig").Operation, event: rr.ReqResp.Event, now: @import("types.zig").Now) void {
+fn reply(node: *NetworkCore, op: *const control_protocol.Operation, event: rr.ReqResp.Event, now: Now) void {
     const manager = &node.peer_manager;
     const observed = op.reply();
     manager.controlReplied(&observed, event, now, node.current_slot);
@@ -29,7 +37,7 @@ test "core fork revalidation protects retention but old replies never restore ap
     var next = setup.client.peer_manager.local;
     next.fork.digest = @splat(1);
     next.status.fork_digest = next.fork.digest;
-    try @import("network_core_test_support.zig").updateLocal(&setup.client, &next, setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.client, &next, setup.pair.now);
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     const deadline = setup.client.peer_manager.control.revalidationDeadline(peer.peer, peer.connection.?, setup.pair.now).?;
     try std.testing.expect(!setup.client.peer_manager.catalog.get(peer.peer).?.relevant);
@@ -64,14 +72,14 @@ test "core fork revalidation excludes peers that never established relevance" {
     var next = setup.client.peer_manager.local;
     next.fork.digest = @splat(3);
     next.status.fork_digest = next.fork.digest;
-    try @import("network_core_test_support.zig").updateLocal(&setup.client, &next, setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.client, &next, setup.pair.now);
     try std.testing.expectEqual(@as(?u64, null), setup.client.peer_manager.control.revalidationDeadline(peer, conn, setup.pair.now));
 }
 
 test "core production fork capabilities defer rejected Status probes only during revalidation" {
     const capabilities = @import("capabilities.zig");
     var setup: Setup = .{};
-    var opts = @import("network_core_test_support.zig").resolvedOptions();
+    var opts = network_core_test_support.resolvedOptions();
     opts.core.protocols.router.capabilities = try capabilities.forFork(.electra, false, &.{.v1_2});
     try setup.initOwnersWithOptions(&.{ .fork = .{ .fork = .electra } }, opts);
     defer setup.deinit();
@@ -84,7 +92,7 @@ test "core production fork capabilities defer rejected Status probes only during
     next.fork.digest = @splat(1);
     next.status.fork_digest = next.fork.digest;
     setup.client.protocols.router.setCapabilities(try capabilities.forFork(.fulu, false, &.{.v1_2}));
-    try @import("network_core_test_support.zig").updateLocal(&setup.client, &next, setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.client, &next, setup.pair.now);
     const deadline = setup.client.peer_manager.control.connections[peer.index].transition_until_ms;
     for (0..80) |_| try setup.step(0);
     const waiting = setup.client.peer_manager.catalog.get(peer).?;
@@ -104,7 +112,7 @@ test "core production Fulu receives old Status only with established revalidatio
     const capabilities = @import("capabilities.zig");
     for ([_]bool{ false, true }) |established| {
         var setup: Setup = .{};
-        var opts = @import("network_core_test_support.zig").resolvedOptions();
+        var opts = network_core_test_support.resolvedOptions();
         opts.core.protocols.router.capabilities = try capabilities.forFork(.electra, false, &.{.v1_2});
         try setup.initOwnersWithOptions(&.{ .fork = .{ .fork = .electra } }, opts);
         defer setup.deinit();
@@ -118,7 +126,7 @@ test "core production Fulu receives old Status only with established revalidatio
         next.fork.digest = @splat(1);
         next.status.fork_digest = next.fork.digest;
         setup.server.protocols.router.setCapabilities(try capabilities.forFork(.fulu, false, &.{.v1_2}));
-        try @import("network_core_test_support.zig").updateLocal(&setup.server, &next, setup.pair.now);
+        try network_core_test_support.updateLocal(&setup.server, &next, setup.pair.now);
         const deadline = setup.server.peer_manager.control.connections[peer.index].transition_until_ms;
         setup.server.peer_manager.control.connections[peer.index].retry_ms = std.math.maxInt(u64);
         setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, peer.index);
@@ -157,7 +165,7 @@ test "core local pruning records automatic redial backoff separately from peer f
 
 test "core admission evaluation expires without protocol progress" {
     var setup: Setup = .{};
-    var opts = @import("network_core_test_support.zig").resolvedOptions();
+    var opts = network_core_test_support.resolvedOptions();
     opts.core.peers.target_peers = 0;
     opts.core.peers.min_outbound = 0;
     try setup.initOwnersWithOptions(&.{}, opts);
@@ -232,7 +240,7 @@ test "core records a buffered Goodbye before transport cancellation and preserve
         try std.testing.expectEqual(if (local_ban) blocked_until else 0, snapshot.goodbye_until_ms);
         try std.testing.expectEqual(if (local_ban) null else @as(?t.Rejection, .too_many_peers), setup.server.peer_manager.catalog.history.rejection(identity, blocked_until - 1));
         try std.testing.expectEqual(@as(?t.Rejection, null), setup.server.peer_manager.catalog.history.rejection(identity, blocked_until));
-        try std.testing.expectEqual(@as(u64, 1), setup.server.peer_manager.control.counters.events.goodbyes[@intFromEnum(@import("peers/goodbye.zig").Reason.too_many_peers)]);
+        try std.testing.expectEqual(@as(u64, 1), setup.server.peer_manager.control.counters.events.goodbyes[@intFromEnum(goodbye.Reason.too_many_peers)]);
     }
 }
 
@@ -251,7 +259,7 @@ test "core local head and metadata updates preserve periodic status scheduling" 
         var local = setup.client.peer_manager.local;
         local.status.head_slot += 1;
         local.metadata.seq_number += 1;
-        try @import("network_core_test_support.zig").updateLocal(&setup.client, &local, setup.pair.now);
+        try network_core_test_support.updateLocal(&setup.client, &local, setup.pair.now);
         for (0..40) |_| try setup.step(1);
         try std.testing.expectEqual(due, setup.client.peer_manager.control.connections[peer.index].status_due_ms);
         try std.testing.expectEqual(started, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
@@ -379,7 +387,7 @@ test "core native stalled fork transition only wakes for eligible work" {
         .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
         .metadata = .{ .seq_number = 1, .custody_group_count = 1 },
     };
-    try @import("network_core_test_support.zig").updateLocal(&setup.client, &updated, setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.client, &updated, setup.pair.now);
     setup.pair.advance(1500);
     for (0..8) |_| {
         _ = try setup.turn(&setup.client, .{});
@@ -396,7 +404,7 @@ test "core native stalled fork transition only wakes for eligible work" {
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now), setup.pair.now.millis()) == null);
     const core_due = schedule_test_support.wakeupMilliseconds(setup.client.wakeups(setup.pair.now, .{}).schedule(), setup.pair.now.millis()).?;
     try std.testing.expect(core_due > setup.pair.now.millis() and core_due <= service_due);
-    try @import("network_core_test_support.zig").updateLocal(&setup.server, &updated, setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.server, &updated, setup.pair.now);
     for (0..80) |_| try setup.step(0);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.relevant);
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now), setup.pair.now.millis()).? > setup.pair.now.millis());
@@ -423,8 +431,8 @@ test "core native host fork transition cancels old maintenance without reviving 
         .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
         .metadata = .{ .seq_number = 1, .custody_group_count = 1 },
     };
-    try @import("network_core_test_support.zig").updateLocal(&setup.client, &updated, setup.pair.now);
-    try @import("network_core_test_support.zig").updateLocal(&setup.server, &updated, setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.client, &updated, setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.server, &updated, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.peerCounts().relevant);
     const invalidated = setup.client.peer_manager.catalog.get(before.peer).?;
     try std.testing.expectEqualDeep(before.connection, invalidated.connection);
@@ -443,7 +451,7 @@ test "core native host fork transition cancels old maintenance without reviving 
     var next = updated;
     next.fork.digest = @splat(2);
     next.status.fork_digest = @splat(2);
-    try @import("network_core_test_support.zig").updateLocal(&setup.client, &next, setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.client, &next, setup.pair.now);
     try std.testing.expectEqual(t.DisconnectReason.host, setup.client.peer_manager.catalog.get(before.peer).?.disconnect_reason.?);
     try std.testing.expectEqual(deadline, setup.client.peer_manager.control.connections[before.peer.index].closing.?.deadline_ms);
 }
@@ -461,8 +469,8 @@ test "core native previous fork request grace does not refresh relevance and exp
         .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
         .metadata = .{ .seq_number = 1, .custody_group_count = 1 },
     };
-    try @import("network_core_test_support.zig").updateLocal(&setup.client, &updated, setup.pair.now);
-    try @import("network_core_test_support.zig").updateLocal(&setup.server, &updated, setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.client, &updated, setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.server, &updated, setup.pair.now);
     for (0..80) |_| try setup.step(1);
     const before = setup.server.peer_manager.catalog.get(peer).?;
     const deadline = setup.server.peer_manager.control.connections[peer.index].transition_until_ms;
@@ -647,7 +655,7 @@ test "core native gossip admission precedes Status without establishing relevanc
 
 test "core native inbound application per connection cap protects control from extra raw bulk owners" {
     var setup: Setup = .{};
-    var options = @import("network_core_test_support.zig").resolvedOptions();
+    var options = network_core_test_support.resolvedOptions();
     options.core.protocols.reqresp.serving_max = 24;
     options.core.protocols.reqresp.outbound_max = 24;
     options.core.protocols.reqresp.inbound_per_connection_max = 16;
@@ -698,7 +706,7 @@ test "core native inbound application per connection cap protects control from e
         }
     }
     try std.testing.expectEqual(@as(usize, 4), count);
-    const ready = @intFromEnum(@import("reqresp/metrics.zig").InboundPhase.ready);
+    const ready = @intFromEnum(InboundPhase.ready);
     try std.testing.expectEqual(@as(usize, 4), setup.server.protocols.reqresp.resourceSnapshot().inbound_phases[ready]);
     _ = setup.server.peer_manager.snapshots(&snapshots);
     const server_conn = snapshots[0].connection.?;
@@ -849,7 +857,7 @@ test "core control does not schedule gossip admission alongside active request" 
 
 test "core control cancelled canonical requests retain buffers until local retirement" {
     var setup: Setup = .{};
-    var opts = @import("network_core_test_support.zig").resolvedOptions();
+    var opts = network_core_test_support.resolvedOptions();
     opts.core.peers.max_peers = 2;
     opts.core.peers.target_peers = 1;
     opts.core.peers.min_outbound = 0;
@@ -871,7 +879,7 @@ test "core control cancelled canonical requests retain buffers until local retir
         .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
         .metadata = .{ .custody_group_count = 1 },
     };
-    try @import("network_core_test_support.zig").updateLocal(&setup.client, &updated, setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.client, &updated, setup.pair.now);
     try std.testing.expect(op.cancelled);
     try std.testing.expectEqual(request, op.request.?);
     try std.testing.expectEqualSlices(u8, bytes[0..84], op.bytes[0..84]);
@@ -956,7 +964,7 @@ test "core control capabilities pre-Fulu Metadata3 serves configured custody cou
     var setup: Setup = .{};
     try setup.init(&local);
     defer setup.deinit();
-    const active = try @import("capabilities.zig").forFork(.phase0, false, &.{ .v1_2, .v1_1 });
+    const active = try capabilities_mod.forFork(.phase0, false, &.{ .v1_2, .v1_1 });
     setup.client.protocols.router.setCapabilities(active);
     setup.server.protocols.router.setCapabilities(active);
     for (0..50) |_| try setup.step(0);
@@ -1092,13 +1100,13 @@ test "core control response deadline survives continuous peer progress" {
     const encoded = try rr.codec.encodeChunk(0, null, payload[0..length], &storage);
     try std.testing.expect(encoded.len > 9);
     for (0..9) |i| {
-        setup.pair.now.monotonic = @import("time.zig").milliseconds(due - 90 + i * 10);
+        setup.pair.now.monotonic = time.milliseconds(due - 90 + i * 10);
         try std.testing.expectEqual(@as(usize, 1), try setup.pair.server.write(stream, encoded[i .. i + 1], false));
         try setup.pair.pump();
         _ = try setup.turn(&setup.client, .{});
         try std.testing.expectEqual(@as(?u64, due), client.deadline());
     }
-    setup.pair.now.monotonic = @import("time.zig").milliseconds(due);
+    setup.pair.now.monotonic = time.milliseconds(due);
     _ = try setup.turn(&setup.client, .{});
     for (setup.client.control_protocol.operations) |op| if (op.request) |active| {
         try std.testing.expect(!std.meta.eql(handle, active));
@@ -1136,7 +1144,7 @@ test "core coalesces silent inbound request owners before host request delivery"
 
 /// Makes the remote advertise `sequence` in its Ping and Metadata replies, including a sequence
 /// an owner never assigns, as a misbehaving peer would.
-fn remoteSequence(node: *@import("network_core.zig").NetworkCore, sequence: u64) void {
+fn remoteSequence(node: *NetworkCore, sequence: u64) void {
     node.peer_manager.local.metadata.seq_number = sequence;
 }
 
@@ -1262,7 +1270,7 @@ test "core idle connected peers cost no control or dial visits" {
 
 test "core control starts a due ping or Status on the turn its deadline passes" {
     for ([_]rr.Protocol{ .ping_v1, .status_v1 }) |protocol| {
-        var opts = @import("network_core_test_support.zig").resolvedOptions();
+        var opts = network_core_test_support.resolvedOptions();
         // A Status interval shorter than the ping interval makes Status the next probe.
         if (protocol == .status_v1) {
             opts.core.control.status_interval_ms = 30_000;
@@ -1281,11 +1289,11 @@ test "core control starts a due ping or Status on the turn its deadline passes" 
         const counter = &setup.client.protocols.reqresp.protocol_counters[@intFromEnum(protocol)].outgoing;
         const started = counter.*;
         const visits = setup.client.peer_manager.control.visits;
-        setup.pair.now.monotonic = @import("time.zig").milliseconds(due - 1);
+        setup.pair.now.monotonic = time.milliseconds(due - 1);
         try setup.step(0);
         try std.testing.expectEqual(started, counter.*);
         try std.testing.expectEqual(visits, setup.client.peer_manager.control.visits);
-        setup.pair.now.monotonic = @import("time.zig").milliseconds(due);
+        setup.pair.now.monotonic = time.milliseconds(due);
         try setup.step(0);
         try std.testing.expectEqual(started + 1, counter.*);
         try std.testing.expectEqual(visits + 1, setup.client.peer_manager.control.visits);
@@ -1293,7 +1301,7 @@ test "core control starts a due ping or Status on the turn its deadline passes" 
 }
 
 test "core control retries a start refused for want of a request slot after the local retry delay" {
-    var opts = @import("network_core_test_support.zig").resolvedOptions();
+    var opts = network_core_test_support.resolvedOptions();
     opts.core.peers.max_peers = 2;
     opts.core.peers.target_peers = 1;
     opts.core.peers.min_outbound = 0;
@@ -1311,7 +1319,7 @@ test "core control retries a start refused for want of a request slot after the 
     const ping = [_]u8{0} ** 8;
     _ = try setup.client.protocols.request(setup.pair.client, row.conn, .ping_v1, &ping, &sinks[0], .{}, setup.pair.now);
     _ = try setup.client.protocols.request(setup.pair.client, row.conn, wire.metadataProtocol(setup.client.peer_manager.local.fork), &.{}, &sinks[1], .{}, setup.pair.now);
-    setup.pair.now.monotonic = @import("time.zig").milliseconds(row.ping_due_ms);
+    setup.pair.now.monotonic = time.milliseconds(row.ping_due_ms);
     const deferred = setup.client.peer_manager.control.counters.deferred;
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(deferred + 1, setup.client.peer_manager.control.counters.deferred);

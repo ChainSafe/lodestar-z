@@ -9,18 +9,23 @@ const gossip = @import("gossipsub/options.zig");
 const c = @import("gossipsub/constants.zig");
 const peers = @import("peers/root.zig");
 const Router = @import("router.zig").Router;
+const identify_mod = @import("identify/root.zig");
+const ForkEntry = @import("types.zig").ForkEntry;
+const request_policy = @import("reqresp/request_policy.zig");
+const message_store = @import("gossipsub/message_store.zig");
+const receive_pool = @import("gossipsub/receive_pool.zig");
 
 pub const Profile = enum { small, beacon_node };
 pub const ReqRespOverrides = Overrides(rr.Options, &.{ "connections", "forks", "request_fork", "outbound_control_reserved", "serving_control_reserved", "admission" });
 pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "connection_slots", "retained_capacity", "retained_outbound_reserve", "random_seed" });
-pub const IdentifyOverrides = Overrides(@import("identify/root.zig").Handler.Options, &.{});
+pub const IdentifyOverrides = Overrides(identify_mod.Handler.Options, &.{});
 pub const RouterOverrides = Overrides(Router.Options, &.{ "outbound_control_reserved", "inbound_connections" });
 
 /// Req/resp, gossip and router fields override profile defaults; shared capacities are derived.
 pub const Options = struct {
     profile: Profile = .beacon_node,
     seed: u64,
-    forks: []const @import("types.zig").ForkEntry,
+    forks: []const ForkEntry,
     limits: ?Engine.Limits = null,
     work_limits: Transport.WorkLimits = .{},
     socket_buffers: SocketBuffers = .{},
@@ -31,7 +36,7 @@ pub const Options = struct {
     router: RouterOverrides = .{},
     identify: IdentifyOverrides = .{},
     application_requests_max: ?u16 = null,
-    admission_policy: @import("reqresp/request_policy.zig").Config,
+    admission_policy: request_policy.Config,
     control: ?peers.Control.Options = null,
     byte_limit: ?usize = null,
 };
@@ -108,7 +113,7 @@ pub fn resolve(options: Options) !Resolved {
     }
 
     requests.admission = try rr.Options.Admission.defaults(&options.admission_policy, peer_options.capacity, peer_options.max_peers, requests.serving_max - requests.serving_control_reserved);
-    var identify: @import("identify/root.zig").Handler.Options = .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 };
+    var identify: identify_mod.Handler.Options = .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 };
     applyOverrides(&identify, options.identify);
     var router_options: Router.Options = .{
         .negotiations_max = peer_options.max_peers + @as(u16, if (small) 30 else 248),
@@ -129,8 +134,8 @@ pub fn resolve(options: Options) !Resolved {
         gossip_options.seen_capacity = 4096;
         gossip_options.mcache_capacity = 256;
         gossip_options.validation_capacity = 64;
-        gossip_options.mcache_arena_bytes = c.maxCompressedLen(c.MAX_PAYLOAD_SIZE) + @import("gossipsub/message_store.zig").page_bytes;
-        gossip_options.receive_arena_bytes = std.mem.alignForward(usize, c.GOSSIP_MAX_SIZE, @import("gossipsub/receive_pool.zig").page_bytes);
+        gossip_options.mcache_arena_bytes = c.maxCompressedLen(c.MAX_PAYLOAD_SIZE) + message_store.page_bytes;
+        gossip_options.receive_arena_bytes = std.mem.alignForward(usize, c.GOSSIP_MAX_SIZE, receive_pool.page_bytes);
     }
     applyOverrides(&gossip_options, options.gossip);
     const result: Resolved = .{

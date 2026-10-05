@@ -1,6 +1,7 @@
 const std = @import("std");
 const t = @import("control_values.zig");
 const w = @import("control_wire.zig");
+const capabilities = @import("capabilities.zig");
 
 test "peer local state validated immutable copy leaves previous value on rejection" {
     var source: t.LocalState = .{};
@@ -18,7 +19,7 @@ test "peer local state validated immutable copy leaves previous value on rejecti
 }
 
 test "peer control serving prerequisites follow receive protocols before Fulu" {
-    var receive: @import("capabilities.zig").Set = .initEmpty();
+    var receive: capabilities.Set = .initEmpty();
     receive.insert(.{ .reqresp = .status_v1 });
     receive.insert(.{ .reqresp = .metadata_v2 });
     var source: t.LocalState = .{};
@@ -45,7 +46,7 @@ test "peer control serving prerequisites follow receive protocols before Fulu" {
 }
 
 test "control values validate serving prerequisites before copying complete local state" {
-    var receive: @import("capabilities.zig").Set = .initEmpty();
+    var receive: capabilities.Set = .initEmpty();
     receive.insert(.{ .reqresp = .status_v2 });
     receive.insert(.{ .reqresp = .metadata_v3 });
     var out: t.LocalState = .{ .status = .{ .head_slot = 42 }, .metadata = .{ .seq_number = 8 } };

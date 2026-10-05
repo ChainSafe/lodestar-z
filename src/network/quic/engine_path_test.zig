@@ -4,6 +4,7 @@ const Engine = @import("Engine.zig");
 const limits = @import("limits.zig");
 const support = @import("test_support.zig");
 const types = @import("../types.zig");
+const Registry = @import("Registry.zig");
 
 const Pair = support.Pair;
 const client_address = support.client_address;
@@ -229,7 +230,7 @@ test "engine junk short header from a live peer's address marks nothing" {
 }
 
 test "engine registry retires exhausted connection generations" {
-    var registry = try @import("Registry.zig").init(std.testing.allocator, 2, 1);
+    var registry = try Registry.init(std.testing.allocator, 2, 1);
     defer registry.deinit(std.testing.allocator);
     registry.slots[0].generation = std.math.maxInt(u32);
     try std.testing.expectEqual(@as(?u16, 1), registry.claim());

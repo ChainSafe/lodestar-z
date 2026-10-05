@@ -7,6 +7,7 @@ const Protocol = protocol.Protocol;
 const test_pair = @import("test_pair.zig");
 const Pair = test_pair.Pair;
 const deneb_digest = test_pair.deneb_digest;
+const ForkSeq = @import("config").ForkSeq;
 
 const statusBytes = test_pair.statusBytes;
 
@@ -210,7 +211,7 @@ test "reqresp streams blocks by range chunks with fork context" {
         };
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
-                try std.testing.expectEqual(@as(?@import("config").ForkSeq, .deneb), chunk.fork);
+                try std.testing.expectEqual(@as(?ForkSeq, .deneb), chunk.fork);
                 try std.testing.expectEqualSlices(u8, &blocks[received], chunk.bytes);
                 received += 1;
                 try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now));

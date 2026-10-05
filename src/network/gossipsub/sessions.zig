@@ -5,6 +5,10 @@ const Engine = @import("../quic/Engine.zig");
 const index_list = @import("../index_list.zig");
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const Options = @import("options.zig").Options;
+const ControlScratch = @import("outbox.zig").ControlScratch;
+const peer_session = @import("peer_session.zig");
+const layout_mod = @import("layout.zig");
+const receive_pool_mod = @import("receive_pool.zig");
 
 const assert = std.debug.assert;
 const Handle = Engine.Handle;
@@ -47,17 +51,17 @@ pub const Sessions = struct {
     deliveries: *DeliveryPool,
     /// Control encoding storage every outbox's `submit` borrows for one call. A field rather than
     /// a local so ReleaseSafe does not fill it for every control frame.
-    control_scratch: @import("outbox.zig").ControlScratch = undefined,
+    control_scratch: ControlScratch = undefined,
 
     /// An opening or a close is ready work. Callers settle any other change.
-    pub fn setOutbound(self: *Sessions, index: u16, outbound: @import("peer_session.zig").Outbound) void {
+    pub fn setOutbound(self: *Sessions, index: u16, outbound: peer_session.Outbound) void {
         assert(self.rows[index].active);
         self.rows[index].outbound = outbound;
         self.delivery_revision +|= 1;
         if (outbound == .pending or outbound == .closing) self.markReady(index);
     }
 
-    pub fn init(a: std.mem.Allocator, options: *const @import("options.zig").Options, layout: *const @import("layout.zig").Layout) !Sessions {
+    pub fn init(a: std.mem.Allocator, options: *const Options, layout: *const layout_mod.Layout) !Sessions {
         const rows = try a.alloc(Session, layout.sessions);
         errdefer a.free(rows);
         const words_per_peer = (@as(usize, layout.topics) + @bitSizeOf(usize) - 1) / @bitSizeOf(usize);
@@ -90,11 +94,11 @@ pub const Sessions = struct {
         return .{ .rows = rows, .deadlines = deadlines, .by_connection = by_connection, .io_arena = arena, .subscription_words = subscription_words, .receive_pool = receive_pool, .decode_scratch = decode_scratch, .deliveries = deliveries };
     }
 
-    pub fn metadataBytes(layout: *const @import("layout.zig").Layout) usize {
+    pub fn metadataBytes(layout: *const layout_mod.Layout) usize {
         return @as(usize, layout.sessions) * (@sizeOf(Session) + @sizeOf(DeadlineHeap.Entry) + @sizeOf(u32)) + @sizeOf(DeliveryPool) +
             @as(usize, layout.connection_slots) * @sizeOf(u16) +
             @as(usize, layout.sessions) * ((@as(usize, layout.topics) + @bitSizeOf(usize) - 1) / @bitSizeOf(usize)) * @sizeOf(usize) +
-            DeliveryPool.backingBytes(layout.deliveries) + layout.receive_arena_bytes / @import("receive_pool.zig").page_bytes * @sizeOf(u32);
+            DeliveryPool.backingBytes(layout.deliveries) + layout.receive_arena_bytes / receive_pool_mod.page_bytes * @sizeOf(u32);
     }
 
     pub fn deinit(self: *Sessions, a: std.mem.Allocator) void {

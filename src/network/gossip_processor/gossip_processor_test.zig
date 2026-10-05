@@ -1,6 +1,7 @@
 const std = @import("std");
 const p = @import("root.zig");
 const t = std.testing;
+const index_list = @import("../index_list.zig");
 
 test "gossip processor validates explicit execution overrides before allocating" {
     const limits: p.limits.Limits = @splat(.{ .items = 4096, .bytes = 4096 });
@@ -58,7 +59,7 @@ fn add(table: *p.GossipProcessor, kind: p.limits.Kind, root: ?[32]u8) !p.GossipP
     const token = try table.reserveKind(kind, 1);
     const cell = table.get(token).?;
     cell.id = @splat(1);
-    cell.deadline = if (table.expiry.tail == @import("../index_list.zig").none) 100 else @max(100, table.cells[table.expiry.tail].deadline);
+    cell.deadline = if (table.expiry.tail == index_list.none) 100 else @max(100, table.cells[table.expiry.tail].deadline);
     cell.metadata = .{ .root = root, .slot = 1 };
     table.install(token, "x");
     return token;

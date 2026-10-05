@@ -1,8 +1,10 @@
 // @ts-check
 /**
+ * @typedef {import("./network-runtime.js").NativeNetworkApplicationRuntime} NativeNetworkApplicationRuntime
+ * @typedef {import("./network-runtime.js").NativeEscalation} NativeEscalation
  * @typedef {"now" | "later" | "retry" | "idle"} Continuation
  * @typedef {{turn(): Continuation}} Pump
- * @typedef {Pick<import("./network-runtime.js").NativeNetworkApplicationRuntime, "exchange" | "fail">} Route
+ * @typedef {Pick<NativeNetworkApplicationRuntime, "exchange" | "fail">} Route
  */
 
 const RETRY_MS = 25;
@@ -25,7 +27,7 @@ export const CONTROL = Object.freeze({
  * Formats `cause` for native `fail`, which terminates the process.
  *
  * @param {Pick<Route, "fail">} runtime
- * @param {import("./network-runtime.js").NativeEscalation} site
+ * @param {NativeEscalation} site
  * @param {unknown} cause
  * @returns {never}
  */

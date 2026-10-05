@@ -6,18 +6,27 @@ import {CONTROL, FAILURES_MAX, SETTLE_CELLS, escalate} from "./network-turn-sche
 /**
  * @typedef {import("./network-turn-scheduler.js").Continuation} Continuation
  * @typedef {import("./network-runtime.js").NativeAction} Action
- * @typedef {Extract<Action, {type: "block" | "reportPeer" | "dropQueued" | "recheck"}>} CoalescedAction
  * @typedef {import("./network-runtime.js").NativeGossipHandle} Handle
  * @typedef {import("./network-runtime.js").NativeIncomingRequest} Incoming
  * @typedef {import("./network-runtime.js").NativeExchange} Exchange
  * @typedef {import("./network.js").NativeHost} Host
  * @typedef {import("./network.js").CloseResult} CloseResult
+ * @typedef {import("./network.js").GossipJob} GossipJob
+ * @typedef {import("./network.js").NativeForkEntry} NativeForkEntry
+ * @typedef {import("./network.js").NativePeerAction} NativePeerAction
+ * @typedef {import("./network.js").Verdict} Verdict
+ * @typedef {import("./network-runtime.js").NativeNetworkApplicationRuntime} NativeNetworkApplicationRuntime
+ * @typedef {import("./network-runtime.js").NativeEscalation} NativeEscalation
+ * @typedef {import("./network-runtime.js").NativeGossipBatch} NativeGossipBatch
+ * @typedef {import("./network-runtime.js").NativeGossipDependencyCheck} NativeGossipDependencyCheck
+ * @typedef {import("./network-turn-scheduler.js").TurnScheduler} TurnScheduler
+ * @typedef {Extract<Action, {type: "block" | "reportPeer" | "dropQueued" | "recheck"}>} CoalescedAction
  * @typedef {{failure: Error | null}} Terminal
  * @typedef {{resolve(): void, reject(error: unknown): void, remaining: number, weak: WeakRef<Settler> | null}} Settler
- * @typedef {{adopted: boolean, handles: Handle[], job: import("./network.js").GossipJob | null, urgent: boolean}} Job
+ * @typedef {{adopted: boolean, handles: Handle[], job: GossipJob | null, urgent: boolean}} Job
  * @typedef {{adopted: boolean, incoming: Incoming}} Start
- * @typedef {Pick<import("./network-runtime.js").NativeNetworkApplicationRuntime, "exchange" | "fail" | "drainLogs"> & {
- * scheduler: import("./network-turn-scheduler.js").TurnScheduler,
+ * @typedef {Pick<NativeNetworkApplicationRuntime, "exchange" | "fail" | "drainLogs"> & {
+ * scheduler: TurnScheduler,
  * closed: Promise<CloseResult>,
  * close(): Promise<CloseResult>,
  * state: string
@@ -111,7 +120,7 @@ class IncomingRequest {
   }
   /**
    * @param {Uint8Array} data
-   * @param {import("./network.js").NativeForkEntry | null} context
+   * @param {NativeForkEntry | null} context
    */
   respond(data, context) {
     return this.#incoming.respond(data, context);
@@ -144,7 +153,7 @@ class IncomingRequest {
 export class NativePump {
   /** @type {Runtime | null} */
   #runtime = null;
-  /** @type {import("./network-turn-scheduler.js").TurnScheduler | null} */
+  /** @type {TurnScheduler | null} */
   #scheduler = null;
   #host;
   /** Terminal bookkeeping the facade shares; it holds no host reference. */
@@ -245,7 +254,7 @@ export class NativePump {
   }
   /**
    * @param {string} peerId
-   * @param {import("./network.js").NativePeerAction} action
+   * @param {NativePeerAction} action
    */
   reportPeer(peerId, action) {
     this.#coalesce({action, count: 1, peerId, type: "reportPeer"});
@@ -399,7 +408,7 @@ export class NativePump {
   }
 
   /**
-   * @param {import("./network-runtime.js").NativeEscalation} site
+   * @param {NativeEscalation} site
    * @param {unknown} cause
    * @returns {never}
    */
@@ -561,7 +570,7 @@ export class NativePump {
 
   /**
    * Jobs with host records that physically omit native handles, each awaiting every message's disposition.
-   * @param {import("./network-runtime.js").NativeGossipBatch | null} gossip
+   * @param {NativeGossipBatch | null} gossip
    * @returns {Job[]}
    */
   #jobs(gossip) {
@@ -676,7 +685,7 @@ export class NativePump {
 
   /**
    * Classifies every check with the host's answers, or unavailable when it cannot answer them all.
-   * @param {readonly import("./network-runtime.js").NativeGossipDependencyCheck[]} checks
+   * @param {readonly NativeGossipDependencyCheck[]} checks
    */
   #check(checks) {
     if (checks.length === 0) return;
@@ -745,7 +754,7 @@ export class NativePump {
 
   /**
    * @param {WeakRef<NativePump>} weak
-   * @param {Promise<readonly import("./network.js").Verdict[]>} verdicts
+   * @param {Promise<readonly Verdict[]>} verdicts
    * @param {Job} record
    */
   static #validated(weak, verdicts, record) {

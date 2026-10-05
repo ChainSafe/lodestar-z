@@ -2,6 +2,7 @@ const std = @import("std");
 const network = @import("network");
 const control = @import("peer_control.zig");
 const t = network.peers.types;
+const config = @import("config");
 
 const Peer = struct {
     node: network.NetworkCore,
@@ -17,7 +18,7 @@ const Peer = struct {
     pub fn pump(self: *Peer) !void {
         self.now = try network.Transport.currentTime(self.io);
         var events: [1]t.Event = undefined;
-        const result = network.driver.step(&self.node, self.io, self.now, .{ .peers = events[0..self.capacity] }, .deadlineOnly(@import("network").time.optionalMilliseconds(self.now.millis() +| 1)));
+        const result = network.driver.step(&self.node, self.io, self.now, .{ .peers = events[0..self.capacity] }, .deadlineOnly(network.time.optionalMilliseconds(self.now.millis() +| 1)));
         if (result.failure) |err| return err;
         for (events[0..result.counts.peers]) |event| {
             if (self.emitted == 512) return error.EventBound;
@@ -119,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
         .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2 },
         .peers = .{ .capacity = 4, .outbound_reserve = 1, .target_peers = 1, .max_peers = 3, .min_outbound = 0 },
         .control = .{ .inbound_status_grace_ms = 20, .ping_inbound_ms = 1_000, .ping_outbound_ms = 1_000 },
-        .admission_policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule),
+        .admission_policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&config.mainnet.config, &blob_schedule),
     });
     try peer.node.init(a, init.io, &resolved, .{
         .host = &key,

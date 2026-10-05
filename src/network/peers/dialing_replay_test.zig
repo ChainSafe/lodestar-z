@@ -5,6 +5,7 @@ const enr = @import("enr.zig");
 const Catalog = @import("catalog.zig").Catalog;
 const dialing = @import("dialing.zig");
 const a = std.testing.allocator;
+const dialing_test_support = @import("dialing_test_support.zig");
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9001 } };
 const local: t.PeerId = .{ .bytes = @splat(0) };
 const opts: Catalog.Options = .{ .capacity = 4, .max_peers = 4, .target_peers = 4, .min_outbound = 0, .outbound_reserve = 1 };
@@ -18,7 +19,7 @@ const unix_s: u64 = 1_700_000_000;
 /// Replay queues four candidates at once, then one every 250 ms.
 const replay_interval_ms: u64 = 250;
 
-fn at(ms: u64) @import("../types.zig").Now {
+fn at(ms: u64) Now {
     return Now.fromMilliseconds(.{ .mono_ms = ms, .unix_s = @intCast(unix_s + ms / 1000) });
 }
 
@@ -235,7 +236,7 @@ test "replay paces remembered first attempts as they start while direct and fres
         var it = c.intents.iterator(.{});
         while (it.next()) |index| waiting += @intFromBool(c.rows[index].dial.replay == .untried);
         try std.testing.expect(waiting <= remembered.replay_burst);
-        if (waiting > 0 and d.attempts().total < 16) try std.testing.expect(@import("dialing_test_support.zig").refreshAndWakeup(&d, &c, now, 4).? <= @max(now, c.remembered.replayDue()));
+        if (waiting > 0 and d.attempts().total < 16) try std.testing.expect(dialing_test_support.refreshAndWakeup(&d, &c, now, 4).? <= @max(now, c.remembered.replayDue()));
     }
     // Any run of remembered first attempts fits a burst of four plus one per 250 ms between them.
     for (0..started) |i| for (i..started) |j| {

@@ -14,6 +14,11 @@ const protobuf = @import("protobuf.zig");
 const Handle = Engine.Handle;
 const Now = @import("../types.zig").Now;
 const snappy = @import("snappy");
+const receive_pool = @import("receive_pool.zig");
+const IwantOutcome = @import("metrics.zig").IwantOutcome;
+const topic_fixture = @import("topic_fixture.zig");
+const Reservations = @import("../reservations.zig").Reservations;
+const frame = @import("frame.zig");
 
 fn buildTopic(name: []const u8, out: []u8) []const u8 {
     return topic_mod.build(digest, name, out);
@@ -82,12 +87,12 @@ test "gossipsub receive page exhaustion discards only the requesting frame witho
     defer setup.deinit();
     try setup.connectMesh();
     const g = setup.shared.server.gossipsub;
-    var held: [3]@import("receive_pool.zig").Chain = @splat(.{});
+    var held: [3]receive_pool.Chain = @splat(.{});
     defer for (&held) |*chain| g.sessions.receive_pool.release(chain);
     for (0..g.sessions.receive_pool.next.len) |i| {
         const chain = &held[i % held.len];
         _ = g.sessions.receive_pool.writable(chain).?;
-        chain.len += @import("receive_pool.zig").page_bytes;
+        chain.len += receive_pool.page_bytes;
     }
     const peer = g.sessions.find(setup.shared.handles.server).?;
     const logical = g.sessions.rows[peer].logical;
@@ -133,16 +138,16 @@ test "gossipsub graylist refuses bulk reception and releases an idle partial fra
         const index = g.sessions.find(setup.shared.handles.server).?;
         const row = &g.sessions.rows[index];
         var wire: [1024]u8 = undefined;
-        var writer = @import("protobuf.zig").Writer.init(&wire);
-        writer.varint(@import("constants.zig").GOSSIP_MAX_SIZE);
+        var writer = protobuf.Writer.init(&wire);
+        writer.varint(constants.GOSSIP_MAX_SIZE);
         writer.bytes(&([_]u8{0} ** 128));
-        if (!partial) @import("test_support.zig").penalize(g, row.conn, 50);
+        if (!partial) support.penalize(g, row.conn, 50);
         try std.testing.expectEqual(writer.len, try setup.shared.pair.client.write(setup.clientStream(), writer.written(), false));
         for (0..8) |_| try setup.pumpOnce();
         if (partial) {
             try std.testing.expect(row.io.overflow.pages > 0);
             try std.testing.expect(!row.io.rx_ready);
-            @import("test_support.zig").penalize(g, row.conn, 50);
+            support.penalize(g, row.conn, 50);
             // The next heartbeat finds the graylisted session holding a frame.
             setup.shared.pair.advance(constants_heartbeat);
             try setup.pumpOnce();
@@ -242,7 +247,7 @@ test "gossip IWANT admits 5000 IDs and rejects larger envelopes before service" 
         } else {
             try std.testing.expectError(error.OccurrenceLimit, result);
         }
-        try std.testing.expectEqual(@as(u64, constants.max_iwant_ids_per_rpc), g.iwant_outcomes[@intFromEnum(@import("metrics.zig").IwantOutcome.miss)]);
+        try std.testing.expectEqual(@as(u64, constants.max_iwant_ids_per_rpc), g.iwant_outcomes[@intFromEnum(IwantOutcome.miss)]);
         try std.testing.expectEqual(@as(usize, 0), emitted);
         _ = g.sessions.finishFrame(io);
     }
@@ -261,10 +266,10 @@ test "gossip independent RPC enumerates every receive split through admission" {
         .seen_ttl_ms = 1,
         .validation_tombstone_ms = 1,
         .body_buffer_bytes = 1,
-        .topic_policy = &.{@import("topic_fixture.zig").bytes(.{ 1, 0, 0, 0 })},
+        .topic_policy = &.{topic_fixture.bytes(.{ 1, 0, 0, 0 })},
     });
     defer g.deinit();
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     try support.subscribe(&g, name);
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
@@ -291,8 +296,8 @@ test "gossip independent RPC enumerates every receive split through admission" {
                 try std.testing.expect(result.consumed > 0);
                 consumed += result.consumed;
                 if (result.complete) {
-                    try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, now, &count, &items));
-                    try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, now, &count, &items));
+                    try std.testing.expect(try support.processRpc(&g, peer.index, now, &count, &items));
+                    try std.testing.expect(try support.processRpc(&g, peer.index, now, &count, &items));
                     try std.testing.expect(g.sessions.finishFrame(io));
                 }
             }
@@ -315,7 +320,7 @@ test "gossip independent RPC enumerates every receive split through admission" {
 
 test "gossip paged RPC cursors survive shared workspace reuse without runtime allocation" {
     var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
+    var ledger: Reservations = .{ .backing = backing.allocator() };
     var g = try support.init(ledger.allocator(), .{
         .random_seed = 1,
         .connected_capacity = 4,
@@ -334,7 +339,7 @@ test "gossip paged RPC cursors survive shared workspace reuse without runtime al
     }
     var prefix: [8]u8 = undefined;
     var pw = protobuf.Writer.init(&prefix);
-    pw.varint(@import("constants.zig").GOSSIP_MAX_SIZE);
+    pw.varint(constants.GOSSIP_MAX_SIZE);
     for (0..2) |i| try feedPagedTestFrame(&g, @intCast(i), pw.written());
     try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
     for (0..2) |i| try feedPagedTestFrame(&g, @intCast(i), "slow");
@@ -349,10 +354,10 @@ test "gossip paged RPC cursors survive shared workspace reuse without runtime al
     for (0..2) |i| {
         var writer = protobuf.Writer.init(&body);
         for (0..2) |j| {
-            const len = try @import("snappy").raw.compress(&payloads[i * 2 + j], &compressed);
+            const len = try snappy.raw.compress(&payloads[i * 2 + j], &compressed);
             protobuf.writeMessage(&writer, compressed[0..len], name);
         }
-        try feedPagedTestFrame(&g, @intCast(i + 2), @import("frame.zig").writeFrame(&wire, writer.written()));
+        try feedPagedTestFrame(&g, @intCast(i + 2), frame.writeFrame(&wire, writer.written()));
         try std.testing.expect(g.sessions.rows[i + 2].io.rpc != null);
     }
     var inbox: support.Inbox = .{};

@@ -7,8 +7,14 @@ const support = @import("test_support.zig");
 const full = @import("topic_fixture.zig").full;
 const name = "/eth2/01020304/beacon_block/ssz_snappy";
 const next = "/eth2/01020304/voluntary_exit/ssz_snappy";
-const boundaries = [_]@import("topic_policy.zig").Boundary{ full(.{ 1, 2, 3, 4 }), full(.{ 5, 6, 7, 8 }), full(.{ 9, 10, 11, 12 }) };
-const now: @import("../types.zig").Now = Now.fromMilliseconds(.{ .mono_ms = 100, .unix_s = 0 });
+const boundaries = [_]topic_policy.Boundary{ full(.{ 1, 2, 3, 4 }), full(.{ 5, 6, 7, 8 }), full(.{ 9, 10, 11, 12 }) };
+const topic_policy = @import("topic_policy.zig");
+const topic_fixture = @import("topic_fixture.zig");
+const Reservations = @import("../reservations.zig").Reservations;
+const snappy = @import("snappy");
+const constants = @import("constants.zig");
+const message_store = @import("message_store.zig");
+const now: Now = Now.fromMilliseconds(.{ .mono_ms = 100, .unix_s = 0 });
 
 fn options() Gossipsub.Options {
     return .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8, .topic_policy = &boundaries };
@@ -20,7 +26,7 @@ fn unavailableExcept(g: *Gossipsub, count: usize) void {
 
 fn apply(g: *Gossipsub, w: *local.Workspace, desired: []const []const u8) !bool {
     var buffer: [64]local.Boundary = undefined;
-    const changed = try g.prepareSubscriptions(try @import("topic_fixture.zig").subscriptionsInto(desired, &buffer), w, now, 0);
+    const changed = try g.prepareSubscriptions(try topic_fixture.subscriptionsInto(desired, &buffer), w, now, 0);
     if (changed) g.commitSubscriptions(w);
     return changed;
 }
@@ -67,7 +73,7 @@ test "intent and publication prefer unused rows and reclaim only their selected 
 
 test "local intent exact capacity excess and namespace refusal" {
     var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
+    var ledger: Reservations = .{ .backing = backing.allocator() };
     var g = try Gossipsub.init(ledger.allocator(), options());
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
@@ -189,7 +195,7 @@ test "local intent history survives former row reuse and real retransmission des
     const entry = g.messages.store.get(retained).?;
     try std.testing.expectEqualStrings(name, entry.topicString());
     var payload: [64]u8 = undefined;
-    const read = try @import("snappy").raw.uncompress(g.messages.store.segment(retained, g.messages.store.cursor(retained)), &payload);
+    const read = try snappy.raw.uncompress(g.messages.store.segment(retained, g.messages.store.cursor(retained)), &payload);
     try std.testing.expectEqualStrings("history payload", payload[0..read]);
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const io = &g.sessions.rows[peer.index].io;
@@ -304,7 +310,7 @@ test "compact intent validates masks and boundary identities before mutation" {
     defer std.testing.allocator.destroy(w);
     w.* = try local.Workspace.init(std.testing.allocator, g.overlay.rows.len);
     defer w.deinit(std.testing.allocator);
-    const sets = @import("topic_fixture.zig").subscriptions(&.{name});
+    const sets = topic_fixture.subscriptions(&.{name});
     try std.testing.expectError(error.DuplicateBoundary, g.prepareSubscriptions(&.{ sets[0], sets[0] }, w, now, 0));
     var invalid = sets[0];
     invalid.digest = @splat(255);
@@ -356,7 +362,7 @@ test "local intent startup kind scores activate on accepted slots without resett
     defer std.testing.allocator.destroy(w);
     w.* = try local.Workspace.init(std.testing.allocator, g.overlay.rows.len);
     defer w.deinit(std.testing.allocator);
-    const sets = @import("topic_fixture.zig").subscriptions(&.{ name, "/eth2/05060708/beacon_block/ssz_snappy" });
+    const sets = topic_fixture.subscriptions(&.{ name, "/eth2/05060708/beacon_block/ssz_snappy" });
     try std.testing.expect(try g.prepareSubscriptions(sets, w, now, 0));
     g.commitSubscriptions(w);
     try std.testing.expectEqual(@as(f64, 0), g.peers.scores.topic_params[0].mesh_delivery_weight);
@@ -442,7 +448,7 @@ test "resident allocation accounting follows namespace dimensions and frees ever
     const a = std.testing.allocator;
     var measured = std.testing.FailingAllocator.init(a, .{});
     var opts = options();
-    opts.mcache_arena_bytes = @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE) + @import("message_store.zig").page_bytes;
+    opts.mcache_arena_bytes = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + message_store.page_bytes;
     var g = try Gossipsub.init(measured.allocator(), opts);
     try std.testing.expectEqual(g.overlay.namespace.?.topic_count, g.overlay.rows.len);
     try std.testing.expectEqual(measured.allocated_bytes, g.memoryPlan().total_bytes - @sizeOf(Gossipsub));
@@ -458,7 +464,7 @@ test "resident allocation accounting follows namespace dimensions and frees ever
 test "resident score and bitset dimensions cover the validated namespace maximum" {
     const a = std.testing.allocator;
     const score = @import("score.zig");
-    for ([_]usize{ 1, 65, 615, 1082, @import("topic_policy.zig").topic_max }) |count| {
+    for ([_]usize{ 1, 65, 615, 1082, topic_policy.topic_max }) |count| {
         var measured = std.testing.FailingAllocator.init(a, .{});
         var scores = try score.PeerScore.initForTopics(measured.allocator(), .{}, 2, count);
         try std.testing.expectEqual(score.PeerScore.backingBytesForTopics(2, count), measured.allocated_bytes);

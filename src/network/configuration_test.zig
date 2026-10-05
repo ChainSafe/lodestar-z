@@ -6,6 +6,11 @@ const std = @import("std");
 const Transport = @import("transport.zig").Transport;
 const udp = @import("udp");
 const validate = @import("configuration.zig").validate;
+const protocol = @import("reqresp/protocol.zig");
+const config = @import("config");
+const PeerId = @import("wire/peer_id.zig").PeerId;
+const ForkEntry = @import("types.zig").ForkEntry;
+const configuration = @import("configuration.zig");
 
 test "configuration resolves dial concurrency independently of peer headroom" {
     for ([_]u16{ 1, 2, 10 }) |headroom| {
@@ -54,19 +59,19 @@ test "configuration control admission quotas permit the full two hundred peer wo
         .peers = .{ .capacity = 512, .target_peers = 190, .max_peers = 200, .min_outbound = 50 },
         .limits = .{ .connections_max = 232 },
         .application_requests_max = 32,
-        .admission_policy = @import("reqresp/policy_fixture.zig").config(),
+        .admission_policy = policy_fixture.config(),
     });
     const requests = resolved.core.protocols.reqresp;
     const quotas = requests.admission.limits;
     const admission = @import("reqresp/admission.zig");
     var starts = try admission.Limiter.init(std.testing.allocator, requests.admission.limits);
     defer starts.deinit(std.testing.allocator);
-    for (std.enums.values(@import("reqresp/protocol.zig").Protocol)) |which| {
+    for (std.enums.values(protocol.Protocol)) |which| {
         if (!which.isControl()) continue;
-        const quota = quotas.peer[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(which)];
-        try std.testing.expectEqual(quota.tokens * 200, quotas.global[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(which)].tokens);
+        const quota = quotas.peer[@intFromEnum(config.ForkSeq.fulu)][@intFromEnum(which)];
+        try std.testing.expectEqual(quota.tokens * 200, quotas.global[@intFromEnum(config.ForkSeq.fulu)][@intFromEnum(which)].tokens);
         for (0..200) |index| {
-            var identity: @import("wire/peer_id.zig").PeerId = .{ .bytes = @splat(0) };
+            var identity: PeerId = .{ .bytes = @splat(0) };
             std.mem.writeInt(u16, identity.bytes[0..2], @intCast(index), .little);
             try std.testing.expectEqual(admission.Decision.allowed, starts.take(&identity, which, quota.tokens, .fulu, 0));
             try std.testing.expectEqual(admission.Decision.peer_quota, starts.take(&identity, which, 1, .fulu, 0));
@@ -90,7 +95,7 @@ test "configuration resolves shared capacities from their owners" {
 }
 
 test "configuration overrides preserve profile defaults and derive shared fields" {
-    const forks: []const @import("types.zig").ForkEntry = &.{.{ .digest = @splat(1), .fork = .fulu }};
+    const forks: []const ForkEntry = &.{.{ .digest = @splat(1), .fork = .fulu }};
     const resolved = try resolve(.{
         .profile = .small,
         .seed = 17,
@@ -104,7 +109,7 @@ test "configuration overrides preserve profile defaults and derive shared fields
     });
     const protocols = &resolved.core.protocols;
     try std.testing.expectEqual(@as(u16, 8), protocols.reqresp.connections);
-    try std.testing.expectEqualSlices(@import("types.zig").ForkEntry, forks, protocols.reqresp.forks);
+    try std.testing.expectEqualSlices(ForkEntry, forks, protocols.reqresp.forks);
     try std.testing.expectEqual(@as(u16, 12), protocols.reqresp.outbound_max);
     try std.testing.expectEqual(@as(u16, 7), protocols.reqresp.work_per_pump_max);
     try std.testing.expectEqual(resolved.core.peers.max_peers, protocols.reqresp.serving_control_reserved);
@@ -182,7 +187,7 @@ test "configuration request admission memory plan measures both retained profile
     for ([_]Profile{ .small, .beacon_node }) |profile| {
         const resolved = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
         var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var handler = try @import("reqresp/ReqResp.zig").init(allocator.allocator(), resolved.core.protocols.reqresp);
+        var handler = try rr.init(allocator.allocator(), resolved.core.protocols.reqresp);
         defer handler.deinit();
         const plan = handler.memoryPlan();
         try std.testing.expectEqual(allocator.allocated_bytes, plan.total_bytes - plan.facade_bytes);
@@ -202,12 +207,12 @@ test "configuration carries bounded UDP socket buffer requests" {
     const mib = 1024 * 1024;
     try std.testing.expectEqual(udp.Sockets.Buffers{ .receive = 16 * mib, .send = 4 * mib }, resolved.socket_buffers.quic);
     try std.testing.expectEqual(udp.Sockets.Buffers{ .receive = 2 * mib, .send = 1 * mib }, resolved.socket_buffers.discovery);
-    const bounds: @import("configuration.zig").SocketBuffers = .{
+    const bounds: configuration.SocketBuffers = .{
         .quic = .{ .receive = udp.Sockets.Buffers.bytes_max, .send = udp.Sockets.Buffers.bytes_min },
         .discovery = .{ .receive = udp.Sockets.Buffers.bytes_min, .send = udp.Sockets.Buffers.bytes_max },
     };
     try std.testing.expectEqual(bounds, (try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .socket_buffers = bounds, .admission_policy = policy_fixture.config() })).socket_buffers);
-    const invalid = [_]@import("configuration.zig").SocketBuffers{
+    const invalid = [_]configuration.SocketBuffers{
         .{ .quic = .{ .receive = udp.Sockets.Buffers.bytes_min - 1, .send = udp.Sockets.Buffers.bytes_min } },
         .{ .quic = .{ .receive = udp.Sockets.Buffers.bytes_min, .send = udp.Sockets.Buffers.bytes_max + 1 } },
         .{ .discovery = .{ .receive = udp.Sockets.Buffers.bytes_max + 1, .send = udp.Sockets.Buffers.bytes_min } },
@@ -224,13 +229,13 @@ test "resolved admission and Identify overrides use final profile capacities" {
         .seed = 91,
         .forks = &.{},
         .reqresp = .{ .serving_max = 256 },
-        .admission_policy = @import("reqresp/policy_fixture.zig").config(),
+        .admission_policy = policy_fixture.config(),
         .identify = .{ .agent = "resolved-agent", .protocol_version = "resolved-version" },
     });
     const requests = resolved.core.protocols.reqresp;
     const quotas = requests.admission.limits;
     try std.testing.expectEqual(resolved.core.peers.capacity, quotas.identities);
-    try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * quotas.peer[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)].tokens, quotas.global[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)].tokens);
+    try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * quotas.peer[@intFromEnum(config.ForkSeq.fulu)][@intFromEnum(protocol.Protocol.ping_v1)].tokens, quotas.global[@intFromEnum(config.ForkSeq.fulu)][@intFromEnum(protocol.Protocol.ping_v1)].tokens);
     const identify = resolved.core.protocols.identify;
     try std.testing.expectEqual(@as(u16, 2), identify.inbound_max);
     try std.testing.expectEqualStrings("resolved-agent", identify.agent);
@@ -244,24 +249,24 @@ test "application request limits preserve control capacity and size admission fr
             .seed = 91,
             .forks = &.{},
             .application_requests_max = 32,
-            .admission_policy = @import("reqresp/policy_fixture.zig").config(),
+            .admission_policy = policy_fixture.config(),
         });
         const requests = resolved.core.protocols.reqresp;
         const application_max: u16 = if (profile == .small) 6 else 32;
         try std.testing.expectEqual(application_max, requests.serving_max - requests.serving_control_reserved);
         try std.testing.expectEqual(application_max, requests.outbound_max - requests.outbound_control_reserved);
         try std.testing.expectEqual(resolved.core.peers.max_peers, requests.outbound_control_reserved);
-        const ping = requests.admission.limits.global[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)];
-        try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * requests.admission.limits.peer[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)].tokens, ping.tokens);
+        const ping = requests.admission.limits.global[@intFromEnum(config.ForkSeq.fulu)][@intFromEnum(protocol.Protocol.ping_v1)];
+        try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * requests.admission.limits.peer[@intFromEnum(config.ForkSeq.fulu)][@intFromEnum(protocol.Protocol.ping_v1)].tokens, ping.tokens);
     }
     try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 0, .admission_policy = policy_fixture.config() }));
     try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 32, .reqresp = .{ .serving_max = 1 }, .admission_policy = policy_fixture.config() }));
 }
 
 test "configuration rejects invalid complete sections" {
-    const forks: []const @import("types.zig").ForkEntry = &.{.{ .digest = @splat(0), .fork = .phase0 }};
+    const forks: []const ForkEntry = &.{.{ .digest = @splat(0), .fork = .phase0 }};
     inline for (.{ error.InvalidOptions, error.InvalidOptions, error.InvalidOptions, error.InvalidLimits, error.InvalidLimits, error.InvalidOptions }, 0..) |expected, section| {
-        var request: @import("configuration.zig").Options = .{ .profile = .small, .seed = 1, .forks = forks, .admission_policy = @import("reqresp/policy_fixture.zig").config() };
+        var request: configuration.Options = .{ .profile = .small, .seed = 1, .forks = forks, .admission_policy = policy_fixture.config() };
         switch (section) {
             0 => request.reqresp.work_per_pump_max = 0,
             1 => request.control = .{ .ping_inbound_ms = 0 },
@@ -271,6 +276,6 @@ test "configuration rejects invalid complete sections" {
             5 => request.peers = .{ .capacity = 0 },
             else => unreachable,
         }
-        try std.testing.expectError(expected, @import("configuration.zig").resolve(request));
+        try std.testing.expectError(expected, resolve(request));
     }
 }

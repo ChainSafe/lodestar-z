@@ -4,6 +4,8 @@ const topic_mod = @import("topic.zig");
 const digest = topic_mod.ForkDigest{ 0x6a, 0x95, 0xa1, 0xa9 };
 const Pair = @import("test_pair.zig").Pair;
 const constants_heartbeat = @import("constants.zig").heartbeat_interval_ms;
+const topic_fixture = @import("topic_fixture.zig");
+const session_io = @import("session_io.zig");
 
 fn buildTopic(name: []const u8, out: []u8) []const u8 {
     return topic_mod.build(digest, name, out);
@@ -87,19 +89,19 @@ test "gossipsub delivers a published message to a mesh peer" {
 
 test "gossipsub subscription cursors synchronize all topics through small critical queues" {
     const topic_capacity = @import("constants.zig").topics_cap;
-    const topics = &@import("topic_fixture.zig").churn;
+    const topics = &topic_fixture.churn;
     var setup: Pair = .{};
     try setup.initOpts(.{ .random_seed = 1, .topic_policy = topics, .critical_bytes = 256, .control_bytes = 64 }, .{ .random_seed = 1, .topic_policy = topics, .critical_bytes = 256, .control_bytes = 64 });
     defer setup.deinit();
     var buf: [topic_mod.topic_max_len]u8 = undefined;
     for (0..topic_capacity) |i| {
-        const topic = try @import("topic_fixture.zig").churnTopic(i, &buf);
+        const topic = try topic_fixture.churnTopic(i, &buf);
         try support.subscribe(setup.shared.client.gossipsub, topic);
         try support.subscribe(setup.shared.server.gossipsub, topic);
     }
     for (0..128) |_| try setup.pumpOnce();
     const peer = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
-    @import("session_io.zig").resetOutbound(setup.shared.client.gossipsub, &setup.shared.pair.client, peer);
+    session_io.resetOutbound(setup.shared.client.gossipsub, &setup.shared.pair.client, peer);
     setup.shared.client.gossipsub.sessions.setOutbound(peer, .pending);
     for (0..128) |_| try setup.pumpOnce();
     for (0..8) |_| try setup.pumpOnce();

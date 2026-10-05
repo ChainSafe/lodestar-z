@@ -12,9 +12,13 @@ const snappy = @import("snappy");
 const receiveForTest = support.receiveMessage;
 const testMessage = support.message;
 const IwantOutcome = @import("metrics.zig").IwantOutcome;
+const delivery = @import("delivery.zig");
+const StorageRefusal = @import("messages.zig").StorageRefusal;
+const topic_policy = @import("topic_policy.zig");
+const turn_mod = @import("turn.zig");
 
 fn ids(out: []u8, field: u32, list: []const MessageId) []const u8 {
-    var writer = @import("protobuf.zig").Writer.init(out);
+    var writer = protobuf.Writer.init(out);
     for (list) |*id| writer.bytesField(field, id);
     return writer.written();
 }
@@ -32,13 +36,13 @@ test "IWANT outcomes separate misses, suppression, the retransmission limit, que
         id.* = topic_mod.validMessageId(test_topic, payload, .{});
     }
     var body: [256]u8 = undefined;
-    const now: @import("../types.zig").Now = Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 });
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 });
     support.control(&g, peer.index, .{ .idontwant = .{ .body = ids(&body, 1, &.{known[2]}) } }, now);
     const unknown: MessageId = @splat(9);
     support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{ unknown, known[2], known[0], known[0], known[0], known[0] }) } }, now);
     const tx = &g.sessions.rows[peer.index].io.tx;
     const h = g.messages.history.message(g.messages.history.get(&g.messages.store, known[0]).?);
-    for (0..@import("delivery.zig").per_peer_limit) |_| {
+    for (0..delivery.per_peer_limit) |_| {
         if (tx.data.full()) break;
         _ = tx.queueData(&g.messages.store, h, .forward, .{ .bytes = g.options.tx_peer_bytes }, 2);
     }
@@ -61,7 +65,7 @@ test "gossip counts each consumed message once by topic kind and never on a work
     var compressed: [64]u8 = undefined;
     const message: protobuf.Message = .{ .topic = name, .data = compressed[0..try snappy.raw.compress("payload", &compressed)] };
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
-    var turn = @import("turn.zig").Turn.init(&g.options, now, g.msg_scratch);
+    var turn = turn_mod.Turn.init(&g.options, now, g.msg_scratch);
     turn.sink = g.message_sink;
     turn.large_used = true;
     turn.budget.work = 0;
@@ -75,7 +79,7 @@ test "gossip counts each consumed message once by topic kind and never on a work
     try std.testing.expectEqual(@as(f64, 1), support.invalidDeliveries(&g));
     inbox.full = true;
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "refused", 1));
-    try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.processor_capacity)]);
+    try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(StorageRefusal.processor_capacity)]);
     try std.testing.expectEqual(@as(u64, 4), counts.received);
     try std.testing.expectEqual(@as(u64, 1), counts.duplicate);
     const unsubscribed = "/eth2/01020304/voluntary_exit/ssz_snappy";
@@ -84,7 +88,7 @@ test "gossip counts each consumed message once by topic kind and never on a work
         try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, peer.index, .{ .topic = topic, .data = message.data }, now));
     }
     try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(unsubscribed).received);
-    try std.testing.expectEqual(@as(u64, 2), g.topic_metrics.counts[@import("topic_policy.zig").kind_count].received);
+    try std.testing.expectEqual(@as(u64, 2), g.topic_metrics.counts[topic_policy.kind_count].received);
     try std.testing.expectEqual(@as(u64, 4), counts.received);
     for (g.topic_metrics.counts) |kind| try std.testing.expectEqual(@as(u64, 0), kind.published);
 }

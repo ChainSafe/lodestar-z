@@ -4,6 +4,10 @@ const d = @import("discv5");
 const core_test = @import("network_core_test_support.zig");
 const NetworkCore = @import("network_core.zig").NetworkCore;
 const keys = @import("wire/keys.zig");
+const Sockets = @import("udp").Sockets;
+const transport = @import("transport.zig");
+const time = @import("time.zig");
+const Multiaddr = @import("wire/multiaddr.zig").Multiaddr;
 
 const Peers = struct {
     nodes: []d.Transport,
@@ -14,7 +18,7 @@ const Peers = struct {
         errdefer for (nodes[0..initialized]) |*node| node.deinit(std.testing.allocator, std.testing.io);
         for (nodes, 0..) |*node, i| {
             const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{@as(u8, @intCast(100 + i))}));
-            var sockets = try @import("udp").Sockets.bind(std.testing.io, .{ .ip4 = .{ .bytes = .{ 127, 1, @intCast(i), 1 }, .port = 0 } });
+            var sockets = try Sockets.bind(std.testing.io, .{ .ip4 = .{ .bytes = .{ 127, 1, @intCast(i), 1 }, .port = 0 } });
             errdefer sockets.close(std.testing.io);
             const record = try d.identity.enr.Record.create(&key, 1, d.types.Address.fromNetwork(sockets.primary().address));
             try node.init(std.testing.allocator, sockets, key, record, .{});
@@ -33,14 +37,14 @@ const Peers = struct {
             _ = try owner.transport.startCall(std.testing.io, .{ .node_id = record.node_id, .address = remote.localAddress() }, record, &.{ .ping = .{
                 .request_id = try .init(&.{id}),
                 .enr_sequence = node.localRecord().?.sequence,
-            } }, try @import("discv5").Transport.monotonicMilliseconds(std.testing.io));
+            } }, try d.Transport.monotonicMilliseconds(std.testing.io));
             var expired: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
             var completed = false;
             for (0..100) |_| {
-                const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-                const response = try @import("discv5").driver.step(remote, std.testing.io, &expired, .{ .deadline = now.monotonic, .wait_max = .fromMilliseconds(10) });
+                const now = try transport.Transport.currentTime(std.testing.io);
+                const response = try d.driver.step(remote, std.testing.io, &expired, .{ .deadline = now.monotonic, .wait_max = .fromMilliseconds(10) });
                 if (response.failure) |failure| return failure.cause;
-                const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
+                const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
                 if (result.failure) |err| return err;
                 if (owner.transport.engine.calls.count() == 0) {
                     completed = true;
@@ -136,7 +140,7 @@ test "core constructs complete dual-family Identify with existing address preced
         try std.testing.expectEqualStrings("complete", local.agent.slice());
         try std.testing.expectEqual(@as(u8, if (case == 3) 0 else 2), local.address_count);
         for (local.addresses[0..local.address_count], 0..) |encoded, family| {
-            const addr = (try @import("wire/multiaddr.zig").Multiaddr.decode(encoded.bytes[0..encoded.len])).address;
+            const addr = (try Multiaddr.decode(encoded.bytes[0..encoded.len])).address;
             const expected = switch (case) {
                 0 => node.transport.sockets.localAddresses()[family].?,
                 1 => explicit[family],

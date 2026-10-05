@@ -4,6 +4,7 @@ const storage = @import("message_store.zig");
 const validation = @import("validation.zig");
 const topic = @import("topic.zig");
 const assert = std.debug.assert;
+const turn = @import("turn.zig");
 
 /// A synchronous borrow. Preflight and commit run under the processor lock on the
 /// network owner; no admission or validation mutation may intervene.
@@ -16,7 +17,7 @@ pub const Admission = struct {
     maximum_compressed: usize,
     compressed: []const u8,
     event: messages.MessageEvent,
-    workspace: *const @import("turn.zig").Workspace,
+    workspace: *const turn.Workspace,
     committed: bool = false,
     refusal: messages.StorageRefusal = .processor_capacity,
 

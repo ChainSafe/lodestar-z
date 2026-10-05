@@ -6,6 +6,7 @@ const multistream = @import("wire/multistream.zig");
 const stream_io = @import("stream_io.zig");
 const types = @import("types.zig");
 const DeadlineHeap = @import("deadline_heap.zig").DeadlineHeap;
+const limits = @import("quic/limits.zig");
 
 const assert = std.debug.assert;
 const Handle = Engine.Handle;
@@ -104,8 +105,8 @@ pub const Negotiator = struct {
     pub fn validateOptions(options: Options) Error!void {
         const negotiations_max = options.negotiations_max;
         if (options.outbound_control_reserved > negotiations_max) return error.InvalidLimits;
-        if (options.inbound_per_connection_max == 0 or options.inbound_per_connection_max > @import("quic/limits.zig").peer_streams_bidi or
-            options.inbound_connections > @import("quic/limits.zig").connections_max_ceiling) return error.InvalidLimits;
+        if (options.inbound_per_connection_max == 0 or options.inbound_per_connection_max > limits.peer_streams_bidi or
+            options.inbound_connections > limits.connections_max_ceiling) return error.InvalidLimits;
         if (options.outbound_reserved) |reserved| {
             if (reserved > negotiations_max or reserved < options.outbound_control_reserved) return error.InvalidLimits;
         }

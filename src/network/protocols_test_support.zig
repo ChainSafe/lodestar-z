@@ -3,16 +3,24 @@ const support = @import("quic/test_support.zig");
 const Protocols = @import("protocols.zig").Protocols;
 const Engine = @import("quic/Engine.zig");
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
+const identify_mod = @import("identify/root.zig");
+const KeyPair = @import("wire/keys.zig").KeyPair;
+const binding = @import("quic/binding.zig");
+const limits = @import("quic/limits.zig");
+const negotiate = @import("negotiate.zig");
+const ReqResp = @import("reqresp/ReqResp.zig");
+const Gossipsub = @import("gossipsub/Gossipsub.zig");
+const PeerId = @import("wire/peer_id.zig").PeerId;
 
 pub fn initProtocols(allocator: std.mem.Allocator, options: Protocols.Options, transport: *const Engine) !Protocols {
     const local = try options.identify.makeLocal(&transport.tls.local_peer_id, &transport.local);
     return Protocols.init(allocator, options, &local);
 }
 
-pub fn fixtureLocal(options: @import("identify/root.zig").Handler.Options) !@import("identify/root.zig").Local {
-    const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
-    const peer = @import("wire/peer_id.zig").PeerId.fromPublicKey(&key.publicKey());
-    return @import("identify/root.zig").Local.init(&peer, options.agent, options.protocol_version, if (options.addresses.len == 0) &.{support.client_address} else options.addresses);
+pub fn fixtureLocal(options: identify_mod.Handler.Options) !identify_mod.Local {
+    const key = try KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
+    const peer = PeerId.fromPublicKey(&key.publicKey());
+    return identify_mod.Local.init(&peer, options.agent, options.protocol_version, if (options.addresses.len == 0) &.{support.client_address} else options.addresses);
 }
 
 /// Admits gossip peers explicitly, as PeerManager does, and delivers gossip through inboxes.
@@ -33,7 +41,7 @@ pub const ProtocolsPair = struct {
     pub fn initWindow(self: *ProtocolsPair, client: Protocols.Options, server: Protocols.Options, stream_window: ?u64) !void {
         try self.pair.init(.{}, .{});
         errdefer self.pair.deinit();
-        if (stream_window) |window| @import("quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_remote(self.pair.server.config.ptr, window);
+        if (stream_window) |window| binding.c.quiche_config_set_initial_max_stream_data_bidi_remote(self.pair.server.config.ptr, window);
         self.client = try initProtocols(std.testing.allocator, client, &self.pair.client);
         errdefer self.client.deinit();
         self.server = try initProtocols(std.testing.allocator, server, &self.pair.server);
@@ -79,7 +87,7 @@ pub const ProtocolsPair = struct {
     }
 
     fn process(self: *ProtocolsPair, owner: *Protocols, transport: *Engine, outputs: Protocols.Outputs) Protocols.OutputCounts {
-        var events: [@import("quic/limits.zig").events_per_turn_max]Engine.Event = undefined;
+        var events: [limits.events_per_turn_max]Engine.Event = undefined;
         return owner.process(transport, self.pair.events(transport, &events), self.pair.now, outputs);
     }
 };
@@ -88,10 +96,10 @@ pub const ProtocolsPair = struct {
 /// marks the owner's row ready; gossip takes readiness events only. Lifecycle handling stays with
 /// the test.
 pub const Owners = struct {
-    negotiator: ?*@import("negotiate.zig").Negotiator = null,
-    identify: ?*@import("identify/root.zig").Handler = null,
-    reqresp: ?*@import("reqresp/ReqResp.zig") = null,
-    gossip: ?*@import("gossipsub/Gossipsub.zig") = null,
+    negotiator: ?*negotiate.Negotiator = null,
+    identify: ?*identify_mod.Handler = null,
+    reqresp: ?*ReqResp = null,
+    gossip: ?*Gossipsub = null,
 
     pub fn route(self: Owners, engine: *Engine, events: []const Engine.Event) void {
         for (events) |event| {

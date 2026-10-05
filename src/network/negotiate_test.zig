@@ -5,6 +5,8 @@ const Engine = @import("quic/Engine.zig");
 const multistream = @import("wire/multistream.zig");
 const Negotiator = @import("negotiate.zig").Negotiator;
 const support = @import("quic/test_support.zig");
+const types = @import("types.zig");
+const time = @import("time.zig");
 
 const Pair = support.Pair;
 const Outcome = Negotiator.Outcome;
@@ -418,7 +420,7 @@ test "negotiator preserves coalesced acceptance payload and FIN for the dialer" 
     try std.testing.expectEqual(@as(usize, 1), setup.pumpDialer(&supported, &outcomes));
     try std.testing.expectEqualStrings("pong", outcomes[0].result.ready.leftover);
     try std.testing.expect(outcomes[0].result.ready.fin);
-    try std.testing.expectEqual(@import("types.zig").Direction.outbound, outcomes[0].direction);
+    try std.testing.expectEqual(types.Direction.outbound, outcomes[0].direction);
     try std.testing.expect(setup.dialer.schedule(0).runnable);
     try std.testing.expectEqual(@as(usize, 0), setup.pumpDialer(&supported, &.{}));
     try std.testing.expect(!setup.dialer.schedule(0).runnable);
@@ -568,9 +570,9 @@ test "negotiation timed entry owns exact expiry below and above the default" {
         var outcomes: [1]Outcome = undefined;
         try std.testing.expectEqual(@as(usize, 0), negotiator.pump(&pair.client, pair.now, &supported, &outcomes));
         try std.testing.expectEqual(@as(?u64, due), schedule_test_support.wakeupMilliseconds(negotiator.schedule(1), pair.now.millis()));
-        pair.now.monotonic = @import("time.zig").milliseconds(due - 1);
+        pair.now.monotonic = time.milliseconds(due - 1);
         try std.testing.expectEqual(@as(usize, 0), negotiator.pump(&pair.client, pair.now, &supported, &outcomes));
-        pair.now.monotonic = @import("time.zig").milliseconds(due);
+        pair.now.monotonic = time.milliseconds(due);
         try std.testing.expectEqual(@as(usize, 1), negotiator.pump(&pair.client, pair.now, &supported, &outcomes));
         try std.testing.expectEqual(stream, outcomes[0].stream);
         try std.testing.expectEqual(.timeout, outcomes[0].result.failed);

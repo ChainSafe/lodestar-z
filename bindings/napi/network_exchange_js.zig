@@ -21,6 +21,13 @@ const peers_max = exchange_mod.peers_max;
 const serving_max = exchange_mod.serving_max;
 const settle_max = publications.capacity_max;
 const bytes = @import("network_js.zig").bytes;
+const network_peer_reports = @import("network_peer_reports.zig");
+const network_incoming_js = @import("network_incoming_js.zig");
+const network_js = @import("network_js.zig");
+const network_publication_js = @import("network_publication_js.zig");
+const network_command_js = @import("network_command_js.zig");
+const network_request_js = @import("network_request_js.zig");
+const network_gossip_js = @import("network_gossip_js.zig");
 
 pub fn parseDemand(value: Value) !Demand {
     _ = try object(value);
@@ -91,7 +98,7 @@ fn handle(value: Value) !g.Token {
 }
 
 fn reportCount(value: Value) !u8 {
-    const result = try decode.integer(value, @import("network_peer_reports.zig").report_max);
+    const result = try decode.integer(value, network_peer_reports.report_max);
     if (result == 0) return error.InvalidNetworkInteger;
     return @intCast(result);
 }
@@ -179,17 +186,17 @@ fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     const serving = try env.createArrayWithLength(selection.serving_count);
     for (selection.serving[0..selection.serving_count], 0..) |token, i| {
         const cell = &runtime.incoming.?.cells[token.index];
-        try serving.setElement(@intCast(i), try @import("network_incoming_js.zig").descriptorValue(runtime, token, cell));
+        try serving.setElement(@intCast(i), try network_incoming_js.descriptorValue(runtime, token, cell));
     }
     try result.setNamedProperty("serving", serving);
     const checks = try env.createArrayWithLength(selection.checks.len);
     for (selection.checks.tokens[0..selection.checks.len], selection.views[0..selection.checks.len], 0..) |token, *view, i| {
         const check = try env.createObject();
-        const reference = try @import("network_js.zig").handle(env, token.index, token.generation);
+        const reference = try network_js.handle(env, token.index, token.generation);
         try check.setNamedProperty("handle", reference);
         try check.setNamedProperty("root", try bytes(env, &view.root));
         try check.setNamedProperty("slot", try env.createBigintUint64(view.slot));
-        try check.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &view.identity));
+        try check.setNamedProperty("peerId", try network_js.peerIdValue(env, &view.identity));
         try check.setNamedProperty("topic", try env.createStringUtf8(view.topic[0..view.topic_len]));
         try checks.setElement(@intCast(i), check);
     }
@@ -197,22 +204,22 @@ fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     try result.setNamedProperty("gossip", if (selection.gossip) |*batch| try jobs(env, runtime, batch) else try env.getNull());
     const acknowledged = try env.createArrayWithLength(selection.acknowledged_count);
     for (selection.acknowledged[0..selection.acknowledged_count], 0..) |token, i| {
-        const reference = try @import("network_js.zig").handle(env, token.index, token.generation);
+        const reference = try network_js.handle(env, token.index, token.generation);
         try acknowledged.setElement(@intCast(i), reference);
     }
     try result.setNamedProperty("acknowledged", acknowledged);
     const completions = try env.createArrayWithLength(@intCast(selection.publication_count + selection.command_count + selection.request_count + selection.incoming_count));
     for (selection.publications[0..selection.publication_count], 0..) |token, i| {
-        try completions.setElement(@intCast(i), try @import("network_publication_js.zig").completion(env, token, runtime.publications.?.get(token).?));
+        try completions.setElement(@intCast(i), try network_publication_js.completion(env, token, runtime.publications.?.get(token).?));
     }
     for (selection.commands[0..selection.command_count], selection.publication_count..) |token, i| {
-        try completions.setElement(@intCast(i), try @import("network_command_js.zig").completion(env, runtime, token));
+        try completions.setElement(@intCast(i), try network_command_js.completion(env, runtime, token));
     }
     for (selection.requests[0..selection.request_count], selection.publication_count + selection.command_count..) |completion, i| {
-        try completions.setElement(@intCast(i), try @import("network_request_js.zig").completion(env, runtime, completion));
+        try completions.setElement(@intCast(i), try network_request_js.completion(env, runtime, completion));
     }
     for (selection.incoming[0..selection.incoming_count], selection.publication_count + selection.command_count + selection.request_count..) |completion, i| {
-        try completions.setElement(@intCast(i), try @import("network_incoming_js.zig").completion(env, completion));
+        try completions.setElement(@intCast(i), try network_incoming_js.completion(env, completion));
     }
     try result.setNamedProperty("completions", completions);
     try result.setNamedProperty("failure", try env.getNull());
@@ -224,7 +231,7 @@ fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
 fn closedValue(env: napi.Env, closed: Closed) !Value {
     const value = try env.createObject();
     try value.setNamedProperty("reason", try env.createStringUtf8(@tagName(closed.reason)));
-    if (closed.failure) |err| try value.setNamedProperty("error", try @import("network_js.zig").settled(env, @import("network_js.zig").errorValue(env, @errorName(err))));
+    if (closed.failure) |err| try value.setNamedProperty("error", try network_js.settled(env, network_js.errorValue(env, @errorName(err))));
     return value;
 }
 
@@ -239,7 +246,7 @@ fn jobs(env: napi.Env, runtime: *Runtime, batch: *const g.Batch) !Value {
     const table = &runtime.gossip.?;
     const messages = try env.createArrayWithLength(batch.len);
     for (batch.tokens[0..batch.len], 0..) |token, i| {
-        try messages.setElement(@intCast(i), try @import("network_gossip_js.zig").descriptor(runtime, token, &table.cells[token.index]));
+        try messages.setElement(@intCast(i), try network_gossip_js.descriptor(runtime, token, &table.cells[token.index]));
     }
     const result = try env.createObject();
     try result.setNamedProperty("messages", messages);

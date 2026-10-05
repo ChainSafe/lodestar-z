@@ -9,8 +9,17 @@ const protobuf = @import("protobuf.zig");
 const snappy = @import("snappy");
 const block = "/eth2/01020304/beacon_block/ssz_snappy";
 const attestation = "/eth2/01020304/beacon_attestation_0/ssz_snappy";
+const topic_fixture = @import("topic_fixture.zig");
+const test_pair = @import("test_pair.zig");
+const Reservations = @import("../reservations.zig").Reservations;
+const session_io = @import("session_io.zig");
+const topic_policy = @import("topic_policy.zig");
+const recovery = @import("recovery.zig");
+const turn_mod = @import("turn.zig");
+const topic_mod = @import("topic.zig");
+const frame = @import("frame.zig");
 const options: Gossipsub.Options = .{
-    .topic_policy = &.{@import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 })},
+    .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })},
     .random_seed = 1,
     .connected_capacity = 4,
     .retained_capacity = 8,
@@ -42,12 +51,12 @@ fn receive(g: *Gossipsub, source: u16, topic: []const u8, payload: []const u8) !
     var compressed: [8192]u8 = undefined;
     const len = try snappy.raw.compress(payload, &compressed);
     var turn = Gossipsub.beginPump(g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
-    var credit = @import("turn.zig").Credits.peer(&g.options);
+    var credit = turn_mod.Credits.peer(&g.options);
     try t.expectEqual(.done, g.receiveItem(g.sessions.ref(source), .{ .message = .{ .topic = topic, .data = compressed[0..len] } }, &turn, &credit));
 }
 
 test "gossip direct processor admission drains paged RPCs while the host queue stays full" {
-    var pair: @import("test_pair.zig").Pair = .{};
+    var pair: test_pair.Pair = .{};
     try pair.initOpts(options, options);
     defer pair.deinit();
     const g = pair.shared.server.gossipsub;
@@ -74,7 +83,7 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
         protobuf.writeMessage(&writer, compressed[0..len], block);
     }
     var framed: [32776]u8 = undefined;
-    const wire = @import("frame.zig").writeFrame(&framed, writer.written());
+    const wire = frame.writeFrame(&framed, writer.written());
     const source = g.sessions.find(pair.shared.handles.server).?;
     const row = &g.sessions.rows[source];
     const score = g.peers.score(row.logical, pair.shared.pair.now.millis());
@@ -107,7 +116,7 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
 
 test "gossip full processor preserves duplicate attribution without runtime allocations" {
     var backing = std.testing.FailingAllocator.init(t.allocator, .{});
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
+    var ledger: Reservations = .{ .backing = backing.allocator() };
     var g = try support.init(ledger.allocator(), options);
     defer g.deinit();
     const limits: processor.limits.Limits = @splat(.{ .items = 2, .bytes = 4096 });
@@ -127,7 +136,7 @@ test "gossip full processor preserves duplicate attribution without runtime allo
     try receive(&g, 1, block, "pending");
     try receive(&g, 1, block, "unexamined");
     var turn = Gossipsub.beginPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
-    var credit = @import("turn.zig").Credits.peer(&g.options);
+    var credit = turn_mod.Credits.peer(&g.options);
     try t.expectEqual(.done, g.receiveItem(g.sessions.ref(1), .{ .message = .{ .topic = block, .data = &.{7} } }, &turn, &credit));
     try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&g));
     try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .reject }, g.report(handle, .reject, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
@@ -179,8 +188,8 @@ test "gossip invalid verdict stops remaining publications in the same RPC" {
     const io = &g.sessions.rows[source.index].io;
     io.startRpc(writer.written());
     var turn = Gossipsub.beginPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
-    var credit = @import("turn.zig").Credits.peer(&g.options);
-    try t.expectEqual(.done, try @import("session_io.zig").processRpc(&g, source.index, &turn, &credit));
+    var credit = turn_mod.Credits.peer(&g.options);
+    try t.expectEqual(.done, try session_io.processRpc(&g, source.index, &turn, &credit));
     try t.expectEqual(@as(f64, 1), support.invalidDeliveries(&g));
     _ = g.sessions.finishFrame(io);
 }
@@ -193,7 +202,7 @@ fn vote(bytes: []u8, tag: u8, slot: u64) void {
 test "gossip admission rejects ineligible candidates without replacing work and commits valid replacements atomically" {
     var opts = options;
     const limits: processor.limits.Limits = @splat(.{ .items = 4, .bytes = 16384 });
-    var boundary = @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 });
+    var boundary = topic_fixture.bytes(.{ 1, 2, 3, 4 });
     for (&boundary.rules) |*rule| rule.ssz_max = 6000;
     opts.topic_policy = &.{boundary};
     opts.payload_limits = limits;
@@ -236,7 +245,7 @@ test "gossip admission rejects ineligible candidates without replacing work and 
 test "gossip admission leaves queued work intact when a host copy pins the required pages" {
     var opts = options;
     const limits: processor.limits.Limits = @splat(.{ .items = 4, .bytes = 8192 });
-    var boundary = @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 });
+    var boundary = topic_fixture.bytes(.{ 1, 2, 3, 4 });
     for (&boundary.rules) |*rule| rule.ssz_max = 6000;
     opts.topic_policy = &.{boundary};
     opts.payload_limits = limits;
@@ -280,7 +289,7 @@ test "gossip admission leaves queued work intact when a host copy pins the requi
 test "gossip admission after a refused victim selection retires only its own victims" {
     var opts = options;
     const limits: processor.limits.Limits = @splat(.{ .items = 4, .bytes = 8192 });
-    var boundary = @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 });
+    var boundary = topic_fixture.bytes(.{ 1, 2, 3, 4 });
     for (&boundary.rules) |*rule| rule.ssz_max = 6000;
     opts.topic_policy = &.{boundary};
     opts.payload_limits = limits;
@@ -337,9 +346,9 @@ const IwantFixture = struct {
         opts.validation_capacity = validation_capacity;
         opts.iwant_followup_ms = 12_000;
         const policy = comptime policy: {
-            var boundary = @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 });
+            var boundary = topic_fixture.bytes(.{ 1, 2, 3, 4 });
             for (&boundary.rules) |*rule| rule.ssz_max = 6000;
-            break :policy [_]@import("topic_policy.zig").Boundary{boundary};
+            break :policy [_]topic_policy.Boundary{boundary};
         };
         opts.topic_policy = &policy;
         self.g = try support.init(t.allocator, opts);
@@ -371,8 +380,8 @@ const IwantFixture = struct {
         io.startRpc(bytes);
         defer _ = self.g.sessions.finishFrame(io);
         var turn = Gossipsub.beginPump(&self.g, Now.fromMilliseconds(.{ .mono_ms = self.now, .unix_s = 0 }));
-        var credit = @import("turn.zig").Credits.peer(&self.g.options);
-        try t.expectEqual(.done, try @import("session_io.zig").processRpc(&self.g, source, &turn, &credit));
+        var credit = turn_mod.Credits.peer(&self.g.options);
+        try t.expectEqual(.done, try session_io.processRpc(&self.g, source, &turn, &credit));
         return self.g.options.work_per_pump - turn.budget.work;
     }
 
@@ -437,7 +446,7 @@ test "gossip identified receipts settle only their IWANT ID across providers des
         const payload = backing[0..if (case == .processor_bytes) 6000 else 240];
         const slot: u64 = if (case == .ineligible or case == .cached) 1000 else 96;
         vote(payload, 10, slot);
-        const x = @import("topic.zig").validMessageId(attestation, payload, .{});
+        const x = topic_mod.validMessageId(attestation, payload, .{});
         if (case == .cached) {
             _ = try f.message(0, payload);
             try t.expect(!f.g.messages.wasSeen(x, f.now));
@@ -511,7 +520,7 @@ test "gossip unidentified local loss cancels only its connection and charges rec
     try t.expectEqual(@as(usize, 1), f.g.recovery.len);
     const second_work = try f.message(0, &payload);
     try t.expect(first_work > second_work);
-    try t.expect(second_work >= @sizeOf(@import("recovery.zig").Batch));
+    try t.expect(second_work >= @sizeOf(recovery.Batch));
     try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
     try f.expire(0, 1);
 }
@@ -521,7 +530,7 @@ test "gossip invalid-domain and malformed receipts do not satisfy valid-domain p
     try f.init(64);
     defer f.deinit();
     const invalid = [_]u8{ 5, 0 };
-    const invalid_id = @import("topic.zig").invalidMessageId(attestation, &invalid, .{});
+    const invalid_id = topic_mod.invalidMessageId(attestation, &invalid, .{});
     try f.promises(invalid_id);
     _ = try f.receiveCompressed(0, &invalid);
     _ = try f.receiveCompressed(0, &.{0x80});
@@ -537,7 +546,7 @@ test "gossip deferred receipt neither settles nor forgives promises before resum
     defer f.deinit();
     var payload: [240]u8 = undefined;
     vote(&payload, 10, 1000);
-    const x = @import("topic.zig").validMessageId(attestation, &payload, .{});
+    const x = topic_mod.validMessageId(attestation, &payload, .{});
     try f.promises(x);
     var compressed: [512]u8 = undefined;
     const len = try snappy.raw.compress(&payload, &compressed);
@@ -548,13 +557,13 @@ test "gossip deferred receipt neither settles nor forgives promises before resum
     io.startRpc(writer.written());
     defer _ = f.g.sessions.finishFrame(io);
     var turn = Gossipsub.beginPump(&f.g, Now.fromMilliseconds(.{ .mono_ms = 300, .unix_s = 0 }));
-    var credit = @import("turn.zig").Credits.peer(&f.g.options);
+    var credit = turn_mod.Credits.peer(&f.g.options);
     turn.budget.work = 0;
-    try t.expectEqual(.credits, try @import("session_io.zig").processRpc(&f.g, 0, &turn, &credit));
+    try t.expectEqual(.credits, try session_io.processRpc(&f.g, 0, &turn, &credit));
     try t.expectEqual(@as(usize, 3), f.g.recovery.len);
     turn = Gossipsub.beginPump(&f.g, Now.fromMilliseconds(.{ .mono_ms = 301, .unix_s = 0 }));
-    credit = @import("turn.zig").Credits.peer(&f.g.options);
-    try t.expectEqual(.done, try @import("session_io.zig").processRpc(&f.g, 0, &turn, &credit));
+    credit = turn_mod.Credits.peer(&f.g.options);
+    try t.expectEqual(.done, try session_io.processRpc(&f.g, 0, &turn, &credit));
     try t.expectEqual(@as(usize, 1), f.g.recovery.len);
     try f.expire(1, 0);
 }
@@ -565,7 +574,7 @@ test "gossip refused receipt before IWANT write completion cannot rearm its ID o
     defer f.deinit();
     var payload: [240]u8 = undefined;
     vote(&payload, 10, 1000);
-    const x = @import("topic.zig").validMessageId(attestation, &payload, .{});
+    const x = topic_mod.validMessageId(attestation, &payload, .{});
     try f.request(0, x);
     try f.request(0, @splat(0xee));
     try f.request(1, x);
@@ -587,7 +596,7 @@ test "gossip refused receipt before IWANT write completion cannot rearm its ID o
 }
 
 test "gossip ineligible QUIC publication preserves sent IWANT promises for other IDs" {
-    var pair: @import("test_pair.zig").Pair = .{};
+    var pair: test_pair.Pair = .{};
     var opts = options;
     opts.iwant_followup_ms = 12_000;
     try pair.initOpts(opts, opts);
@@ -612,7 +621,7 @@ test "gossip ineligible QUIC publication preserves sent IWANT promises for other
         writer = protobuf.Writer.init(&ihave);
         protobuf.beginIhaveRpc(&writer, attestation, 1, id.len);
         protobuf.writeIhaveId(&writer, &id);
-        const wire = @import("frame.zig").writeFrame(&framed, writer.written());
+        const wire = frame.writeFrame(&framed, writer.written());
         try t.expectEqual(wire.len, try pair.shared.pair.client.write(pair.clientStream(), wire, false));
         for (0..32) |_| {
             try pair.pumpOnce();
@@ -627,7 +636,7 @@ test "gossip ineligible QUIC publication preserves sent IWANT promises for other
     var body: [1024]u8 = undefined;
     writer = protobuf.Writer.init(&body);
     protobuf.writeMessage(&writer, compressed[0..len], attestation);
-    const wire = @import("frame.zig").writeFrame(&framed, writer.written());
+    const wire = frame.writeFrame(&framed, writer.written());
     try t.expectEqual(wire.len, try pair.shared.pair.client.write(pair.clientStream(), wire, false));
     for (0..32) |_| {
         try pair.pumpOnce();
@@ -727,11 +736,11 @@ test "gossip eviction scan is work charged and leaves candidates untouched on ex
         const pages = f.table.store.free_pages;
         const protocol_pages = f.g.messages.store.free_pages;
         vote(&data, 9, 96);
-        const id = @import("topic.zig").validMessageId(attestation, &data, .{});
+        const id = topic_mod.validMessageId(attestation, &data, .{});
         var compressed: [8192]u8 = undefined;
         const length = try snappy.raw.compress(&data, &compressed);
         var turn = Gossipsub.beginPump(&f.g, Now.fromMilliseconds(.{ .mono_ms = f.now, .unix_s = 0 }));
-        var credit = @import("turn.zig").Credits.peer(&f.g.options);
+        var credit = turn_mod.Credits.peer(&f.g.options);
         // Stop either after inspecting the older other-kind cell or after selecting
         // and charging a victim, immediately before its repeated joint preflight.
         const cost = length * 2 + data.len * 2;
@@ -765,7 +774,7 @@ test "gossip local replacement suppresses push and IHAVE through the retained ig
     defer f.deinit();
     var data: [240]u8 = undefined;
     vote(&data, 1, 96);
-    const id = @import("topic.zig").validMessageId(attestation, &data, .{});
+    const id = topic_mod.validMessageId(attestation, &data, .{});
     _ = try f.message(0, &data);
     const victim = oldestReplaceable(&f.table);
     const handle = f.table.get(victim).?.handle;
@@ -805,7 +814,7 @@ test "gossip local replacement suppresses push and IHAVE through the retained ig
 test "gossip replacement preflights compressed and decoded pages across multiple victims" {
     var opts = options;
     const limits: processor.limits.Limits = @splat(.{ .items = 4, .bytes = 8192 });
-    var boundary = @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 });
+    var boundary = topic_fixture.bytes(.{ 1, 2, 3, 4 });
     for (&boundary.rules) |*rule| rule.ssz_max = 6000;
     opts.topic_policy = &.{boundary};
     opts.payload_limits = limits;
@@ -828,7 +837,7 @@ test "gossip replacement preflights compressed and decoded pages across multiple
         const bytes = data[0..if (i < 2) 513 else 240];
         random.random().bytes(bytes);
         std.mem.writeInt(u64, bytes[16..24], 1, .little);
-        ids[i] = @import("topic.zig").validMessageId(attestation, bytes, .{});
+        ids[i] = topic_mod.validMessageId(attestation, bytes, .{});
         try receive(&g, @intCast(i / 2), attestation, bytes);
         const index = table.expiry.tail;
         tokens[i] = .{ .index = @intCast(index), .generation = table.cells[index].generation };

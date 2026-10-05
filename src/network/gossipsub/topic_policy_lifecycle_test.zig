@@ -7,6 +7,15 @@ const validation = @import("validation.zig");
 const support = @import("test_support.zig");
 const name = "/eth2/01020304/beacon_block/ssz_snappy";
 const unknown = "/eth2/01020304/voluntary_exit/ssz_snappy";
+const SessionRef = @import("sessions.zig").SessionRef;
+const constants = @import("constants.zig");
+const messages = @import("messages.zig");
+const turn = @import("turn.zig");
+const snappy = @import("snappy");
+const session_io = @import("session_io.zig");
+const topic_mod = @import("topic.zig");
+const Reservations = @import("../reservations.zig").Reservations;
+const topic_fixture = @import("topic_fixture.zig");
 
 fn boundary() p.Boundary {
     var b: p.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
@@ -64,7 +73,7 @@ test "gossip accepted mesh membership does not invent a declared subscription ac
     const topic = g.overlay.findTopic(name).?;
     const grafted = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const declared = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
-    const now: @import("../types.zig").Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     support.control(&g, grafted.index, .{ .graft = name }, now);
     support.control(&g, declared.index, .{ .subscription = .{ .topic = name, .subscribe = true } }, now);
     const ns = &g.overlay.namespace.?;
@@ -84,8 +93,8 @@ test "gossip accepted mesh membership does not invent a declared subscription ac
     try std.testing.expect(!g.overlay.gossipRecipients(&context, topic, 1).isSet(grafted.index));
     try support.unsubscribe(&g, name);
     try std.testing.expect(!g.overlay.maintainFanout(&context, topic, true).isSet(grafted.index));
-    for ([_]@import("sessions.zig").SessionRef{ grafted, declared }) |peer| g.cancelWrites(peer);
-    g.last_now_ms = 1 + @max(g.options.retained_score_ms, @import("constants.zig").prune_backoff_ms, @import("constants.zig").fanout_ttl_ms);
+    for ([_]SessionRef{ grafted, declared }) |peer| g.cancelWrites(peer);
+    g.last_now_ms = 1 + @max(g.options.retained_score_ms, constants.prune_backoff_ms, constants.fanout_ttl_ms);
     context = g.overlayContext(g.last_now_ms);
     _ = g.overlay.maintainFanout(&context, topic, false);
     const pins = g.messages.topicPins();
@@ -105,21 +114,21 @@ test "topic policy incoming lengths precede decode work arena store and validati
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     try support.subscribe(&g, name);
-    const context: @import("messages.zig").Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options, .epoch = g.cycle.epoch };
-    const source: @import("messages.zig").Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = g.sessions.ref(peer.index), .connection = g.sessions.rows[peer.index].conn };
+    const context: messages.Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options, .epoch = g.cycle.epoch };
+    const source: messages.Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = g.sessions.ref(peer.index), .connection = g.sessions.rows[peer.index].conn };
     var peer_work: usize = g.options.decompress_per_peer_bytes;
     var work: usize = 10000;
     var large_used = false;
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
-    const workspace: @import("turn.zig").Workspace = .{ .scratch = g.msg_scratch, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .sink = g.message_sink };
+    const workspace: turn.Workspace = .{ .scratch = g.msg_scratch, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .sink = g.message_sink };
     var compressed: [100]u8 = undefined;
     const payload: [21]u8 = @splat('x');
     for ([_]usize{ 9, 21 }) |size| {
-        const len = try @import("snappy").raw.compress(payload[0..size], &compressed);
-        try std.testing.expectEqual(@import("messages.zig").Received{ .invalid = .ssz_size }, g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1));
-        try std.testing.expectEqual(@import("messages.zig").Received{ .invalid = .ssz_size }, g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = &.{@intCast(size)} }, 1));
+        const len = try snappy.raw.compress(payload[0..size], &compressed);
+        try std.testing.expectEqual(messages.Received{ .invalid = .ssz_size }, g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1));
+        try std.testing.expectEqual(messages.Received{ .invalid = .ssz_size }, g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = &.{@intCast(size)} }, 1));
         try std.testing.expectEqual(g.options.decompress_per_peer_bytes, peer_work);
         try std.testing.expectEqual(@as(usize, 10000), work);
         try std.testing.expect(!large_used);
@@ -127,7 +136,7 @@ test "topic policy incoming lengths precede decode work arena store and validati
         for (g.messages.validation.entries) |entry| try std.testing.expect(entry.state == .free);
     }
     for ([_]usize{ 10, 20 }) |size| {
-        const len = try @import("snappy").raw.compress(payload[0..size], &compressed);
+        const len = try snappy.raw.compress(payload[0..size], &compressed);
         const received = g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1);
         try std.testing.expect(received == .admitted);
         try std.testing.expectEqualSlices(u8, payload[0..size], inbox.last().bytes);
@@ -161,8 +170,8 @@ test "topic policy physical close clears bits while same connection stream repla
     const index = pair.shared.server.gossipsub.sessions.find(pair.shared.handles.server).?;
     const ns = &pair.shared.server.gossipsub.overlay.namespace.?;
     try std.testing.expect(ns.subscribed(index, 0));
-    @import("session_io.zig").resetInbound(pair.shared.server.gossipsub, &pair.shared.pair.server, index);
-    @import("session_io.zig").resetOutbound(pair.shared.server.gossipsub, &pair.shared.pair.server, index);
+    session_io.resetInbound(pair.shared.server.gossipsub, &pair.shared.pair.server, index);
+    session_io.resetOutbound(pair.shared.server.gossipsub, &pair.shared.pair.server, index);
     try std.testing.expect(ns.subscribed(index, 0));
     for (0..20) |_| try pair.pumpOnce();
     const client_index = pair.shared.client.gossipsub.sessions.find(pair.shared.handles.client).?;
@@ -226,18 +235,18 @@ test "topic policy real wire receives only bounded SSZ and keeps borrowed payloa
 }
 
 test "topic policy all 784 resident names keep the live subscription limit at 512" {
-    const boundaries = @import("topic_fixture.zig").hoodi();
+    const boundaries = topic_fixture.hoodi();
     var g = try support.init(std.testing.allocator, options(&boundaries));
     defer g.deinit();
-    var buffer: [@import("topic.zig").topic_max_len]u8 = undefined;
+    var buffer: [topic_mod.topic_max_len]u8 = undefined;
     var names: usize = 0;
     for (&boundaries) |*b| {
         inline for (@typeInfo(p.Kind).@"enum".fields) |field| {
             const kind: p.Kind = @enumFromInt(field.value);
             for (0..b.rules[field.value].count) |subnet| {
-                var short: [@import("topic.zig").name_max_len]u8 = undefined;
+                var short: [topic_mod.name_max_len]u8 = undefined;
                 const part = if (kind.countMax() == 1) field.name else try std.fmt.bufPrint(&short, field.name ++ "_{d}", .{subnet});
-                const topic_name = @import("topic.zig").build(b.digest, part, &buffer);
+                const topic_name = topic_mod.build(b.digest, part, &buffer);
                 try std.testing.expect(g.overlay.namespace.?.lookup(topic_name) != null);
                 if (names < 512) {
                     try support.subscribe(&g, topic_name);
@@ -259,8 +268,8 @@ test "topic policy all 784 resident names keep the live subscription limit at 51
 
 test "topic policy copied startup allocation prefixes and whole owner memory reconcile" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, startup, .{});
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
-    var boundaries = @import("topic_fixture.zig").hoodi();
+    var ledger: Reservations = .{ .backing = std.testing.allocator };
+    var boundaries = topic_fixture.hoodi();
     var g = try support.init(ledger.allocator(), options(&boundaries));
     defer g.deinit();
     const ns = &g.overlay.namespace.?;
@@ -273,7 +282,7 @@ test "topic policy copied startup allocation prefixes and whole owner memory rec
     const configured_bytes = ledger.bytes;
     var raw_options = options(&boundaries);
     raw_options.topic_policy = null;
-    var raw_ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var raw_ledger: Reservations = .{ .backing = std.testing.allocator };
     var raw = try Gossipsub.init(raw_ledger.allocator(), raw_options);
     defer raw.deinit();
     try std.testing.expectEqual(raw.memoryPlan().total_bytes - @sizeOf(Gossipsub), raw_ledger.bytes);
@@ -283,7 +292,7 @@ test "topic policy copied startup allocation prefixes and whole owner memory rec
 }
 
 fn startup(a: std.mem.Allocator) !void {
-    const boundaries = @import("topic_fixture.zig").hoodi();
+    const boundaries = topic_fixture.hoodi();
     var g = try support.init(a, options(&boundaries));
     defer g.deinit();
     try std.testing.expectEqual(@as(u16, 784), g.overlay.namespace.?.topic_count);
@@ -291,7 +300,7 @@ fn startup(a: std.mem.Allocator) !void {
 
 test "topic policy remembered ordinals remain independent of retained validation generations" {
     var boundaries: [4]p.Boundary = undefined;
-    for (&boundaries, 0..) |*b, i| b.* = @import("topic_fixture.zig").full(.{ @intCast(i + 1), 2, 3, 4 });
+    for (&boundaries, 0..) |*b, i| b.* = topic_fixture.full(.{ @intCast(i + 1), 2, 3, 4 });
     var g = try support.init(std.testing.allocator, options(&boundaries));
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
@@ -299,22 +308,22 @@ test "topic policy remembered ordinals remain independent of retained validation
     try support.subscribe(&g, name);
     const old = g.overlay.findTopic(name).?;
     const generation = g.overlay.rows[old].generation;
-    const context: @import("messages.zig").Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options, .epoch = g.cycle.epoch };
-    const source: @import("messages.zig").Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = g.sessions.ref(peer.index), .connection = g.sessions.rows[peer.index].conn };
+    const context: messages.Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options, .epoch = g.cycle.epoch };
+    const source: messages.Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = g.sessions.ref(peer.index), .connection = g.sessions.rows[peer.index].conn };
     var work: usize = 10000;
     var peer_work: usize = g.options.decompress_per_peer_bytes;
     var large_used = false;
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
-    const workspace: @import("turn.zig").Workspace = .{ .scratch = g.msg_scratch, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .sink = g.message_sink };
+    const workspace: turn.Workspace = .{ .scratch = g.msg_scratch, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .sink = g.message_sink };
     var compressed: [64]u8 = undefined;
-    const len = try @import("snappy").raw.compress("0123456789", &compressed);
+    const len = try snappy.raw.compress("0123456789", &compressed);
     try std.testing.expect(g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1) == .admitted);
     const received = inbox.last();
     try support.unsubscribe(&g, name);
     g.sessions.rows[peer.index].io.tx.subscription_dirty.unset(old);
-    var buffer: [@import("topic.zig").topic_max_len]u8 = undefined;
+    var buffer: [topic_mod.topic_max_len]u8 = undefined;
     for (0..511) |i| {
         const next = try std.fmt.bufPrint(&buffer, "/eth2/{x:0>2}020304/data_column_sidecar_{d}/ssz_snappy", .{ i / 128 + 1, i % 128 });
         try support.subscribe(&g, next);

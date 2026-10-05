@@ -2,6 +2,8 @@ const Topics = @import("metrics.zig").Topics;
 const policy = @import("topic_policy.zig");
 const std = @import("std");
 const topic = @import("topic.zig");
+const metrics = @import("metrics.zig");
+const registry = @import("../metrics/registry.zig");
 
 test "metric topic labels have a fixed vocabulary and canonical subnet bounds" {
     try std.testing.expectEqual(@as(u16, 63), topic.Name.parse("beacon_attestation_63").?.subnet);
@@ -14,9 +16,9 @@ test "metric topic labels have a fixed vocabulary and canonical subnet bounds" {
     try std.testing.expectEqual(@as(u64, 1), counters.counts[policy.kind_count].accepted);
 }
 
-fn render(populations: *const @import("metrics.zig").ScorePopulations, buffer: []u8) ![]const u8 {
+fn render(populations: *const metrics.ScorePopulations, buffer: []u8) ![]const u8 {
     var writer = std.Io.Writer.fixed(buffer);
-    var encoder: @import("../metrics/registry.zig").Encoder = .{ .writer = &writer };
+    var encoder: registry.Encoder = .{ .writer = &writer };
     try populations.write(&encoder);
     return writer.buffered();
 }

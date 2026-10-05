@@ -12,6 +12,9 @@ const Protocol = protocol.Protocol;
 const Now = types.Now;
 const Router = @import("../router.zig").Router;
 const RequestOptions = ReqResp.RequestOptions;
+const RequestState = @import("RequestState.zig");
+const PeerId = @import("../wire/peer_id.zig").PeerId;
+const index_list = @import("../index_list.zig");
 
 const Event = ReqResp.Event;
 const Failure = ReqResp.Failure;
@@ -19,16 +22,16 @@ const reads_per_pump_max = RequestIO.reads_per_pump_max;
 
 const Client = @This();
 
-request: @import("RequestState.zig") = .{},
+request: RequestState = .{},
 phase: ReqResp.RequestPhase = .negotiation,
 timeouts: ReqResp.RequestOptions.Timeouts = .{},
 phase_deadline_ms: u64 = 0,
-identity: @import("../wire/peer_id.zig").PeerId = undefined,
+identity: PeerId = undefined,
 protocol_chunks_max: u32 = 1,
 host_hold_started_ms: ?u64 = null,
 host_held_ms: u64 = 0,
 /// On the owner's list for this slot's connection index while occupied.
-conn_link: @import("../index_list.zig").Link = .{},
+conn_link: index_list.Link = .{},
 
 pub fn complete(self: *Client, owner: *ReqResp, index: u16, event: Event, now: Now) void {
     owner.complete(&self.request, index, event, .{ .phase_name = @tagName(self.phase) }, now);
@@ -223,7 +226,7 @@ fn resetResponseDecoder(slot: *Client, owner: *const ReqResp) void {
 }
 
 pub const Start = struct {
-    identity: @import("../wire/peer_id.zig").PeerId,
+    identity: PeerId,
     stream: Engine.StreamHandle,
     protocol: Protocol,
     request_ssz: []const u8,

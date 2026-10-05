@@ -6,6 +6,7 @@ const n = @import("network");
 const r = @import("network_runtime.zig");
 const requests = @import("network_requests.zig");
 const Runtime = r.Runtime;
+const network_js = @import("network_js.zig");
 
 const bytes = @import("network_js.zig").bytes;
 const errorValue = @import("network_js.zig").errorValue;
@@ -59,7 +60,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     const cell = runtime.requests.?.get(token).?;
     cell.peer = identity;
     cell.options = request_options;
-    const value = try @import("network_js.zig").handle(runtime.env, token.index, token.generation);
+    const value = try network_js.handle(runtime.env, token.index, token.generation);
     try decode.bytes(data, cell.input);
     runtime.lock();
     defer runtime.unlock();
@@ -140,7 +141,7 @@ pub fn completion(env: napi.Env, runtime: *Runtime, delivered: requests.Completi
     const cell = &runtime.requests.?.cells[delivered.token.index];
     const object = try env.createObject();
     try object.setNamedProperty("family", try env.createStringUtf8("request"));
-    try object.setNamedProperty("handle", try @import("network_js.zig").handle(env, delivered.token.index, delivered.token.generation));
+    try object.setNamedProperty("handle", try network_js.handle(env, delivered.token.index, delivered.token.generation));
     switch (delivered.value) {
         .chunk => |chunk| {
             const value = try env.createObject();
@@ -155,7 +156,7 @@ pub fn completion(env: napi.Env, runtime: *Runtime, delivered: requests.Completi
         .terminal => |terminal| if (terminal == .done)
             try object.setNamedProperty("done", try env.getBoolean(true))
         else
-            try object.setNamedProperty("error", try @import("network_js.zig").settled(env, terminalError(env, terminal, cell))),
+            try object.setNamedProperty("error", try network_js.settled(env, terminalError(env, terminal, cell))),
     }
     return object;
 }

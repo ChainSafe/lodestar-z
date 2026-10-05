@@ -2,6 +2,7 @@ const std = @import("std");
 const Sockets = @import("sockets.zig").Sockets;
 const Address = @import("address.zig").Address;
 const net = std.Io.net;
+const fault_io = @import("fault_io");
 
 const loopbacks: Sockets.Bindings = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
 
@@ -341,7 +342,7 @@ test "UDP native retry cancellation preserves a same-family successful prefix" {
 test "UDP leaves sends to a provider that replaces them" {
     var sockets = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sockets.close(std.testing.io);
-    var faults: @import("fault_io") = .{ .send = .{} };
+    var faults: fault_io = .{ .send = .{} };
     const destination = Address.fromNetwork(sockets.primary().address);
     try std.testing.expectError(error.AddressFamilyUnsupported, sockets.sendTo(faults.io(), destination, "provider", 16));
     try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
@@ -388,7 +389,7 @@ test "UDP ready reads leave a provider that replaces timed receives on its own r
     var sockets = try Sockets.bind(std.testing.io, loopbacks);
     defer sockets.close(std.testing.io);
     for (sockets.values) |target| try target.?.send(std.testing.io, &target.?.address, "provider");
-    var faults: @import("fault_io") = .{};
+    var faults: fault_io = .{};
     var buffer: [16]u8 = undefined;
     var ready: [2]bool = .{ true, false };
     try std.testing.expectEqualStrings("provider", (try sockets.receiveReady(faults.io(), &buffer, &ready)).?.data);

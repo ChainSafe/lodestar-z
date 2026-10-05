@@ -1,5 +1,6 @@
 const std = @import("std");
 const policy = @import("../gossipsub/topic_policy.zig");
+const collectors = @import("collectors.zig");
 pub const histogram = @import("histogram.zig");
 pub const registry = @import("registry.zig");
 pub const bridge = @import("bridge.zig");
@@ -22,5 +23,5 @@ pub fn textCapacity(boundaries: []const policy.Boundary) usize {
 
 pub fn write(context: *const Context, writer: *std.Io.Writer) prom.Error!void {
     var encoder: prom.Encoder = .{ .writer = writer };
-    try @import("collectors.zig").registry.collect(context, &encoder);
+    try collectors.registry.collect(context, &encoder);
 }

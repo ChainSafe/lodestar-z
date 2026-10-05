@@ -3,6 +3,7 @@ const ForkSeq = @import("config").ForkSeq;
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const Protocol = @import("protocol.zig").Protocol;
 const quota_config = @import("quotas.zig");
+const constants = @import("constants.zig");
 
 pub const ByFork = [ForkSeq.count]quota_config.Quotas;
 pub const Options = struct {
@@ -10,8 +11,8 @@ pub const Options = struct {
     peer: ByFork,
     global: ByFork,
     starts: quota_config.Quota = .{
-        .tokens = Protocol.count * @import("constants.zig").MAX_CONCURRENT_REQUESTS,
-        .period_ms = @import("constants.zig").progress_timeout_ms_default,
+        .tokens = Protocol.count * constants.MAX_CONCURRENT_REQUESTS,
+        .period_ms = constants.progress_timeout_ms_default,
     },
 };
 pub const Decision = enum { allowed, peer_quota, global_quota, identity_capacity };

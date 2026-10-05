@@ -1,6 +1,8 @@
 const std = @import("std");
 const ct = @import("consensus_types");
 const t = @import("control_values.zig");
+const types = @import("types.zig");
+const RequestHandle = @import("reqresp/events.zig").RequestHandle;
 pub const Protocol = @import("reqresp/protocol.zig").Protocol;
 /// Work selected by peer policy and executed by the control protocol.
 pub const Probe = struct {
@@ -11,9 +13,9 @@ pub const Probe = struct {
 /// Immutable facts from one matched outbound control operation. Buffers and operation-table
 /// ownership stay in the protocol; peer policy uses these facts with the decoded event.
 pub const ControlReply = struct {
-    peer: @import("types.zig").PeerRef,
-    conn: @import("types.zig").Handle,
-    request: ?@import("reqresp/events.zig").RequestHandle = null,
+    peer: types.PeerRef,
+    conn: types.Handle,
+    request: ?RequestHandle = null,
     protocol: Protocol,
     cancelled: bool = false,
     received: bool = false,

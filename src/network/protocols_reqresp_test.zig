@@ -5,6 +5,9 @@ const protocol = @import("reqresp/protocol.zig");
 const reqresp = @import("reqresp/ReqResp.zig");
 const Engine = @import("quic/Engine.zig");
 const harness = @import("reqresp/test_pair.zig");
+const policy_fixture = @import("reqresp/policy_fixture.zig");
+const admission_fixture = @import("reqresp/admission_fixture.zig");
+const protocols_test_support = @import("protocols_test_support.zig");
 
 const Event = reqresp.Event;
 const Protocol = protocol.Protocol;
@@ -61,10 +64,10 @@ test "protocol stack round trips a status request through the collapsed host loo
 }
 
 test "protocol stack reclaims inbound sinks across more requests than it has slots" {
-    const admission: reqresp.Options.Admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{
+    const admission: reqresp.Options.Admission = .{ .policy = policy_fixture.config(), .limits = .{
         .identities = 2,
-        .peer = @import("reqresp/admission_fixture.zig").quotas(1_000, 1_000),
-        .global = @import("reqresp/admission_fixture.zig").quotas(1_000, 1_000),
+        .peer = admission_fixture.quotas(1_000, 1_000),
+        .global = admission_fixture.quotas(1_000, 1_000),
     } };
     var setup: Pair = .{};
     try setup.init(.{ .outbound_max = 4, .serving_max = 4 }, .{ .outbound_max = 4, .serving_max = 4, .admission = admission });
@@ -211,7 +214,7 @@ test "protocol stack request work remains bounded and rotates between live strea
         try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
     }
     try setup.shared.pair.pump();
-    @import("protocols_test_support.zig").forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
+    protocols_test_support.forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     var events: [2]Event = undefined;
     var delivered: [2]reqresp.RequestHandle = undefined;
@@ -284,7 +287,7 @@ test "protocol stack reqresp slot is serviced only after a stream event or its d
 
 test "protocol stack reqresp deadline fires on time while more slots than the pump budget stay ready" {
     // One client identity opens every stream, so its request starts need a larger burst.
-    var admission = try reqresp.Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 8);
+    var admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 128, 128, 8);
     admission.limits.starts.tokens = 64;
     var setup: Pair = .{};
     try setup.init(.{}, .{ .progress_timeout_ms = 1_000, .admission = admission });

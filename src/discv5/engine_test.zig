@@ -9,6 +9,7 @@ const packet = @import("wire/packet.zig");
 const engine_session = @import("SessionStore.zig");
 const test_support = @import("test_support.zig");
 const types = @import("types.zig");
+const Admission = @import("Admission.zig");
 
 const engineConfig = test_support.engineConfig;
 const keyPair = test_support.keyPair;
@@ -40,7 +41,7 @@ test "unsolicited NODES fails before record validation" {
     test_support.installSession(&pair.node_b, pair.peerA(), 0x55);
     const received = try receiveMalformedNodes(&pair);
     try std.testing.expectEqual(types.RejectReason.unsolicited_response, received.rejected);
-    const record_stage = @intFromEnum(@import("Admission.zig").Stage.record);
+    const record_stage = @intFromEnum(Admission.Stage.record);
     try std.testing.expectEqual(@as(u64, 0), pair.node_a.channel.admission.global[record_stage].charged_until_ms);
     try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
 }
@@ -245,7 +246,7 @@ test "engine reports source admission pressure without a local failure" {
     defer pair.deinit();
     const sealed = try pair.node_a.channel.seal(&pair.a_to_b, pair.peerB(), "ping", &sealEntropy(0x10), 0);
     var source = pair.address_a;
-    for (0..@import("Admission.zig").source_quota.burst) |i| {
+    for (0..Admission.source_quota.burst) |i| {
         source.ip4.port = @intCast(9_000 + i);
         const outcome = try pair.node_b.receive(&pair.b_to_a, pair.a_to_b[0..sealed.packet_length], source, receiveArgs(0, 0x30), &pair.scratch_b);
         try std.testing.expectEqual(@as(u16, 63), outcome.accepted.packet_length);

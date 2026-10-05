@@ -18,6 +18,13 @@ const peers_mod = @import("peer_book.zig");
 const sessions_mod = @import("sessions.zig");
 const Engine = @import("../quic/Engine.zig");
 const types = @import("../types.zig");
+const messages_mod = @import("messages.zig");
+const heartbeat_cycle = @import("heartbeat_cycle.zig");
+const outbox_mod = @import("outbox.zig");
+const metrics = @import("metrics.zig");
+const logging = @import("../logging.zig");
+const delivery = @import("delivery.zig");
+const PeerId = @import("../wire/peer_id.zig").PeerId;
 
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -31,13 +38,13 @@ options: Options,
 memory: MemoryPlan,
 sessions: *Sessions,
 peers: peers_mod.PeerBook,
-messages: @import("messages.zig").Messages,
+messages: messages_mod.Messages,
 /// The sink and its context must outlive every pump that uses them.
 message_sink: ?*const MessageSink = null,
-cycle: @import("heartbeat_cycle.zig").Cycle = .{},
+cycle: heartbeat_cycle.Cycle = .{},
 /// The clock that bounds each maintenance slice.
 clock: std.Io = std.Io.Threaded.global_single_threaded.io(),
-retired_queue_drops: [@import("outbox.zig").drop_reason_count]u64 = @splat(0),
+retired_queue_drops: [outbox_mod.drop_reason_count]u64 = @splat(0),
 overlay: *overlay_mod.Overlay,
 heartbeat_at: u64 = 0,
 opportunistic_at: u64 = 0,
@@ -45,10 +52,10 @@ last_now_ms: u64 = 0,
 msg_scratch: []u8,
 recovery: Recovery,
 counters: Counters = .{},
-topic_metrics: @import("metrics.zig").Topics = .{},
-iwant_outcomes: [@import("metrics.zig").iwant_outcome_count]u64 = @splat(0),
-delivery_metrics: @import("metrics.zig").Delivery = .{},
-validation_time: @import("metrics.zig").ValidationTime = .{},
+topic_metrics: metrics.Topics = .{},
+iwant_outcomes: [metrics.iwant_outcome_count]u64 = @splat(0),
+delivery_metrics: metrics.Delivery = .{},
+validation_time: metrics.ValidationTime = .{},
 
 pub const Options = @import("options.zig").Options;
 
@@ -127,7 +134,7 @@ pub fn coverageRevision(self: *const Gossipsub) [4]u64 {
     return .{ self.overlay.subscription_revision, if (self.overlay.namespace) |*ns| ns.revision else 0, self.peers.scores.revision, self.cycle.epoch };
 }
 
-pub fn coverageSubscriptions(self: *Gossipsub, conn: Handle, digest: [4]u8, local: *const @import("topic_policy.zig").Subnets, now: Now) @import("topic_policy.zig").Subnets {
+pub fn coverageSubscriptions(self: *Gossipsub, conn: Handle, digest: [4]u8, local: *const topic_policy.Subnets, now: Now) topic_policy.Subnets {
     const index = self.sessions.find(conn) orelse return .{};
     if (self.sessions.rows[index].outStream() == null) return .{};
     var result = self.overlay.subnetSubscriptions(index, digest);
@@ -175,7 +182,7 @@ pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
     var peers = try peers_mod.PeerBook.init(allocator, &options);
     errdefer peers.deinit(allocator);
 
-    var messages = try @import("messages.zig").Messages.init(allocator, &options, &layout);
+    var messages = try messages_mod.Messages.init(allocator, &options, &layout);
     errdefer messages.deinit(allocator, &peers);
     const msg_scratch = try allocator.alloc(u8, constants.GOSSIP_MAX_SIZE);
     errdefer allocator.free(msg_scratch);
@@ -328,7 +335,7 @@ pub fn publishWithOptions(self: *Gossipsub, topic_str: []const u8, ssz: []const 
     return result;
 }
 
-fn messageContext(self: *Gossipsub) @import("messages.zig").Context {
+fn messageContext(self: *Gossipsub) messages_mod.Context {
     return .{ .overlay = self.overlay, .peers = &self.peers, .options = &self.options, .epoch = self.cycle.epoch };
 }
 
@@ -345,7 +352,7 @@ pub fn report(self: *Gossipsub, handle: ValidationHandle, verdict: Verdict, now:
             .ignore => counts.ignored +|= 1,
         }
         self.validation_time.observe(now.millis() -| applied.admitted_ms);
-        if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, applied.id, @tagName(verdict), applied.topicString(), @import("../logging.zig").peer(&applied.source), now.millis() -| applied.admitted_ms });
+        if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, applied.id, @tagName(verdict), applied.topicString(), logging.peer(&applied.source), now.millis() -| applied.admitted_ms });
         if (applied.forward) |forward| {
             if (self.deliver(self.overlay.mesh(forward.topic.index), forward.message, forward.source, now.millis()).queued > 0) counts.forwarded +|= 1;
         }
@@ -359,7 +366,7 @@ fn deliver(self: *Gossipsub, peers: *const sessions_mod.PeerSet, h: storage.Hand
     const id = self.messages.store.get(h).?.id;
     const attribution = if (source != null) self.messages.validation.find(id, now_ms) else null;
     var result: PublishOutcome = .{};
-    const origin: @import("delivery.zig").Origin = if (source == null) .publication else .forward;
+    const origin: delivery.Origin = if (source == null) .publication else .forward;
     var recipients = peers.*;
     const topic = self.overlay.findTopic(self.messages.store.get(h).?.topicString()).?;
     if (source != null) for (self.sessions.rows, 0..) |*row, peer| {
@@ -550,7 +557,7 @@ pub fn advanceWrite(self: *Gossipsub, session: sessions_mod.SessionRef, written:
     if (self.sessions.rows[session.index].io.tx.advance(&self.messages.store, written)) |completion| self.writeCompleted(session, completion, now_ms);
 }
 
-pub fn writeCompleted(self: *Gossipsub, session: sessions_mod.SessionRef, completion: @import("outbox.zig").Completion, now_ms: u64) void {
+pub fn writeCompleted(self: *Gossipsub, session: sessions_mod.SessionRef, completion: outbox_mod.Completion, now_ms: u64) void {
     if (!self.sessions.matches(session)) return;
     const peer = session.index;
     switch (completion) {
@@ -559,7 +566,7 @@ pub fn writeCompleted(self: *Gossipsub, session: sessions_mod.SessionRef, comple
     }
 }
 
-fn deliveryLimits(self: *const Gossipsub) @import("delivery.zig").Limits {
+fn deliveryLimits(self: *const Gossipsub) delivery.Limits {
     return .{ .bytes = self.options.tx_peer_bytes, .local_bytes = self.options.tx_local_bytes };
 }
 
@@ -585,7 +592,7 @@ pub fn scoreSnapshot(self: *Gossipsub, conn: Handle, now: Now) ?f64 {
     return self.peerScore(index, now.millis());
 }
 
-pub fn unmarkDirect(self: *Gossipsub, identity: *const @import("../wire/peer_id.zig").PeerId) void {
+pub fn unmarkDirect(self: *Gossipsub, identity: *const PeerId) void {
     const peer = self.peers.find(identity) orelse return;
     self.peers.rows[peer.index].direct = false;
 }
@@ -605,7 +612,7 @@ fn onMessage(self: *Gossipsub, index: u16, msg: protobuf.Message, turn: *Turn, p
     const now = turn.now;
     const context = self.messageContext();
     const workspace = turn.workspace(peer);
-    const source: @import("messages.zig").Source = .{ .peer = self.logical(index), .session = self.sessions.ref(index), .connection = self.sessions.rows[index].conn };
+    const source: messages_mod.Source = .{ .peer = self.logical(index), .session = self.sessions.ref(index), .connection = self.sessions.rows[index].conn };
     const result = self.messages.receive(&context, &workspace, &source, msg, now.millis());
     // The turn offers a message refused for work again, so only its final outcome counts.
     if (result == .deferred) return .credits;

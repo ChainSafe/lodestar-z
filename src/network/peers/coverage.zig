@@ -1,6 +1,8 @@
+const std = @import("std");
 const preset = @import("preset");
 const t = @import("types.zig");
 const Subnets = @import("../gossipsub/topic_policy.zig").Subnets;
+const custody = @import("custody.zig");
 
 pub fn gossip(subscriptions: *const Subnets, context: *const t.ForkContext) t.Coverage {
     var result: t.Coverage = .{ .attnets = subscriptions.attnets, .syncnets = subscriptions.syncnets };
@@ -13,9 +15,9 @@ pub fn gossip(subscriptions: *const Subnets, context: *const t.ForkContext) t.Co
     return result;
 }
 
-pub fn stable(actual: *const t.Coverage, metadata: *const t.Metadata, sampled: ?@import("custody.zig").Groups) t.Coverage {
+pub fn stable(actual: *const t.Coverage, metadata: *const t.Metadata, sampled: ?custody.Groups) t.Coverage {
     return .{
-        .attnets = actual.attnets & @import("std").mem.readInt(u64, &metadata.attnets, .little),
+        .attnets = actual.attnets & std.mem.readInt(u64, &metadata.attnets, .little),
         .syncnets = actual.syncnets & @as(u4, @intCast(metadata.syncnets)),
         .groups = actual.groups.intersectWith(sampled orelse .initEmpty()),
     };

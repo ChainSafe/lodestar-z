@@ -10,6 +10,7 @@ const incoming_mod = r.incoming_mod;
 const projection = r.projection;
 const support = @import("network_test_support.zig");
 const exchange = @import("network_exchange.zig");
+const network_wake = @import("network_wake.zig");
 
 test "stop preserves latched success and cancels accepted nonterminal commands" {
     var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
@@ -65,7 +66,7 @@ test "one runtime is live per process until its last release" {
 
 test "a payload release while the owner waits for budget wakes the owner once" {
     var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
-    runtime.wake = try @import("network_wake.zig").Wake.init();
+    runtime.wake = try network_wake.Wake.init();
     defer runtime.wake.?.deinit();
     runtime.payload_budget.limit = 64;
     var readable = [_]std.c.pollfd{.{ .fd = runtime.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 }};

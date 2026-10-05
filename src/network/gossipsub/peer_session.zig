@@ -6,6 +6,8 @@ const StreamHandle = @import("../quic/Engine.zig").StreamHandle;
 const MessageId = @import("topic.zig").MessageId;
 const Version = @import("protocol.zig").Version;
 const Options = @import("options.zig").Options;
+const PeerIo = @import("peer_io.zig").PeerIo;
+const peer_book = @import("peer_book.zig");
 pub const Outbound = union(enum) {
     /// No scheduled opening. New inbound stream evidence may return this to pending.
     none,
@@ -17,11 +19,11 @@ pub const Outbound = union(enum) {
 };
 
 pub const Session = struct {
-    io: @import("peer_io.zig").PeerIo,
+    io: PeerIo,
     outbound: Outbound = .none,
     /// Membership of `Sessions.ready`.
     ready_link: index_list.Link = .{},
-    logical: @import("peer_book.zig").Ref = undefined,
+    logical: peer_book.Ref = undefined,
     active: bool = false,
     generation: u64 = 0,
     conn: Handle = undefined,

@@ -7,7 +7,9 @@ const Handle = @import("../quic/Engine.zig").Handle;
 const MessageId = @import("topic.zig").MessageId;
 const assert = std.debug.assert;
 const none = std.math.maxInt(u16);
-const bucket_count = @import("mcache.zig").indexCapacity(constants.promises_cap);
+const bucket_count = mcache.indexCapacity(constants.promises_cap);
+const outbox_mod = @import("outbox.zig");
+const mcache = @import("mcache.zig");
 
 pub const promises_per_peer = constants.max_ihave_per_heartbeat * constants.gossip_ids_max;
 
@@ -140,7 +142,7 @@ pub const Recovery = struct {
     }
 
     /// Commit a nonempty subset admitted by filterPending, without intervening recovery mutation.
-    pub fn requestBatch(self: *Recovery, peers: *Peers, outbox: *@import("outbox.zig").Outbox, scratch: *@import("outbox.zig").ControlScratch, ids: []const MessageId, peer: PeerRef, connection: Handle, random: std.Random, followup_ms: u64, now: u64) error{OutboxFull}!void {
+    pub fn requestBatch(self: *Recovery, peers: *Peers, outbox: *outbox_mod.Outbox, scratch: *outbox_mod.ControlScratch, ids: []const MessageId, peer: PeerRef, connection: Handle, random: std.Random, followup_ms: u64, now: u64) error{OutboxFull}!void {
         assert(ids.len > 0 and ids.len <= constants.gossip_ids_max and ids.len <= self.available());
         const index = self.batch_len;
         self.addBatch(peers, ids, peer, connection, 0, random.uintLessThan(usize, ids.len), now +| followup_ms);

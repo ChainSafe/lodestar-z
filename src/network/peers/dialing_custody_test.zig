@@ -3,6 +3,9 @@ const mod = @import("dialing.zig");
 const catalog_mod = @import("catalog.zig");
 const t = @import("types.zig");
 const a = std.testing.allocator;
+const custody_mod = @import("custody.zig");
+const Reservations = @import("../reservations.zig").Reservations;
+const policy = @import("policy.zig");
 
 const support = @import("dialing_test_support.zig");
 const discovered = support.discovered;
@@ -18,7 +21,7 @@ test "peer discovery uses the configured custody minimum only for an absent ENR 
     var candidate = try discovered(1, 0);
     try q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, 0);
     try std.testing.expectEqual(@as(u64, 4), candidates[0].custody_work.?.custody_count);
-    var budget: u16 = @import("custody.zig").hashes_per_turn;
+    var budget: u16 = custody_mod.hashes_per_turn;
     try std.testing.expect(!catalog.advanceCustody(&context, 0, 60_000, &budget));
     q.configureSelection(&catalog, &wanted, false, &context, 0);
     try std.testing.expectEqual(@as(usize, 4), candidates[0].custody_work.?.walk.groups.count());
@@ -42,7 +45,7 @@ test "peer discovery uses the configured custody minimum only for an absent ENR 
 test "peer dial custody diagnostics count unfinished derivations without mutating retained coverage" {
     const custody = @import("custody.zig");
     var backing = std.testing.FailingAllocator.init(a, .{});
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
+    var ledger: Reservations = .{ .backing = backing.allocator() };
     var q = try mod.Dialing.init(.{ .capacity = 4, .seed = 4 });
     var catalog = try initCatalog(ledger.allocator(), q.options);
     defer catalog.deinit(ledger.allocator());
@@ -243,7 +246,7 @@ test "peer dial actual custody gives no utility for connected sampling only grou
     var candidate = try discovered(1, 0);
     candidate.custody_group_count = 4;
     const context: t.ForkContext = .{ .fork = .fulu, .minimum_sampling_groups = 8 };
-    var pair = try @import("custody.zig").SamplingDerivation.init(&candidate.node_id, .{ .groups = 128, .columns = 128 }, 4, 8);
+    var pair = try custody_mod.SamplingDerivation.init(&candidate.node_id, .{ .groups = 128, .columns = 128 }, 4, 8);
     const derived = (try pair.step(64)).?;
     var wanted: t.Coverage = .{ .groups = derived.sampling.differenceWith(derived.custody) };
     try std.testing.expectEqual(@as(usize, 4), wanted.groups.count());
@@ -253,14 +256,14 @@ test "peer dial actual custody gives no utility for connected sampling only grou
     q.configureSelection(&catalog, &wanted, false, &context, 0);
     try std.testing.expectEqual(@as(u16, 0), candidates[0].dial.priority);
     try std.testing.expect(!candidates[0].dial.selected);
-    try std.testing.expectEqual(@as(u16, 4), @import("policy.zig").utility(&.{ .groups = derived.sampling }, &wanted));
+    try std.testing.expectEqual(@as(u16, 4), policy.utility(&.{ .groups = derived.sampling }, &wanted));
     wanted.groups = derived.custody;
     q.configureSelection(&catalog, &wanted, false, &context, 0);
     try std.testing.expectEqual(@as(u16, 1), candidates[0].dial.priority);
     try std.testing.expect(candidates[0].dial.selected);
 }
 
-fn custodyIncomplete(catalog: *const @import("catalog.zig").Catalog) usize {
+fn custodyIncomplete(catalog: *const catalog_mod.Catalog) usize {
     var count: usize = 0;
     var it = catalog.intents.iterator(.{});
     while (it.next()) |index| {

@@ -12,6 +12,7 @@ const Now = @import("../types.zig").Now;
 const Schedule = @import("../types.zig").Schedule;
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
+const histogram = @import("../metrics/histogram.zig");
 
 const history_retention_ms = Catalog.history_retention_ms;
 const hint_freshness_ms = Catalog.hint_freshness_ms;
@@ -37,7 +38,7 @@ pub const Dialing = struct {
     pub const attempts_max = 64;
     pub const connect_timeout_ms: u64 = 30_000;
     pub const Source = enum { discovery, manual, direct };
-    pub const DialTime = @import("../metrics/histogram.zig").Duration(&.{ 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000 });
+    pub const DialTime = histogram.Duration(&.{ 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000 });
 
     options: Options,
     active: [attempts_max]Attempt = @splat(.{}),

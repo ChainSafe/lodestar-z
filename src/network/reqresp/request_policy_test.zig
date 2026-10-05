@@ -3,6 +3,8 @@ const p = @import("request_policy.zig");
 const c = @import("constants");
 const preset = @import("preset");
 const Protocol = @import("protocol.zig").Protocol;
+const consensus_types = @import("consensus_types");
+const protocol = @import("protocol.zig");
 
 const fixture = @import("policy_fixture.zig").config;
 
@@ -21,7 +23,7 @@ test "request policy derives historical blob boundaries independently of BPO" {
     const value = try p.Config.fromBeaconConfig(&cfg, &points);
     try std.testing.expectEqual(@as(usize, 1), value.blob_schedule.len);
     for (value.blob_schedule, 1..) |point, epoch| {
-        try std.testing.expectEqual(epoch * @import("preset").preset.SLOTS_PER_EPOCH, point.start_slot);
+        try std.testing.expectEqual(epoch * preset.preset.SLOTS_PER_EPOCH, point.start_slot);
         try std.testing.expectEqual(cfg.getMaxBlobsPerBlock(epoch), point.max_blobs);
     }
 }
@@ -236,8 +238,8 @@ test "reqresp request admission policy configured limits and full preset column 
     offset(&empty, 0, 4);
     offset(&empty, 36, 36);
     try std.testing.expectEqual(@as(u128, 1), (try policy.inspect(.data_column_sidecars_by_root_v1, &empty, .fulu)).charged_cost);
-    const maximum = @import("protocol.zig").requestMaxAll();
-    try std.testing.expect(maximum >= @import("consensus_types").phase0.BeaconBlockRoots.max_size);
+    const maximum = protocol.requestMaxAll();
+    try std.testing.expect(maximum >= consensus_types.phase0.BeaconBlockRoots.max_size);
 }
 
 test "native Ping and Metadata preserve full u64 sequences under host integer policy" {

@@ -6,13 +6,22 @@ const peers = @import("peer_book.zig");
 const local_intent = @import("local_intent.zig");
 const topic_policy = @import("topic_policy.zig");
 const topic_fixture = @import("topic_fixture.zig");
+const MessageEvent = @import("messages.zig").MessageEvent;
+const topic_mod = @import("topic.zig");
+const policy = @import("../gossip_processor/policy.zig");
+const constants = @import("constants.zig");
+const peer_id = @import("../wire/peer_id.zig");
+const options_mod = @import("options.zig");
+const layout = @import("layout.zig");
+const router_mod = @import("../router.zig");
+const session_io = @import("session_io.zig");
 
 /// A MessageSink that admits as the gossip processor does: it commits each feasible
 /// candidate and copies the message, which stays readable until `clear`.
 pub const Inbox = struct {
     pub const capacity = 64;
     sink: Gossipsub.MessageSink = undefined,
-    events: [capacity]@import("messages.zig").MessageEvent = undefined,
+    events: [capacity]MessageEvent = undefined,
     count: usize = 0,
     /// Report no capacity, as a full processor does.
     full: bool = false,
@@ -23,11 +32,11 @@ pub const Inbox = struct {
         g.message_sink = &self.sink;
     }
 
-    pub fn messages(self: *const Inbox) []const @import("messages.zig").MessageEvent {
+    pub fn messages(self: *const Inbox) []const MessageEvent {
         return self.events[0..self.count];
     }
 
-    pub fn last(self: *const Inbox) @import("messages.zig").MessageEvent {
+    pub fn last(self: *const Inbox) MessageEvent {
         std.debug.assert(self.count > 0);
         return self.events[self.count - 1];
     }
@@ -44,14 +53,14 @@ pub const Inbox = struct {
         self.clear();
     }
 
-    fn hasCapacity(context: *anyopaque, _: @import("topic.zig").Kind, _: usize) bool {
+    fn hasCapacity(context: *anyopaque, _: topic_mod.Kind, _: usize) bool {
         const self: *Inbox = @ptrCast(@alignCast(context));
         return !self.full and self.count < capacity;
     }
 
     fn admit(context: *anyopaque, candidate: *Gossipsub.MessageAdmission) bool {
         const self: *Inbox = @ptrCast(@alignCast(context));
-        if (self.full or self.count == capacity or !@import("../gossip_processor/policy.zig").sourceRoom(candidate) or !@import("../gossip_processor/policy.zig").feasible(candidate, &.{})) return false;
+        if (self.full or self.count == capacity or !policy.sourceRoom(candidate) or !policy.feasible(candidate, &.{})) return false;
         const topic = std.testing.allocator.dupe(u8, candidate.event.topic) catch return false;
         const bytes = std.testing.allocator.dupe(u8, candidate.event.bytes) catch {
             std.testing.allocator.free(topic);
@@ -85,7 +94,7 @@ const Admissions = struct {
         return self.count;
     }
 
-    fn hasCapacity(context: *anyopaque, kind: @import("topic.zig").Kind, size: usize) bool {
+    fn hasCapacity(context: *anyopaque, kind: topic_mod.Kind, size: usize) bool {
         const self: *Admissions = @ptrCast(@alignCast(context));
         return self.inner.?.has_capacity(self.inner.?.context, kind, size);
     }
@@ -105,7 +114,7 @@ pub fn init(allocator: std.mem.Allocator, options: Gossipsub.Options) !Gossipsub
 }
 
 pub fn subscriptionUpdate(g: *const Gossipsub, name: ?[]const u8, subscribed: bool, out: *[topic_policy.boundary_max]local_intent.Boundary) ![]const local_intent.Boundary {
-    var names: [@import("constants.zig").topics_cap][]const u8 = undefined;
+    var names: [constants.topics_cap][]const u8 = undefined;
     var count: usize = 0;
     for (g.overlay.rows, 0..) |*row, index| {
         if (!row.active or !row.subscribed) continue;
@@ -144,7 +153,7 @@ fn setSubscription(g: *Gossipsub, name: []const u8, subscribed: bool) !void {
 
 pub fn addPeer(g: *Gossipsub, conn: Engine.Handle, version: sessions_mod.Version) ?sessions_mod.SessionRef {
     var metadata: peers.Metadata = .{
-        .identity = .{ .bytes = [_]u8{0} ** @import("../wire/peer_id.zig").length },
+        .identity = .{ .bytes = [_]u8{0} ** peer_id.length },
         .address = .unspecified,
         .direction = .inbound,
     };
@@ -172,15 +181,15 @@ pub fn penalize(g: *Gossipsub, conn: Engine.Handle, count: f64) void {
 }
 
 /// Returns the messages delivered to the attached sink.
-pub fn pump(g: *Gossipsub, transport: *Engine, now: @import("../types.zig").Now) usize {
+pub fn pump(g: *Gossipsub, transport: *Engine, now: Now) usize {
     var admissions: Admissions = .{ .g = g, .inner = g.message_sink };
     admissions.begin();
     _ = pumpTurn(g, transport, now);
     return admissions.end();
 }
 
-pub fn pumpTurn(g: *Gossipsub, transport: *Engine, now: @import("../types.zig").Now) @import("turn.zig").Turn {
-    var router = @import("../router.zig").Router.init(std.testing.allocator, .{ .negotiations_max = 1 }) catch @panic("test router allocation failed");
+pub fn pumpTurn(g: *Gossipsub, transport: *Engine, now: Now) Turn {
+    var router = router_mod.Router.init(std.testing.allocator, .{ .negotiations_max = 1 }) catch @panic("test router allocation failed");
     defer router.deinit();
     var turn = Gossipsub.beginPump(g, now);
     Gossipsub.runTurn(g, &router, transport, &turn);
@@ -189,20 +198,20 @@ pub fn pumpTurn(g: *Gossipsub, transport: *Engine, now: @import("../types.zig").
 
 /// Now while a session is ready, else the earliest session deadline; heartbeat and
 /// maintenance deadlines are left out.
-pub fn sessionWakeup(g: *const Gossipsub, now: @import("../types.zig").Now) u64 {
+pub fn sessionWakeup(g: *const Gossipsub, now: Now) u64 {
     if (g.sessions.ready.len > 0) return now.millis();
     const top = g.sessions.deadlines.peek() orelse return std.math.maxInt(u64);
     return @max(now.millis(), top.deadline);
 }
 
-pub fn processRpc(g: *Gossipsub, index: u16, now: @import("../types.zig").Now, count: *usize, items: *usize) !bool {
+pub fn processRpc(g: *Gossipsub, index: u16, now: Now, count: *usize, items: *usize) !bool {
     var admissions: Admissions = .{ .g = g, .inner = g.message_sink };
     admissions.begin();
-    var turn = @import("turn.zig").Turn.init(&g.options, now, g.msg_scratch);
+    var turn = Turn.init(&g.options, now, g.msg_scratch);
     turn.sink = g.message_sink;
-    var peer = @import("turn.zig").Credits.peer(&g.options);
+    var peer = Credits.peer(&g.options);
     peer.items = items.*;
-    const result = @import("session_io.zig").processRpc(g, index, &turn, &peer);
+    const result = session_io.processRpc(g, index, &turn, &peer);
     count.* += admissions.end();
     const progress = try result;
     items.* = peer.items;
@@ -216,8 +225,8 @@ pub fn ageHistory(g: *Gossipsub) void {
 }
 
 pub fn sessions(a: std.mem.Allocator, capacity: u16) !sessions_mod.Sessions {
-    const options: @import("options.zig").Options = .{ .connected_capacity = capacity };
-    return sessions_mod.Sessions.init(a, &options, &@import("layout.zig").Layout.init(&options));
+    const options: options_mod.Options = .{ .connected_capacity = capacity };
+    return sessions_mod.Sessions.init(a, &options, &layout.Layout.init(&options));
 }
 
 const Now = @import("../types.zig").Now;

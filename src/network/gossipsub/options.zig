@@ -1,15 +1,24 @@
+const std = @import("std");
 const constants = @import("constants.zig");
 const topic_mod = @import("topic.zig");
 const score_mod = @import("score.zig");
 const storage = @import("message_store.zig");
+const topic_policy_mod = @import("topic_policy.zig");
+const quic_limits = @import("../quic/limits.zig");
+const peer_book = @import("peer_book.zig");
+const gossip_limits = @import("../gossip_limits.zig");
+const outbox = @import("outbox.zig");
+const preset = @import("preset");
+const mcache = @import("mcache.zig");
+const delivery = @import("delivery.zig");
 
 pub const Options = struct {
-    topic_policy: ?[]const @import("topic_policy.zig").Boundary = null,
+    topic_policy: ?[]const topic_policy_mod.Boundary = null,
     connected_capacity: u16 = constants.peers_cap,
     /// Engine connection slots; a session is found by its connection's index.
-    connection_slots: u16 = @import("../quic/limits.zig").connections_max_ceiling,
-    retained_capacity: u16 = @import("peer_book.zig").capacity,
-    retained_outbound_reserve: u16 = @import("peer_book.zig").outbound_reserve,
+    connection_slots: u16 = quic_limits.connections_max_ceiling,
+    retained_capacity: u16 = peer_book.capacity,
+    retained_outbound_reserve: u16 = peer_book.outbound_reserve,
     message_id_policy: topic_mod.MessageIdPolicy = .{},
     iwant_followup_ms: u64 = constants.default_iwant_followup_ms,
     idontwant_min_data_size: usize = constants.default_idontwant_min_data_size,
@@ -19,7 +28,7 @@ pub const Options = struct {
     mcache_capacity: usize = 8_192,
     mcache_arena_bytes: usize = 64 * 1024 * 1024,
     /// Compressed pending and retained payload allowances; their lifetimes differ from decoded work.
-    payload_limits: ?@import("../gossip_limits.zig").Limits = null,
+    payload_limits: ?gossip_limits.Limits = null,
     validation_capacity: usize = 1024,
     validation_timeout_ms: u64 = 30_000,
     validation_tombstone_ms: u64 = 30_000,
@@ -28,7 +37,7 @@ pub const Options = struct {
     /// Absolute per-frame residence from queue admission through transmission.
     tx_timeout_ms: u64 = 30_000,
     control_bytes: usize = 28 * 1024,
-    critical_bytes: usize = @import("outbox.zig").critical_bytes,
+    critical_bytes: usize = outbox.critical_bytes,
     tx_peer_bytes: usize = 16 * 1024 * 1024,
     /// Per-peer data descriptors and bytes that only local publications may use: forwards and
     /// IWANT responses leave them free, so our own messages still queue behind a forward burst.
@@ -54,51 +63,51 @@ pub const Options = struct {
     large_frame_timeout_ms: u64 = 10_000,
     body_buffer_bytes: usize = constants.body_buffer_len,
     receive_arena_bytes: usize = 32 * 1024 * 1024,
-    seen_ttl_ms: u64 = constants.seenTtlMs(@import("preset").preset.SLOTS_PER_EPOCH, 12),
+    seen_ttl_ms: u64 = constants.seenTtlMs(preset.preset.SLOTS_PER_EPOCH, 12),
     gossip_factor: f64 = 0.25,
-    retained_score_ms: u64 = 100 * @import("preset").preset.SLOTS_PER_EPOCH * 12_000,
-    ip_allowlist: []const @import("peer_book.zig").Ip = &.{},
+    retained_score_ms: u64 = 100 * preset.preset.SLOTS_PER_EPOCH * 12_000,
+    ip_allowlist: []const peer_book.Ip = &.{},
     score_params: score_mod.Params = .{},
-    topic_params: ?[@import("topic_policy.zig").kind_count]score_mod.TopicPolicy = null,
+    topic_params: ?[topic_policy_mod.kind_count]score_mod.TopicPolicy = null,
     initial_slot: u64 = 0,
     opportunistic_graft_interval_ms: u64 = constants.opportunistic_graft_ms,
     /// Required independent host entropy. Initialization rejects null; tests seed explicitly.
     random_seed: ?u64 = null,
 
-    pub fn validate(o: *const Options) (error{InvalidLimits} || @import("topic_policy.zig").Error)!void {
-        if (o.topic_policy) |boundaries| _ = try @import("topic_policy.zig").validate(boundaries);
+    pub fn validate(o: *const Options) (error{InvalidLimits} || topic_policy_mod.Error)!void {
+        if (o.topic_policy) |boundaries| _ = try topic_policy_mod.validate(boundaries);
         try score_mod.validateParams(o.score_params);
         if (o.topic_params) |*policies| for (policies) |*policy| {
             try score_mod.validateTopic(policy.params);
             try score_mod.validateTopic(policy.atSlot(0));
         };
         if (o.random_seed == null or o.ip_allowlist.len > 32 or o.retained_score_ms == 0 or o.retained_score_ms > 86_400_000) return error.InvalidLimits;
-        if (!@import("std").math.isFinite(o.gossip_factor) or o.gossip_factor < 0 or o.gossip_factor > 1) return error.InvalidLimits;
+        if (!std.math.isFinite(o.gossip_factor) or o.gossip_factor < 0 or o.gossip_factor > 1) return error.InvalidLimits;
         try range(o.connected_capacity, 1, constants.peers_cap);
-        try range(o.connection_slots, 1, @import("../quic/limits.zig").connections_max_ceiling);
-        try range(o.retained_capacity, o.connected_capacity, @import("peer_book.zig").capacity);
+        try range(o.connection_slots, 1, quic_limits.connections_max_ceiling);
+        try range(o.retained_capacity, o.connected_capacity, peer_book.capacity);
         try range(o.retained_outbound_reserve, 1, o.retained_capacity - 1);
         const compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
         try range(o.validation_capacity, 1, 65535);
         if (o.payload_limits) |limits| {
-            @import("../gossip_limits.zig").validate(&limits) catch return error.InvalidLimits;
+            gossip_limits.validate(&limits) catch return error.InvalidLimits;
             if (o.topic_policy) |boundaries| for (boundaries) |boundary| {
                 for (boundary.rules, limits) |rule, limit| if (rule.count > 0 and constants.maxCompressedLen(rule.ssz_max) > limit.bytes) return error.InvalidLimits;
             };
-            if (o.validation_capacity != @import("../gossip_limits.zig").items(&limits) or o.mcache_arena_bytes < 2 * @import("../gossip_limits.zig").bytes(&limits)) return error.InvalidLimits;
+            if (o.validation_capacity != gossip_limits.items(&limits) or o.mcache_arena_bytes < 2 * gossip_limits.bytes(&limits)) return error.InvalidLimits;
         }
         try range(o.seen_capacity, 1, 1_048_576);
-        try range(o.mcache_capacity, 1, @import("mcache.zig").History.capacity_max);
+        try range(o.mcache_capacity, 1, mcache.History.capacity_max);
         try range(o.mcache_arena_bytes, compressed + storage.page_bytes, 1024 * 1024 * 1024);
         const page = @import("receive_pool.zig").page_bytes;
-        const receive_min = @max(page, @import("std").mem.alignForward(usize, constants.GOSSIP_MAX_SIZE - @min(o.body_buffer_bytes, constants.GOSSIP_MAX_SIZE), page));
+        const receive_min = @max(page, std.mem.alignForward(usize, constants.GOSSIP_MAX_SIZE - @min(o.body_buffer_bytes, constants.GOSSIP_MAX_SIZE), page));
         try range(o.receive_arena_bytes, receive_min, 1024 * 1024 * 1024);
         if (o.receive_arena_bytes % page != 0) return error.InvalidLimits;
         try range(o.body_buffer_bytes, 1, constants.GOSSIP_MAX_SIZE);
         try range(o.control_bytes, 1, 65536);
-        try range(o.critical_bytes, 32 + topic_mod.topic_max_len, @import("outbox.zig").critical_bytes);
+        try range(o.critical_bytes, 32 + topic_mod.topic_max_len, outbox.critical_bytes);
         try range(o.tx_peer_bytes, compressed, 1024 * 1024 * 1024);
-        try range(o.tx_local_descriptors, 0, @import("delivery.zig").per_peer_limit - 1);
+        try range(o.tx_local_descriptors, 0, delivery.per_peer_limit - 1);
         try range(o.tx_local_bytes, 0, o.tx_peer_bytes - compressed);
         try range(o.topics_per_pump, 1, constants.topics_cap);
         try range(o.peers_per_pump, 1, constants.peers_cap);

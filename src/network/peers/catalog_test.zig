@@ -2,6 +2,8 @@ const std = @import("std");
 const t = @import("types.zig");
 const Catalog = @import("catalog.zig").Catalog;
 const Handle = t.Handle;
+const identify = @import("../identify/root.zig");
+const custody = @import("custody.zig");
 const opts: Catalog.Options = .{
     .capacity = 2,
     .outbound_reserve = 0,
@@ -453,7 +455,7 @@ test "identify catalog metadata copies only to current full peer and transport g
     try std.testing.expect(c.updateStatus(ref, first, &.{}, 0));
     var events: [1]t.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&events));
-    var metadata: @import("../identify/root.zig").Metadata = .{ .agent = try .init("stock") };
+    var metadata: identify.Metadata = .{ .agent = try .init("stock") };
     try std.testing.expect(c.updateIdentify(ref, first, &metadata));
     metadata.agent.?.bytes[0] = 'x';
     try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&events));
@@ -608,7 +610,7 @@ test "catalog caches node ID across custody changes and reconnects and resets it
     try std.testing.expect(c.updateMetadata(ref, first, &.{ .custody_group_count = 4 }, 0));
     var budget: u16 = 0;
     _ = c.advanceCustody(&.{ .fork = .fulu }, 0, 60_000, &budget);
-    const expected = try @import("custody.zig").nodeId(&remote);
+    const expected = try custody.nodeId(&remote);
     try std.testing.expectEqual(expected, c.rows[ref.index].node_id.?);
     try std.testing.expect(c.updateMetadata(ref, first, &.{ .seq_number = 1, .custody_group_count = 8 }, 1));
     _ = c.advanceCustody(&.{ .fork = .fulu, .minimum_sampling_groups = 16 }, 1, 60_000, &budget);
@@ -620,7 +622,7 @@ test "catalog caches node ID across custody changes and reconnects and resets it
     try std.testing.expectEqual(expected, c.rows[ref.index].node_id.?);
     try std.testing.expect(c.disconnect(ref, replacement, .host, 4));
     _ = c.pollEvents(&events);
-    const third_id = try @import("custody.zig").nodeId(&third);
+    const third_id = try custody.nodeId(&third);
     const reused = c.admit(&third, &local, .{ .index = 1, .generation = 3 }, &.{ .direction = .outbound, .endpoint = .unspecified, .now_ms = 5, .node_id = third_id }).admitted.peer;
     try std.testing.expectEqual(ref.index, reused.index);
     try std.testing.expect(reused.generation > ref.generation);

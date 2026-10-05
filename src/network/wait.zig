@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const time = @import("time.zig");
 
 pub const supported = builtin.os.tag == .linux or builtin.os.tag == .macos;
 /// A backstop only: an owner computes its wait from its deadlines and wakes on readiness.
@@ -39,7 +40,7 @@ pub fn poll(io: std.Io, sources: Sources, timeout: std.Io.Timeout) Result {
             break :blk now.addDuration(.{ .clock = .awake, .raw = .fromNanoseconds(@min(duration.raw.nanoseconds, maximum.nanoseconds)) });
         },
     };
-    return pollWith(io, sources, @import("time.zig").waitMilliseconds(deadline, now, maximum), std.c.poll);
+    return pollWith(io, sources, time.waitMilliseconds(deadline, now, maximum), std.c.poll);
 }
 
 fn pollWith(io: std.Io, sources: Sources, timeout_ms: u32, comptime pollFn: anytype) Result {

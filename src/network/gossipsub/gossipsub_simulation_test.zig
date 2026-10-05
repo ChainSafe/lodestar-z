@@ -4,6 +4,7 @@ const Gossipsub = @import("Gossipsub.zig");
 const SessionRef = @import("sessions.zig").SessionRef;
 const Now = @import("../types.zig").Now;
 const name = "/eth2/01020304/beacon_block/ssz_snappy";
+const turn_mod = @import("turn.zig");
 
 const Node = struct {
     core: Gossipsub,
@@ -50,7 +51,7 @@ test "gossip simulation ignores decoded items and write receipts from a retired 
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 });
     try node.begin(now);
     var turn = Gossipsub.beginPump(&node.core, now);
-    var peer = @import("turn.zig").Credits.peer(&node.core.options);
+    var peer = turn_mod.Credits.peer(&node.core.options);
     try std.testing.expectEqual(.done, node.core.receiveItem(old, .{ .subscription = .{ .topic = name, .subscribe = true } }, &turn, &peer));
     node.core.writeCompleted(old, .{ .control = .{ .token = 1 } }, now.millis());
     try std.testing.expectEqual(@as(usize, 0), node.core.resourceSnapshot().remote_subscriptions);

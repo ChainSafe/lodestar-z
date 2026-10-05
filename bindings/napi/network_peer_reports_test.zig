@@ -1,6 +1,7 @@
 const std = @import("std");
 const n = @import("network");
 const Table = @import("network_peer_reports.zig").Table;
+const network_peer_reports = @import("network_peer_reports.zig");
 
 fn identity(value: u32) n.PeerId {
     var result: n.PeerId = .{ .bytes = @splat(0) };
@@ -53,5 +54,5 @@ test "counted reports saturate as the same number of single reports do" {
         try std.testing.expectEqual(single.pending, counted.pending);
         try std.testing.expectEqualSlices(u8, &single.rows[0].counts, &counted.rows[0].counts);
     }
-    try std.testing.expectEqual(@as(u32, @import("network_peer_reports.zig").report_max), counted.pending);
+    try std.testing.expectEqual(@as(u32, network_peer_reports.report_max), counted.pending);
 }

@@ -9,6 +9,12 @@ const Engine = @import("quic/Engine.zig");
 const resolvedOptions = @import("network_core_test_support.zig").resolvedOptions;
 const Setup = @import("network_core_test_support.zig").Setup;
 const clientWakeup = @import("network_core_test_support.zig").clientWakeup;
+const enr = @import("peers/enr.zig");
+const control = @import("peers/control.zig");
+const KeyPair = @import("wire/keys.zig").KeyPair;
+const custody = @import("peers/custody.zig");
+const NetworkCore = @import("network_core.zig").NetworkCore;
+const network_core_test_support = @import("network_core_test_support.zig");
 
 /// Dials the discovered server, so the client's connection has a dialed endpoint.
 fn dialServer(setup: *Setup) !void {
@@ -18,12 +24,12 @@ fn dialServer(setup: *Setup) !void {
     try std.testing.expect(setup.client.peer_manager.dialStarted(intents[0].token, handle));
 }
 
-fn serverStrikes(setup: *Setup, server: *const @import("peers/enr.zig").Candidate) u8 {
+fn serverStrikes(setup: *Setup, server: *const enr.Candidate) u8 {
     const history = &setup.client.peer_manager.catalog.history;
     return history.strikesFor(history.endpointKey(&server.peer, support.server_address), server.sequence, setup.pair.now.millis());
 }
 
-fn discoverServer(setup: *Setup) !@import("peers/enr.zig").Candidate {
+fn discoverServer(setup: *Setup) !enr.Candidate {
     const server = try discoveredAt(2, support.server_address);
     try std.testing.expect(server.peer.eql(&setup.server.peerId()));
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.protocols.gossipsub, &.{server}, setup.pair.now).accepted);
@@ -42,17 +48,17 @@ fn refuseStatus(setup: *Setup) !void {
 fn expectRefusals(setup: *Setup, count: u64, rejections: u64) !void {
     const manager = &setup.client.peer_manager;
     try std.testing.expectEqual(@as(u16, 0), manager.catalog.connectedCount());
-    try std.testing.expectEqual(count, manager.control.counters.health_failures[@intFromEnum(@import("peers/control.zig").Control.HealthProbe.status)]);
+    try std.testing.expectEqual(count, manager.control.counters.health_failures[@intFromEnum(control.Control.HealthProbe.status)]);
     try std.testing.expectEqual(count, manager.control.counters.closed[@intFromEnum(t.DisconnectReason.health_error)]);
     try std.testing.expectEqual(rejections, manager.catalog.rejections[@intFromEnum(t.Rejection.early_close)]);
 }
 
-fn discoveredAt(tag: u8, endpoint: t.Address) !@import("peers/enr.zig").Candidate {
+fn discoveredAt(tag: u8, endpoint: t.Address) !enr.Candidate {
     var secret: [32]u8 = @splat(0);
     secret[31] = tag;
-    const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret);
+    const key = try KeyPair.fromSecretKey(&secret);
     const peer = t.PeerId.fromPublicKey(&key.publicKey());
-    return .{ .peer = peer, .node_id = try @import("peers/custody.zig").nodeId(&peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ endpoint, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = 0, .custody_group_count = null };
+    return .{ .peer = peer, .node_id = try custody.nodeId(&peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ endpoint, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = 0, .custody_group_count = null };
 }
 
 test "core Status and Metadata clear dial failures that QUIC admission keeps" {
@@ -210,7 +216,7 @@ test "core simultaneous selected dials consume one commitment and preserve dupli
     opts.core.peers.min_outbound = 0;
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();
-    const nodes = [_]*@import("network_core.zig").NetworkCore{ &setup.client, &setup.server };
+    const nodes = [_]*NetworkCore{ &setup.client, &setup.server };
     const identities = [_]t.PeerId{ setup.server.peerId(), setup.client.peerId() };
     const addresses = [_]t.Address{ support.server_address, support.client_address };
     const blocker: t.PeerId = .{ .bytes = @splat(99) };
@@ -406,14 +412,14 @@ test "core refused Status inside the fork transition grace neither closes nor re
     var next = manager.local;
     next.fork.digest = @splat(3);
     next.status.fork_digest = next.fork.digest;
-    try @import("network_core_test_support.zig").updateLocal(&setup.client, &next, setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.client, &next, setup.pair.now);
     try setup.step(1);
     try failStatus(&setup, .negotiation_rejected);
     for (0..4) |_| try setup.step(1);
     try std.testing.expect(setup.pair.now.millis() < row.transition_until_ms);
     try std.testing.expect(manager.catalog.get(peer).?.disconnect_reason == null);
     try std.testing.expectEqual(@as(?t.Rejection, null), row.rejection);
-    try std.testing.expectEqual(@as(u64, 0), manager.control.counters.health_failures[@intFromEnum(@import("peers/control.zig").Control.HealthProbe.status)]);
+    try std.testing.expectEqual(@as(u64, 0), manager.control.counters.health_failures[@intFromEnum(control.Control.HealthProbe.status)]);
     // Past the grace, the same refusal closes and records.
     setup.pair.advance(row.transition_until_ms - setup.pair.now.millis());
     try setup.step(1);
@@ -462,7 +468,7 @@ test "core native public close cancels overlapping attempts and preserves bounde
 
 test "core dial admission reserve counts only answered dials" {
     var setup: Setup = .{};
-    var opts = @import("network_core_test_support.zig").resolvedOptions();
+    var opts = resolvedOptions();
     opts.core.dial.concurrent_max = 2;
     opts.limits.dialing_max = 2;
     try setup.initOwnersWithOptions(&.{}, opts);
@@ -487,7 +493,7 @@ test "core dial admission reserve counts only answered dials" {
 
 test "core inbound admission is not blocked by unanswered dials in flight" {
     var setup: Setup = .{};
-    var opts = @import("network_core_test_support.zig").resolvedOptions();
+    var opts = resolvedOptions();
     opts.core.dial.concurrent_max = 3;
     opts.limits.dialing_max = 3;
     try setup.initOwnersWithOptions(&.{}, opts);

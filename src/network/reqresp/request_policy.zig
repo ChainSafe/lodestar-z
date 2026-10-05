@@ -5,6 +5,9 @@ const preset = @import("preset");
 const Protocol = @import("protocol.zig").Protocol;
 const quota_config = @import("quotas.zig");
 const ct = @import("consensus_types");
+const constants_mod = @import("constants.zig");
+const BeaconConfig = @import("config").BeaconConfig;
+const protocol = @import("protocol.zig");
 
 pub const BlobLimit = struct { start_slot: u64, max_blobs: u32 };
 pub const Config = struct {
@@ -18,10 +21,10 @@ pub const Config = struct {
     column_chunks: u32,
     blob_schedule: []const BlobLimit,
     host_integer_max: ?u64 = null,
-    max_payload_size: usize = @import("constants.zig").MAX_PAYLOAD_SIZE,
+    max_payload_size: usize = constants_mod.MAX_PAYLOAD_SIZE,
 
     /// Borrows schedule storage until ReqResp.init copies the validated policy.
-    pub fn fromBeaconConfig(cfg: *const @import("config").BeaconConfig, storage: *[schedule_max]BlobLimit) error{InvalidPolicy}!Config {
+    pub fn fromBeaconConfig(cfg: *const BeaconConfig, storage: *[schedule_max]BlobLimit) error{InvalidPolicy}!Config {
         const chain = &cfg.chain;
         var count: usize = 0;
         for ([_]u64{ chain.DENEB_FORK_EPOCH, chain.ELECTRA_FORK_EPOCH }) |epoch| {
@@ -77,11 +80,11 @@ pub const Policy = struct {
     point_count: u8,
 
     pub fn init(config: *const Config) error{InvalidPolicy}!Policy {
-        if (config.max_payload_size < @import("protocol.zig").payloadMaxControl() or config.max_payload_size > @import("constants.zig").MAX_PAYLOAD_SIZE or
+        if (config.max_payload_size < protocol.payloadMaxControl() or config.max_payload_size > constants_mod.MAX_PAYLOAD_SIZE or
             config.blocks_pre_deneb == 0 or config.blocks_pre_deneb > constants.MAX_REQUEST_BLOCKS or
             config.blocks_deneb == 0 or config.blocks_deneb > constants.MAX_REQUEST_BLOCKS_DENEB or
-            config.blob_identifiers_deneb == 0 or config.blob_identifiers_deneb > @import("constants.zig").blob_identifiers_capacity or
-            config.blob_identifiers_electra == 0 or config.blob_identifiers_electra > @import("constants.zig").blob_identifiers_capacity or
+            config.blob_identifiers_deneb == 0 or config.blob_identifiers_deneb > constants_mod.blob_identifiers_capacity or
+            config.blob_identifiers_electra == 0 or config.blob_identifiers_electra > constants_mod.blob_identifiers_capacity or
             config.number_of_columns != preset.NUMBER_OF_COLUMNS or
             config.column_chunks == 0 or config.column_chunks > preset.MAX_REQUEST_DATA_COLUMN_SIDECARS or
             config.blob_schedule.len > schedule_max) return error.InvalidPolicy;
@@ -100,7 +103,7 @@ pub const Policy = struct {
         return result;
     }
 
-    pub fn requestBounds(self: *const Policy, which: Protocol, fork: ForkSeq) @import("protocol.zig").Info {
+    pub fn requestBounds(self: *const Policy, which: Protocol, fork: ForkSeq) protocol.Info {
         var result = which.info();
         result.response_max = @min(result.response_max, self.config.max_payload_size);
         switch (which) {

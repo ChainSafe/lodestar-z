@@ -1,5 +1,7 @@
 const Options = @import("options.zig").Options;
 const std = @import("std");
+const Now = @import("../types.zig").Now;
+const MessageSink = @import("messages.zig").MessageSink;
 pub const Budget = enum { calls, input, output, items, fields, work, copy };
 pub const budget_count = @typeInfo(Budget).@"enum".fields.len;
 pub const Budgets = std.EnumSet(Budget);
@@ -29,12 +31,12 @@ pub const Credits = struct {
 };
 
 pub const Turn = struct {
-    now: @import("../types.zig").Now,
+    now: Now,
     budget: Credits,
     scratch: []u8,
     large_used: bool = false,
     large_copy_used: bool = false,
-    sink: ?*const @import("messages.zig").MessageSink = null,
+    sink: ?*const MessageSink = null,
     deferred: Budgets = .initEmpty(),
 
     pub fn exhausted(self: *const Turn) Budgets {
@@ -45,7 +47,7 @@ pub const Turn = struct {
         return result;
     }
 
-    pub fn init(options: *const Options, now: @import("../types.zig").Now, scratch: []u8) Turn {
+    pub fn init(options: *const Options, now: Now, scratch: []u8) Turn {
         return .{
             .now = now,
             .budget = .{
@@ -85,7 +87,7 @@ pub const Workspace = struct {
     peer_work: *usize,
     work: *usize,
     large_used: *bool,
-    sink: ?*const @import("messages.zig").MessageSink = null,
+    sink: ?*const MessageSink = null,
     deferred: ?*Budgets = null,
 
     pub fn charge(workspace: *const Workspace, options: *const Options, compressed: usize, decoded: usize) bool {

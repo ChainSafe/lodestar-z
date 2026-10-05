@@ -11,6 +11,8 @@ const PendingResponse = @import("PendingResponse.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
+const SessionStore = @import("SessionStore.zig");
+const Admission = @import("Admission.zig");
 
 pub const Error = CallTable.Error || Channel.Error || RoutingTable.Error ||
     PendingResponse.Error || error{
@@ -118,7 +120,7 @@ pub const ReceiveArgs = struct {
 pub const Config = struct {
     session_capacity: usize = 1_024,
     /// Ceiling; storage is derived from the challenge admission rate and timeout.
-    challenge_capacity: usize = @import("SessionStore.zig").challenge_capacity_max,
+    challenge_capacity: usize = SessionStore.challenge_capacity_max,
     call_capacity: usize = 64,
     request_timeout_ms: u64 = 1_000,
     challenge_timeout_ms: u64 = 1_000,
@@ -327,7 +329,7 @@ pub fn receive(
 }
 
 pub fn admitDatagram(self: *Engine, from: *const types.Address, now_ms: u64) bool {
-    const stage: @import("Admission.zig").Stage = if (self.calls.expectsResponseFrom(from, now_ms)) .response else .packet;
+    const stage: Admission.Stage = if (self.calls.expectsResponseFrom(from, now_ms)) .response else .packet;
     return self.channel.admission.allow(stage, from, now_ms);
 }
 

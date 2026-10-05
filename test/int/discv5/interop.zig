@@ -1,5 +1,6 @@
 const std = @import("std");
 const discv5 = @import("discv5");
+const Sockets = @import("udp").Sockets;
 
 const duration_ms: u64 = 8_000;
 const steps_max: usize = 512;
@@ -21,7 +22,7 @@ pub fn main(init: std.process.Init) !void {
     if (address != .ip4 or address.ip4.octets[0] != 127) return error.NonLoopbackEndpoint;
     const peer = discv5.types.Endpoint{ .node_id = remote.node_id, .address = address };
 
-    var sockets = try @import("udp").Sockets.bind(io, .{ .ip4 = .loopback(0) });
+    var sockets = try Sockets.bind(io, .{ .ip4 = .loopback(0) });
     var sockets_owned = true;
     errdefer if (sockets_owned) sockets.close(io);
     var key = try discv5.identity.crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
@@ -60,21 +61,21 @@ pub fn main(init: std.process.Init) !void {
                 .request_id = try discv5.wire.message.RequestId.init(&.{1}),
                 .enr_sequence = local.sequence,
             } };
-            pending = try driver.startCall(io, peer, &remote, &ping, try @import("discv5").Transport.monotonicMilliseconds(io));
+            pending = try driver.startCall(io, peer, &remote, &ping, try discv5.Transport.monotonicMilliseconds(io));
             phase = .ping;
         } else if (phase == .ping_complete) {
             const find_node = discv5.wire.message.Message{ .find_node = .{
                 .request_id = try discv5.wire.message.RequestId.init(&.{2}),
                 .distances = &.{0},
             } };
-            pending = try driver.startCall(io, peer, &remote, &find_node, try @import("discv5").Transport.monotonicMilliseconds(io));
+            pending = try driver.startCall(io, peer, &remote, &find_node, try discv5.Transport.monotonicMilliseconds(io));
             phase = .nodes;
         } else if (phase == .done and (unadvertised or served >= 2)) {
             try std.Io.File.stdout().writeStreamingAll(io, "DONE\n");
             return;
         }
 
-        const result = try @import("discv5").driver.step(&driver, io, &expired, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, deadline_ms) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+        const result = try discv5.driver.step(&driver, io, &expired, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, deadline_ms) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
         served += result.progress.standard_responses;
         var call_expired = false;
         for (expired[0..result.calls_expired]) |entry| {

@@ -9,6 +9,9 @@ const types = @import("../types.zig");
 const support = @import("../quic/test_support.zig");
 const Router = @import("../router.zig").Router;
 const quotas = @import("admission_fixture.zig").quotas;
+const policy_fixture = @import("policy_fixture.zig");
+const Engine = @import("../quic/Engine.zig");
+const constants = @import("constants.zig");
 
 fn options(connections: u16) rr.Options {
     return .{
@@ -17,7 +20,7 @@ fn options(connections: u16) rr.Options {
         .serving_max = 4,
         .inbound_per_connection_max = 8,
         .forks = &.{},
-        .admission = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{
+        .admission = .{ .policy = policy_fixture.config(), .limits = .{
             .identities = 4,
             .peer = quotas(4, 1000),
             .global = quotas(4, 1000),
@@ -30,7 +33,7 @@ fn inboundStream(pair: *support.Pair, conn: types.Handle) !types.StreamHandle {
     const stream = try pair.client.openStream(conn);
     try std.testing.expectEqual(1, try pair.client.write(stream, &.{0}, false));
     try pair.pump();
-    var events: [16]@import("../quic/Engine.zig").Event = undefined;
+    var events: [16]Engine.Event = undefined;
     for (pair.events(&pair.server, &events)) |event| {
         if (event == .stream_opened) return event.stream_opened;
     }
@@ -79,7 +82,7 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
 
 fn readySlot(owner: *rr, peer: u16, which: Protocol, ordinal: u16, identity: PeerId, accepted_ms: u64) u16 {
     std.debug.assert(peer < owner.options.connections);
-    std.debug.assert(ordinal < @import("constants.zig").MAX_CONCURRENT_REQUESTS);
+    std.debug.assert(ordinal < constants.MAX_CONCURRENT_REQUESTS);
     const index: u16 = @intCast(ReceiveLayout.first(peer, which) + ordinal);
     const slot = &owner.inbound[index];
     std.debug.assert(slot.request.available());

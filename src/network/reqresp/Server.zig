@@ -10,28 +10,35 @@ const StreamHandle = Engine.StreamHandle;
 const protocol = @import("protocol.zig");
 const Now = types.Now;
 const Router = @import("../router.zig").Router;
+const request_policy = @import("request_policy.zig");
+const RequestState = @import("RequestState.zig");
+const ForkSeq = @import("config").ForkSeq;
+const ReceiveLayout = @import("ReceiveLayout.zig");
+const PeerId = @import("../wire/peer_id.zig").PeerId;
+const InboundAdmission = @import("InboundAdmission.zig");
+const control_wire = @import("../control_wire.zig");
 
 const Event = ReqResp.Event;
 const Failure = ReqResp.Failure;
 const reads_per_pump_max = RequestIO.reads_per_pump_max;
 
 pub const State = enum { receiving_request, ready, serving, writing_chunk, finishing };
-pub const Rejection = codec.Error || @import("request_policy.zig").InspectError;
+pub const Rejection = codec.Error || request_policy.InspectError;
 
 const Server = @This();
 
-request: @import("RequestState.zig") = .{ .direction = .inbound },
+request: RequestState = .{ .direction = .inbound },
 progress_ms: u64 = 0,
 pending_context: ?[constants.context_bytes_length]u8 = null,
 pending_result: u8 = constants.result_success,
 close_after_write: bool = false,
 state: State = .receiving_request,
-request_fork: @import("config").ForkSeq = .phase0,
+request_fork: ForkSeq = .phase0,
 rejection: ?Rejection = null,
-receive: @import("ReceiveLayout.zig").Buffers = .{ .sink = &.{}, .scratch = &.{}, .read = &.{} },
-identity: @import("../wire/peer_id.zig").PeerId = undefined,
+receive: ReceiveLayout.Buffers = .{ .sink = &.{}, .scratch = &.{}, .read = &.{} },
+identity: PeerId = undefined,
 execution: ?u16 = null,
-admission: @import("InboundAdmission.zig").State = .{},
+admission: InboundAdmission.State = .{},
 
 pub fn complete(self: *Server, owner: *ReqResp, index: u16, event: Event, now: Now) void {
     owner.complete(&self.request, index, event, .{ .phase_name = @tagName(self.state), .rejection = self.rejection, .result_code = self.pending_result }, now);
@@ -192,12 +199,12 @@ pub fn closingGoodbye(self: *Server, owner: *ReqResp, engine: *Engine, index: u1
     if (self.state == .receiving_request and request.pendingEvent() == null) readRequest(owner, engine, self, index, now);
     if (request.running() and self.state == .ready) {
         const bytes = request.io.decoder.payload();
-        const code = @import("../control_wire.zig").decodeScalar(bytes) catch unreachable;
+        const code = control_wire.decodeScalar(bytes) catch unreachable;
         self.state = .serving;
         return code;
     }
     if (request.pendingEvent()) |event| if (event == .request) {
-        const code = @import("../control_wire.zig").decodeScalar(event.request.bytes) catch unreachable;
+        const code = control_wire.decodeScalar(event.request.bytes) catch unreachable;
         request.notification = .none;
         self.state = .serving;
         return code;
@@ -206,7 +213,7 @@ pub fn closingGoodbye(self: *Server, owner: *ReqResp, engine: *Engine, index: u1
     return null;
 }
 
-pub fn admit(self: *Server, index: u16, lease: *const @import("InboundAdmission.zig").Lease, now: Now) void {
+pub fn admit(self: *Server, index: u16, lease: *const InboundAdmission.Lease, now: Now) void {
     const request = &self.request;
     assert(request.running() and self.state == .ready);
     assert(!self.admission.start_pending);
@@ -343,8 +350,8 @@ pub fn acceptPrepared(
     slot: *Server,
     stream: StreamHandle,
     ready: Router.Selection,
-    accepted: *const @import("InboundAdmission.zig").Acceptance,
-    request_fork: @import("config").ForkSeq,
+    accepted: *const InboundAdmission.Acceptance,
+    request_fork: ForkSeq,
     now: Now,
 ) void {
     const which = accepted.protocol;

@@ -4,6 +4,8 @@ const consensus = @import("constants");
 const ct = @import("consensus_types");
 const preset = @import("preset");
 const protocol = @import("protocol.zig");
+const policy_fixture = @import("policy_fixture.zig");
+const request_policy = @import("request_policy.zig");
 
 const Protocol = protocol.Protocol;
 
@@ -106,6 +108,6 @@ test "reqresp active literal ids shapes and application partition" {
 }
 
 fn chunkLimit(which: Protocol, bytes: []const u8) error{InvalidRequest}!u32 {
-    const policy = @import("request_policy.zig").Policy.init(&@import("policy_fixture.zig").config()) catch unreachable;
+    const policy = request_policy.Policy.init(&policy_fixture.config()) catch unreachable;
     return (policy.inspect(which, bytes, .fulu) catch return error.InvalidRequest).chunks_max;
 }

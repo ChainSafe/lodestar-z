@@ -8,6 +8,9 @@ const turns = 512;
 const sink_size = rr.Protocol.blocks_by_range_v2.info().response_max;
 const chain_config = if (preset.active_preset == .minimal) &config.minimal.config else &config.mainnet.config;
 const warmup_turns = 64;
+const network_gossip_burst = @import("network_gossip_burst.zig");
+const network_recovery = @import("network_recovery.zig");
+const network_scores = @import("network_scores.zig");
 /// The gossip_burst case runs dozens of nodes; their startup info lines would bury its report.
 pub const std_options: std.Options = .{ .log_level = .warn };
 
@@ -118,20 +121,20 @@ fn timestamp(io: std.Io) u64 {
 
 fn turn(node: *network.NetworkCore, io: std.Io, outputs: network.NetworkCore.Outputs) !network.NetworkCore.Result {
     const now = try network.Transport.currentTime(io);
-    const result = network.driver.step(node, io, now, outputs, .deadlineOnly(@import("network").time.optionalMilliseconds(now.millis())));
+    const result = network.driver.step(node, io, now, outputs, .deadlineOnly(network.time.optionalMilliseconds(now.millis())));
     if (result.failure) |err| return err;
     return result;
 }
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len > 2 and std.mem.eql(u8, args[1], "gossip_burst")) return @import("network_gossip_burst.zig").run(init, args[2..]);
+    if (args.len > 2 and std.mem.eql(u8, args[1], "gossip_burst")) return network_gossip_burst.run(init, args[2..]);
     if (args.len > 2) return error.InvalidProfile;
     const selected = if (args.len == 2) args[1] else return error.InvalidProfile;
-    if (std.mem.eql(u8, selected, "gossip_burst")) return @import("network_gossip_burst.zig").run(init, &.{});
+    if (std.mem.eql(u8, selected, "gossip_burst")) return network_gossip_burst.run(init, &.{});
     if (std.mem.eql(u8, selected, "idle_wait")) return idleWait(init);
-    if (std.mem.eql(u8, selected, "recovery_resolve")) return @import("network_recovery.zig").run(init);
-    if (std.mem.eql(u8, selected, "score_collection")) return @import("network_scores.zig").run(init);
+    if (std.mem.eql(u8, selected, "recovery_resolve")) return network_recovery.run(init);
+    if (std.mem.eql(u8, selected, "score_collection")) return network_scores.run(init);
     if (std.mem.eql(u8, selected, "idle_transport")) return idleTransport(init);
     if (std.mem.eql(u8, selected, "idle_connections")) return idleConnections(init);
     const profile: network.configuration.Profile = if (std.mem.eql(u8, selected, "small")) .small else if (std.mem.eql(u8, selected, "beacon_node")) .beacon_node else return error.InvalidProfile;
@@ -231,10 +234,10 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
     }
     for (0..4000) |_| {
         const now_a = try network.Transport.currentTime(io);
-        const result_a = network.driver.step(a, io, now_a, .{ .peers = &peer_events }, .deadlineOnly(@import("network").time.optionalMilliseconds(now_a.millis() +| 1)));
+        const result_a = network.driver.step(a, io, now_a, .{ .peers = &peer_events }, .deadlineOnly(network.time.optionalMilliseconds(now_a.millis() +| 1)));
         if (result_a.failure) |err| return err;
         const now_b = try network.Transport.currentTime(io);
-        const result_b = network.driver.step(b, io, now_b, .{ .peers = &peer_events }, .deadlineOnly(@import("network").time.optionalMilliseconds(now_b.millis() +| 1)));
+        const result_b = network.driver.step(b, io, now_b, .{ .peers = &peer_events }, .deadlineOnly(network.time.optionalMilliseconds(now_b.millis() +| 1)));
         if (result_b.failure) |err| return err;
         if (a.protocols.gossipsub.resourceSnapshot().remote_subscriptions > 0 and a.protocols.gossipsub.peers.rows[0].direct) break;
         try io.sleep(.fromMilliseconds(1), .awake);
@@ -245,7 +248,7 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
     }
 }
 
-fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: std.Io, topic: []const u8, context: @import("network").types.ForkEntry) !void {
+fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: std.Io, topic: []const u8, context: network.types.ForkEntry) !void {
     var payload: [64 * 1024]u8 = undefined;
     var random = std.Random.DefaultPrng.init(123);
     random.random().bytes(&payload);
@@ -310,7 +313,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     try drain(a, b, io, requests.len, &payload, context, &gossip, delivered_gossip);
 }
 
-fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected: usize, payload: []const u8, context: @import("network").types.ForkEntry, gossip: *GossipSink, delivered_gossip: usize) !void {
+fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected: usize, payload: []const u8, context: network.types.ForkEntry, gossip: *GossipSink, delivered_gossip: usize) !void {
     var events: [8]rr.ReqResp.Event = undefined;
     var received: usize = 0;
     var chunks: usize = 0;

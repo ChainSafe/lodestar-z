@@ -2,6 +2,7 @@ const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const d = @import("network").gossipsub.diagnostics;
 const Value = napi.Value;
+const network_js = @import("network_js.zig");
 
 const bytes = @import("network_js.zig").bytes;
 fn weights(env: napi.Env, value: anytype) !Value {
@@ -29,7 +30,7 @@ pub fn copy(env: napi.Env, page: *const d.Page) !Value {
     const peers = try env.createArrayWithLength(page.peer_count);
     for (page.peers[0..page.peer_count], 0..) |*peer, i| {
         const row = try env.createObject();
-        try row.setNamedProperty("identity", try @import("network_js.zig").peerIdValue(env, &peer.identity));
+        try row.setNamedProperty("identity", try network_js.peerIdValue(env, &peer.identity));
         try row.setNamedProperty("ip", try bytes(env, &peer.address));
         try row.setNamedProperty("connected", try env.getBoolean(peer.connected));
         try row.setNamedProperty("outboundReady", try env.getBoolean(peer.outbound_ready));

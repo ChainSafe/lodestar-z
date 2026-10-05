@@ -14,6 +14,13 @@ const resolvedOptions = @import("network_core_test_support.zig").resolvedOptions
 const Setup = @import("network_core_test_support.zig").Setup;
 const updateDemand = @import("network_core_test_support.zig").updateDemand;
 const clientWakeup = @import("network_core_test_support.zig").clientWakeup;
+const preset = @import("preset");
+const enr = @import("peers/enr.zig");
+const custody = @import("peers/custody.zig");
+const session_io = @import("gossipsub/session_io.zig");
+const KeyPair = @import("wire/keys.zig").KeyPair;
+const time = @import("time.zig");
+const topic_fixture = @import("gossipsub/topic_fixture.zig");
 
 fn init(setup: *core_test.Setup, local: *const t.LocalState) !void {
     var opts = core_test.resolvedOptions();
@@ -55,7 +62,7 @@ test "core coverage counts real duty subscriptions separately from custodians" {
     try equal(@as(u16, 1), setup.client.peer_manager.coverageDeficits().attestation);
     try gossip_test.subscribe(setup.server.protocols.gossipsub, attestation);
     try gossip_test.subscribe(setup.server.protocols.gossipsub, "/eth2/01010101/beacon_attestation_8/ssz_snappy");
-    for (0..@import("preset").NUMBER_OF_COLUMNS) |column| {
+    for (0..preset.NUMBER_OF_COLUMNS) |column| {
         if (!peer.sampling_groups.?.isSet(column % local.fork.custody_groups)) continue;
         var buffer: [80]u8 = undefined;
         const name = try std.fmt.bufPrint(&buffer, "/eth2/00000000/data_column_sidecar_{d}/ssz_snappy", .{column});
@@ -165,8 +172,8 @@ fn subscribeServer(setup: *Setup, name: []const u8) !void {
     try gossip_test.subscribe(setup.server.protocols.gossipsub, name);
 }
 
-fn candidateFor(peer: *const t.PeerId, count: ?u64) !@import("peers/enr.zig").Candidate {
-    return .{ .peer = peer.*, .node_id = try @import("peers/custody.zig").nodeId(peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ support.server_address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = null, .custody_group_count = count };
+fn candidateFor(peer: *const t.PeerId, count: ?u64) !enr.Candidate {
+    return .{ .peer = peer.*, .node_id = try custody.nodeId(peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ support.server_address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = null, .custody_group_count = count };
 }
 
 fn waitSampling(setup: *Setup) !t.Snapshot {
@@ -198,7 +205,7 @@ test "core coverage demand copies persists across slots and keeps general discov
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 1), setup.client.peer_manager.discoveryNeed().syncnets);
-    try @import("network_core_test_support.zig").advanceSlot(&setup.client, 10_000, setup.pair.now);
+    try core_test.advanceSlot(&setup.client, 10_000, setup.pair.now);
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 1), setup.client.peer_manager.discoveryNeed().syncnets);
@@ -231,7 +238,7 @@ test "core coverage authenticated custody differs from gossip delivery and inval
     try std.testing.expect(setup.client.peer_manager.catalog.setDirect(snapshots[0].peer, true));
     const connection = snapshots[0].connection.?;
     const index = setup.client.protocols.gossipsub.sessions.find(connection).?;
-    @import("gossipsub/session_io.zig").resetOutbound(setup.client.protocols.gossipsub, setup.pair.client, index);
+    session_io.resetOutbound(setup.client.protocols.gossipsub, setup.pair.client, index);
     try std.testing.expect(!setup.client.protocols.gossipsub.deliveryAvailable(connection));
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().groups);
@@ -241,7 +248,7 @@ test "core coverage authenticated custody differs from gossip delivery and inval
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().groups);
     local.fork.custody_groups = 64;
     local.metadata.custody_group_count = 64;
-    try @import("network_core_test_support.zig").updateLocal(&setup.client, &local, setup.pair.now);
+    try core_test.updateLocal(&setup.client, &local, setup.pair.now);
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().groups);
     _ = setup.client.peer_manager.snapshots(&snapshots);
@@ -262,7 +269,7 @@ test "core coverage physical closing capacity blocks new leased intents" {
     try std.testing.expectEqual(@as(u16, 4), setup.pair.client.registry.active_len);
     var secret: [32]u8 = @splat(0);
     secret[31] = 17;
-    const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
+    const key = (try KeyPair.fromSecretKey(&secret)).publicKey();
     const peer = t.PeerId.fromPublicKey(&key);
     try setup.client.peer_manager.connect(&peer, &.{support.server_address}, setup.pair.now);
     var out: [2]SelectedDial = undefined;
@@ -281,7 +288,7 @@ test "core coverage direct candidate dials at soft target and respects physical 
     for (0..50) |_| try setup.step(0);
     var secret: [32]u8 = @splat(0);
     secret[31] = 17;
-    const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
+    const key = (try KeyPair.fromSecretKey(&secret)).publicKey();
     const peer = t.PeerId.fromPublicKey(&key);
     try setup.client.addDirectPeer(&peer, &.{support.server_address}, setup.pair.now);
     var out: [1]SelectedDial = undefined;
@@ -329,7 +336,7 @@ test "core coverage bounded custody work resumes without output and stale metada
     for (0..4) |i| {
         var secret: [32]u8 = @splat(0);
         secret[31] = @intCast(i + 20);
-        const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
+        const key = (try KeyPair.fromSecretKey(&secret)).publicKey();
         const peer = t.PeerId.fromPublicKey(&key);
         const candidate = try candidateFor(&peer, 127);
         try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.protocols.gossipsub, &.{candidate}, setup.pair.now).accepted);
@@ -369,7 +376,7 @@ test "core coverage outbound deficit uses admission headroom while retaining exi
         try std.testing.expectEqual(@as(u16, 1), setup.server.peer_manager.peerCounts().relevant);
         var secret: [32]u8 = @splat(0);
         secret[31] = 17;
-        const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
+        const key = (try KeyPair.fromSecretKey(&secret)).publicKey();
         const peer = t.PeerId.fromPublicKey(&key);
         const candidate = try candidateFor(&peer, null);
         try std.testing.expectEqual(@as(u16, 1), setup.server.peer_manager.discoveredBatch(setup.server.protocols.gossipsub, &.{candidate}, setup.pair.now).accepted);
@@ -391,7 +398,7 @@ test "core coverage review same-digest group update disables cached automatic ca
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     local.fork.custody_groups = 64;
     local.metadata.custody_group_count = 64;
-    try @import("network_core_test_support.zig").updateLocal(&setup.client, &local, setup.pair.now);
+    try core_test.updateLocal(&setup.client, &local, setup.pair.now);
     var out: [1]SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &out));
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.catalog.rows[0].dial.priority);
@@ -490,23 +497,23 @@ test "core reconciliation raw mutators and deadlines invalidate once" {
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().sync);
     const deadline = setup.client.peer_manager.selection_deadline.?;
     var clock = setup.pair.now;
-    clock.monotonic = @import("time.zig").milliseconds(deadline - 1);
+    clock.monotonic = time.milliseconds(deadline - 1);
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, clock);
     const fresh = setup.client.peer_manager.counters.selections;
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 0), setup.client.peer_manager.discoveryNeed().syncnets);
     try std.testing.expectEqual(deadline, setup.client.peer_manager.reconciliation_deadline.?);
-    clock.monotonic = @import("time.zig").milliseconds(deadline);
+    clock.monotonic = time.milliseconds(deadline);
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, clock);
     try std.testing.expectEqual(@as(u4, 0), setup.client.peer_manager.policy_scratch[0].stable.syncnets);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 0), setup.client.peer_manager.discoveryNeed().syncnets);
     try std.testing.expectEqual(fresh + 1, setup.client.peer_manager.counters.selections);
-    clock.monotonic = @import("time.zig").milliseconds(clock.millis() + 1);
+    clock.monotonic = time.milliseconds(clock.millis() + 1);
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, clock);
     try std.testing.expectEqual(fresh + 1, setup.client.peer_manager.counters.selections);
 
-    @import("gossipsub/test_support.zig").penalize(setup.client.protocols.gossipsub, conn, 7);
+    gossip_test.penalize(setup.client.protocols.gossipsub, conn, 7);
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, clock);
     try std.testing.expectEqual(fresh + 1, setup.client.peer_manager.counters.selections);
     _ = setup.client.protocols.gossipsub.scoreSnapshot(conn, clock);
@@ -516,7 +523,7 @@ test "core reconciliation raw mutators and deadlines invalidate once" {
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, clock);
     const penalized = setup.client.peer_manager.counters.selections;
     const health = setup.client.peer_manager.catalog.get(peer).?.score;
-    clock.monotonic = @import("time.zig").milliseconds(clock.millis() + 100);
+    clock.monotonic = time.milliseconds(clock.millis() + 100);
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, clock);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.score > health);
     try std.testing.expectEqual(penalized, setup.client.peer_manager.counters.selections);
@@ -588,15 +595,15 @@ test "core reconciliation ban expiry still defers until strict score recovery" {
     var out: [1]SelectedDial = undefined;
     const ban = setup.client.peer_manager.catalog.get(peer).?.ban_until_ms;
     var clock = setup.pair.now;
-    clock.monotonic = @import("time.zig").milliseconds(ban - 1);
+    clock.monotonic = time.milliseconds(ban - 1);
     try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, clock, &out));
-    clock.monotonic = @import("time.zig").milliseconds(ban);
+    clock.monotonic = time.milliseconds(ban);
     try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, clock, &out));
     const recovery = setup.client.peer_manager.reconciliation_deadline.?;
     try std.testing.expect(recovery > ban);
-    clock.monotonic = @import("time.zig").milliseconds(recovery - 1);
+    clock.monotonic = time.milliseconds(recovery - 1);
     try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, clock, &out));
-    clock.monotonic = @import("time.zig").milliseconds(recovery);
+    clock.monotonic = time.milliseconds(recovery);
     try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, clock, &out));
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.score > -50);
     try std.testing.expect(out[0].peer.eql(&candidate.peer));
@@ -606,7 +613,7 @@ test "core sampling delivery follows real outbound stream retirement replacement
     var setup: Setup = .{};
     const local: t.LocalState = .{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } };
     var opts = resolvedOptions();
-    opts.core.protocols.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(@splat(0))};
+    opts.core.protocols.gossipsub.topic_policy = &.{topic_fixture.full(@splat(0))};
     try setup.initOwnersWithOptions(&local, opts);
     defer setup.deinit();
     _ = try setup.pair.dial();
@@ -617,7 +624,7 @@ test "core sampling delivery follows real outbound stream retirement replacement
     for (0..128) |i| if (snapshot.sampling_groups.?.isSet(i)) {
         demand.group_targets[i] = 1;
     };
-    for (0..@import("preset").NUMBER_OF_COLUMNS) |column| {
+    for (0..preset.NUMBER_OF_COLUMNS) |column| {
         if (!snapshot.sampling_groups.?.isSet(column % local.fork.custody_groups)) continue;
         var buffer: [80]u8 = undefined;
         const name = try std.fmt.bufPrint(&buffer, "/eth2/00000000/data_column_sidecar_{d}/ssz_snappy", .{column});
@@ -682,7 +689,7 @@ test "core replaces failed gossip below target without a reputation penalty or a
     const started = driver.counters.negotiation_started;
     try std.testing.expect(driver.deliveryAvailable(conn));
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.selection.retained_count);
-    @import("gossipsub/session_io.zig").resetOutbound(driver, setup.pair.client, index);
+    session_io.resetOutbound(driver, setup.pair.client, index);
     try std.testing.expectEqual(setup.pair.now.millis(), clientWakeup(&setup).?);
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.selection.retained_count);

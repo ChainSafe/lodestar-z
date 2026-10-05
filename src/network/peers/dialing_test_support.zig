@@ -3,15 +3,18 @@ const Catalog = @import("catalog.zig").Catalog;
 const std = @import("std");
 const mod = @import("dialing.zig");
 const t = @import("types.zig");
+const enr = @import("enr.zig");
+const KeyPair = @import("../wire/keys.zig").KeyPair;
+const custody = @import("custody.zig");
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 1234 } };
 
-pub fn discovered(tag: u8, sync: u8) !@import("enr.zig").Candidate {
+pub fn discovered(tag: u8, sync: u8) !enr.Candidate {
     var secret: [32]u8 = @splat(0);
     secret[31] = tag;
-    const pair = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&secret);
+    const pair = try KeyPair.fromSecretKey(&secret);
     const key = pair.publicKey();
     const peer = t.PeerId.fromPublicKey(&key);
-    return .{ .peer = peer, .node_id = try @import("custody.zig").nodeId(&peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = sync, .custody_group_count = null };
+    return .{ .peer = peer, .node_id = try custody.nodeId(&peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = sync, .custody_group_count = null };
 }
 
 pub fn initCatalog(allocator: std.mem.Allocator, options: mod.Dialing.Options) !Catalog {
@@ -39,8 +42,8 @@ pub fn disconnect(catalog: *Catalog, peer: *const t.PeerId, connected_at_ms: u64
     if (row.connection) |conn| std.debug.assert(catalog.disconnect(ref, conn, reason, now_ms));
 }
 
-pub fn expire(queue: *@import("dialing.zig").Dialing, catalog: *Catalog, now_ms: u64) !void {
-    var close: [@import("dialing.zig").Dialing.attempts_max]t.Handle = undefined;
+pub fn expire(queue: *mod.Dialing, catalog: *Catalog, now_ms: u64) !void {
+    var close: [mod.Dialing.attempts_max]t.Handle = undefined;
     try std.testing.expectEqual(@as(usize, 0), queue.expire(catalog, now_ms, &close));
 }
 

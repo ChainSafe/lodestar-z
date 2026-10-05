@@ -1,5 +1,6 @@
 const std = @import("std");
 const prom = @import("metrics/registry.zig");
+const peer_id = @import("wire/peer_id.zig");
 
 pub const Scope = enum { network_runtime, network_core, network_quic, network_peers, network_reqresp, network_reqresp_errors, network_gossip, network_mesh, network_discovery, network_bridge, network_gossip_errors };
 pub const capacity = 128;
@@ -194,13 +195,13 @@ pub fn levelName(level: std.log.Level) []const u8 {
     };
 }
 
-pub fn peer(value: *const @import("wire/peer_id.zig").PeerId) PeerFormatter {
+pub fn peer(value: *const peer_id.PeerId) PeerFormatter {
     return .{ .value = value };
 }
 const PeerFormatter = struct {
-    value: *const @import("wire/peer_id.zig").PeerId,
+    value: *const peer_id.PeerId,
     pub fn format(self: PeerFormatter, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        var buffer: [@import("wire/peer_id.zig").text_length_max]u8 = undefined;
+        var buffer: [peer_id.text_length_max]u8 = undefined;
         try writer.writeAll(self.value.toText(&buffer));
     }
 };

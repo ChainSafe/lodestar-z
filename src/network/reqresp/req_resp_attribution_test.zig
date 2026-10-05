@@ -4,6 +4,7 @@ const codec = @import("codec.zig");
 const Protocol = @import("protocol.zig").Protocol;
 const harness = @import("test_pair.zig");
 const Pair = harness.Pair;
+const time = @import("../time.zig");
 
 fn awaitRequest(pair: *Pair) !rr.RequestHandle {
     for (0..40) |_| {
@@ -43,7 +44,7 @@ test "reqresp attribution keeps absolute deadlines while excluding host holds an
             const length = if (case == .native_buffer) first.len + (try codec.encodeChunk(0, harness.deneb_digest, &payload, encoded[first.len..])).len else first.len;
             try std.testing.expectEqual(length, try pair.shared.pair.server.write(stream, encoded[0..length], false));
             try awaitChunk(&pair);
-            if (case == .host_hold) pair.shared.pair.now.monotonic = @import("../time.zig").milliseconds(deadline - 1);
+            if (case == .host_hold) pair.shared.pair.now.monotonic = time.milliseconds(deadline - 1);
             try std.testing.expect(pair.shared.client.reqresp.consume(handle, pair.shared.pair.now));
             if (case == .host_hold) try std.testing.expect(client.host_held_ms > 0);
             if (case == .native_buffer) {
@@ -56,7 +57,7 @@ test "reqresp attribution keeps absolute deadlines while excluding host holds an
             try pair.shared.pair.pump();
             try std.testing.expect(try pair.shared.pair.client.streamReadable(client.request.stream));
         }
-        pair.shared.pair.now.monotonic = @import("../time.zig").milliseconds(deadline);
+        pair.shared.pair.now.monotonic = time.milliseconds(deadline);
         var events: [1]rr.Event = undefined;
         const count = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .application = &events });
         try std.testing.expectEqual(@as(usize, 1), count.application);
@@ -88,7 +89,7 @@ test "reqresp attribution ignores locally unread incoming bodies at absolute exp
     try std.testing.expectEqual(@as(usize, 1), try pair.shared.pair.client.write(stream, &.{8}, false));
     try pair.shared.pair.pump();
     try std.testing.expect(try pair.shared.pair.server.streamReadable(incoming.request.stream));
-    pair.shared.pair.now.monotonic = @import("../time.zig").milliseconds(incoming.deadline(&pair.shared.server.reqresp).?);
+    pair.shared.pair.now.monotonic = time.milliseconds(incoming.deadline(&pair.shared.server.reqresp).?);
     var events: [1]rr.Event = undefined;
     const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &events });
     try std.testing.expectEqual(@as(usize, 1), count.control);
