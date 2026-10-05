@@ -10,6 +10,12 @@ const remembered = @import("remembered.zig");
 const Now = @import("../types.zig").Now;
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
+const identify_mod = @import("../identify/root.zig");
+const limits = @import("../quic/limits.zig");
+const preset = @import("preset");
+const logging = @import("../logging.zig");
+const client = @import("client.zig");
+const goodbye = @import("goodbye.zig");
 
 pub const Catalog = struct {
     pub const history_retention_ms: u64 = 600_000;
@@ -59,7 +65,7 @@ pub const Catalog = struct {
         established_slot: ?u16 = null,
         dial: DialState = .{},
         attempt: ?u8 = null,
-        identify: ?@import("../identify/root.zig").Metadata = null,
+        identify: ?identify_mod.Metadata = null,
         custody_work: ?custody.SamplingDerivation = null,
         custody_context: ?t.ForkContext = null,
         generation: u64 = 0,
@@ -177,7 +183,7 @@ pub const Catalog = struct {
     pub fn initWithIntents(a: std.mem.Allocator, options: Options, intent_capacity: u16, connections_max: u16, seed: u64) !Catalog {
         try options.validate();
         if (intent_capacity > 4096) return error.InvalidOptions;
-        if (connections_max == 0 or connections_max > @import("../quic/limits.zig").connections_max_ceiling) return error.InvalidOptions;
+        if (connections_max == 0 or connections_max > limits.connections_max_ceiling) return error.InvalidOptions;
         const rows = try a.alloc(Row, @as(usize, options.capacity) + intent_capacity);
         errdefer a.free(rows);
 
@@ -280,7 +286,7 @@ pub const Catalog = struct {
         }
         if (std.meta.eql(row.custody_context, context.*)) if (row.custody_work) |work| if (work.custody_count == count and work.sampling_count == count) return;
         row.custody_context = context.*;
-        row.custody_work = custody.SamplingDerivation.init(&row.node_id.?, .{ .groups = context.custody_groups, .columns = @import("preset").NUMBER_OF_COLUMNS }, count, 0) catch null;
+        row.custody_work = custody.SamplingDerivation.init(&row.node_id.?, .{ .groups = context.custody_groups, .columns = preset.NUMBER_OF_COLUMNS }, count, 0) catch null;
     }
 
     pub fn candidateCoverage(row: *const Row, context: *const t.ForkContext, now_ms: u64) t.Coverage {
@@ -355,7 +361,7 @@ pub const Catalog = struct {
                 row.custody_work = null;
                 row.custody_context = context.*;
                 if (row.node_id == null) row.node_id = custody.nodeId(&row.identity) catch continue;
-                row.custody_work = custody.SamplingDerivation.init(&row.node_id.?, .{ .groups = context.custody_groups, .columns = @import("preset").NUMBER_OF_COLUMNS }, count, context.minimum_sampling_groups) catch continue;
+                row.custody_work = custody.SamplingDerivation.init(&row.node_id.?, .{ .groups = context.custody_groups, .columns = preset.NUMBER_OF_COLUMNS }, count, context.minimum_sampling_groups) catch continue;
                 completed = false;
             }
             if (now_ms >= row.metadata_at_ms +| freshness_ms) continue;
@@ -613,7 +619,7 @@ pub const Catalog = struct {
     }
 
     fn connect(row: *Row, conn: t.Handle, options: *const AdmissionOptions) void {
-        std.log.scoped(.network_peers).debug("peer_admitted peer={f} connection={d}:{d} direction={s}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(options.direction) });
+        std.log.scoped(.network_peers).debug("peer_admitted peer={f} connection={d}:{d} direction={s}", .{ logging.peer(&row.identity), conn.index, conn.generation, @tagName(options.direction) });
         row.identify = null;
         row.custody_work = null;
         row.custody_context = null;
@@ -687,7 +693,7 @@ pub const Catalog = struct {
         now_ms: u64,
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
-        std.log.scoped(.network_peers).debug("peer_disconnected peer={f} connection={d}:{d} reason={s} connected_ms={d} relevant={any} agent={f}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(reason), now_ms -| row.connected_at_ms, row.status != null, std.json.fmt(@import("client.zig").agent(&row.identify), .{}) });
+        std.log.scoped(.network_peers).debug("peer_disconnected peer={f} connection={d}:{d} reason={s} connected_ms={d} relevant={any} agent={f}", .{ logging.peer(&row.identity), conn.index, conn.generation, @tagName(reason), now_ms -| row.connected_at_ms, row.status != null, std.json.fmt(client.agent(&row.identify), .{}) });
         self.revision +|= 1;
         self.by_connection[conn.index] = null;
         self.connected_count -= 1;
@@ -711,7 +717,7 @@ pub const Catalog = struct {
         row.dial.history_until_ms = @max(row.dial.history_until_ms, now_ms +| history_retention_ms);
         if (reason == .capacity or reason == .count_pruning) {
             if (row.reputation.redial_until_ms <= now_ms)
-                row.reputation.deferRedial(now_ms, @import("goodbye.zig").cooldownMs(129));
+                row.reputation.deferRedial(now_ms, goodbye.cooldownMs(129));
             return;
         }
         row.dial.connectionClosed(now_ms, now_ms -| row.connected_at_ms, self.random.random().int(u16) % 1_001);
@@ -767,7 +773,7 @@ pub const Catalog = struct {
         const block_ms = self.history.reject(key, kind, now_ms);
         self.rejections[@intFromEnum(kind)] +|= 1;
         if (kind != .shutdown) self.remembered.forget(&row.identity);
-        std.log.scoped(.network_peers).debug("peer_rejection_recorded peer={f} connection={d}:{d} kind={s} block_ms={d}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(kind), block_ms });
+        std.log.scoped(.network_peers).debug("peer_rejection_recorded peer={f} connection={d}:{d} kind={s} block_ms={d}", .{ logging.peer(&row.identity), conn.index, conn.generation, @tagName(kind), block_ms });
         if (!row.dial.automatic) return;
         row.dial.automatic = false;
         self.markDial(ref.index);
@@ -864,7 +870,7 @@ pub const Catalog = struct {
         return true;
     }
 
-    pub fn updateIdentify(self: *Catalog, ref: t.PeerRef, conn: t.Handle, metadata: *const @import("../identify/root.zig").Metadata) bool {
+    pub fn updateIdentify(self: *Catalog, ref: t.PeerRef, conn: t.Handle, metadata: *const identify_mod.Metadata) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return false;
         row.identify = metadata.*;

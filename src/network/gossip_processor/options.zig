@@ -1,12 +1,13 @@
 const limits_mod = @import("../gossip_limits.zig");
 const policy = @import("../gossipsub/topic_policy.zig");
 const ForkEntry = @import("../types.zig").ForkEntry;
+const constants = @import("../constants.zig");
 
 pub const Options = struct {
     limits: limits_mod.Limits,
     /// Defaults derive from work limits; explicit overrides also obey execution-specific ceilings.
     execution: ?limits_mod.Limits = null,
-    source_maximum: [limits_mod.kind_count]usize = @splat(@import("../constants.zig").MAX_PAYLOAD_SIZE),
+    source_maximum: [limits_mod.kind_count]usize = @splat(constants.MAX_PAYLOAD_SIZE),
     forks: []const ForkEntry = &.{},
     random_seed: u64 = 0,
 

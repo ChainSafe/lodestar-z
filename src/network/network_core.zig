@@ -15,13 +15,27 @@ const control_wire = @import("control_wire.zig");
 const control_values = @import("control_values.zig");
 const ControlProtocol = @import("control_protocol.zig").ControlProtocol;
 const advertisement = @import("advertisement.zig");
+const constants = @import("constants.zig");
+const KeyPair = @import("wire/keys.zig").KeyPair;
+const Sockets = @import("udp").Sockets;
+const Reservations = @import("reservations.zig").Reservations;
+const timing = @import("metrics/timing.zig");
+const identify_mod = @import("identify/root.zig");
+const configuration = @import("configuration.zig");
+const router = @import("router.zig");
+const limits = @import("quic/limits.zig");
+const Multiaddr = @import("wire/multiaddr.zig").Multiaddr;
+const ForkEntry = @import("types.zig").ForkEntry;
+const capabilities_mod = @import("capabilities.zig");
+const codec = @import("identify/codec.zig");
+const logging = @import("logging.zig");
 
 /// Initialize at its final address. Serialize every call, including reads and teardown.
 pub const NetworkCore = struct {
     pub const wait = @import("wait.zig");
 
     /// Discovery datagrams drained per turn, matching the QUIC receive batch.
-    pub const discovery_batch_max: u32 = @import("constants.zig").receive_batch_max;
+    pub const discovery_batch_max: u32 = constants.receive_batch_max;
     pub const controls_per_turn = 32;
     pub const identify_per_turn = 8;
     pub const dials_per_turn = 4;
@@ -33,8 +47,8 @@ pub const NetworkCore = struct {
     };
     pub const DiscoveryOptions = peers.Discovery.Config;
     pub const Startup = struct {
-        host: *const @import("wire/keys.zig").KeyPair,
-        bind: @import("udp").Sockets.Bindings,
+        host: *const KeyPair,
+        bind: Sockets.Bindings,
         local: t.LocalState,
         schedule: control_values.ForkSchedule = .{},
         discovery: ?DiscoveryOptions = null,
@@ -99,7 +113,7 @@ pub const NetworkCore = struct {
         readiness_failures: u64 = 0,
     };
 
-    reservations: @import("reservations.zig").Reservations,
+    reservations: Reservations,
     allocator: std.mem.Allocator,
     transport: Transport,
     peer_manager: manager.PeerManager,
@@ -110,7 +124,7 @@ pub const NetworkCore = struct {
     local_intent_workspace: *gossip.local_intent.Workspace,
     schedule: control_values.ForkSchedule,
     counters: Counters = .{},
-    step_duration: @import("metrics/timing.zig").Duration = .{},
+    step_duration: timing.Duration = .{},
     /// Zero-wait turns, counted under every source already due; readiness tests and the idle
     /// benchmarks read them to show an idle owner does not spin.
     due_now_turns: [wake_sources.source_count]u64 = @splat(0),
@@ -124,15 +138,15 @@ pub const NetworkCore = struct {
     /// The Protocols's control events and Identify results that `process` consumes within its turn.
     /// Fields rather than locals so ReleaseSafe does not fill them every turn.
     controls: [controls_per_turn]rr.ReqResp.Event = undefined,
-    identify_results: [identify_per_turn]@import("identify/root.zig").Handler.Result = undefined,
+    identify_results: [identify_per_turn]identify_mod.Handler.Result = undefined,
 
-    pub fn init(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, resolved: *const @import("configuration.zig").Resolved, startup: Startup) !void {
-        try @import("configuration.zig").validate(resolved.limits, resolved.core);
+    pub fn init(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, resolved: *const configuration.Resolved, startup: Startup) !void {
+        try configuration.validate(resolved.limits, resolved.core);
         try resolved.socket_buffers.validate();
         if (!wait.supported) return error.UnsupportedWait;
         if (startup.remembered.len > peers.remembered.capacity) return error.InvalidOptions;
         var local: t.LocalState = undefined;
-        try control_values.copyServingLocal(&local, &startup.local, @import("router.zig").Router.initialCapabilities(resolved.core.protocols.router).receive);
+        try control_values.copyServingLocal(&local, &startup.local, router.Router.initialCapabilities(resolved.core.protocols.router).receive);
         try validateSchedule(&local, startup.schedule);
         try validateForkTable(resolved.core.protocols.reqresp.forks, &local.fork);
         self.initialized = false;
@@ -164,7 +178,7 @@ pub const NetworkCore = struct {
         var protocols_options = resolved.core.protocols;
         protocols_options.reqresp.request_fork = local.fork.fork;
         const identify_base = try protocols_options.identify.makeLocal(&self.transport.peerId(), &self.transport.sockets.localAddresses());
-        const identify_local = try prepareIdentifyLocal(&identify_base, self.advertisementEndpoints(), @import("router.zig").Router.initialCapabilities(protocols_options.router));
+        const identify_local = try prepareIdentifyLocal(&identify_base, self.advertisementEndpoints(), router.Router.initialCapabilities(protocols_options.router));
         self.protocols = try Protocols.init(allocator, protocols_options, &identify_local);
         errdefer self.protocols.deinit();
         self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, resolved.core.peerManager(), self.protocols.router.capabilities().receive, self.transport.engine.limits.connections_max);
@@ -174,7 +188,7 @@ pub const NetworkCore = struct {
         errdefer self.control_protocol.deinit(allocator);
         self.peer_manager.loadRemembered(startup.remembered, self.last_now);
         self.protocols.gossipsub.clock = io;
-        self.native_events = try allocator.alloc(Engine.Event, @import("quic/limits.zig").events_per_turn_max);
+        self.native_events = try allocator.alloc(Engine.Event, limits.events_per_turn_max);
         errdefer allocator.free(self.native_events);
         self.local_intent_workspace = try allocator.create(gossip.local_intent.Workspace);
         errdefer allocator.destroy(self.local_intent_workspace);
@@ -236,7 +250,7 @@ pub const NetworkCore = struct {
     pub fn peerId(self: *const NetworkCore) t.PeerId {
         return self.transport.peerId();
     }
-    pub fn localMultiaddr(self: *const NetworkCore) @import("wire/multiaddr.zig").Multiaddr {
+    pub fn localMultiaddr(self: *const NetworkCore) Multiaddr {
         return self.transport.localMultiaddr();
     }
     pub fn localRecord(self: *const NetworkCore) ?*const d.identity.enr.Record {
@@ -313,7 +327,7 @@ pub const NetworkCore = struct {
         return self.protocols.reqresp.consume(request, now);
     }
     /// Borrows bytes until chunk_sent or terminal delivery. Readiness is not a reservation.
-    pub fn respond(self: *NetworkCore, request: rr.ReqResp.RequestHandle, bytes: []const u8, context: ?@import("types.zig").ForkEntry, now: Now) !void {
+    pub fn respond(self: *NetworkCore, request: rr.ReqResp.RequestHandle, bytes: []const u8, context: ?ForkEntry, now: Now) !void {
         try self.protocols.reqresp.respond(request, bytes, context, now);
     }
     /// Copies the message; terminal delivery still ends any outstanding payload borrows.
@@ -386,7 +400,7 @@ pub const NetworkCore = struct {
         }, now);
     }
 
-    fn prepareIdentifyLocal(base: *const @import("identify/root.zig").Local, endpoints: ?advertisement.Endpoints, capabilities: @import("capabilities.zig").Directional) !@import("identify/root.zig").Local {
+    fn prepareIdentifyLocal(base: *const identify_mod.Local, endpoints: ?advertisement.Endpoints, capabilities: capabilities_mod.Directional) !identify_mod.Local {
         var local = base.*;
         if (endpoints) |announced| {
             var addresses: [2]t.Address = undefined;
@@ -401,7 +415,7 @@ pub const NetworkCore = struct {
             };
             try local.setAddresses(addresses[0..count]);
         }
-        var encoded: [@import("identify/codec.zig").encoded_frame_max]u8 = undefined;
+        var encoded: [codec.encoded_frame_max]u8 = undefined;
         _ = try local.encode(capabilities.receive, null, &encoded);
         return local;
     }
@@ -410,8 +424,8 @@ pub const NetworkCore = struct {
         local: t.LocalState,
         schedule: control_values.ForkSchedule,
         endpoints: ?advertisement.Endpoints,
-        capabilities: @import("capabilities.zig").Directional,
-        identify: @import("identify/root.zig").Local,
+        capabilities: capabilities_mod.Directional,
+        identify: identify_mod.Local,
         record: ?peers.Discovery.PreparedAdvertisement = null,
         changed: bool,
     };
@@ -597,8 +611,8 @@ pub const NetworkCore = struct {
         const readiness = input.readiness;
         self.counters.readiness_failures +|= @intFromBool(readiness.failure != null);
         self.counters.transport_failures +|= @intFromBool(input.clock_failure != null);
-        const start = @import("metrics/timing.zig").now(io);
-        defer self.step_duration.observe(@import("metrics/timing.zig").now(io) -| start);
+        const start = timing.now(io);
+        defer self.step_duration.observe(timing.now(io) -| start);
         self.last_now = tick;
         var result: Result = .{
             .transport = self.transport.beginTurn(tick),
@@ -653,11 +667,11 @@ pub const NetworkCore = struct {
         for (selected[0..count], 0..) |attempt, index| {
             const handle = self.transport.dialPeer(io, attempt.address, attempt.peer, tick) catch |err| {
                 if (err == error.DestinationUnreachable) {
-                    std.log.scoped(.network_core).debug("dial_failed peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&attempt.peer), attempt.address, @errorName(err) });
+                    std.log.scoped(.network_core).debug("dial_failed peer={f} endpoint={any} reason={s}", .{ logging.peer(&attempt.peer), attempt.address, @errorName(err) });
                     std.debug.assert(self.peer_manager.dialFailed(attempt.token, tick));
                     result.dial_failed += 1;
                 } else {
-                    std.log.scoped(.network_core).debug("dial_deferred peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&attempt.peer), attempt.address, @errorName(err) });
+                    std.log.scoped(.network_core).debug("dial_deferred peer={f} endpoint={any} reason={s}", .{ logging.peer(&attempt.peer), attempt.address, @errorName(err) });
                     std.debug.assert(self.peer_manager.dialDeferred(attempt.token, tick));
                     result.dial_deferred += 1;
                     result.failure = result.failure orelse err;
@@ -673,7 +687,7 @@ pub const NetworkCore = struct {
                 continue;
             };
             std.debug.assert(self.peer_manager.dialStarted(attempt.token, handle));
-            std.log.scoped(.network_core).debug("dial_started peer={f} endpoint={any} connection={d}:{d}", .{ @import("logging.zig").peer(&attempt.peer), attempt.address, handle.index, handle.generation });
+            std.log.scoped(.network_core).debug("dial_started peer={f} endpoint={any} connection={d}:{d}", .{ logging.peer(&attempt.peer), attempt.address, handle.index, handle.generation });
             result.dial_started += 1;
         }
         self.peer_manager.dialing.refresh(&self.peer_manager.catalog, tick.millis());
@@ -686,7 +700,7 @@ pub const NetworkCore = struct {
     /// Application borrows stay valid until the next turn; closes after publication clean up
     /// without a second recycling pass.
     fn process(self: *NetworkCore, events: []const Engine.Event, now: Now, outputs: Outputs) Counts {
-        std.debug.assert(events.len <= @import("quic/limits.zig").events_per_turn_max);
+        std.debug.assert(events.len <= limits.events_per_turn_max);
         const pm = &self.peer_manager;
         const quic = &self.transport.engine;
         if (pm.phase == .stopping) {
@@ -869,7 +883,7 @@ pub const NetworkCore = struct {
     }
 };
 
-fn validateForkTable(table: []const @import("types.zig").ForkEntry, context: *const t.ForkContext) !void {
+fn validateForkTable(table: []const ForkEntry, context: *const t.ForkContext) !void {
     try rr.ReqResp.validateForkTable(table);
     var found = false;
     for (table) |entry| {

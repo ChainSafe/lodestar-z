@@ -14,6 +14,11 @@ const exchange_mod = @import("network_exchange.zig");
 const exchange_js = @import("network_exchange_js.zig");
 const command_js = @import("network_command_js.zig");
 const fatal = @import("network_fatal.zig");
+const network_owner = @import("network_owner.zig");
+const network_storage = @import("network_storage.zig");
+const network_wake = @import("network_wake.zig");
+const network = @import("network");
+const network_logs = @import("network_logs.zig");
 
 const commands = @import("network_commands.zig");
 
@@ -38,11 +43,11 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     runtime.heavy.?.* = .{};
     try application_cfg.parse(config.val, &runtime.heavy.?.config, &runtime.heavy.?.application);
     runtime.logs.configure(runtime.heavy.?.application.log_level);
-    try @import("network_owner.zig").prepareConfiguration(runtime);
-    try @import("network_storage.zig").initialize(runtime, &runtime.heavy.?.application);
-    runtime.wake = try @import("network_wake.zig").Wake.init();
+    try network_owner.prepareConfiguration(runtime);
+    try network_storage.initialize(runtime, &runtime.heavy.?.application);
+    runtime.wake = try network_wake.Wake.init();
     errdefer if (runtime.wake) |*wake| wake.deinit();
-    try @import("network_owner.zig").initialize(runtime);
+    try network_owner.initialize(runtime);
     const identity = try runtime.heavy.?.readIdentity();
 
     const env = js.env();
@@ -62,7 +67,7 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     try holder.setNamedProperty("capacities", try capacities(env, runtime));
     runtime.retain();
     errdefer runtime.release();
-    runtime.thread = try std.Thread.spawn(.{ .stack_size = std.Thread.SpawnConfig.default_stack_size }, @import("network_owner.zig").run, .{runtime});
+    runtime.thread = try std.Thread.spawn(.{ .stack_size = std.Thread.SpawnConfig.default_stack_size }, network_owner.run, .{runtime});
     self.runtime = runtime;
     return .{ .val = holder };
 }
@@ -217,7 +222,7 @@ fn capacities(env: napi.Env, runtime: *const Runtime) !Value {
 
 /// The gossip SHA-256 implementation this process selected, for packaged qualification records.
 pub fn gossipSha256Backend() js.String {
-    return js.String.from(@tagName(@import("network").gossipsub.sha256.backend()));
+    return js.String.from(@tagName(network.gossipsub.sha256.backend()));
 }
 
 pub fn getMetrics(self: *@This()) !js.String {
@@ -235,11 +240,11 @@ pub fn getMetrics(self: *@This()) !js.String {
 }
 
 pub fn drainLogs(self: *@This(), limit: js.Value) !js.Value {
-    return @import("network_logs.zig").drain(try self.owner(), limit.val);
+    return network_logs.drain(try self.owner(), limit.val);
 }
 
 pub fn setLogLevel(self: *@This(), level: js.Value) !void {
-    try @import("network_logs.zig").configure(try self.owner(), level.val);
+    try network_logs.configure(try self.owner(), level.val);
 }
 
 pub fn applyIntent(self: *@This(), intent: js.Value, slot: js.Value) !js.Value {

@@ -12,6 +12,9 @@ const requestStatus = harness.requestStatus;
 const requestBlocks = harness.requestBlocks;
 const firstFailure = harness.firstFailure;
 const waitForRequest = harness.waitForRequest;
+const ForkEntry = @import("../types.zig").ForkEntry;
+const policy_fixture = @import("policy_fixture.zig");
+const ForkSeq = @import("config").ForkSeq;
 
 test "reqresp rejects reserved error results before changing a serving response" {
     for ([_]u8{ 1, 3, 128, 255 }) |valid| {
@@ -44,7 +47,7 @@ test "reqresp rejects reserved error results before changing a serving response"
 
 test "reqresp fails a response whose context bytes name an unknown fork" {
     var setup: Pair = .{};
-    const only_deneb = [_]@import("../types.zig").ForkEntry{.{ .digest = deneb_digest, .fork = .deneb }};
+    const only_deneb = [_]ForkEntry{.{ .digest = deneb_digest, .fork = .deneb }};
     try setup.init(.{ .forks = &only_deneb }, .{});
     defer setup.deinit();
 
@@ -87,31 +90,31 @@ test "reqresp caller cardinality rejects invalid bounds before opening a stream"
 }
 
 test "reqresp validates transport capacity and copies its fork table" {
-    var forks = [_]@import("../types.zig").ForkEntry{.{ .digest = deneb_digest, .fork = .deneb }};
-    var rr = try reqresp.init(std.testing.allocator, .{ .connections = 1, .forks = &forks, .admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) });
+    var forks = [_]ForkEntry{.{ .digest = deneb_digest, .fork = .deneb }};
+    var rr = try reqresp.init(std.testing.allocator, .{ .connections = 1, .forks = &forks, .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1, 1, 64) });
     defer rr.deinit();
     forks[0].digest = fulu_digest;
-    try std.testing.expectEqual(@as(?@import("config").ForkSeq, .deneb), rr.forkFor(deneb_digest));
-    try std.testing.expectEqual(@as(?@import("config").ForkSeq, null), rr.forkFor(fulu_digest));
+    try std.testing.expectEqual(@as(?ForkSeq, .deneb), rr.forkFor(deneb_digest));
+    try std.testing.expectEqual(@as(?ForkSeq, null), rr.forkFor(fulu_digest));
     var setup: Pair = .{};
     try setup.init(.{}, .{});
     defer setup.deinit();
     try std.testing.expectError(error.InvalidCapacity, rr.validateTransportCapacity(&setup.shared.pair.client));
-    try std.testing.expectError(error.InvalidOptions, reqresp.init(std.testing.allocator, .{ .connections = 1025, .forks = &.{}, .admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) }));
+    try std.testing.expectError(error.InvalidOptions, reqresp.init(std.testing.allocator, .{ .connections = 1025, .forks = &.{}, .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1, 1, 64) }));
     const plan = rr.memoryPlan();
     try std.testing.expectEqual(plan.total_bytes, plan.facade_bytes + plan.slot_bytes + plan.io_bytes + plan.admission_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes);
     try std.testing.expect(plan.io_bytes > 0 and plan.slot_bytes > 0);
 }
 
 test "reqresp explicit BPO context validates without consuming the serving slot" {
-    const first: @import("../types.zig").ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
-    const second: @import("../types.zig").ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
-    const invalid = [_]?@import("../types.zig").ForkEntry{
+    const first: ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
+    const second: ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
+    const invalid = [_]?ForkEntry{
         null,
         .{ .digest = .{ 9, 9, 9, 9 }, .fork = .fulu },
         .{ .digest = second.digest, .fork = .deneb },
     };
-    for ([_]@import("../types.zig").ForkEntry{ first, second }) |selected| {
+    for ([_]ForkEntry{ first, second }) |selected| {
         for (invalid) |context| {
             var setup: Pair = .{};
             try setup.init(.{ .forks = &.{selected} }, .{ .forks = &.{ first, second } });
@@ -154,12 +157,12 @@ test "reqresp explicit BPO context validates without consuming the serving slot"
 }
 
 test "reqresp rejects duplicate digests before allocating" {
-    const first: @import("../types.zig").ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
+    const first: ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    for ([_]@import("config").ForkSeq{ .fulu, .deneb }) |fork| {
+    for ([_]ForkSeq{ .fulu, .deneb }) |fork| {
         try std.testing.expectError(error.InvalidOptions, reqresp.init(failing.allocator(), .{
             .forks = &.{ first, .{ .digest = first.digest, .fork = fork } },
-            .admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 1, 1, 1),
+            .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1, 1, 1),
         }));
     }
 }

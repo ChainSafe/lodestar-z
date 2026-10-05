@@ -15,6 +15,8 @@ const Runtime = r.Runtime;
 const Kind = n.gossip_processor.limits.Kind;
 const limits_mod = n.gossip_processor.limits;
 const State = n.gossip_processor.GossipProcessor.State;
+const network_wake = @import("network_wake.zig");
+const network_storage = @import("network_storage.zig");
 
 const Part = enum { peers, serving, checks, gossip, acknowledged, completions, closed };
 
@@ -410,7 +412,7 @@ test "actions apply before selection, so a check classified in an exchange is cl
     try fixture.init(false, 2);
     defer fixture.deinit();
     const runtime = &fixture.runtime;
-    runtime.wake = try @import("network_wake.zig").Wake.init();
+    runtime.wake = try network_wake.Wake.init();
     defer runtime.wake.?.deinit();
     var readable = [_]std.c.pollfd{.{ .fd = runtime.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
     const checked = try admit(runtime, .beacon_attestation, @splat(3), "data");
@@ -599,7 +601,7 @@ test "command completions arrive at most `settle` per exchange, fairly under ref
     try fixture.init(false, 2);
     defer fixture.deinit();
     const runtime = &fixture.runtime;
-    var stores = try @import("network_storage.zig").Stores.create(std.testing.allocator, 4);
+    var stores = try network_storage.Stores.create(std.testing.allocator, 4);
     defer stores.destroy();
     runtime.stores = stores;
     defer runtime.stores = null;

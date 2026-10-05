@@ -4,6 +4,9 @@ const Peers = @import("peer_book.zig").PeerBook;
 const Recovery = @import("recovery.zig").Recovery;
 const constants = @import("constants.zig");
 const std = @import("std");
+const peer_book = @import("peer_book.zig");
+const peer_id = @import("../wire/peer_id.zig");
+const score = @import("score.zig");
 
 test "recovery receipts bind connection generation and token and release only cancelled pins" {
     const allocator = std.testing.allocator;
@@ -13,8 +16,8 @@ test "recovery receipts bind connection generation and token and release only ca
     defer recovery.deinit(allocator, &peers);
     const connection: Handle = .{ .index = 0, .generation = 1 };
     const next_connection: Handle = .{ .index = 0, .generation = 2 };
-    const metadata: @import("peer_book.zig").Metadata = .{
-        .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length },
+    const metadata: peer_book.Metadata = .{
+        .identity = .{ .bytes = [_]u8{1} ** peer_id.length },
         .address = .unspecified,
         .direction = .inbound,
     };
@@ -44,8 +47,8 @@ test "recovery capacity resolves every matching attribution and deinit releases 
     var peers = try Peers.init(allocator, &.{ .retained_score_ms = 10_000, .retained_capacity = 2, .retained_outbound_reserve = 1 });
     defer peers.deinit(allocator);
     const connection: Handle = .{ .index = 0, .generation = 1 };
-    const metadata: @import("peer_book.zig").Metadata = .{
-        .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length },
+    const metadata: peer_book.Metadata = .{
+        .identity = .{ .bytes = [_]u8{1} ** peer_id.length },
         .address = .unspecified,
         .direction = .inbound,
     };
@@ -69,7 +72,7 @@ test "recovery batches pin identity once and score one randomly selected promise
     var recovery = try Recovery.init(a);
     defer recovery.deinit(a, &peers);
     const connection: Handle = .{ .index = 0, .generation = 1 };
-    const metadata: @import("peer_book.zig").Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound };
+    const metadata: peer_book.Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound };
     const peer = peers.admit(connection, &metadata, 0).admitted.peer;
     var ids: [constants.gossip_ids_max]MessageId = undefined;
     for (&ids, 0..) |*id, i| id.* = @splat(@intCast(i));
@@ -95,7 +98,7 @@ const PeerRef = @import("peer_book.zig").Ref;
 const none: u16 = std.math.maxInt(u16);
 
 fn admit(peers: *Peers, index: u16) PeerRef {
-    const metadata: @import("peer_book.zig").Metadata = .{ .identity = .{ .bytes = @splat(@intCast(index + 1)) }, .address = .unspecified, .direction = .inbound };
+    const metadata: peer_book.Metadata = .{ .identity = .{ .bytes = @splat(@intCast(index + 1)) }, .address = .unspecified, .direction = .inbound };
     return peers.admit(.{ .index = index, .generation = 1 }, &metadata, 0).admitted.peer;
 }
 
@@ -420,6 +423,6 @@ test "recovery arms one sampled promise per sent batch whose sample is still out
     try std.testing.expectEqual(@as(u64, 3), recovery.armed);
     try std.testing.expectEqual(@as(u64, 0), recovery.expire(&peers, 30_000));
     try std.testing.expectEqual(@as(usize, 0), recovery.len);
-    try std.testing.expectEqual(@as(u64, 1), peers.scores.penalties[@intFromEnum(@import("score.zig").Penalty.broken_iwant)]);
+    try std.testing.expectEqual(@as(u64, 1), peers.scores.penalties[@intFromEnum(score.Penalty.broken_iwant)]);
     try std.testing.expectEqual(@as(f64, 1), peers.scores.rows[peer.index].behaviour);
 }

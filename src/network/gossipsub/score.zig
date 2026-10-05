@@ -1,5 +1,6 @@
 const std = @import("std");
 const constants = @import("constants.zig");
+const topic_policy = @import("topic_policy.zig");
 
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -121,7 +122,7 @@ pub const PeerScore = struct {
     }
 
     pub fn initForTopics(allocator: Allocator, params: Params, count: u16, topic_count: usize) (Allocator.Error || error{InvalidLimits})!PeerScore {
-        if (count == 0 or count > peer_capacity or topic_count == 0 or topic_count > @import("topic_policy.zig").topic_max) return error.InvalidLimits;
+        if (count == 0 or count > peer_capacity or topic_count == 0 or topic_count > topic_policy.topic_max) return error.InvalidLimits;
         try validateParams(params);
         const cells = @as(usize, count) * topic_count;
         const topics = try allocator.alloc(TopicCounters, cells);

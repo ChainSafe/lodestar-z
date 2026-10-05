@@ -1,3 +1,4 @@
+const std = @import("std");
 const network = @import("network");
 const control = @import("peer_control.zig");
 const Peer = @import("network_peer.zig").Peer;
@@ -54,17 +55,17 @@ pub fn emit(peer: *Peer, id: u32) !void {
     });
 }
 
-pub fn ids(a: @import("std").mem.Allocator, id: u32) !void {
+pub fn ids(a: std.mem.Allocator, id: u32) !void {
     const topic = "/eth2/01000000/beacon_block/ssz_snappy";
     const other = "/eth2/01000000/voluntary_exit/ssz_snappy";
     const phase0 = network.gossipsub.topic.MessageIdPolicy{ .phase0_digest = .{ 1, 0, 0, 0 } };
     try control.emit(a, .{
         .id = id,
         .ok = true,
-        .phase0Other = @import("std").fmt.bytesToHex(network.gossipsub.topic.validMessageId(other, "hello", phase0), .lower),
-        .phase0 = @import("std").fmt.bytesToHex(network.gossipsub.topic.validMessageId(topic, "hello", phase0), .lower),
-        .altair = @import("std").fmt.bytesToHex(network.gossipsub.topic.validMessageId(topic, "hello", .{}), .lower),
-        .invalid = @import("std").fmt.bytesToHex(network.gossipsub.topic.invalidMessageId(topic, &.{0xff}, .{}), .lower),
-        .other = @import("std").fmt.bytesToHex(network.gossipsub.topic.validMessageId(other, "hello", .{}), .lower),
+        .phase0Other = std.fmt.bytesToHex(network.gossipsub.topic.validMessageId(other, "hello", phase0), .lower),
+        .phase0 = std.fmt.bytesToHex(network.gossipsub.topic.validMessageId(topic, "hello", phase0), .lower),
+        .altair = std.fmt.bytesToHex(network.gossipsub.topic.validMessageId(topic, "hello", .{}), .lower),
+        .invalid = std.fmt.bytesToHex(network.gossipsub.topic.invalidMessageId(topic, &.{0xff}, .{}), .lower),
+        .other = std.fmt.bytesToHex(network.gossipsub.topic.validMessageId(other, "hello", .{}), .lower),
     });
 }

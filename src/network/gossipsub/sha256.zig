@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const gossip_sha256_options = @import("gossip_sha256_options");
 
 pub const Backend = enum(u8) { zig_std, x86_sha_avx2, aarch64_sha2 };
 
@@ -19,7 +20,7 @@ const Accelerated = fn (
     out: *[32]u8,
 ) callconv(.c) void;
 
-const linked: ?*const Accelerated = if (@import("gossip_sha256_options").accelerated)
+const linked: ?*const Accelerated = if (gossip_sha256_options.accelerated)
     @extern(*const Accelerated, .{ .name = "lodestar_z_gossip_sha256", .visibility = .hidden })
 else
     null;

@@ -6,6 +6,15 @@ const NetworkCore = @import("network_core.zig").NetworkCore;
 const keys = @import("wire/keys.zig");
 const options = @import("network_core_test_support.zig").networkOptions;
 const stepAfter = @import("network_core_test_support.zig").stepAfter;
+const time = @import("time.zig");
+const transport = @import("transport.zig");
+const Engine = @import("quic/Engine.zig");
+const multistream = @import("wire/multistream.zig");
+const reqresp = @import("reqresp/root.zig");
+const configuration = @import("configuration.zig");
+const policy_fixture = @import("reqresp/policy_fixture.zig");
+const network_core_test_support = @import("network_core_test_support.zig");
+const udp = @import("udp");
 
 fn delayedRuntimeDatagram(sender: std.Io.net.Socket, address: std.Io.net.IpAddress) void {
     std.testing.io.sleep(.fromMilliseconds(10), .awake) catch unreachable;
@@ -69,7 +78,7 @@ test "core native host wake validates rollback stays attached through shutdown a
     try std.testing.expect(!detached.readiness.host);
     try node.setHostWake(host.handle);
     node.shutdown(node.last_now);
-    const stopped = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(node.last_now.millis() +| 100)));
+    const stopped = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(time.optionalMilliseconds(node.last_now.millis() +| 100)));
     try std.testing.expect(stopped.readiness.host);
     try std.testing.expectError(error.Stopped, node.setHostWake(host.handle));
     try node.setHostWake(null);
@@ -110,7 +119,7 @@ test "core native wait source failure retains completed protocol progress" {
     try std.testing.expectEqualSlices(u8, "invalid", node.discovery.?.transport.receive_buffer[0..7]);
     try std.testing.expectEqual(allocations, backing_node.allocations);
     try node.setHostWake(null);
-    const clean = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(node.last_now.millis())));
+    const clean = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(time.optionalMilliseconds(node.last_now.millis())));
     try std.testing.expect(clean.failure == null);
     try std.testing.expectEqual(@as(u64, 1), node.counters.readiness_failures);
 }
@@ -125,11 +134,11 @@ test "core native wait honors engine timers and pending lifecycle work" {
     defer node.deinit(std.testing.io);
     const remote = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer remote.close(std.testing.io);
-    const destination = @import("udp").Address.fromNetwork(remote.address);
-    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
+    const destination = udp.Address.fromNetwork(remote.address);
+    const now = try transport.Transport.currentTime(std.testing.io);
     _ = try node.transport.engine.dial(&destination, node.peerId(), now);
     try std.testing.expect(node.transport.engine.backlog());
-    const first = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 100)));
+    const first = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 100)));
     try std.testing.expect(first.failure == null);
     try std.testing.expect(first.transport.datagrams_sent > 0);
     try std.testing.expect(!first.transport.backlog);
@@ -138,15 +147,15 @@ test "core native wait honors engine timers and pending lifecycle work" {
     const deadline_ms = deadline / std.time.ns_per_ms + @intFromBool(deadline % std.time.ns_per_ms != 0);
     try std.testing.expect(deadline_ms <= now.millis() + 80);
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(current, .{}).schedule(), current.millis()).? <= deadline_ms);
-    const timer = driver.step(&node, std.testing.io, current, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(current.millis() +| 100)));
+    const timer = driver.step(&node, std.testing.io, current, .{}, .deadlineOnly(time.optionalMilliseconds(current.millis() +| 100)));
     try std.testing.expect(timer.failure == null);
     const failed = try node.transport.engine.dial(&destination, node.peerId(), node.last_now);
     try std.testing.expect(node.transport.engine.failSend(failed));
     try std.testing.expect(node.transport.engine.eventsPending());
-    const lifecycle = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(node.last_now.millis() +| 100)));
+    const lifecycle = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(time.optionalMilliseconds(node.last_now.millis() +| 100)));
     try std.testing.expect(lifecycle.failure == null);
     try std.testing.expect(lifecycle.transport.events > 0);
-    const repeated = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(node.last_now.millis())));
+    const repeated = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(time.optionalMilliseconds(node.last_now.millis())));
     try std.testing.expectEqual(@as(usize, 0), repeated.transport.events);
 }
 
@@ -158,11 +167,11 @@ test "core flushes a protocol reply in the turn that wrote it" {
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     // A bare QUIC peer: it speaks multistream by hand and runs no protocol of its own.
-    var spoke: @import("transport.zig").Transport = .{};
+    var spoke: transport.Transport = .{};
     try spoke.init(std.testing.allocator, std.testing.io, .{ .host = &spoke_key, .bind = .{ .ip4 = .loopback(0) } });
     defer spoke.deinit(std.testing.io);
-    const conn = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId(), try @import("transport.zig").Transport.currentTime(std.testing.io));
-    var events: [32]@import("quic/Engine.zig").Event = undefined;
+    const conn = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId(), try transport.Transport.currentTime(std.testing.io));
+    var events: [32]Engine.Event = undefined;
     var connected = false;
     for (0..400) |_| {
         const stepped = try transport_test.step(&spoke, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(1) });
@@ -177,7 +186,7 @@ test "core flushes a protocol reply in the turn that wrote it" {
     }
 
     const stream = try spoke.engine.openStream(conn);
-    const dialer = try @import("wire/multistream.zig").Dialer.init(@import("reqresp/root.zig").Protocol.ping_v1.id());
+    const dialer = try multistream.Dialer.init(reqresp.Protocol.ping_v1.id());
     var proposal: [256]u8 = undefined;
     const hello = try dialer.initialWrite(&proposal);
     try std.testing.expectEqual(hello.len, try spoke.engine.write(stream, hello, false));
@@ -205,20 +214,20 @@ test "core flushes a protocol reply in the turn that wrote it" {
 
 test "core beacon idle scans do not manufacture immediate deadlines" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{11}));
-    const resolved = try @import("configuration.zig").resolve(.{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
+    const resolved = try configuration.resolve(.{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = policy_fixture.config() });
     var node: NetworkCore = undefined;
     var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     try node.init(backing_node.allocator(), std.testing.io, &resolved, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
-        .local = @import("network_core_test_support.zig").localState(.{}),
+        .local = network_core_test_support.localState(.{}),
         .slot = 100,
     });
     defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
+    const now = try transport.Transport.currentTime(std.testing.io);
     const calls = backing_node.allocations;
     for (0..8) |_| {
-        const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
+        const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
         try std.testing.expect(result.failure == null);
         try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(node.protocols.reqresp.schedule(.{}), now.millis()));
         try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(now, .{}).schedule(), now.millis()).? > now.millis());
@@ -235,11 +244,11 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
     defer node.deinit(std.testing.io);
     // A bare QUIC peer never answers the node's identify, meshsub and status proposals, so
     // their negotiations stay pending on future deadlines.
-    var spoke: @import("transport.zig").Transport = .{};
+    var spoke: transport.Transport = .{};
     try spoke.init(std.testing.allocator, std.testing.io, .{ .host = &spoke_key, .bind = .{ .ip4 = .loopback(0) } });
     defer spoke.deinit(std.testing.io);
-    _ = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId(), try @import("transport.zig").Transport.currentTime(std.testing.io));
-    var events: [32]@import("quic/Engine.zig").Event = undefined;
+    _ = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId(), try transport.Transport.currentTime(std.testing.io));
+    var events: [32]Engine.Event = undefined;
     for (0..40) |_| {
         _ = try transport_test.step(&spoke, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(1) });
         _ = try stepAfter(&node, 1);
@@ -249,10 +258,10 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
     const due = node.due_now_turns;
     const visits = .{ node.protocols.reqresp.visits, node.protocols.router.negotiator.visits };
     for (0..64) |_| {
-        const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
+        const now = try transport.Transport.currentTime(std.testing.io);
         if (schedule_test_support.wakeupMilliseconds(node.protocols.reqresp.schedule(.{ .application = 1, .control = 1 }), now.millis())) |wakeup| try std.testing.expect(wakeup > now.millis());
         try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.protocols.router.schedule(1), now.millis()).? > now.millis());
-        try std.testing.expect(driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis()))).failure == null);
+        try std.testing.expect(driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis()))).failure == null);
     }
     try std.testing.expectEqual(due[@intFromEnum(Source.reqresp)], node.due_now_turns[@intFromEnum(Source.reqresp)]);
     try std.testing.expectEqual(due[@intFromEnum(Source.negotiation)], node.due_now_turns[@intFromEnum(Source.negotiation)]);

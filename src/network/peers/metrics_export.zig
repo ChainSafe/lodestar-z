@@ -6,6 +6,8 @@ const Discovery = @import("discovery.zig").Discovery;
 const Dialing = @import("dialing.zig").Dialing;
 const Population = @import("population.zig").Population;
 const Client = @import("client.zig").Client;
+const control = @import("control.zig");
+const discv5 = @import("discv5");
 
 pub fn writePeers(manager: *const PeerManager, population: *const Population, running: bool, w: *prom.Encoder) prom.Error!void {
     try w.scalar(.{
@@ -57,7 +59,7 @@ pub fn writePeerCloses(manager: *const PeerManager, w: *prom.Encoder) prom.Error
         .kind = .counter,
         .help = "Failed Status, Metadata and Ping probes; a streak of failures disconnects at its limit and a refused probe at once",
         .labels = &.{"probe"},
-    }, @import("control.zig").Control.HealthProbe, &manager.control.counters.health_failures);
+    }, control.Control.HealthProbe, &manager.control.counters.health_failures);
 }
 
 pub fn writeRememberedPeers(manager: *const PeerManager, w: *prom.Encoder) prom.Error!void {
@@ -112,7 +114,7 @@ pub fn writeDiscoveryProgress(manager: *const PeerManager, discovery_owner: ?*co
         .help = "Completed foreground discovery walks by finish reason; cancellations excluded",
         .labels = &.{"reason"},
     });
-    inline for (@typeInfo(@import("discv5").Lookup.FinishReason).@"enum".fields) |field| {
+    inline for (@typeInfo(discv5.Lookup.FinishReason).@"enum".fields) |field| {
         if (comptime !std.mem.eql(u8, field.name, "cancelled"))
             try lookup_finishes.sample(.{field.name}, discovery.lookup_finishes[field.value]);
     }
@@ -149,12 +151,12 @@ pub fn writeDiscoveryCounters(manager: *const PeerManager, discovery_owner: ?*co
         .help = "Received discovery datagrams rejected by processing stage and reason",
         .labels = &.{ "stage", "reason" },
     });
-    inline for (std.meta.fields(@import("discv5").types.RejectReason)) |field| {
+    inline for (std.meta.fields(discv5.types.RejectReason)) |field| {
         try rejected.sample(.{ comptime rejectStage(@enumFromInt(field.value)), field.name }, datagram_rejections[field.value]);
     }
 }
 
-fn rejectStage(reason: @import("discv5").types.RejectReason) []const u8 {
+fn rejectStage(reason: discv5.types.RejectReason) []const u8 {
     return switch (reason) {
         .oversized_datagram => "receive",
         .admission_limited => "admission",

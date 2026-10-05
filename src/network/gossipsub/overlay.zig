@@ -8,16 +8,20 @@ const prom = @import("../metrics/registry.zig");
 const Sessions = @import("sessions.zig").Sessions;
 const PeerSet = @import("sessions.zig").PeerSet;
 const assert = std.debug.assert;
+const PeerBook = @import("peer_book.zig").PeerBook;
+const options_mod = @import("options.zig");
+const heartbeat_cycle = @import("heartbeat_cycle.zig");
+const outbox_mod = @import("outbox.zig");
 
 const c = constants;
 const Set = PeerSet;
 
 pub const Context = struct {
     sessions: *Sessions,
-    peers: *@import("peer_book.zig").PeerBook,
-    options: *const @import("options.zig").Options,
+    peers: *PeerBook,
+    options: *const options_mod.Options,
     now: u64,
-    snapshot: ?*const @import("heartbeat_cycle.zig").Scores = null,
+    snapshot: ?*const heartbeat_cycle.Scores = null,
 };
 
 pub const Row = struct {
@@ -127,7 +131,7 @@ pub const Overlay = struct {
         }
     }
 
-    pub fn synchronize(self: *const Overlay, outbox: *@import("outbox.zig").Outbox, now: u64) void {
+    pub fn synchronize(self: *const Overlay, outbox: *outbox_mod.Outbox, now: u64) void {
         const announcements = &outbox.subscription_dirty;
         assert(announcements.bit_length == self.rows.len);
         announcements.setRangeValue(.{ .start = 0, .end = announcements.bit_length }, false);
@@ -137,7 +141,7 @@ pub const Overlay = struct {
         outbox.synchronize(now);
     }
 
-    pub fn flushSubscriptions(self: *const Overlay, outbox: *@import("outbox.zig").Outbox, scratch: *@import("outbox.zig").ControlScratch, now: u64) void {
+    pub fn flushSubscriptions(self: *const Overlay, outbox: *outbox_mod.Outbox, scratch: *outbox_mod.ControlScratch, now: u64) void {
         for (0..self.rows.len) |_| {
             const index = outbox.nextSubscription() orelse return;
             const row = &self.rows[index];
@@ -351,12 +355,12 @@ pub const Overlay = struct {
         return null;
     }
 
-    pub fn ref(self: *const Overlay, index: u16) @import("topic.zig").Ref {
+    pub fn ref(self: *const Overlay, index: u16) topic_mod.Ref {
         assert(self.rows[index].active);
         return .{ .index = index, .generation = self.rows[index].generation };
     }
 
-    pub fn matches(self: *const Overlay, topic: @import("topic.zig").Ref) bool {
+    pub fn matches(self: *const Overlay, topic: topic_mod.Ref) bool {
         return topic.index < self.rows.len and self.rows[topic.index].active and self.rows[topic.index].generation == topic.generation;
     }
 

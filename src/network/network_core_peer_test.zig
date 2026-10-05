@@ -11,9 +11,17 @@ const gossip = @import("gossipsub/root.zig");
 const resolvedOptions = @import("network_core_test_support.zig").resolvedOptions;
 const localState = @import("network_core_test_support.zig").localState;
 const Setup = @import("network_core_test_support.zig").Setup;
+const ForkSeq = @import("config").ForkSeq;
+const network_core_test_support = @import("network_core_test_support.zig");
+const control = @import("peers/control.zig");
+const time = @import("time.zig");
+const session_io = @import("gossipsub/session_io.zig");
+const goodbye = @import("peers/goodbye.zig");
+const NetworkCore = @import("network_core.zig").NetworkCore;
+const router = @import("router.zig");
 
 test "core native two owners establish relevance and fetch initial metadata without public output" {
-    for ([_]@import("config").ForkSeq{ .phase0, .altair, .fulu }) |fork| {
+    for ([_]ForkSeq{ .phase0, .altair, .fulu }) |fork| {
         const local: t.LocalState = .{
             .fork = .{ .fork = fork },
             .status = .{ .earliest_available_slot = if (fork.gte(.fulu)) 0 else null },
@@ -76,7 +84,7 @@ test "core native ping coalesces metadata and confirms unchanged freshness then 
     for (0..50) |_| try setup.step(1);
     _ = setup.client.peer_manager.snapshots(&snapshots);
     try std.testing.expect(snapshots[0].metadata_at_ms > before);
-    try @import("network_core_test_support.zig").updateLocal(&setup.server, &metadataUpdate(&setup.server, &localState(.{ .metadata = .{ .attnets = @splat(9) } }).metadata), setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.server, &metadataUpdate(&setup.server, &localState(.{ .metadata = .{ .attnets = @splat(9) } }).metadata), setup.pair.now);
     var changed = setup.server.localState().metadata;
     try std.testing.expectEqual(@as(u64, 1), changed.seq_number);
     // Phase0 Metadata carries no custody count.
@@ -106,7 +114,7 @@ test "core native immutable metadata response survives local update during pendi
             if (slot.request.protocol != .metadata_v1) continue;
             try std.testing.expect(slot.request.io.writing);
             const changed: t.Metadata = .{ .seq_number = 5, .attnets = @splat(9) };
-            try @import("network_core_test_support.zig").updateLocal(&setup.server, &metadataUpdate(&setup.server, &localState(.{ .metadata = changed }).metadata), setup.pair.now);
+            try network_core_test_support.updateLocal(&setup.server, &metadataUpdate(&setup.server, &localState(.{ .metadata = changed }).metadata), setup.pair.now);
             pending = true;
             break;
         };
@@ -143,7 +151,7 @@ test "core native control timeout releases owners independent of public output" 
 }
 
 test "core native control disconnects only after consecutive health failures" {
-    const status = @intFromEnum(@import("peers/control.zig").Control.HealthProbe.status);
+    const status = @intFromEnum(control.Control.HealthProbe.status);
     const Case = struct { failure: rr.ReqResp.Failure, reason: ?t.DisconnectReason };
     for ([_]Case{
         .{ .failure = .stream_closed, .reason = .health_error },
@@ -190,7 +198,7 @@ test "core native control retries a failed probe on the turn its retry deadline 
     for (0..50) |_| try setup.step(0);
     const peer = setup.client.peer_manager.catalog.find(&setup.server.peerId()).?;
     const row = &setup.client.peer_manager.control.connections[peer.index];
-    const status = @intFromEnum(@import("peers/control.zig").Control.HealthProbe.status);
+    const status = @intFromEnum(control.Control.HealthProbe.status);
     try failStatusRound(&setup, .timeout);
     try std.testing.expectEqual(@as(u8, 1), row.health_failures[status]);
     const retry = row.retry_ms;
@@ -199,11 +207,11 @@ test "core native control retries a failed probe on the turn its retry deadline 
     const counter = &setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
     const started = counter.*;
     const visits = setup.client.peer_manager.control.visits;
-    setup.pair.now.monotonic = @import("time.zig").milliseconds(retry - 1);
+    setup.pair.now.monotonic = time.milliseconds(retry - 1);
     try setup.step(0);
     try std.testing.expectEqual(started, counter.*);
     try std.testing.expectEqual(visits, setup.client.peer_manager.control.visits);
-    setup.pair.now.monotonic = @import("time.zig").milliseconds(retry);
+    setup.pair.now.monotonic = time.milliseconds(retry);
     try setup.step(0);
     try std.testing.expectEqual(started + 1, counter.*);
     try std.testing.expectEqual(visits + 1, setup.client.peer_manager.control.visits);
@@ -216,7 +224,7 @@ test "core native control success clears a health failure streak" {
     defer setup.deinit();
     for (0..50) |_| try setup.step(0);
     const peer = setup.client.peer_manager.catalog.find(&setup.server.peerId()).?;
-    const status = @intFromEnum(@import("peers/control.zig").Control.HealthProbe.status);
+    const status = @intFromEnum(control.Control.HealthProbe.status);
     const limit = setup.client.peer_manager.control.options.health_failures_max;
     for (0..2) |_| {
         for (0..limit - 1) |_| {
@@ -234,7 +242,7 @@ test "core native control success clears a health failure streak" {
 fn allocationCheck(a: std.mem.Allocator) !void {
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     const opts = resolvedOptions().core;
-    const receive = @import("router.zig").Router.initialCapabilities(opts.protocols.router).receive;
+    const receive = router.Router.initialCapabilities(opts.protocols.router).receive;
     var core = try PeerManager.init(a, &identity, &localState(.{}), opts.peerManager(), receive, 4);
     defer core.deinit();
 }
@@ -395,7 +403,7 @@ test "core retains explicit direct connections without periodically resurrecting
     _ = setup.server.peer_manager.snapshots(&remote);
     try std.testing.expect(setup.server.peer_manager.catalog.setDirect(remote[0].peer, true));
     const driver = setup.client.protocols.gossipsub;
-    @import("gossipsub/session_io.zig").retirePeer(driver, &setup.client.protocols.router, setup.pair.client, driver.sessions.find(conn).?);
+    session_io.retirePeer(driver, &setup.client.protocols.router, setup.pair.client, driver.sessions.find(conn).?);
     const started = driver.counters.negotiation_started;
     for (0..4) |_| {
         setup.pair.advance(1_000);
@@ -424,7 +432,7 @@ test "core direct removal clears both pins and gossip score reads have no feedba
     _ = setup.client.peer_manager.snapshots(&snapshots);
     try std.testing.expect(snapshots[0].direct);
     const conn = snapshots[0].connection.?;
-    @import("gossipsub/test_support.zig").penalize(setup.client.protocols.gossipsub, conn, 7);
+    gossip_test.penalize(setup.client.protocols.gossipsub, conn, 7);
     const before = setup.client.peer_manager.gossipScore(setup.client.protocols.gossipsub, snapshots[0].peer, setup.pair.now).?;
     try std.testing.expect(std.math.isFinite(before));
     _ = setup.client.peer_manager.reportPeer(snapshots[0].peer, .high_tolerance, setup.pair.now);
@@ -437,7 +445,7 @@ test "core direct removal clears both pins and gossip score reads have no feedba
     try std.testing.expect(!snapshots[0].direct);
     const logical = setup.client.protocols.gossipsub.peers.find(&identity).?;
     try std.testing.expect(!setup.client.protocols.gossipsub.peers.rows[logical.index].direct);
-    var intents: [2]@import("peers/dialing.zig").Dialing.SelectedDial = undefined;
+    var intents: [2]SelectedDial = undefined;
     try std.testing.expectEqual(
         @as(usize, 0),
         setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents),
@@ -490,7 +498,7 @@ test "core native continuous reStatus cannot starve due metadata sequence confir
     try setup.init(&.{});
     defer setup.deinit();
     for (0..50) |_| try setup.step(0);
-    try @import("network_core_test_support.zig").updateLocal(&setup.server, &metadataUpdate(&setup.server, &localState(.{ .metadata = .{ .attnets = @splat(12) } }).metadata), setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.server, &metadataUpdate(&setup.server, &localState(.{ .metadata = .{ .attnets = @splat(12) } }).metadata), setup.pair.now);
     const sequence = setup.server.localState().metadata.seq_number;
     try std.testing.expect(sequence > 0);
     setup.pair.advance(21_000);
@@ -533,7 +541,7 @@ test "core native Goodbye immediately removes relevance and delayed Status canno
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.peerCounts().connected);
     try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.catalog.pollEvents(&event));
     try std.testing.expectEqual(t.DisconnectReason.reputation, event[0].closed.reason);
-    const fault = @intFromEnum(@import("peers/goodbye.zig").Reason.bad_score);
+    const fault = @intFromEnum(goodbye.Reason.bad_score);
     try std.testing.expectEqual(@as(u64, 1), setup.server.peer_manager.control.counters.events.goodbyes[fault]);
     for (0..4) |_| try setup.step(0);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.peerCounts().connected);
@@ -571,7 +579,7 @@ test "core native peer counts distinguish open relevant invalidated and closed w
     try std.testing.expect(!setup.client.removeDirectPeer(&offline));
 }
 
-fn metadataUpdate(node: *const @import("network_core.zig").NetworkCore, metadata: *const t.Metadata) t.LocalState {
+fn metadataUpdate(node: *const NetworkCore, metadata: *const t.Metadata) t.LocalState {
     var local = node.localState();
     local.metadata = metadata.*;
     return local;

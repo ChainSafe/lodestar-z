@@ -8,8 +8,13 @@ const std = @import("std");
 const c = @import("constants.zig");
 const Context = @import("overlay.zig").Context;
 const assert = std.debug.assert;
+const Gossipsub = @import("Gossipsub.zig");
+const registry = @import("../metrics/registry.zig");
+const test_support = @import("../quic/test_support.zig");
+const topic_fixture = @import("topic_fixture.zig");
+const score = @import("score.zig");
 const Fixture = struct {
-    g: @import("Gossipsub.zig"),
+    g: Gossipsub,
     topic: u16,
 
     fn init(count: usize) !Fixture {
@@ -19,7 +24,7 @@ const Fixture = struct {
         gossip_test.subscribe(&g, name) catch unreachable;
         const topic = g.overlay.findTopic(name).?;
         for (0..count) |index| {
-            const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(index), .generation = 1 }, .v1_2).?;
+            const peer = gossip_test.addPeer(&g, .{ .index = @intCast(index), .generation = 1 }, .v1_2).?;
             _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, g.overlay.topicString(topic), true);
         }
         return .{ .g = g, .topic = topic };
@@ -33,7 +38,7 @@ const Fixture = struct {
 fn meshChanges(overlay: *const Overlay, comptime topic: []const u8, comptime event: []const u8, comptime reason: []const u8) !u64 {
     var buffer: [32 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    var encoder: @import("../metrics/registry.zig").Encoder = .{ .writer = &writer };
+    var encoder: registry.Encoder = .{ .writer = &writer };
     try overlay.mesh_changes.write(&encoder);
     const prefix = "lodestar_native_gossip_mesh_changes_total{topic=\"" ++ topic ++ "\",event=\"" ++ event ++ "\",reason=\"" ++ reason ++ "\"} ";
     const start = (std.mem.indexOf(u8, writer.buffered(), prefix) orelse return error.MissingSeries) + prefix.len;
@@ -89,7 +94,7 @@ test "gossip heartbeat admits sessions newer than its score snapshot" {
     defer f.g.deinit();
     const context = f.context(2);
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
-    const peer = @import("test_support.zig").addPeer(&f.g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = gossip_test.addPeer(&f.g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     f.g.overlay.onGraft(&f.g.overlayContext(2), f.topic, peer.index);
     try std.testing.expect(f.g.overlay.inMesh(f.topic, peer.index));
     f.g.overlay.maintain(&context, f.topic);
@@ -183,7 +188,7 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
 test "gossip partial peer turn queues subscription before outgoing GRAFT" {
     var f = try Fixture.init(2);
     defer f.g.deinit();
-    var pair: @import("../quic/test_support.zig").Pair = .{};
+    var pair: test_support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     f.g.options.peers_per_pump = 1;
@@ -191,7 +196,7 @@ test "gossip partial peer turn queues subscription before outgoing GRAFT" {
     const target = &f.g.sessions.rows[1].io.tx;
     try std.testing.expect(target.subscription_dirty.isSet(f.topic));
     f.g.heartbeat_at = 1;
-    _ = @import("test_support.zig").pump(&f.g, &pair.client, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
+    _ = gossip_test.pump(&f.g, &pair.client, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     // The turn took only the first ready session; the second stays ready for the next one.
     try std.testing.expect(!f.g.sessions.rows[0].ready_link.linked);
     try std.testing.expectEqual(@as(u32, 1), f.g.sessions.ready.head);
@@ -336,7 +341,7 @@ test "overlay unsubscribe and disconnect retire membership and score together" {
 }
 
 test "gossip policy topic capacity supports two full fork subnet sets" {
-    var gossip = try gossip_test.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{ @import("topic_fixture.zig").bytes(.{ 0, 0, 0, 0 }), @import("topic_fixture.zig").bytes(.{ 1, 0, 0, 0 }), @import("topic_fixture.zig").bytes(.{ 2, 0, 0, 0 }) } });
+    var gossip = try gossip_test.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{ topic_fixture.bytes(.{ 0, 0, 0, 0 }), topic_fixture.bytes(.{ 1, 0, 0, 0 }), topic_fixture.bytes(.{ 2, 0, 0, 0 }) } });
     defer gossip.deinit();
     const overlay = gossip.overlay;
     var name: [topic_mod.name_max_len]u8 = undefined;
@@ -366,7 +371,7 @@ test "gossip policy topic capacity supports two full fork subnet sets" {
 }
 
 test "gossip state intern snapshots an aliased retiring topic string" {
-    var g = try @import("Gossipsub.zig").init(std.testing.allocator, .{ .random_seed = 1 });
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const overlay = g.overlay;
     const oversized = [_]u8{'x'} ** (topic_mod.topic_max_len + 1);
@@ -401,8 +406,8 @@ test "mesh changes count each committed join and leave once by reason, not contr
     overlay.onGraft(&context, f.topic, 0);
     try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "beacon_block", "leave", "remote_prune"));
     try std.testing.expectEqual(@as(u64, 0), try meshChanges(overlay, "beacon_block", "leave", "refused_graft"));
-    try std.testing.expectEqual(@as(u64, 1), f.g.peers.scores.penalties[@intFromEnum(@import("score.zig").Penalty.graft_backoff)]);
-    try std.testing.expectEqual(@as(u64, 1), f.g.peers.scores.penalties[@intFromEnum(@import("score.zig").Penalty.graft_flood)]);
+    try std.testing.expectEqual(@as(u64, 1), f.g.peers.scores.penalties[@intFromEnum(score.Penalty.graft_backoff)]);
+    try std.testing.expectEqual(@as(u64, 1), f.g.peers.scores.penalties[@intFromEnum(score.Penalty.graft_flood)]);
     for (0..2) |_| _ = overlay.peerSubscription(&context, 1, name, false);
     for (0..2) |_| f.g.markDirect(f.g.sessions.rows[2].conn);
     f.g.peers.scores.penalize(f.g.sessions.rows[3].logical.index, 50);

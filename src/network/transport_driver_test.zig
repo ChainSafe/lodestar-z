@@ -5,6 +5,7 @@ const support = @import("transport_test_support.zig");
 const Node = support.Node;
 const quic_test = @import("quic/test_support.zig");
 const FaultIo = @import("fault_io");
+const transport_driver = @import("transport_driver.zig");
 
 test "transport bounds an idle step by the requested wait" {
     var node: Node = .{};
@@ -34,13 +35,13 @@ test "transport progress early clock failure does not begin or publish a turn" {
     var faults: FaultIo = .{ .clock = .{} };
     const io = faults.io();
     var events: [4]Engine.Event = undefined;
-    const result = @import("transport_driver.zig").step(&node.transport, io, &events, .{ .wait_max = .fromMilliseconds(0) });
+    const result = transport_driver.step(&node.transport, io, &events, .{ .wait_max = .fromMilliseconds(0) });
     try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?);
     try std.testing.expectEqual(@as(u64, 0), result.progress.now.millis());
     try std.testing.expectEqual(@as(usize, 0), result.progress.events);
     try std.testing.expectEqual(@as(u32, 0), result.progress.datagrams_sent);
     try std.testing.expect(node.transport.engine.eventsPending());
-    const next = @import("transport_driver.zig").step(&node.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
+    const next = transport_driver.step(&node.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
     try std.testing.expectEqual(@as(usize, 1), next.progress.events);
     try std.testing.expectEqual(failed, events[0].closed.conn);
 }
@@ -54,7 +55,7 @@ test "transport driver keeps receive progress when the post-wait clock read fail
     vtable.now = ReceiveClockFault.clock;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     ReceiveClockFault.calls = 0;
-    const result = @import("transport_driver.zig").step(&node.transport, io, &.{}, .{ .wait_max = .fromMilliseconds(0) });
+    const result = transport_driver.step(&node.transport, io, &.{}, .{ .wait_max = .fromMilliseconds(0) });
     try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?);
     try std.testing.expectEqual(@as(u32, 1), result.progress.datagrams_received);
     try std.testing.expectEqual(@as(u32, 1), result.progress.datagrams_dropped);

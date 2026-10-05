@@ -3,6 +3,11 @@ const std = @import("std");
 const Pair = @import("test_pair.zig").Pair;
 const Penalty = @import("score.zig").Penalty;
 const test_topic = "/eth2/01020304/beacon_block/ssz_snappy";
+const protobuf = @import("protobuf.zig");
+const TimeoutReason = @import("peer_io.zig").TimeoutReason;
+const receive_pool = @import("receive_pool.zig");
+const time = @import("../time.zig");
+const frame_mod = @import("frame.zig");
 
 test "gossipsub large frame deadline releases receive pages despite byte progress" {
     var setup: Pair = .{};
@@ -12,7 +17,7 @@ test "gossipsub large frame deadline releases receive pages despite byte progres
     const server_peer = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
     const client_peer = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
     var prefix: [128]u8 = undefined;
-    var w = @import("protobuf.zig").Writer.init(&prefix);
+    var w = protobuf.Writer.init(&prefix);
     w.varint(65536);
     w.bytes(&([_]u8{'x'} ** 65));
     try std.testing.expectEqual(w.len, try setup.shared.pair.client.write(setup.clientStream(), w.written(), false));
@@ -59,11 +64,11 @@ test "gossipsub completed frame expiry releases pages without blaming the peer" 
     const peer = &g.sessions.rows[index];
     const before = g.peers.score(peer.logical, setup.shared.pair.now.millis());
     var body: [256]u8 = undefined;
-    var writer = @import("protobuf.zig").Writer.init(&body);
-    @import("protobuf.zig").writeSubscription(&writer, true, test_topic);
-    @import("protobuf.zig").writeSubscription(&writer, false, test_topic);
+    var writer = protobuf.Writer.init(&body);
+    protobuf.writeSubscription(&writer, true, test_topic);
+    protobuf.writeSubscription(&writer, false, test_topic);
     var frame: [260]u8 = undefined;
-    const wire = @import("frame.zig").writeFrame(&frame, writer.written());
+    const wire = frame_mod.writeFrame(&frame, writer.written());
     try std.testing.expectEqual(wire.len, try setup.shared.pair.client.write(setup.clientStream(), wire, false));
     for (0..16) |_| {
         try setup.pumpOnce();
@@ -72,7 +77,7 @@ test "gossipsub completed frame expiry releases pages without blaming the peer" 
     try std.testing.expect(peer.io.rpc != null);
     try std.testing.expectEqual(@as(u32, 1), peer.io.overflow.pages);
     const began = peer.io.frame_since.?;
-    try std.testing.expectEqual(@as(?u64, began + 100), peer.io.deadlines(&g.options).values[@intFromEnum(@import("peer_io.zig").TimeoutReason.receive_frame)]);
+    try std.testing.expectEqual(@as(?u64, began + 100), peer.io.deadlines(&g.options).values[@intFromEnum(TimeoutReason.receive_frame)]);
     g.recovery.add(&g.peers, @splat(1), peer.logical, peer.conn, 1, began + 1000);
     setup.shared.pair.advance(100);
     try setup.pumpOnce();
@@ -119,19 +124,19 @@ test "gossipsub discarding a locally refused frame preserves its deadline withou
     defer setup.deinit();
     try setup.connectMesh();
     const g = setup.shared.server.gossipsub;
-    var held: [3]@import("receive_pool.zig").Chain = @splat(.{});
+    var held: [3]receive_pool.Chain = @splat(.{});
     defer for (&held) |*chain| g.sessions.receive_pool.release(chain);
     for (0..g.sessions.receive_pool.next.len) |i| {
         const chain = &held[i % held.len];
         _ = g.sessions.receive_pool.writable(chain).?;
-        chain.len += @import("receive_pool.zig").page_bytes;
+        chain.len += receive_pool.page_bytes;
     }
     const index = g.sessions.find(setup.shared.handles.server).?;
     const peer = &g.sessions.rows[index];
     const before = g.peers.score(peer.logical, setup.shared.pair.now.millis());
     var wire: [65540]u8 = undefined;
     const body: [65536]u8 = @splat(0);
-    _ = @import("frame.zig").writeFrame(&wire, &body);
+    _ = frame_mod.writeFrame(&wire, &body);
     try std.testing.expectEqual(@as(usize, 2048), try setup.shared.pair.client.write(setup.clientStream(), wire[0..2048], false));
     for (0..16) |_| {
         try setup.pumpOnce();
@@ -139,7 +144,7 @@ test "gossipsub discarding a locally refused frame preserves its deadline withou
     }
     try std.testing.expect(peer.io.discarding);
     const began = peer.io.frame_since.?;
-    setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(began + 199);
+    setup.shared.pair.now.monotonic = time.milliseconds(began + 199);
     try setup.pumpOnce();
     try std.testing.expect(peer.in_stream != null);
     setup.shared.pair.advance(1);

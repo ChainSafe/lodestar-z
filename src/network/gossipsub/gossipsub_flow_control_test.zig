@@ -4,9 +4,12 @@ const std = @import("std");
 const Gossipsub = @import("Gossipsub.zig");
 const Pair = @import("test_pair.zig").Pair;
 const test_topic = "/eth2/01020304/beacon_block/ssz_snappy";
+const constants = @import("constants.zig");
+const snappy = @import("snappy");
+const frame_mod = @import("frame.zig");
 
 test "gossipsub legal maximum and above two MiB publish use actual resumable IO" {
-    const sizes = [_]usize{ 65536, 2 * 1024 * 1024 + 1, @import("constants.zig").MAX_PAYLOAD_SIZE };
+    const sizes = [_]usize{ 65536, 2 * 1024 * 1024 + 1, constants.MAX_PAYLOAD_SIZE };
     for (sizes) |size| {
         var setup: Pair = .{};
         try setup.init();
@@ -48,12 +51,12 @@ test "gossipsub readiness behind a partial turn stays queued and is generation c
     _ = support.addPeer(g, .{ .index = 77, .generation = 9 }, .v1_2).?;
     const pb = @import("protobuf.zig");
     var compressed: [128]u8 = undefined;
-    const n = try @import("snappy").raw.compress("arrived behind a ready session", &compressed);
+    const n = try snappy.raw.compress("arrived behind a ready session", &compressed);
     var body: [256]u8 = undefined;
     var w = pb.Writer.init(&body);
     pb.writeMessage(&w, compressed[0..n], test_topic);
     var frame: [258]u8 = undefined;
-    const wire = @import("frame.zig").writeFrame(&frame, w.written());
+    const wire = frame_mod.writeFrame(&frame, w.written());
     try std.testing.expectEqual(wire.len, try setup.shared.pair.client.write(setup.clientStream(), wire, false));
     try setup.shared.pair.pump();
     setup.forwardServer();
@@ -84,7 +87,7 @@ test "gossipsub native write credit behind a ready session resumes and blocked w
     try setup.connectMesh();
     const g = setup.shared.client.gossipsub;
     const index = g.sessions.find(setup.shared.handles.client).?;
-    const payload = try std.testing.allocator.alloc(u8, @import("constants.zig").MAX_PAYLOAD_SIZE);
+    const payload = try std.testing.allocator.alloc(u8, constants.MAX_PAYLOAD_SIZE);
     defer std.testing.allocator.free(payload);
     var rng = std.Random.DefaultPrng.init(112);
     rng.random().bytes(payload);

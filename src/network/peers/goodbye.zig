@@ -1,5 +1,6 @@
 const std = @import("std");
 const Rejection = @import("types.zig").Rejection;
+const dial_history = @import("dial_history.zig");
 
 pub const Reason = enum { shutdown, irrelevant_network, fault, unable_to_verify, too_many_peers, bad_score, banned, banned_ip, unknown };
 pub const count = @typeInfo(Reason).@"enum".fields.len;
@@ -30,7 +31,7 @@ pub fn rejection(code: u64) Rejection {
 
 /// The cooldown after a Goodbye we send, equal to the first block of the same Goodbye received.
 pub fn cooldownMs(code: u64) u64 {
-    return @import("dial_history.zig").firstBlockMs(rejection(code));
+    return dial_history.firstBlockMs(rejection(code));
 }
 
 test "goodbye labels and cooldowns bound unknown peer codes" {

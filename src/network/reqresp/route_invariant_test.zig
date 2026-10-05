@@ -3,6 +3,7 @@ const invariant = @import("route_invariant.zig");
 const support = @import("../quic/test_support.zig");
 const Client = @import("Client.zig");
 const Server = @import("Server.zig");
+const StreamOwner = @import("../types.zig").StreamOwner;
 
 test "reverse route invariant detects orphans without a forward request to visit" {
     var pair: support.Pair = .{};
@@ -13,7 +14,7 @@ test "reverse route invariant detects orphans without a forward request to visit
     var outbound = [_]Client{.{}};
     var inbound = [_]Server{.{}};
     try invariant.check(&pair.client, &outbound, &inbound);
-    for ([_]@import("../types.zig").StreamOwner{ .reqresp_outbound, .reqresp_inbound }) |owner| {
+    for ([_]StreamOwner{ .reqresp_outbound, .reqresp_inbound }) |owner| {
         try pair.client.bindStream(stream, .{ .owner = owner, .row = 0 });
         try std.testing.expectError(error.OrphanedRoute, invariant.check(&pair.client, &outbound, &inbound));
         try pair.client.bindStream(stream, .{ .owner = owner, .row = 1 });

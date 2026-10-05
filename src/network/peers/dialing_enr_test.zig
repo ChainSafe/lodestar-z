@@ -5,6 +5,7 @@ const adapter = @import("enr.zig");
 const types = @import("types.zig");
 const vectors = @import("enr_vectors.zig").vectors;
 const context = types.ForkContext{ .digest = .{ 1, 2, 3, 4 }, .custody_groups = 128 };
+const Dialing = @import("dialing.zig").Dialing;
 
 const support = @import("enr_test_support.zig");
 const signingKey = support.signingKey;
@@ -43,7 +44,7 @@ test "peer ENR zero custody remains dialable for subnet demand without custody c
     const candidate = try adapter.decode(&record, &context);
     var catalog = try Catalog.initWithIntents(std.testing.allocator, .{}, 1, 1024, 1);
     defer catalog.deinit(std.testing.allocator);
-    var queue = try @import("dialing.zig").Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 1 });
+    var queue = try Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 1 });
     const wanted: types.Coverage = .{ .syncnets = 1 };
     var fork = context;
     fork.fork = .fulu;
@@ -60,7 +61,7 @@ test "peer ENR zero custody remains dialable for subnet demand without custody c
     try std.testing.expectEqual(@as(usize, 0), coverage.groups.count());
     try std.testing.expectEqual(@as(usize, 0), coverage.custody_groups.count());
     queue.configureSelection(&catalog, &wanted, false, &fork, 0);
-    var out: [1]@import("dialing.zig").Dialing.SelectedDial = undefined;
+    var out: [1]Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), queue.poll(&catalog, 0, &out));
     try std.testing.expect(out[0].peer.eql(&candidate.peer));
 }

@@ -4,6 +4,7 @@ const score = @import("score.zig");
 const topic = @import("topic.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const Gossipsub = @import("Gossipsub.zig");
+const topic_policy = @import("topic_policy.zig");
 pub const peers_per_page = 8;
 
 pub const Topic = struct {
@@ -44,7 +45,7 @@ pub const Page = struct {
     weights: []score.TopicWeights,
 
     pub fn init(a: std.mem.Allocator, count: usize) !Page {
-        std.debug.assert(count > 0 and count <= @import("topic_policy.zig").topic_max);
+        std.debug.assert(count > 0 and count <= topic_policy.topic_max);
         const topics = try a.alloc(Topic, count);
         errdefer a.free(topics);
         const topic_scores = try a.alloc(TopicScore, count * peers_per_page);
@@ -67,7 +68,7 @@ pub const Page = struct {
     }
 };
 
-pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").Now, out: *Page) error{InvalidDiagnosticsCursor}!void {
+pub fn capture(g: *const Gossipsub, cursor: u16, now: Now, out: *Page) error{InvalidDiagnosticsCursor}!void {
     std.debug.assert(out.topics.len == g.overlay.rows.len);
     if (cursor > g.peers.rows.len) return error.InvalidDiagnosticsCursor;
     out.mono_ms = now.millis();

@@ -8,6 +8,7 @@ const incoming = @import("network_incoming.zig");
 const publications = @import("network_publications.zig");
 const gossip = @import("network_gossip.zig");
 const projection = @import("network_peer_projection.zig");
+const network_metrics = @import("network_metrics.zig");
 
 /// A remembered peers snapshot and the network it belongs to.
 const RememberedPage = struct {
@@ -69,7 +70,7 @@ pub fn initialize(runtime: *Runtime, app: *const application_cfg.Config) !void {
     const publication_capacity: usize = if (runtime.heavy.?.config.profile == .small) 32 else publications.capacity_max;
     const bridge = publication_capacity * @sizeOf(publications.Cell) + 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + Stores.bytesForTopics(runtime.peer_capacity, resident_topics) + @sizeOf(projection.Lane);
     if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
-    runtime.metrics = try @import("network_metrics.zig").Export.init(metrics_capacity);
+    runtime.metrics = try network_metrics.Export.init(metrics_capacity);
     runtime.requests = try requests.Table.init(r.allocator, request_capacity, &runtime.payload_budget);
     runtime.payload_budget.limit = app.resources.bridgeBudgetBytes - bridge;
     var response_max: usize = 0;

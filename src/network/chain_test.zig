@@ -6,6 +6,9 @@ const constants = @import("constants");
 const chain = @import("chain.zig");
 const topics = @import("gossipsub/topic_policy.zig");
 const rr = @import("reqresp/ReqResp.zig");
+const LocalState = @import("peers/types.zig").LocalState;
+const consensus_types = @import("consensus_types");
+const test_support = @import("gossipsub/test_support.zig");
 
 fn fixture() config.ChainConfig {
     var result = if (preset.active_preset == .minimal) config.minimal.chain_config else config.mainnet.chain_config;
@@ -25,7 +28,7 @@ test "network chain resolves same epoch forks BPO contexts and clock identity" {
     const chain_config = try chain.Config.init(&cfg, false);
     try std.testing.expectEqual(@as(u8, 4), chain_config.boundary_count);
     try std.testing.expectEqual(@as(?[4]u8, null), chain_config.phase0_digest);
-    const local: @import("peers/types.zig").LocalState = .{ .metadata = .{ .custody_group_count = 8 }, .status = .{ .head_slot = 1, .earliest_available_slot = 0 } };
+    const local: LocalState = .{ .metadata = .{ .custody_group_count = 8 }, .status = .{ .head_slot = 1, .earliest_available_slot = 0 } };
     const genesis = try chain_config.update(local, null, 0);
     try std.testing.expectEqual(.deneb, genesis.local.fork.fork);
     try std.testing.expectEqual(@as(u64, 2), genesis.schedule.next_epoch);
@@ -109,8 +112,8 @@ test "network chain validates schedule and chain namespace before owner allocati
 
 test "network chain honors configured wire limits and requires complete metadata before unscheduled Fulu" {
     var input = fixture();
-    input.FULU_FORK_EPOCH = @import("constants").FAR_FUTURE_EPOCH;
-    input.GLOAS_FORK_EPOCH = @import("constants").FAR_FUTURE_EPOCH;
+    input.FULU_FORK_EPOCH = constants.FAR_FUTURE_EPOCH;
+    input.GLOAS_FORK_EPOCH = constants.FAR_FUTURE_EPOCH;
     input.BLOB_SCHEDULE = &.{};
     input.MAX_REQUEST_BLOCKS = 16;
     input.MAX_REQUEST_BLOCKS_DENEB = 8;
@@ -135,7 +138,7 @@ test "network chain honors configured wire limits and requires complete metadata
     requests.setRequestFork(.electra);
     try std.testing.expectEqual(@as(usize, 120), requests.requestBounds(.blob_sidecars_by_root_v1).request_max);
     input.MAX_REQUEST_BLOCKS_DENEB = 128;
-    input.MAX_PAYLOAD_SIZE = @import("consensus_types").deneb.BlobSidecar.fixed_size;
+    input.MAX_PAYLOAD_SIZE = consensus_types.deneb.BlobSidecar.fixed_size;
     const small_cfg = config.BeaconConfig.init(input, @splat(0));
     const small = try chain.Config.init(&small_cfg, false);
     try std.testing.expectEqual(@as(usize, input.MAX_PAYLOAD_SIZE), small.policy.requestMax());
@@ -275,7 +278,7 @@ test "network chain namespace capacity preserves retired scores and backoffs acr
             defer g.deinit();
             try std.testing.expectEqual(@as(usize, 615), g.overlay.rows.len);
             try std.testing.expectEqual(@as(usize, 410), try applyScheduled(&g, &chain_config, 8));
-            const peer = @import("gossipsub/test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+            const peer = test_support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
             const logical = g.sessions.rows[peer.index].logical;
             var generations: [205]u64 = undefined;
             for (g.overlay.rows[0..205], 0..) |row, i| {

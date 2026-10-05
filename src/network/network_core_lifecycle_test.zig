@@ -11,6 +11,12 @@ const support = @import("quic/test_support.zig");
 const resolvedOptions = @import("network_core_test_support.zig").resolvedOptions;
 const localState = @import("network_core_test_support.zig").localState;
 const updateDemand = @import("network_core_test_support.zig").updateDemand;
+const policy_fixture = @import("reqresp/policy_fixture.zig");
+const snappy = @import("snappy");
+const multistream_mod = @import("wire/multistream.zig");
+const network_core_test_support = @import("network_core_test_support.zig");
+const policy = @import("peers/policy.zig");
+const admission_fixture = @import("reqresp/admission_fixture.zig");
 
 /// No application request reaches serving while the Goodbye goes out; `serving` is the serving
 /// occupancy when quiescence began.
@@ -41,10 +47,10 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
     const hold_selection = mode == .selection;
     const multistream = @import("wire/multistream.zig");
     var setup: Setup = .{};
-    var opts = @import("network_core_test_support.zig").resolvedOptions();
+    var opts = resolvedOptions();
 
-    const quotas = @import("reqresp/admission_fixture.zig").quotas(1000, 1000);
-    opts.core.protocols.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{ .identities = 4, .peer = quotas, .global = quotas } };
+    const quotas = admission_fixture.quotas(1000, 1000);
+    opts.core.protocols.reqresp.admission = .{ .policy = policy_fixture.config(), .limits = .{ .identities = 4, .peer = quotas, .global = quotas } };
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();
     _ = try setup.pair.dial();
@@ -116,7 +122,7 @@ fn quiescenceGossip(hold_selection: bool) !void {
         try std.testing.expect(held);
     }
     var compressed: [128]u8 = undefined;
-    const size = try @import("snappy").raw.compress("quiescence wire payload", &compressed);
+    const size = try snappy.raw.compress("quiescence wire payload", &compressed);
     var bytes: [256]u8 = undefined;
     var writer = protobuf.Writer.init(&bytes);
     writer.varint(protobuf.messageSize(compressed[0..size], topic));
@@ -129,7 +135,7 @@ fn quiescenceGossip(hold_selection: bool) !void {
     setup.client.beginGracefulClose(setup.pair.now);
     if (hold_selection) {
         var proposal_bytes: [64]u8 = undefined;
-        const proposal = try @import("wire/multistream.zig").encodeMessage("/meshsub/1.2.0", &proposal_bytes);
+        const proposal = try multistream_mod.encodeMessage("/meshsub/1.2.0", &proposal_bytes);
         try std.testing.expectEqual(proposal.len, try setup.pair.server.write(stream, proposal, false));
     }
     const remaining = if (hold_selection) frame else frame[frame.len - 1 ..];
@@ -326,7 +332,7 @@ test "core native wrong fork Goodbye hard closes with zero output and shutdown r
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
-    try @import("network_core_test_support.zig").updateLocal(&setup.server, &localState(.{ .fork = .{ .digest = @splat(3) }, .status = .{ .fork_digest = @splat(3) } }), setup.pair.now);
+    try network_core_test_support.updateLocal(&setup.server, &localState(.{ .fork = .{ .digest = @splat(3) }, .status = .{ .fork_digest = @splat(3) } }), setup.pair.now);
     for (0..40) |_| try setup.step(0);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.peerCounts().relevant);
     setup.pair.advance(2_001);
@@ -374,11 +380,11 @@ test "core reconciliation clears policy observations at quiescence and shutdown"
         const counters = view.counters;
         setup.pair.advance(60_000);
         setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
-        try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
+        try std.testing.expectEqualDeep(policy.Deficits{}, view.coverageDeficits());
         try std.testing.expectEqualDeep(DiscoveryNeed{}, view.discoveryNeed());
         try std.testing.expectEqualDeep(counters, view.counters);
         _ = try setup.turn(&setup.client, .{});
-        try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
+        try std.testing.expectEqualDeep(policy.Deficits{}, view.coverageDeficits());
         try std.testing.expectEqualDeep(DiscoveryNeed{}, view.discoveryNeed());
     }
 }
@@ -424,7 +430,7 @@ test "core native immediate close preserves direct membership and rejects stale 
         try std.testing.expectEqual(@as(usize, 1), try setup.client.peer_manager.directPeers(&identities));
         _ = setup.server.peer_manager.catalog.pollEvents(&closed);
         setup.pair.advance(60_000);
-        var intents: [1]@import("peers/dialing.zig").Dialing.SelectedDial = undefined;
+        var intents: [1]SelectedDial = undefined;
         try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
         const replacement = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);
         try std.testing.expect(setup.client.peer_manager.dialStarted(intents[0].token, replacement));

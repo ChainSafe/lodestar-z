@@ -6,6 +6,7 @@ const Engine = @import("../quic/Engine.zig");
 const types = @import("../types.zig");
 const PeerRef = types.PeerRef;
 const Outbox = @import("../stream_io.zig").Outbox;
+const PeerId = @import("../wire/peer_id.zig").PeerId;
 
 pub const Handler = struct {
     allocator: std.mem.Allocator,
@@ -43,7 +44,7 @@ pub const Handler = struct {
 
         /// Resolve the complete local value at startup. Explicit addresses replace the usable
         /// bound fallback, and the result owns its text, key and encoded addresses.
-        pub fn makeLocal(self: Options, peer: *const @import("../wire/peer_id.zig").PeerId, bound: *const [2]?types.Address) Error!codec.Local {
+        pub fn makeLocal(self: Options, peer: *const PeerId, bound: *const [2]?types.Address) Error!codec.Local {
             try self.limits().validate();
             if (self.addresses.len > 0) return codec.Local.init(peer, self.agent, self.protocol_version, self.addresses);
             var addresses: [2]types.Address = undefined;

@@ -2,6 +2,7 @@ const std = @import("std");
 const crypto = @import("crypto.zig");
 const enr = @import("enr.zig");
 const types = @import("../types.zig");
+const rlp_mod = @import("../wire/rlp.zig");
 
 test "ENR content hash identifies signed fields independently of signature nonce" {
     const key = try crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{1}));
@@ -12,7 +13,7 @@ test "ENR content hash identifies signed fields independently of signature nonce
     if (std.mem.readInt(u256, &signature.s, .big) > scalar.field_order / 2) {
         signature.s = try scalar.neg(signature.s, .big);
     }
-    var outer = @import("../wire/rlp.zig").Reader.init(original.slice());
+    var outer = rlp_mod.Reader.init(original.slice());
     var fields = try outer.readList();
     const old_signature = try fields.readBytes();
     const offset = @intFromPtr(old_signature.ptr) - @intFromPtr(original.bytes[0..].ptr);

@@ -2,6 +2,12 @@ const std = @import("std");
 const n = @import("network");
 const d = @import("discv5");
 const napi = @import("zapi:zapi").napi;
+const network_metrics = @import("network_metrics.zig");
+const network_storage = @import("network_storage.zig");
+const network_peer_reports = @import("network_peer_reports.zig");
+const network_budget = @import("network_budget.zig");
+const network_exchange_js = @import("network_exchange_js.zig");
+const network_owner = @import("network_owner.zig");
 pub const gossip_mod = @import("network_gossip.zig");
 pub const incoming_mod = @import("network_incoming.zig");
 pub const requests_mod = @import("network_requests.zig");
@@ -59,7 +65,7 @@ pub const Capacity = struct { serving: u32 = 0, ordinary: bool = false };
 
 pub const Runtime = struct {
     logs: n.logging.Sink = .{},
-    metrics: @import("network_metrics.zig").Export = .{},
+    metrics: network_metrics.Export = .{},
     bridge: bridge.Recorder = .{},
     metrics_due_ms: u64 = 0,
     health_log_due_ms: u64 = 0,
@@ -68,15 +74,15 @@ pub const Runtime = struct {
     heavy: ?*Owner = null,
     graceful: bool = false,
     closing_deadline: ?u64 = null,
-    stores: ?*@import("network_storage.zig").Stores = null,
+    stores: ?*network_storage.Stores = null,
     lane: ?*projection.Lane = null,
     table: commands.Table = .{},
-    reports: @import("network_peer_reports.zig").Table = .{},
+    reports: network_peer_reports.Table = .{},
     publications: ?publications_mod.Table = null,
     requests: ?requests_mod.Table = null,
     incoming: ?incoming_mod.Table = null,
     gossip: ?gossip_mod.Table = null,
-    payload_budget: @import("network_budget.zig").Budget = .{},
+    payload_budget: network_budget.Budget = .{},
     peer_capacity: u16 = 0,
     max_peers: u16 = 0,
 
@@ -90,7 +96,7 @@ pub const Runtime = struct {
     /// JS thread: an exchange is running, so a nested one is refused.
     in_exchange: bool = false,
     /// The exchange results created at initialize, which idle exchanges and rollbacks return.
-    results: @import("network_exchange_js.zig").Results = .{},
+    results: network_exchange_js.Results = .{},
     /// Owner thread: an event capture left host work for the next apply, so the next turn is due now.
     host_due: bool = false,
     /// The owner leaves reported verdicts unapplied while an ownership test holds them.
@@ -150,10 +156,10 @@ pub const Runtime = struct {
     fn destroyOwner(self: *Runtime) void {
         if (self.heavy) |heavy| {
             if (heavy.core_live) {
-                heavy.core.shutdown((@import("network_owner.zig").now(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now));
+                heavy.core.shutdown((network_owner.now(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now));
                 if (self.metrics.allocatedBytes() > 0) {
                     self.captureBridgeLocked(&heavy.bridge);
-                    var context = n.metrics.Context.init(&heavy.core, (@import("network_owner.zig").now(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now), false);
+                    var context = n.metrics.Context.init(&heavy.core, (network_owner.now(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now), false);
                     context.bridge = &heavy.bridge;
                     if (self.metrics.render(&context)) |index| {
                         self.metrics.published = index;

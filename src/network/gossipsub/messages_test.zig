@@ -8,6 +8,10 @@ const topic = @import("topic.zig");
 const constants = @import("constants.zig");
 const limits_mod = @import("../gossip_limits.zig");
 const policy = @import("../gossip_processor/policy.zig");
+const topic_policy = @import("topic_policy.zig");
+const snappy = @import("snappy");
+const validation = @import("validation.zig");
+const turn_mod = @import("turn.zig");
 
 test "message admission retains canonical topic bounds and namespace-free fallbacks" {
     const Sink = struct {
@@ -36,7 +40,7 @@ test "message admission retains canonical topic bounds and namespace-free fallba
     const Case = enum { namespace, canonical, generic, limited };
     for (std.meta.tags(Case)) |case| {
         const name = if (case == .generic) "/eth2/01020304/custom/ssz_snappy" else "/eth2/01020304/beacon_block/ssz_snappy";
-        var boundary: @import("topic_policy.zig").Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+        var boundary: topic_policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
         boundary.rules[0] = .{ .count = 1, .ssz_min = 4, .ssz_max = 6000 };
         var options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8 };
         if (case == .namespace) options.topic_policy = &.{boundary};
@@ -56,10 +60,10 @@ test "message admission retains canonical topic bounds and namespace-free fallba
         const callback: messages.MessageSink = .{ .context = &sink, .has_capacity = Sink.hasCapacity, .admit = Sink.admit };
         var turn = Gossipsub.beginPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
         turn.sink = &callback;
-        var credits = @import("turn.zig").Credits.peer(&g.options);
+        var credits = turn_mod.Credits.peer(&g.options);
         const workspace = turn.workspace(&credits);
         var compressed: [64]u8 = undefined;
-        const len = try @import("snappy").raw.compress("data", &compressed);
+        const len = try snappy.raw.compress("data", &compressed);
         const received = g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1);
         try t.expect(received == .admitted);
         try t.expectEqual(index, received.admitted.topic_index);
@@ -72,7 +76,7 @@ test "message admission retains canonical topic bounds and namespace-free fallba
             .canonical, .generic => constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE),
         };
         try t.expectEqual(maximum, sink.maximum);
-        try t.expectEqual(@import("validation.zig").Validation.chargedBytes(maximum), sink.source_maximum);
+        try t.expectEqual(validation.Validation.chargedBytes(maximum), sink.source_maximum);
         try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(sink.handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
     }
 }

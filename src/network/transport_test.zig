@@ -4,8 +4,10 @@ const Engine = @import("quic/Engine.zig");
 const keys = @import("wire/keys.zig");
 const multiaddr = @import("wire/multiaddr.zig");
 const Transport = @import("transport.zig").Transport;
+const constants = @import("constants.zig");
+const transport_driver = @import("transport_driver.zig");
 
-const step_options = @import("transport_driver.zig").Options{ .wait_max = .fromMilliseconds(10) };
+const step_options = transport_driver.Options{ .wait_max = .fromMilliseconds(10) };
 const payload_len = 64 * 1024;
 
 fn initTransport(target: *Transport, seed: u8) !void {
@@ -147,7 +149,7 @@ test "transport validates socket work limits before startup allocation" {
         .{ .send_per_turn_max = 0 },
         .{ .send_per_turn_max = Transport.send_burst_max + 1 },
         .{ .receive_per_turn_max = 0 },
-        .{ .receive_per_turn_max = @import("constants.zig").receive_batch_max + 1 },
+        .{ .receive_per_turn_max = constants.receive_batch_max + 1 },
         .{ .burst_per_connection = 0 },
         .{ .send_per_turn_max = 8, .burst_per_connection = 9 },
     };

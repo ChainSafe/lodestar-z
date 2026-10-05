@@ -37,7 +37,7 @@ test "engine reports a stopped write as a stream close carrying the peer's code"
     const stream = try pair.client.openStream(handles.client);
     try std.testing.expectEqual(@as(usize, 1), try pair.client.write(stream, "x", true));
     try pair.pump();
-    var storage: [8]@import("Engine.zig").Event = undefined;
+    var storage: [8]Event = undefined;
     const inbound = try support.expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
     var buffer: [8]u8 = undefined;
     const read = try pair.server.read(inbound, &buffer);
@@ -65,7 +65,7 @@ test "engine reports a stopped write on a stream that is still readable" {
     const stream = try pair.client.openStream(handles.client);
     try std.testing.expectEqual(@as(usize, 1), try pair.client.write(stream, "x", false));
     try pair.pump();
-    var storage: [8]@import("Engine.zig").Event = undefined;
+    var storage: [8]Event = undefined;
     const inbound = try support.expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
     pair.client.shutdown(stream, .read, 7);
     try pair.pump();

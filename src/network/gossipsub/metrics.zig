@@ -6,8 +6,9 @@ const PeerBook = @import("peer_book.zig").PeerBook;
 const Overlay = @import("overlay.zig").Overlay;
 const Sessions = @import("sessions.zig").Sessions;
 const PeerSet = @import("sessions.zig").PeerSet;
+const histogram = @import("../metrics/histogram.zig");
 
-pub const ValidationTime = @import("../metrics/histogram.zig").Duration(&.{ 10, 30, 100, 300, 1000, 3000, 10000 });
+pub const ValidationTime = histogram.Duration(&.{ 10, 30, 100, 300, 1000, 3000, 10000 });
 
 /// Data frame recipients by delivery origin: selected, then queued, pressured or unavailable;
 /// queued frames later complete when QUIC accepts their last byte, which is not delivery, or are

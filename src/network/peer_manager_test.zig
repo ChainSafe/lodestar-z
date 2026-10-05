@@ -7,6 +7,7 @@ const rr = @import("reqresp/root.zig");
 const Now = @import("types.zig").Now;
 const remembered = @import("peers/remembered.zig");
 const history = @import("peers/dial_history.zig");
+const Dialing = @import("peers/dialing.zig").Dialing;
 
 const identity: t.PeerId = .{ .bytes = @splat(1) };
 const endpoint: t.Address = .{ .ip4 = .{ .octets = .{ 203, 0, 113, 1 }, .port = 9000 } };
@@ -29,7 +30,7 @@ fn outbound(manager: *PeerManager, now: Now) !t.PeerRef {
     try manager.connect(&identity, &.{endpoint}, now);
     // Select the operator's already-admitted dial without running gossip or transport. The owner
     // still receives the real started/admitted transitions and records the original dial endpoint.
-    var intents: [1]@import("peers/dialing.zig").Dialing.SelectedDial = undefined;
+    var intents: [1]Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), manager.dialing.poll(&manager.catalog, now.millis(), &intents));
     try std.testing.expect(manager.dialStarted(intents[0].token, conn));
     return admit(manager, conn, .outbound, now);

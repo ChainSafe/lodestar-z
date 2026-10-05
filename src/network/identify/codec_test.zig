@@ -2,6 +2,12 @@ const std = @import("std");
 const codec = @import("codec.zig");
 const keys = @import("../wire/keys.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
+const types = @import("../types.zig");
+const capabilities = @import("../capabilities.zig");
+const protocol = @import("../reqresp/protocol.zig");
+const protocol_mod = @import("../gossipsub/protocol.zig");
+const Multiaddr = @import("../wire/multiaddr.zig").Multiaddr;
+const protobuf = @import("../wire/protobuf.zig");
 fn identity() !PeerId {
     const key = try keys.PublicKey.fromBytes(&.{ 0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98 });
     return PeerId.fromPublicKey(&key);
@@ -230,10 +236,10 @@ test "identify validates every key and bounds semantic key envelope" {
 
 test "identify encoder uses canonical identity copied binary QUIC addresses and receive only" {
     const peer = try identity();
-    var addresses = [_]@import("../types.zig").Address{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9000 } }};
+    var addresses = [_]types.Address{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9000 } }};
     var local = try codec.Local.init(&peer, "stock", "ipfs/0.1.0", &addresses);
     addresses[0].ip4.port = 1;
-    var protocols: @import("../capabilities.zig").Set = .initEmpty();
+    var protocols: capabilities.Set = .initEmpty();
     protocols.insert(.identify);
     var frame: [codec.encoded_frame_max]u8 = undefined;
     const bytes = try local.encode(protocols, null, &frame);
@@ -263,13 +269,13 @@ test "identify maximum key envelope and advertisement respect all exact local bo
     const malformed = [_]u8{ 8, 2, 18, 33 } ++ [_]u8{0} ** 33;
     decoder = codec.Decoder.init(&peer);
     try std.testing.expectError(error.InvalidKey, decoder.feed(fieldFrame(&frame, 1, &malformed, 1), true));
-    const address: @import("../types.zig").Address = .{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } };
-    const addresses: [9]@import("../types.zig").Address = @splat(address);
+    const address: types.Address = .{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } };
+    const addresses: [9]types.Address = @splat(address);
     var local = try codec.Local.init(&peer, &([_]u8{'a'} ** 256), &([_]u8{'v'} ** 64), addresses[0..8]);
-    var protocols: @import("../capabilities.zig").Set = .initEmpty();
+    var protocols: capabilities.Set = .initEmpty();
     protocols.insert(.identify);
-    for (std.enums.values(@import("../reqresp/protocol.zig").Protocol)) |which| protocols.insert(.{ .reqresp = which });
-    for (std.enums.values(@import("../gossipsub/protocol.zig").Version)) |version| protocols.insert(.{ .meshsub = version });
+    for (std.enums.values(protocol.Protocol)) |which| protocols.insert(.{ .reqresp = which });
+    for (std.enums.values(protocol_mod.Version)) |version| protocols.insert(.{ .meshsub = version });
     const encoded = try local.encode(protocols, null, &frame);
     try std.testing.expect(encoded.len <= codec.encoded_frame_max);
     decoder = codec.Decoder.init(&peer);
@@ -283,17 +289,17 @@ test "identify maximum key envelope and advertisement respect all exact local bo
 test "identify includes the current observed QUIC endpoint" {
     const peer = try identity();
     const local = try codec.Local.init(&peer, "stock", "ipfs/0.1.0", &.{});
-    const endpoint: @import("../types.zig").Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 10 }, .port = 9010 } };
+    const endpoint: types.Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 10 }, .port = 9010 } };
     var frame: [codec.encoded_frame_max]u8 = undefined;
     const bytes = try local.encode(.initEmpty(), endpoint, &frame);
-    var reader = @import("../wire/protobuf.zig").Reader.init(bytes);
+    var reader = protobuf.Reader.init(bytes);
     _ = try reader.varint();
     var observed: usize = 0;
     for (0..128) |_| {
         if (reader.atEnd()) break;
         const tag = try reader.tag();
         if (tag.field == 4) {
-            const value = try @import("../wire/multiaddr.zig").Multiaddr.decode(try reader.lenDelimited());
+            const value = try Multiaddr.decode(try reader.lenDelimited());
             try std.testing.expect(value.address.eql(endpoint));
             observed += 1;
         } else try reader.skip(tag.wire);
@@ -304,7 +310,7 @@ test "identify includes the current observed QUIC endpoint" {
 
 test "identify rejects scoped listen and observed addresses without changing local advertisement" {
     const peer = try identity();
-    const endpoint: @import("../types.zig").Address = .{ .ip6 = .{ .octets = .{ 0xfe, 0x80 } ++ .{0} ** 13 ++ .{1}, .port = 9000, .interface = 7 } };
+    const endpoint: types.Address = .{ .ip6 = .{ .octets = .{ 0xfe, 0x80 } ++ .{0} ** 13 ++ .{1}, .port = 9000, .interface = 7 } };
     var local = try codec.Local.init(&peer, "stock", "ipfs/0.1.0", &.{});
     const previous = local;
     try std.testing.expectError(error.InvalidAddress, codec.Local.validate("stock", "ipfs/0.1.0", &.{endpoint}));

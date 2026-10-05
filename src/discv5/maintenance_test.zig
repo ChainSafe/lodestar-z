@@ -6,6 +6,8 @@ const Lookup = @import("Lookup.zig");
 const Maintenance = @import("Maintenance.zig");
 const message = @import("wire/message.zig");
 const test_support = @import("test_support.zig");
+const RoutingTable = @import("RoutingTable.zig");
+const crypto = @import("identity/crypto.zig");
 
 const sealEntropy = test_support.sealEntropy;
 
@@ -58,7 +60,7 @@ test "maintenance probes a quiet partial table on its explicit timer and retries
     const candidates = try std.testing.allocator.create(Lookup.Candidates);
     defer std.testing.allocator.destroy(candidates);
 
-    var seeds: [Lookup.result_max]@import("RoutingTable.zig").Entry = undefined;
+    var seeds: [Lookup.result_max]RoutingTable.Entry = undefined;
     const closest = core.closestNodes(&peer.node_id, &seeds);
     var lookup: Lookup = undefined;
     try lookup.init(candidates, core.localRecord().node_id, peer.node_id, closest, .dual);
@@ -581,7 +583,7 @@ test "observation probes bypass fresh liveness, alternate families, and never pu
     var core = try initEngine();
     defer core.deinit(std.testing.allocator);
     const key = try test_support.keyPair(2);
-    const public_key = @import("identity/crypto.zig").compressedPublicKey(&key);
+    const public_key = crypto.compressedPublicKey(&key);
     const ip4 = [_]u8{ 203, 2, 1, 1 };
     const ip6 = [_]u8{ 0x20, 1, 0xd, 0xb8 } ++ .{0} ** 11 ++ .{1};
     const remote = try enr.Record.createFields(&key, 1, &.{
@@ -626,7 +628,7 @@ test "observation family rotation survives intervening routing probes" {
     defer core.deinit(std.testing.allocator);
     const ip6 = [_]u8{ 0x20, 1, 0xd, 0xb8 } ++ .{0} ** 11 ++ .{1};
     const key = try test_support.keyPair(2);
-    const public_key = @import("identity/crypto.zig").compressedPublicKey(&key);
+    const public_key = crypto.compressedPublicKey(&key);
     const remote = try enr.Record.createFields(&key, 1, &.{
         .{ .key = "id", .value = .{ .bytes = "v4" } },
         .{ .key = "ip", .value = .{ .bytes = &.{ 203, 2, 1, 1 } } },

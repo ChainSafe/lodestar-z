@@ -22,12 +22,12 @@ pub export fn zig_fuzz_test(bytes: [*]const u8, len: usize) callconv(.c) void {
     var datagram: [network.constants.datagram_size_max]u8 = undefined;
     var output: [datagram.len]u8 = undefined;
     var events: [32]quic.Engine.Event = undefined;
-    var now: network.Now = @import("network").Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = fixture.unix_s });
+    var now: network.Now = network.Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = fixture.unix_s });
     for (0..4) |i| {
         @memcpy(datagram[0..len], bytes[0..len]);
         const source = fixture.source(i);
         _ = engine.receive(datagram[0..len], &source, now, &output);
-        now.monotonic = @import("network").time.milliseconds(now.millis() + 1);
+        now.monotonic = network.time.milliseconds(now.millis() + 1);
         engine.expire(now);
         engine.collect(now);
         _ = engine.pollEvents(&events);

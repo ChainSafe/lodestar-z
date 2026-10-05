@@ -2,15 +2,17 @@ const std = @import("std");
 const identify = @import("root.zig");
 const support = @import("../quic/test_support.zig");
 const peerId = @import("test_support.zig").peerId;
+const types = @import("../types.zig");
+const multiaddr = @import("../wire/multiaddr.zig");
 
 test "identify advertises each usable bound address despite another wildcard family" {
     const peer = try peerId();
-    const address: @import("../types.zig").Address = .{ .ip6 = .{ .octets = @import("std").Io.net.Ip6Address.loopback(9000).bytes, .port = 9000 } };
-    const bound = [2]?@import("../types.zig").Address{ .{ .ip4 = .{ .octets = @splat(0), .port = 9000 } }, address };
+    const address: types.Address = .{ .ip6 = .{ .octets = std.Io.net.Ip6Address.loopback(9000).bytes, .port = 9000 } };
+    const bound = [2]?types.Address{ .{ .ip4 = .{ .octets = @splat(0), .port = 9000 } }, address };
     const local = try (identify.Handler.Options{}).makeLocal(&peer, &bound);
     try std.testing.expectEqual(@as(u8, 1), local.address_count);
-    var encoded: [@import("../wire/multiaddr.zig").binary_length_max]u8 = undefined;
-    const expected = try (@import("../wire/multiaddr.zig").Multiaddr{ .address = address }).encode(&encoded);
+    var encoded: [multiaddr.binary_length_max]u8 = undefined;
+    const expected = try (multiaddr.Multiaddr{ .address = address }).encode(&encoded);
     const retained = local.addresses[0];
     try std.testing.expectEqualSlices(u8, expected, retained.bytes[0..retained.len]);
 }
@@ -18,19 +20,19 @@ test "identify advertises each usable bound address despite another wildcard fam
 test "identify local construction copies explicit text and address intent" {
     const peer = try peerId();
     var agent = [_]u8{ 'o', 'l', 'd' };
-    var addresses = [_]@import("../types.zig").Address{
+    var addresses = [_]types.Address{
         .{ .ip4 = .{ .octets = .{ 127, 3, 2, 1 }, .port = 19001 } },
         .{ .ip6 = .{ .octets = std.Io.net.Ip6Address.loopback(19002).bytes, .port = 19002 } },
     };
     const opts: identify.Handler.Options = .{ .agent = &agent, .addresses = &addresses };
-    const bound = [2]?@import("../types.zig").Address{ support.client_address, null };
+    const bound = [2]?types.Address{ support.client_address, null };
     const local = try opts.makeLocal(&peer, &bound);
     agent[0] = 'x';
     addresses[0].ip4.port = 19999;
     try std.testing.expectEqualStrings("old", local.agent.slice());
     try std.testing.expectEqual(@as(u8, 2), local.address_count);
     const retained = local.addresses[0];
-    const decoded = try @import("../wire/multiaddr.zig").Multiaddr.decode(retained.bytes[0..retained.len]);
+    const decoded = try multiaddr.Multiaddr.decode(retained.bytes[0..retained.len]);
     try std.testing.expectEqual(@as(u16, 19001), decoded.address.port());
     var encoded: [identify.codec.encoded_frame_max]u8 = undefined;
     const frame = try local.encode(.initEmpty(), null, &encoded);
@@ -41,8 +43,8 @@ test "identify local construction copies explicit text and address intent" {
 
 test "identify options validate the same capacities text and addresses as construction" {
     const peer = try peerId();
-    const bound = [2]?@import("../types.zig").Address{ support.client_address, null };
-    var addresses: [9]@import("../types.zig").Address = @splat(support.server_address);
+    const bound = [2]?types.Address{ support.client_address, null };
+    var addresses: [9]types.Address = @splat(support.server_address);
     const valid: identify.Handler.Options = .{ .addresses = addresses[0..8] };
     try valid.validate();
     const accepted = try valid.makeLocal(&peer, &bound);

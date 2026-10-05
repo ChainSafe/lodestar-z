@@ -8,6 +8,9 @@ const Pair = @import("transport_test_support.zig").Pair;
 const types = @import("types.zig");
 const address4 = test_support.address4;
 const endpoint = test_support.endpoint;
+const driver = @import("driver.zig");
+const fault_io = @import("fault_io");
+const Sockets = @import("udp").Sockets;
 
 test "transport rejects missing expiry storage before advancing" {
     var instance: Transport = undefined;
@@ -25,9 +28,9 @@ test "transport refuses exhausted packet admission before entropy or decoding" {
         try std.testing.expect(pair.transport_a.engine.channel.admission.allow(.packet, &source, 0));
     }
     setup_io.datagram = .{ .from = pair.transport_b.localAddress(), .bytes = &([_]u8{0} ** 63) };
-    var host = @import("fault_io"){ .base = setup_io.io(), .entropy = .{} };
+    var host = fault_io{ .base = setup_io.io(), .entropy = .{} };
     var expired: [4]CallTable.Expired = undefined;
-    const result = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const result = try driver.step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(result.failure == null);
     try std.testing.expectEqual(types.RejectReason.admission_limited, result.datagram.rejected);
     try std.testing.expectEqual(@as(usize, 0), host.entropy_calls);
@@ -52,7 +55,7 @@ test "maintenance bounds local replacement probe retries without blocking transp
     setup_io.now_ms = 999;
     setup_io.datagram = .{ .from = pair.transport_b.localAddress(), .bytes = &.{0xff}, .truncated = true };
     var expired: [4]CallTable.Expired = undefined;
-    const received = try @import("driver.zig").step(&pair.transport_a, setup_io.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const received = try driver.step(&pair.transport_a, setup_io.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expectEqual(types.RejectReason.oversized_datagram, received.datagram.rejected);
     try std.testing.expect(received.failure == null);
     const retry = (try controller.startNext(&pair.transport_a.engine, &out, try .init(&.{2}), 1_000, &test_support.sealEntropy(11))).?;
@@ -87,12 +90,12 @@ test "transport reports truncation alongside already produced expiries" {
         .datagram = .{ .from = pair.transport_b.localAddress(), .bytes = &.{0xff}, .truncated = true },
     };
     var expired: [4]CallTable.Expired = undefined;
-    const result = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const result = try driver.step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expectEqual(@as(?Transport.Failure, null), result.failure);
     try std.testing.expect(result.datagram == .rejected);
     try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
     try std.testing.expectEqual(started.handle, expired[0].handle);
-    const next = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const next = try driver.step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expectEqual(@as(usize, 0), next.calls_expired);
 }
 
@@ -116,12 +119,12 @@ test "transport preserves expiry delivery when the host cannot receive" {
     );
     var host: test_support.ManualIo = .{ .now_ms = 100, .receive_failure = error.ConcurrencyUnavailable };
     var expired: [4]CallTable.Expired = undefined;
-    const result = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const result = try driver.step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expectEqual(error.ConcurrencyUnavailable, result.failure.?.cause);
     try std.testing.expectEqual(Transport.FailureStage.receive, result.failure.?.stage);
     try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
     try std.testing.expectEqual(started.handle, expired[0].handle);
-    const next = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
+    const next = try driver.step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expectEqual(@as(usize, 0), next.calls_expired);
 }
 
@@ -130,12 +133,12 @@ test "transport cancels a discovery call dropped by local pressure without recor
     var pair: Pair = undefined;
     try pair.init(setup_io.io(), 1_000, false);
     defer pair.deinit();
-    var faults: @import("fault_io") = .{ .base = setup_io.io(), .send = .{}, .send_failure = error.SystemResources };
+    var faults: fault_io = .{ .base = setup_io.io(), .send = .{}, .send_failure = error.SystemResources };
     const request: message.Message = .{ .ping = .{ .request_id = try .init(&.{1}), .enr_sequence = pair.record_a.sequence } };
     try std.testing.expectError(error.SystemResources, pair.transport_a.startCall(faults.io(), endpoint(&pair.record_b), &pair.record_b, &request, try Transport.monotonicMilliseconds(faults.io())));
     try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
     try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.calls.count());
-    const pressure = @intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources);
+    const pressure = @intFromEnum(Sockets.SendDrops.Reason.system_resources);
     try std.testing.expectEqual(@as(u64, 1), pair.transport_a.send_drops.datagrams[pressure]);
     try std.testing.expect(pair.transport_a.send_drops.bytes[pressure] > 0);
     var expired: [4]CallTable.Expired = undefined;
@@ -152,7 +155,7 @@ test "transport advance expires at supplied time without reading the host clock"
         .request_id = try .init(&.{1}),
         .enr_sequence = 1,
     } }, 0, &test_support.sealEntropy(4));
-    var faults: @import("fault_io") = .{ .base = host.io(), .clock = .{} };
+    var faults: fault_io = .{ .base = host.io(), .clock = .{} };
     var expired: [1]CallTable.Expired = undefined;
     const before = try pair.transport_a.advance(faults.io(), 99, &expired, null);
     try std.testing.expectEqual(@as(usize, 0), before.calls_expired);

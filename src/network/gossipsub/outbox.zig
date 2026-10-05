@@ -6,6 +6,8 @@ const topic = @import("topic.zig");
 const assert = std.debug.assert;
 const ItemKind = std.meta.Tag(protobuf.Item);
 const delivery = @import("delivery.zig");
+const frame = @import("frame.zig");
+const test_support = @import("test_support.zig");
 pub const data_capacity = delivery.per_peer_limit;
 pub const control_frames = 128;
 pub const critical_frames = 2 * constants.topics_cap;
@@ -500,7 +502,7 @@ test "gossip typed controls preserve maximum ID lists and completion kinds" {
     var scratch: ControlScratch = undefined;
     for (&controls) |*control| {
         const token = outbox.submit(control, &scratch, 1).?;
-        var reader: @import("frame.zig").Reader = .{};
+        var reader: frame.Reader = .{};
         var body: [4096]u8 = undefined;
         var received: ?[]const u8 = null;
         var completion: ?Completion = null;
@@ -534,7 +536,7 @@ test "gossip typed controls preserve maximum ID lists and completion kinds" {
 }
 
 test "gossip outboxes sharing one control scratch each queue a copy of their own frame" {
-    var sessions = try @import("test_support.zig").sessions(std.testing.allocator, 2);
+    var sessions = try test_support.sessions(std.testing.allocator, 2);
     defer sessions.deinit(std.testing.allocator);
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     const ids: [constants.gossip_ids_max]topic.MessageId = @splat(@splat(7));
@@ -549,7 +551,7 @@ test "gossip outboxes sharing one control scratch each queue a copy of their own
 }
 
 test "gossip critical queue holds a full subscription snapshot and full PRUNE burst" {
-    var sessions = try @import("test_support.zig").sessions(std.testing.allocator, 1);
+    var sessions = try test_support.sessions(std.testing.allocator, 1);
     defer sessions.deinit(std.testing.allocator);
     const tx = &sessions.rows[0].io.tx;
     const name = "/eth2/01020304/sync_committee_contribution_and_proof/ssz_snappy";

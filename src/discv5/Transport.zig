@@ -12,6 +12,7 @@ const Sockets = @import("udp").Sockets;
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
+const KeyPair = @import("identity/crypto.zig").KeyPair;
 
 pub const Error = Engine.Error || Sockets.DatagramError ||
     Sockets.SendError || std.Io.RandomSecureError || error{
@@ -63,7 +64,7 @@ pub const Options = struct {
 };
 
 /// Takes ownership of bound sockets on success. Initialize at the final address.
-pub fn init(self: *Transport, allocator: std.mem.Allocator, sockets: Sockets, key: @import("identity/crypto.zig").KeyPair, record: enr.Record, options: Options) !void {
+pub fn init(self: *Transport, allocator: std.mem.Allocator, sockets: Sockets, key: KeyPair, record: enr.Record, options: Options) !void {
     self.* = .{ .engine = undefined, .sockets = sockets };
     try self.engine.init(allocator, key, record, options.engine);
 }

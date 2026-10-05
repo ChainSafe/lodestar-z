@@ -2,6 +2,7 @@ const std = @import("std");
 const Transport = @import("transport.zig").Transport;
 const keys = @import("wire/keys.zig");
 const Event = @import("quic/Engine.zig").Event;
+const transport_driver = @import("transport_driver.zig");
 
 pub const Node = struct {
     transport: Transport = .{},
@@ -19,8 +20,8 @@ pub const Node = struct {
     }
 };
 
-pub fn step(transport: *Transport, io: std.Io, events: []Event, options: @import("transport_driver.zig").Options) @import("transport_driver.zig").Error!Transport.Progress {
-    const result = @import("transport_driver.zig").step(transport, io, events, options);
+pub fn step(transport: *Transport, io: std.Io, events: []Event, options: transport_driver.Options) transport_driver.Error!Transport.Progress {
+    const result = transport_driver.step(transport, io, events, options);
     if (result.failure) |err| return err;
     return result.progress;
 }

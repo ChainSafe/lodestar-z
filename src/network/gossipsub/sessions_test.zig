@@ -4,11 +4,13 @@ const Sessions = @import("sessions.zig").Sessions;
 const constants = @import("constants.zig");
 const std = @import("std");
 const Engine = @import("../quic/Engine.zig");
+const test_support = @import("test_support.zig");
+const message_store = @import("message_store.zig");
 
 test "session slots track connection generations" {
     var sessions = try std.testing.allocator.create(Sessions);
     defer std.testing.allocator.destroy(sessions);
-    sessions.* = try @import("test_support.zig").sessions(std.testing.allocator, constants.peers_cap);
+    sessions.* = try test_support.sessions(std.testing.allocator, constants.peers_cap);
     defer sessions.deinit(std.testing.allocator);
     const conn = Handle{ .index = 3, .generation = 1 };
     const peer = sessions.addPeer(conn).?;
@@ -21,7 +23,7 @@ test "session slots track connection generations" {
 test "sessions suppresses ids per peer until monotonic expiry" {
     var sessions = try std.testing.allocator.create(Sessions);
     defer std.testing.allocator.destroy(sessions);
-    sessions.* = try @import("test_support.zig").sessions(std.testing.allocator, constants.peers_cap);
+    sessions.* = try test_support.sessions(std.testing.allocator, constants.peers_cap);
     defer sessions.deinit(std.testing.allocator);
     const peer = sessions.addPeer(.{ .index = 1, .generation = 1 }).?;
     const id = [_]u8{7} ** 20;
@@ -33,9 +35,9 @@ test "sessions suppresses ids per peer until monotonic expiry" {
 
 test "gossip stream cancellation discards unsent work and session reuse preserves receipt identity" {
     const a = std.testing.allocator;
-    var sessions = try @import("test_support.zig").sessions(a, 1);
+    var sessions = try test_support.sessions(a, 1);
     defer sessions.deinit(a);
-    var store = try @import("message_store.zig").Store.init(a, 1, 4096);
+    var store = try message_store.Store.init(a, 1, 4096);
     defer store.deinit(a);
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const first = sessions.addPeer(conn).?;

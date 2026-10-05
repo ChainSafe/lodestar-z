@@ -6,6 +6,8 @@ const identify = @import("root.zig");
 const fixtures = @import("test_support.zig");
 const options = fixtures.protocolsOptions;
 const step = fixtures.step;
+const protocols_test_support = @import("../protocols_test_support.zig");
+const binding = @import("../quic/binding.zig");
 
 const Protocols = @import("../protocols.zig").Protocols;
 
@@ -14,9 +16,9 @@ test "identify protocol integration completes both directions with zero applicat
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var client = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("client"), &pair.client);
+    var client = try protocols_test_support.initProtocols(std.testing.allocator, try options("client"), &pair.client);
     defer client.deinit();
-    var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("server"), &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, try options("server"), &pair.server);
     defer server.deinit();
     try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     try server.identify.start(&server.router, &pair.server, .{ .index = 0, .generation = 1 }, handles.server, pair.now);
@@ -49,7 +51,7 @@ test "identify protocol integration completes both directions with zero applicat
 
 test "identify configured handler controls default and explicit directional capabilities" {
     var opts = try options("");
-    var enabled = try Protocols.init(std.testing.allocator, opts, &try @import("../protocols_test_support.zig").fixtureLocal(opts.identify));
+    var enabled = try Protocols.init(std.testing.allocator, opts, &try protocols_test_support.fixtureLocal(opts.identify));
     defer enabled.deinit();
     try std.testing.expect(enabled.router.capabilities().receive.contains(.identify));
     try std.testing.expect(enabled.router.capabilities().request.contains(.identify));
@@ -59,7 +61,7 @@ test "identify configured handler controls default and explicit directional capa
     try std.testing.expect(both.receive.contains(.identify) and both.request.contains(.identify));
     for ([_]caps.Directional{ empty, .{ .receive = both.receive, .request = empty.request }, .{ .receive = empty.receive, .request = both.request } }) |active| {
         opts.router.capabilities = active;
-        var configured = try Protocols.init(std.testing.allocator, opts, &try @import("../protocols_test_support.zig").fixtureLocal(opts.identify));
+        var configured = try Protocols.init(std.testing.allocator, opts, &try protocols_test_support.fixtureLocal(opts.identify));
         defer configured.deinit();
         try std.testing.expectEqualDeep(active, configured.router.capabilities());
     }
@@ -75,10 +77,10 @@ test "identify saturation leaves reserved Ping negotiation usable" {
     opts.router = .{ .negotiations_max = 2, .outbound_control_reserved = 1 };
     opts.reqresp.outbound_max = 2;
     opts.reqresp.outbound_control_reserved = 1;
-    var client = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, opts, &pair.client);
+    var client = try protocols_test_support.initProtocols(std.testing.allocator, opts, &pair.client);
     defer client.deinit();
     opts.router.negotiations_max = 4;
-    var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, opts, &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, opts, &pair.server);
     defer server.deinit();
     try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     const ping = [_]u8{1} ++ [_]u8{0} ** 7;
@@ -112,11 +114,11 @@ test "identify blocked responder finishes immutable advertisement while new requ
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    @import("../quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 96);
+    binding.c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 96);
     const handles = try support.connectPair(&pair);
-    var client = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("client"), &pair.client);
+    var client = try protocols_test_support.initProtocols(std.testing.allocator, try options("client"), &pair.client);
     defer client.deinit();
-    var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, try options("old"), &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, try options("old"), &pair.server);
     defer server.deinit();
     try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     var blocked = false;

@@ -1,4 +1,5 @@
 const topic_policy = @import("topic_policy.zig");
+const constants = @import("constants.zig");
 
 pub fn full(digest: [4]u8) topic_policy.Boundary {
     var boundary: topic_policy.Boundary = .{ .digest = digest };
@@ -14,7 +15,7 @@ pub fn bytes(digest: [4]u8) topic_policy.Boundary {
     var boundary = full(digest);
     for (&boundary.rules) |*rule| {
         rule.ssz_min = 0;
-        rule.ssz_max = @import("constants.zig").MAX_PAYLOAD_SIZE;
+        rule.ssz_max = constants.MAX_PAYLOAD_SIZE;
     }
     return boundary;
 }
@@ -22,7 +23,7 @@ pub fn bytes(digest: [4]u8) topic_policy.Boundary {
 pub const churn = [_]topic_policy.Boundary{ bytes(.{ 1, 2, 3, 4 }), bytes(.{ 5, 6, 7, 8 }), bytes(.{ 9, 10, 11, 12 }) };
 
 pub fn churnTopic(index: usize, out: []u8) ![]const u8 {
-    std.debug.assert(index < @import("constants.zig").topics_cap);
+    std.debug.assert(index < constants.topics_cap);
     return std.fmt.bufPrint(out, "/eth2/{x:0>8}/{s}_{d}/ssz_snappy", .{
         @as(u32, if (index < 256) 0x01020304 else 0x05060708),
         @as([]const u8, if (index % 256 < 128) "blob_sidecar" else "data_column_sidecar"),

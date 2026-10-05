@@ -3,7 +3,8 @@ const builtin = @import("builtin");
 const n = @import("network");
 const rr = n.reqresp;
 const Budget = @import("network_budget.zig").Budget;
-pub fn forkLabel(fork: ?@FieldType(@import("network").types.ForkEntry, "fork")) ?[]const u8 {
+const network_incoming = @import("network_incoming.zig");
+pub fn forkLabel(fork: ?@FieldType(n.types.ForkEntry, "fork")) ?[]const u8 {
     return if (fork) |value| @tagName(value) else null;
 }
 
@@ -16,7 +17,7 @@ pub const Terminal = union(enum) {
     failed: struct { reason: rr.ReqResp.Failure, phase: ?rr.ReqResp.RequestPhase },
 };
 pub const Rejection = enum { disconnected, protocol_disabled, invalid_request, invalid_request_options, too_many_requests, slots_exhausted, negotiation_table_full, transport };
-pub const Chunk = struct { len: usize, fork: ?@FieldType(@import("network").types.ForkEntry, "fork") };
+pub const Chunk = struct { len: usize, fork: ?@FieldType(n.types.ForkEntry, "fork") };
 pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,
@@ -344,7 +345,7 @@ pub fn capture(runtime: *Runtime, events: []const rr.ReqResp.Event, now: n.Now) 
     defer runtime.unlock();
     const core = &runtime.heavy.?.core;
     for (events) |event| {
-        try @import("network_incoming.zig").captureLocked(runtime, event, now);
+        try network_incoming.captureLocked(runtime, event, now);
         switch (event) {
             .request => |incoming| {
                 if (runtime.incoming == null) try core.respondError(incoming.request, 2, "application handlers unavailable", now);

@@ -2,13 +2,14 @@ const t = @import("types.zig");
 const enr = @import("enr.zig");
 const custody = @import("custody.zig");
 const Catalog = @import("catalog.zig").Catalog;
+const KeyPair = @import("../wire/keys.zig").KeyPair;
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9001 } };
 const local: t.PeerId = .{ .bytes = @splat(0) };
 
 pub fn candidate(tag: u8, sync: u8) !enr.Candidate {
     var secret: [32]u8 = @splat(0);
     secret[31] = tag;
-    const key = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&secret);
+    const key = try KeyPair.fromSecretKey(&secret);
     const peer = t.PeerId.fromPublicKey(&key.publicKey());
     return .{ .peer = peer, .node_id = try custody.nodeId(&peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = sync, .custody_group_count = null };
 }

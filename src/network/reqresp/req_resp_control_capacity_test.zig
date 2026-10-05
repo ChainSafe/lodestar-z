@@ -5,6 +5,8 @@ const rr = @import("ReqResp.zig");
 const protocol = @import("protocol.zig");
 const Router = @import("../router.zig").Router;
 const support = @import("../quic/test_support.zig");
+const policy_fixture = @import("policy_fixture.zig");
+const protocols_test_support = @import("../protocols_test_support.zig");
 
 const reservedOptions = @import("control_fixture.zig").reservedOptions;
 
@@ -190,7 +192,7 @@ test "reqresp control capacity bounds application requests per connection across
     const handles = try support.connectPair(&pair);
     var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var options: rr.Options = .{ .admission = try rr.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 8, 2, 4), .outbound_max = 4, .serving_max = 4, .forks = &.{} };
+    var options: rr.Options = .{ .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 8, 2, 4), .outbound_max = 4, .serving_max = 4, .forks = &.{} };
     options.outbound_per_connection_max = 2;
     var requests = try rr.init(std.testing.allocator, options);
     defer requests.deinit();
@@ -309,7 +311,7 @@ test "reqresp control capacity raw and protocol-stack inbound admission select t
     const handles = try support.connectPair(&pair);
     var options = try reservedOptions();
     options.inbound_per_connection_max = 4;
-    var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const ordinary: Router.Selection = .{
@@ -357,7 +359,7 @@ test "reqresp admission refusals distinguish capacity and concurrency without fa
             .inbound_per_connection_max = case.connection_limit,
             .inbound_application_per_connection_max = case.application_limit,
             .forks = &.{},
-            .admission = try rr.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 8, 2, case.slots),
+            .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 8, 2, case.slots),
         });
         defer requests.deinit();
         defer requests.cancelAll(&pair.server, &router, pair.now);
@@ -434,7 +436,7 @@ test "reqresp control capacity zero defaults retain all ordinary slots and admis
     const handles = try support.connectPair(&pair);
     var requests = try rr.init(
         std.testing.allocator,
-        .{ .outbound_max = 4, .serving_max = 4, .forks = &.{}, .admission = try rr.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 8, 2, 4) },
+        .{ .outbound_max = 4, .serving_max = 4, .forks = &.{}, .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 8, 2, 4) },
     );
     defer requests.deinit();
     var router = try Router.init(std.testing.allocator, .{ .negotiations_max = 4 });
@@ -520,7 +522,7 @@ fn allocationFailures(allocator: std.mem.Allocator) !void {
         .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 },
         .reqresp = options,
         .router = .{ .negotiations_max = 4, .outbound_control_reserved = 2 },
-    }, &try @import("../protocols_test_support.zig").fixtureLocal(.{}));
+    }, &try protocols_test_support.fixtureLocal(.{}));
     defer protocols.deinit();
     const plan = protocols.reqresp.memoryPlan();
     try std.testing.expectEqual(plan.facade_bytes + plan.slot_bytes + plan.io_bytes +
@@ -534,7 +536,7 @@ test "reqresp reserved physical sinks admit full native control wave and recycle
     const handles = try support.connectPair(&pair);
     var options = try reservedOptions();
     options.inbound_per_connection_max = 4;
-    var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     var wave: [4]rr.RequestHandle = undefined;

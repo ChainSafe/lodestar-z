@@ -15,6 +15,13 @@ const types = @import("types.zig");
 const local_intent = @import("gossipsub/local_intent.zig");
 const topic_policy = @import("gossipsub/topic_policy.zig");
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
+const topic_fixture = @import("gossipsub/topic_fixture.zig");
+const policy_fixture = @import("reqresp/policy_fixture.zig");
+const test_support = @import("gossipsub/test_support.zig");
+const time = @import("time.zig");
+const schedule_test_support = @import("schedule_test_support.zig");
+const driver = @import("driver.zig");
+const ReqResp = @import("reqresp/ReqResp.zig");
 
 const Event = Engine.Event;
 const Now = Engine.Now;
@@ -28,7 +35,7 @@ pub fn localState(overrides: t.LocalState) t.LocalState {
 }
 
 /// Linux's default limit for both roles, so harness sockets never log a capped request.
-pub const socket_buffers: @import("configuration.zig").SocketBuffers = .{
+pub const socket_buffers: configuration.SocketBuffers = .{
     .quic = .{ .receive = 208 * 1024, .send = 208 * 1024 },
     .discovery = .{ .receive = 208 * 1024, .send = 208 * 1024 },
 };
@@ -64,7 +71,7 @@ pub fn options() configuration.Options {
             .inbound_application_per_connection_max = 8,
         },
         .gossip = .{
-            .topic_policy = comptime &.{@import("gossipsub/topic_fixture.zig").bytes(@splat(0))},
+            .topic_policy = comptime &.{topic_fixture.bytes(@splat(0))},
             .seen_capacity = 16,
             .mcache_capacity = 8,
             .validation_capacity = 2,
@@ -74,7 +81,7 @@ pub fn options() configuration.Options {
             .control_bytes = 512,
             .critical_bytes = 512,
         },
-        .admission_policy = @import("reqresp/policy_fixture.zig").config(),
+        .admission_policy = policy_fixture.config(),
     };
 }
 
@@ -97,8 +104,8 @@ pub fn updateDemand(node: *NetworkCore, demand: *const t.Demand, now: Now) !void
 /// Commits `local` and `demand` together through the owner's intent path, keeping its schedule,
 /// endpoints, capabilities and subscriptions.
 pub fn updateLocalDemand(node: *NetworkCore, local: *const t.LocalState, demand: *const t.Demand, now: Now) !void {
-    var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
-    var desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
+    var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
+    var desired = intent(node, try test_support.subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
     desired.update.local = local.*;
     desired.demand = demand.*;
     _ = try node.applyIntent(&desired, now);
@@ -106,8 +113,8 @@ pub fn updateLocalDemand(node: *NetworkCore, local: *const t.LocalState, demand:
 
 /// Moves the owner's wall-clock slot forward through the intent path, changing nothing else.
 pub fn advanceSlot(node: *NetworkCore, slot: u64, now: Now) !void {
-    var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
-    var desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
+    var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
+    var desired = intent(node, try test_support.subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
     desired.slot = slot;
     _ = try node.applyIntent(&desired, now);
     std.debug.assert(node.current_slot == slot);
@@ -156,7 +163,7 @@ pub const Link = struct {
         // quiche stamps each datagram's release time from the real clock, and the transport
         // asserts the release against its Io clock, so the virtual clock runs well ahead.
         const real_ms: u64 = @intCast(@divTrunc(std.Io.Clock.awake.now(self.base).nanoseconds, std.time.ns_per_ms));
-        self.now.monotonic = @import("time.zig").milliseconds(real_ms + 1_000_000);
+        self.now.monotonic = time.milliseconds(real_ms + 1_000_000);
         active = self;
     }
 
@@ -172,7 +179,7 @@ pub const Link = struct {
     }
 
     pub fn advance(self: *Link, ms: u64) void {
-        self.now.monotonic = @import("time.zig").milliseconds(self.now.millis() + ms);
+        self.now.monotonic = time.milliseconds(self.now.millis() + ms);
     }
 
     /// Dials the server from the client engine, outside the client's dialing policy.
@@ -300,7 +307,7 @@ pub const Setup = struct {
     pair: Link = .{},
     client: NetworkCore = undefined,
     server: NetworkCore = undefined,
-    forks: [4]@import("types.zig").ForkEntry = undefined,
+    forks: [4]types.ForkEntry = undefined,
     /// Discovery for the client, set before init, so its local updates publish an ENR.
     client_discovery: ?NetworkCore.DiscoveryOptions = null,
     initialized: [2]bool = .{ false, false },
@@ -331,7 +338,7 @@ pub const Setup = struct {
         self.pair.init();
         errdefer self.deinit();
         var count: usize = 0;
-        for ([_]@import("types.zig").ForkEntry{
+        for ([_]types.ForkEntry{
             .{ .digest = local.fork.digest, .fork = local.fork.fork },
             .{ .digest = @splat(1), .fork = .fulu },
             .{ .digest = @splat(2), .fork = .fulu },
@@ -382,7 +389,7 @@ pub const Setup = struct {
 
     /// One owner turn of `node` at the link's clock, with no wait.
     pub fn turn(self: *Setup, node: *NetworkCore, outputs: NetworkCore.Outputs) !NetworkCore.Result {
-        const result = node.advance(self.pair.io(), .{ .now = self.pair.now, .readiness = .{} }, outputs, .deadlineOnly(@import("time.zig").optionalMilliseconds(self.pair.now.millis())));
+        const result = node.advance(self.pair.io(), .{ .now = self.pair.now, .readiness = .{} }, outputs, .deadlineOnly(time.optionalMilliseconds(self.pair.now.millis())));
         if (result.failure) |err| return err;
         return result;
     }
@@ -402,8 +409,8 @@ pub fn networkOptions(key: *const keys.KeyPair) NetworkOptions {
     };
     requested.reqresp.outbound_per_connection_max = 4;
     requested.gossip.topic_policy = comptime &.{
-        @import("gossipsub/topic_fixture.zig").bytes(@splat(0)),
-        @import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 }),
+        topic_fixture.bytes(@splat(0)),
+        topic_fixture.bytes(.{ 1, 2, 3, 4 }),
     };
     return .{
         .resolved = configuration.resolve(requested) catch unreachable,
@@ -447,20 +454,20 @@ pub fn unsubscribe(node: *NetworkCore, name: []const u8) !void {
 
 fn setSubscription(node: *NetworkCore, name: []const u8, subscribed: bool) !void {
     var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
-    const desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.protocols.gossipsub, name, subscribed, &boundaries));
+    const desired = intent(node, try test_support.subscriptionUpdate(node.protocols.gossipsub, name, subscribed, &boundaries));
     _ = try node.applyIntent(&desired, node.last_now);
 }
 
 pub fn clientWakeup(setup: *Setup) ?u64 {
-    return @import("schedule_test_support.zig").wakeupMilliseconds(setup.client.wakeups(setup.pair.now, .{}).schedule(), setup.pair.now.millis());
+    return schedule_test_support.wakeupMilliseconds(setup.client.wakeups(setup.pair.now, .{}).schedule(), setup.pair.now.millis());
 }
 
 pub fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
-    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-    return @import("driver.zig").step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| wait_ms)));
+    const now = try Transport.currentTime(std.testing.io);
+    return driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| wait_ms)));
 }
 
-pub fn failStatus(setup: *Setup, failure: @import("reqresp/ReqResp.zig").Failure) !void {
+pub fn failStatus(setup: *Setup, failure: ReqResp.Failure) !void {
     for (setup.client.control_protocol.operations) |operation| if (operation.request) |handle| {
         if (operation.protocol != .status_v1) continue;
         const requests = &setup.client.protocols.reqresp;
@@ -472,7 +479,7 @@ pub fn failStatus(setup: *Setup, failure: @import("reqresp/ReqResp.zig").Failure
     return error.TestUnexpectedResult;
 }
 
-pub fn failStatusRound(setup: *Setup, failure: @import("reqresp/ReqResp.zig").Failure) !void {
+pub fn failStatusRound(setup: *Setup, failure: ReqResp.Failure) !void {
     setup.client.peer_manager.reStatusPeers(setup.pair.now);
     try setup.step(0);
     try failStatus(setup, failure);

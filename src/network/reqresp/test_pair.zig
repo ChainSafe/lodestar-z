@@ -5,6 +5,11 @@ const protocol = @import("protocol.zig");
 const Engine = @import("../quic/Engine.zig");
 const multistream = @import("../wire/multistream.zig");
 const Event = reqresp.Event;
+const ForkEntry = @import("../types.zig").ForkEntry;
+const ForkSeq = @import("config").ForkSeq;
+const protocols_test_support = @import("../protocols_test_support.zig");
+const protocols = @import("../protocols.zig");
+const policy_fixture = @import("policy_fixture.zig");
 
 pub const deneb_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xa9 };
 pub const fulu_digest = [4]u8{ 0x2f, 0x2f, 0x2f, 0x2f };
@@ -17,14 +22,14 @@ pub const Overrides = struct {
     progress_timeout_ms: u64 = 10_000,
     host_timeout_ms: u64 = 60_000,
     quota_timeout_ms: u64 = 60_000,
-    forks: ?[]const @import("../types.zig").ForkEntry = null,
-    request_fork: @import("config").ForkSeq = .phase0,
+    forks: ?[]const ForkEntry = null,
+    request_fork: ForkSeq = .phase0,
     admission: ?reqresp.Options.Admission = null,
 };
 
 pub const Pair = struct {
-    shared: @import("../protocols_test_support.zig").ProtocolsPair = .{},
-    forks: [2]@import("../types.zig").ForkEntry = .{
+    shared: protocols_test_support.ProtocolsPair = .{},
+    forks: [2]ForkEntry = .{
         .{ .digest = deneb_digest, .fork = .deneb },
         .{ .digest = fulu_digest, .fork = .fulu },
     },
@@ -38,12 +43,12 @@ pub const Pair = struct {
         try self.shared.init(try protocolsOptions(client, &self.forks), try protocolsOptions(server, &self.forks));
     }
 
-    fn protocolsOptions(overrides: Overrides, forks: []const @import("../types.zig").ForkEntry) !@import("../protocols.zig").Protocols.Options {
+    fn protocolsOptions(overrides: Overrides, forks: []const ForkEntry) !protocols.Protocols.Options {
         return .{ .reqresp = try options(overrides, forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 } };
     }
 
     /// Admission defaults over the fixture policy unless the caller supplies admission.
-    fn options(overrides: Overrides, forks: []const @import("../types.zig").ForkEntry) !reqresp.Options {
+    fn options(overrides: Overrides, forks: []const ForkEntry) !reqresp.Options {
         const connections = 128;
         return .{
             .connections = connections,
@@ -55,7 +60,7 @@ pub const Pair = struct {
             .progress_timeout_ms = overrides.progress_timeout_ms,
             .forks = overrides.forks orelse forks,
             .request_fork = overrides.request_fork,
-            .admission = overrides.admission orelse try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), connections, connections, overrides.serving_max -| overrides.serving_control_reserved),
+            .admission = overrides.admission orelse try reqresp.Options.Admission.defaults(&policy_fixture.config(), connections, connections, overrides.serving_max -| overrides.serving_control_reserved),
             .host_timeout_ms = overrides.host_timeout_ms,
             .quota_timeout_ms = overrides.quota_timeout_ms,
         };
@@ -67,8 +72,8 @@ pub const Pair = struct {
 
     /// Routes both sides' stream events to their negotiators and reqresp owners.
     pub fn forwardEvents(self: *Pair) void {
-        @import("../protocols_test_support.zig").forward(&self.shared.pair, &self.shared.pair.client, .{ .negotiator = &self.shared.client.router.negotiator, .reqresp = &self.shared.client.reqresp });
-        @import("../protocols_test_support.zig").forward(&self.shared.pair, &self.shared.pair.server, .{ .negotiator = &self.shared.server.router.negotiator, .reqresp = &self.shared.server.reqresp });
+        protocols_test_support.forward(&self.shared.pair, &self.shared.pair.client, .{ .negotiator = &self.shared.client.router.negotiator, .reqresp = &self.shared.client.reqresp });
+        protocols_test_support.forward(&self.shared.pair, &self.shared.pair.server, .{ .negotiator = &self.shared.server.router.negotiator, .reqresp = &self.shared.server.reqresp });
     }
 
     pub fn pumpOnce(self: *Pair) !void {

@@ -18,16 +18,25 @@ const Outcome = validation.Outcome;
 const Attribution = validation.Attribution;
 const Validation = validation.Validation;
 const Peers = @import("peer_book.zig").PeerBook;
+const Engine = @import("../quic/Engine.zig");
+const PeerId = @import("../wire/peer_id.zig").PeerId;
+const overlay_mod = @import("overlay.zig");
+const SessionRef = @import("sessions.zig").SessionRef;
+const gossip_limits = @import("../gossip_limits.zig");
+const layout_mod = @import("layout.zig");
+const outbox_mod = @import("outbox.zig");
+const delivery = @import("delivery.zig");
+const TopicSet = @import("local_intent.zig").TopicSet;
 
 /// Topic and payload slices are borrowed for the synchronous admission callback only.
 pub const MessageEvent = struct {
     source: ?PeerRef = null,
     handle: Handle,
     id: topic_mod.MessageId,
-    peer: @import("../quic/Engine.zig").Handle,
+    peer: Engine.Handle,
     topic: []const u8,
     bytes: []const u8,
-    identity: @import("../wire/peer_id.zig").PeerId,
+    identity: PeerId,
     admitted_ms: u64,
     deadline: u64,
 };
@@ -50,7 +59,7 @@ pub const StorageRefusals = [std.meta.fields(StorageRefusal).len]u64;
 pub const Applied = struct {
     verdict: Verdict,
     id: topic_mod.MessageId,
-    source: @import("../wire/peer_id.zig").PeerId,
+    source: PeerId,
     admitted_ms: u64,
     topic_bytes: [topic_mod.topic_max_len]u8,
     topic_len: u8,
@@ -78,7 +87,7 @@ pub const Report = union(enum) {
 };
 
 pub const Context = struct {
-    overlay: *const @import("overlay.zig").Overlay,
+    overlay: *const overlay_mod.Overlay,
     peers: *Peers,
     options: *const Options,
     epoch: u64,
@@ -86,8 +95,8 @@ pub const Context = struct {
 
 pub const Source = struct {
     peer: PeerRef,
-    session: @import("sessions.zig").SessionRef,
-    connection: @import("../quic/Engine.zig").Handle,
+    session: SessionRef,
+    connection: Engine.Handle,
 };
 
 const FastEntry = struct {
@@ -104,10 +113,10 @@ pub const Messages = struct {
     storage_refusals: StorageRefusals = @splat(0),
     /// Accepted or published messages whose kind's retention allowance stayed full: they are
     /// neither cached nor forwarded.
-    retention_refusals: [@import("../gossip_limits.zig").kind_count]u64 = @splat(0),
+    retention_refusals: [gossip_limits.kind_count]u64 = @splat(0),
     fast: []FastEntry,
 
-    pub fn init(a: std.mem.Allocator, options: *const Options, layout: *const @import("layout.zig").Layout) !Messages {
+    pub fn init(a: std.mem.Allocator, options: *const Options, layout: *const layout_mod.Layout) !Messages {
         var store = try storage.Store.init(a, layout.payload_entries, layout.payload_bytes);
         errdefer store.deinit(a);
         store.limits = options.payload_limits;
@@ -138,7 +147,7 @@ pub const Messages = struct {
         self.* = undefined;
     }
 
-    pub fn metadataBytes(layout: *const @import("layout.zig").Layout) usize {
+    pub fn metadataBytes(layout: *const layout_mod.Layout) usize {
         return storage.Store.metadataBytes(layout.payload_entries, layout.payload_bytes) +
             Validation.backingBytesForTopics(layout.validations, layout.topics) + layout.fingerprints * @sizeOf(FastEntry) +
             mcache.History.backingBytes(layout.history, layout.retained) + layout.history * @sizeOf(MessageId) +
@@ -181,10 +190,10 @@ pub const Messages = struct {
         known: enum { queued, limited, pressured },
     };
 
-    pub fn serve(self: *Messages, outbox: *@import("outbox.zig").Outbox, peer: PeerRef, id: MessageId, limits: @import("delivery.zig").Limits, now: u64) ServeOutcome {
+    pub fn serve(self: *Messages, outbox: *outbox_mod.Outbox, peer: PeerRef, id: MessageId, limits: delivery.Limits, now: u64) ServeOutcome {
         const slot = self.history.get(&self.store, id) orelse return .unknown;
         self.history.bindPeer(peer);
-        if (!self.history.iwantAllowed(slot, peer, @import("constants.zig").gossip_retransmission)) return .{ .known = .limited };
+        if (!self.history.iwantAllowed(slot, peer, constants.gossip_retransmission)) return .{ .known = .limited };
         const queued = outbox.queueData(&self.store, self.history.message(slot), .iwant, limits, now) == .queued;
         if (queued) self.history.sent(slot, peer);
         return .{ .known = if (queued) .queued else .pressured };
@@ -209,7 +218,7 @@ pub const Messages = struct {
         if (!context.overlay.subscribed(topic)) return .ignored;
         if (msg.signed) return invalid(context, source, topic, .signed);
         const header = admission.inspect(&msg);
-        if (header == .rejected) return invalid(context, source, topic, if (msg.data.len > @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE)) .compressed_size else .ssz_size);
+        if (header == .rejected) return invalid(context, source, topic, if (msg.data.len > constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE)) .compressed_size else .ssz_size);
         if (header == .invalid) {
             if (!workspace.charge(context.options, msg.data.len, 0)) return .deferred;
             _ = self.seen.add(topic_mod.invalidMessageId(msg.topic, msg.data, context.options.message_id_policy), now);
@@ -324,7 +333,7 @@ pub const Messages = struct {
         return .{ .applied = result };
     }
 
-    pub fn topicPins(self: *const Messages) @import("local_intent.zig").TopicSet {
+    pub fn topicPins(self: *const Messages) TopicSet {
         return self.validation.topic_pins;
     }
 

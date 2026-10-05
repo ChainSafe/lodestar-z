@@ -3,6 +3,8 @@ const constants = @import("../constants.zig");
 const Engine = @import("Engine.zig");
 const keys = @import("../wire/keys.zig");
 const support = @import("test_support.zig");
+const test_support = @import("../tls/test_support.zig");
+const binding = @import("binding.zig");
 
 const Event = Engine.Event;
 const Pair = support.Pair;
@@ -249,8 +251,8 @@ test "engine rejects a forged certificate with tls_failed" {
     const other = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{9}));
     const server_public = server_key.publicKey();
     const context = &pair.server.tls;
-    try @import("../tls/test_support.zig").forgeHostSignature(&context.certificate, &server_public, &other);
-    try std.testing.expectEqual(@as(c_int, 1), @import("binding.zig").c.SSL_CTX_use_certificate(context.ssl_ctx, context.certificate.x509));
+    try test_support.forgeHostSignature(&context.certificate, &server_public, &other);
+    try std.testing.expectEqual(@as(c_int, 1), binding.c.SSL_CTX_use_certificate(context.ssl_ctx, context.certificate.x509));
 
     const handle = try pair.dial();
     try pair.pump();

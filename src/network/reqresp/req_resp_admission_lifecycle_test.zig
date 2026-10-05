@@ -10,6 +10,8 @@ const Pair = harness.Pair;
 const requestStatus = harness.requestStatus;
 const requestBlocks = harness.requestBlocks;
 const waitForRequest = harness.waitForRequest;
+const types = @import("../types.zig");
+const admission_fixture = @import("admission_fixture.zig");
 
 fn application(setup: *harness.Pair, which: Protocol, bytes: []const u8, sink: []u8) !rr.RequestHandle {
     return setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, which, bytes, sink, .{}, setup.shared.pair.now);
@@ -140,7 +142,7 @@ fn allocation(allocator: std.mem.Allocator) !void {
 }
 
 test "reqresp admission lifecycle control traffic preserves application quota fairness" {
-    const quotas = @import("admission_fixture.zig").quotas(4, 1000);
+    const quotas = admission_fixture.quotas(4, 1000);
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
         .serving_max = 3,
@@ -157,7 +159,7 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
         slot.state = .ready;
         slot.admission.cost = if (peer == 0) 4 else 1;
         slot.progress_ms = setup.shared.pair.now.millis();
-        const conn: @import("../types.zig").Handle = .{ .index = @intCast(peer), .generation = std.math.maxInt(u32) };
+        const conn: types.Handle = .{ .index = @intCast(peer), .generation = std.math.maxInt(u32) };
         slot.request = .{
             .direction = .inbound,
             .generation = 1,
@@ -194,8 +196,8 @@ test "reqresp admission lifecycle a fresh burst starts full requests before spli
         .serving_control_reserved = 1,
         .admission = .{ .policy = policy(), .limits = .{
             .identities = 4,
-            .peer = @import("admission_fixture.zig").quotas(4, 1000),
-            .global = @import("admission_fixture.zig").quotas(8, 1000),
+            .peer = admission_fixture.quotas(4, 1000),
+            .global = admission_fixture.quotas(8, 1000),
         } },
     });
     defer setup.deinit();
@@ -208,7 +210,7 @@ test "reqresp admission lifecycle a fresh burst starts full requests before spli
         slot.state = .ready;
         slot.admission.cost = 4;
         slot.progress_ms = setup.shared.pair.now.millis();
-        const conn: @import("../types.zig").Handle = .{ .index = @intCast(peer), .generation = std.math.maxInt(u32) };
+        const conn: types.Handle = .{ .index = @intCast(peer), .generation = std.math.maxInt(u32) };
         slot.request = .{
             .direction = .inbound,
             .generation = 1,
@@ -321,7 +323,7 @@ test "reqresp exhausts outbound slots and per-connection inbound slots" {
 test "reqresp request admission host capacity cancellation and queued cancellation retain debt" {
     var setup: Pair = .{};
     try setup.init(.{}, .{
-        .admission = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{ .identities = 1, .peer = @import("admission_fixture.zig").quotas(1, 86_400_000), .global = @import("admission_fixture.zig").quotas(100, 86_400_000) } },
+        .admission = .{ .policy = policy(), .limits = .{ .identities = 1, .peer = admission_fixture.quotas(1, 86_400_000), .global = admission_fixture.quotas(100, 86_400_000) } },
     });
     defer setup.deinit();
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);

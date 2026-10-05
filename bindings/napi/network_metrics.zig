@@ -6,7 +6,7 @@ pub const Export = struct {
     buffers: [2][]u8 = .{ &.{}, &.{} },
     lengths: [2]usize = .{ 0, 0 },
     published: u1 = 0,
-    failure: ?@import("network").metrics.registry.Error = null,
+    failure: ?n.metrics.registry.Error = null,
 
     pub fn init(capacity: usize) !Export {
         const first = try r.allocator.alloc(u8, capacity);

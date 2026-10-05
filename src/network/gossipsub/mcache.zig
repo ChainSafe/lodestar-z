@@ -1,5 +1,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
+const topic_mod = @import("topic.zig");
+const peer_book = @import("peer_book.zig");
 
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -200,7 +202,7 @@ pub const HistoryEntry = struct {
 };
 const KindList = struct { head: u32 = empty_slot, tail: u32 = empty_slot };
 const HistoryTopic = struct {
-    bytes: [@import("topic.zig").topic_max_len]u8 = undefined,
+    bytes: [topic_mod.topic_max_len]u8 = undefined,
     name: []const u8 = undefined,
     head: u32 = empty_slot,
     tail: u32 = empty_slot,
@@ -221,7 +223,7 @@ pub const History = struct {
     topics: []HistoryTopic,
     topic_index: KeyIndex(HistoryTopic, []const u8, "name"),
     /// Each kind's entries, oldest first.
-    kinds: [@typeInfo(@import("topic.zig").Kind).@"enum".fields.len]KindList = @splat(.{}),
+    kinds: [@typeInfo(topic_mod.Kind).@"enum".fields.len]KindList = @splat(.{}),
     free_topic: u32 = 0,
     /// Entries `gossip` examined, which the bounded-work test reads.
     gossip_entries_visited: u64 = 0,
@@ -231,7 +233,7 @@ pub const History = struct {
     count: usize = 0,
 
     pub fn init(a: Allocator, capacity: usize, retained: u16) !History {
-        if (retained == 0 or retained > @import("peer_book.zig").capacity) return error.InvalidLimits;
+        if (retained == 0 or retained > peer_book.capacity) return error.InvalidLimits;
         if (capacity == 0 or capacity > capacity_max) return error.InvalidLimits;
         const entries = try a.alloc(HistoryEntry, capacity);
         errdefer a.free(entries);

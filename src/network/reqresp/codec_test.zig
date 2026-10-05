@@ -259,7 +259,7 @@ test "codec bounds errors separately from successful ping payloads" {
 }
 
 test "codec compact control buffers decode successful and maximum error payloads" {
-    var sink: [@import("protocol.zig").payloadMaxControl()]u8 = undefined;
+    var sink: [protocol.payloadMaxControl()]u8 = undefined;
     var scratch: [protocol.control_scratch_length]u8 = undefined;
     var encoded: [codec.encodedLengthMax(codec.error_message_max)]u8 = undefined;
     var payload: [codec.error_message_max]u8 = undefined;

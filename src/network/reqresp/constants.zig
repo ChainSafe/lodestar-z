@@ -1,4 +1,5 @@
 const std = @import("std");
+const constants = @import("../constants.zig");
 
 pub const MAX_PAYLOAD_SIZE = @import("../constants.zig").MAX_PAYLOAD_SIZE;
 pub const MAX_CONCURRENT_REQUESTS: u8 = 2;
@@ -29,7 +30,7 @@ pub fn isErrorResult(code: u8) bool {
 
 pub fn maxEncodedLength(uncompressed: usize) usize {
     std.debug.assert(uncompressed <= MAX_PAYLOAD_SIZE);
-    return @import("../constants.zig").maxCompressedLen(uncompressed);
+    return constants.maxCompressedLen(uncompressed);
 }
 
 comptime {

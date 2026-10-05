@@ -8,14 +8,22 @@ const gs = @import("gossipsub/root.zig");
 const topic_mod = @import("gossipsub/topic.zig");
 const multistream = @import("wire/multistream.zig");
 const protobuf = @import("gossipsub/protobuf.zig");
+const protocols_mod = @import("protocols.zig");
+const policy_fixture = @import("reqresp/policy_fixture.zig");
+const protocols_test_support = @import("protocols_test_support.zig");
+const topic_fixture = @import("gossipsub/topic_fixture.zig");
+const peer_id = @import("wire/peer_id.zig");
+const ForkEntry = @import("types.zig").ForkEntry;
+const ForkSeq = @import("config").ForkSeq;
+const admission_fixture = @import("reqresp/admission_fixture.zig");
 
-fn rrOptions() !@import("protocols.zig").Protocols.Options {
+fn rrOptions() !protocols_mod.Protocols.Options {
     return .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
         .outbound_max = 4,
         .serving_max = 4,
         .inbound_per_connection_max = 4,
         .forks = &.{},
-        .admission = try rr.ReqResp.Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 4),
+        .admission = try rr.ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 128, 4),
     } };
 }
 
@@ -23,9 +31,9 @@ test "protocol stack composes simultaneous ping and meshsub on one connection" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var client = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, try rrOptions(), &pair.client);
+    var client = try protocols_test_support.initProtocols(std.testing.allocator, try rrOptions(), &pair.client);
     defer client.deinit();
-    var server = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1, .topic_policy = &.{@import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 })} }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1, .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
     defer server.deinit();
     const requests = &server.reqresp;
     const gossip = server.gossipsub;
@@ -81,16 +89,16 @@ test "protocol stack handles native stream events past empty request capacity" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var client = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
+    var client = try protocols_test_support.initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
         .forks = &.{},
         .outbound_max = 64,
         .serving_max = 64,
         .work_per_pump_max = 1,
-        .admission = try rr.ReqResp.Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 64),
+        .admission = try rr.ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 128, 64),
     } }, &pair.client);
     defer client.deinit();
     defer client.reqresp.cancelAll(&pair.client, &client.router, pair.now);
-    var server = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, try rrOptions(), &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, try rrOptions(), &pair.server);
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const handles = try support.connectPair(&pair);
@@ -127,17 +135,17 @@ test "protocol stack gossip capacity refusal preserves reqresp and explicit host
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var client = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, try rrOptions(), &pair.client);
+    var client = try protocols_test_support.initProtocols(std.testing.allocator, try rrOptions(), &pair.client);
     defer client.deinit();
     defer client.reqresp.cancelAll(&pair.client, &client.router, pair.now);
-    var server = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const handles = try support.connectPair(&pair);
     const peers = @import("gossipsub/peer_book.zig");
     var retained: [peers.capacity - peers.outbound_reserve]peers.Ref = undefined;
     for (0..peers.capacity - peers.outbound_reserve) |i| {
-        var metadata: peers.Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** @import("wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
+        var metadata: peers.Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** peer_id.length }, .address = .unspecified, .direction = .inbound };
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
         const ref = server.gossipsub.peers.admit(.{ .index = 0, .generation = 1 }, &metadata, pair.now.millis()).admitted.peer;
         retained[i] = ref;
@@ -182,7 +190,7 @@ test "protocol stack capabilities disabled outbound preserves stream and request
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var protocols = try @import("protocols_test_support.zig").initProtocols(std.testing.allocator, .{
+    var protocols = try protocols_test_support.initProtocols(std.testing.allocator, .{
         .reqresp = (try rrOptions()).reqresp,
         .gossipsub = .{ .random_seed = 1 },
         .router = .{ .capabilities = caps.Directional{ .receive = .initEmpty(), .request = .initEmpty() } },
@@ -203,13 +211,13 @@ test "protocol stack capabilities disabled outbound preserves stream and request
 test "protocol stack capabilities activation preserves negotiated response context and captured ceiling" {
     const harness = @import("reqresp/test_pair.zig");
     const ct = @import("consensus_types");
-    const context: @import("types.zig").ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
+    const context: ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
     var setup: harness.Pair = .{};
-    const limits = @import("reqresp/admission_fixture.zig").quotas(2048, 1000);
+    const limits = admission_fixture.quotas(2048, 1000);
     const options: harness.Overrides = .{
         .forks = &.{context},
 
-        .admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{ .identities = 2, .peer = limits, .global = limits } },
+        .admission = .{ .policy = policy_fixture.config(), .limits = .{ .identities = 2, .peer = limits, .global = limits } },
     };
     try setup.init(options, options);
     defer setup.deinit();
@@ -234,7 +242,7 @@ test "protocol stack capabilities activation preserves negotiated response conte
                 try std.testing.expectEqual(129, setup.shared.client.reqresp.outbound[handle.index].request.chunks_max);
                 const owner = &setup.shared.server.reqresp.inbound[incoming.request.index];
                 try std.testing.expectEqual(129, owner.request.chunks_max);
-                try std.testing.expectEqual(@import("config").ForkSeq.phase0, owner.request_fork);
+                try std.testing.expectEqual(ForkSeq.phase0, owner.request_fork);
                 activated = true;
             },
             .chunk_sent => |sent| {
@@ -249,7 +257,7 @@ test "protocol stack capabilities activation preserves negotiated response conte
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expect(activated);
-                try std.testing.expectEqual(@as(?@import("config").ForkSeq, .phase0), chunk.fork);
+                try std.testing.expectEqual(@as(?ForkSeq, .phase0), chunk.fork);
                 try std.testing.expectEqualSlices(u8, &payload, chunk.bytes);
                 chunks += 1;
                 try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now));

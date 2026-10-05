@@ -11,6 +11,10 @@ const protobuf = @import("protobuf.zig");
 const peers_mod = @import("peer_book.zig");
 const Handle = Engine.Handle;
 const Now = @import("../types.zig").Now;
+const peer_id = @import("../wire/peer_id.zig");
+const outbox = @import("outbox.zig");
+const delivery = @import("delivery.zig");
+const IwantOutcome = @import("metrics.zig").IwantOutcome;
 const resource_options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 3, .retained_capacity = 4, .retained_outbound_reserve = 1, .validation_capacity = 1, .mcache_capacity = 2, .seen_capacity = 4 };
 
 fn expectControlFloodBounded(control_tag: u8) !void {
@@ -20,7 +24,7 @@ fn expectControlFloodBounded(control_tag: u8) !void {
     const controls_per_rpc = 4096;
     const io = &g.sessions.rows[peer].io;
     var rpc: [5 * controls_per_rpc + 8]u8 = undefined;
-    var writer = @import("protobuf.zig").Writer.init(&rpc);
+    var writer = protobuf.Writer.init(&rpc);
     writer.tag(3, 2);
     writer.varint(controls_per_rpc * @as(usize, if (control_tag == 0x0a) 5 else 2));
     for (0..controls_per_rpc) |_| {
@@ -58,7 +62,7 @@ test "gossipsub legal maximum IWANT response uses actual IO without mesh publish
     try support.subscribe(setup.shared.server.gossipsub, test_topic);
     try support.subscribe(setup.shared.client.gossipsub, test_topic);
     for (0..20) |_| try setup.pumpOnce();
-    const payload = try std.testing.allocator.alloc(u8, @import("constants.zig").MAX_PAYLOAD_SIZE);
+    const payload = try std.testing.allocator.alloc(u8, constants.MAX_PAYLOAD_SIZE);
     defer std.testing.allocator.free(payload);
     var rng = std.Random.DefaultPrng.init(73);
     rng.random().bytes(payload);
@@ -92,7 +96,7 @@ test "gossipsub legal maximum IWANT response uses actual IO without mesh publish
 test "gossipsub IWANT promises commit on queue and start at completed control transmission" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .control_bytes = 64 });
     defer g.deinit();
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, topic);
     var body: [32]u8 = undefined;
@@ -119,7 +123,7 @@ test "gossipsub IWANT promises commit on queue and start at completed control tr
 test "gossipsub IHAVE pending and duplicate prefixes do not hide new tail IDs" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     var bytes: [8192]u8 = undefined;
@@ -181,7 +185,7 @@ test "gossipsub IHAVE samples eligible IDs across the advertisement independentl
 test "gossipsub IHAVE security bounds one identity and deduplicates queued requests" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .iwant_followup_ms = 12000 });
     defer g.deinit();
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     var bytes: [4096]u8 = undefined;
@@ -209,7 +213,7 @@ test "gossipsub IHAVE security bounds one identity and deduplicates queued reque
         }
     }
     try std.testing.expectEqual(@as(usize, constants.gossip_ids_max * constants.max_ihave_per_heartbeat), g.recovery.len);
-    const other = @import("test_support.zig").addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
+    const other = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
     const occupied = g.recovery.len;
     support.control(&g, other.index, .{ .ihave = .{ .topic = name, .body = writer.written() } }, Now.fromMilliseconds(.{ .mono_ms = 7000, .unix_s = 1 }));
     try std.testing.expectEqual(occupied + constants.gossip_ids_max, g.recovery.len);
@@ -223,7 +227,7 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 2 });
     defer g.deinit();
     const metadata: peers_mod.Metadata = .{
-        .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length },
+        .identity = .{ .bytes = [_]u8{1} ** peer_id.length },
         .address = .unspecified,
         .direction = .inbound,
     };
@@ -243,13 +247,13 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
     const iwant = (try reader.next()).?.iwant;
     // Forwards fill the ordinary allowance and publications the local reserve.
     const tx = &g.sessions.rows[first.index].io.tx;
-    for (0..@import("outbox.zig").data_capacity) |_| {
-        const origin: @import("delivery.zig").Origin = if (tx.data.full()) .publication else .forward;
-        try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, tx.queueData(&g.messages.store, message, origin, .{ .bytes = g.options.tx_peer_bytes }, 1));
+    for (0..outbox.data_capacity) |_| {
+        const origin: delivery.Origin = if (tx.data.full()) .publication else .forward;
+        try std.testing.expectEqual(outbox.QueueResult.queued, tx.queueData(&g.messages.store, message, origin, .{ .bytes = g.options.tx_peer_bytes }, 1));
     }
     support.control(&g, first.index, .{ .iwant = iwant }, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }));
     try std.testing.expectEqual(@as(u8, 0), g.messages.history.countsRow(g.messages.history.get(&g.messages.store, id).?)[logical_peer.index]);
-    try std.testing.expectEqual(@as(u64, 1), g.iwant_outcomes[@intFromEnum(@import("metrics.zig").IwantOutcome.refused)]);
+    try std.testing.expectEqual(@as(u64, 1), g.iwant_outcomes[@intFromEnum(IwantOutcome.refused)]);
     g.sessions.rows[first.index].io.tx.cancelStream(&g.messages.store);
     for (0..4) |_| support.control(&g, first.index, .{ .iwant = iwant }, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 3), g.sessions.rows[first.index].io.tx.data.count);
@@ -273,7 +277,7 @@ test "recovery owner clear releases sent and unsent attribution pins" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const conn: Handle = .{ .index = 0, .generation = 1 };
-    const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    const peer = support.addPeer(&g, conn, .v1_2).?;
     const ref = g.sessions.rows[peer.index].logical;
     g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[peer.index].logical, g.sessions.rows[peer.index].conn, 1, 30_000);
     g.recovery.add(&g.peers, [_]u8{2} ** 20, g.sessions.rows[peer.index].logical, g.sessions.rows[peer.index].conn, 2, 30_000);
@@ -290,7 +294,7 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .iwant_followup_ms = 12_000 });
     defer g.deinit();
     const conn: Handle = .{ .index = 0, .generation = 1 };
-    const p = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    const p = support.addPeer(&g, conn, .v1_2).?;
     const io = &g.sessions.rows[p.index].io;
     const token = io.tx.injectFrame("control", false, 1).?;
     g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[p.index].logical, conn, token, 30_000);

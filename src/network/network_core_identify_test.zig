@@ -2,6 +2,9 @@ const std = @import("std");
 const Setup = @import("network_core_test_support.zig").Setup;
 const t = @import("peers/types.zig");
 const Engine = @import("quic/Engine.zig");
+const test_support = @import("quic/test_support.zig");
+const time = @import("time.zig");
+const network_core_test_support = @import("network_core_test_support.zig");
 
 /// Bidirectional streams the client opened on the connection.
 fn clientStreams(setup: *Setup, conn: Engine.Handle) u64 {
@@ -10,7 +13,7 @@ fn clientStreams(setup: *Setup, conn: Engine.Handle) u64 {
 
 test "identify core schedules once after Status and completes without public output" {
     var setup: Setup = .{};
-    var options = @import("network_core_test_support.zig").resolvedOptions();
+    var options = network_core_test_support.resolvedOptions();
     options.core.protocols.identify = .{ .agent = "core-test", .inbound_max = 1, .outbound_max = 1 };
     try setup.initOwnersWithOptions(&.{}, options);
     defer setup.deinit();
@@ -35,7 +38,7 @@ test "identify core schedules once after Status and completes without public out
 test "identify remote refusal completes generation without losing accepted Status" {
     const caps = @import("capabilities.zig");
     var setup: Setup = .{};
-    var options = @import("network_core_test_support.zig").resolvedOptions();
+    var options = network_core_test_support.resolvedOptions();
     options.core.protocols.identify = .{ .agent = "core-test", .inbound_max = 1, .outbound_max = 1 };
     try setup.initOwnersWithOptions(&.{}, options);
     defer setup.deinit();
@@ -62,11 +65,11 @@ test "identify remote refusal completes generation without losing accepted Statu
 
 test "identify replacement generation starts a fresh query and rejects stale completion" {
     var setup: Setup = .{};
-    var options = @import("network_core_test_support.zig").resolvedOptions();
+    var options = network_core_test_support.resolvedOptions();
     options.core.protocols.identify = .{ .agent = "first", .inbound_max = 1, .outbound_max = 1 };
     try setup.initOwnersWithOptions(&.{}, options);
     defer setup.deinit();
-    _ = try setup.pair.server.dial(&@import("quic/test_support.zig").client_address, setup.client.peerId(), setup.pair.now);
+    _ = try setup.pair.server.dial(&test_support.client_address, setup.client.peerId(), setup.pair.now);
     for (0..100) |_| try setup.step(1);
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.peer_manager.snapshots(&snapshots);
@@ -87,7 +90,7 @@ test "identify replacement generation starts a fresh query and rejects stale com
 
 test "identify local refusal retries after one second without resetting accepted Status" {
     var setup: Setup = .{};
-    var options = @import("network_core_test_support.zig").resolvedOptions();
+    var options = network_core_test_support.resolvedOptions();
     options.core.protocols.identify = .{ .agent = "core", .inbound_max = 1, .outbound_max = 1 };
     try setup.initOwnersWithOptions(&.{}, options);
     defer setup.deinit();
@@ -110,10 +113,10 @@ test "identify local refusal retries after one second without resetting accepted
     try std.testing.expectEqual(.pending, schedule.identify_state);
     for (0..60) |_| try setup.step(0);
     try std.testing.expectEqual(.pending, schedule.identify_state);
-    setup.pair.now.monotonic = @import("time.zig").milliseconds(retry - 1);
+    setup.pair.now.monotonic = time.milliseconds(retry - 1);
     try setup.step(0);
     try std.testing.expectEqual(.pending, schedule.identify_state);
-    setup.pair.now.monotonic = @import("time.zig").milliseconds(retry);
+    setup.pair.now.monotonic = time.milliseconds(retry);
     for (0..60) |_| try setup.step(0);
     try std.testing.expectEqual(.done, schedule.identify_state);
     try std.testing.expectEqualStrings("core", setup.client.peer_manager.catalog.get(peer).?.identify.?.agent.?.slice());

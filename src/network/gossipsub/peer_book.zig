@@ -4,6 +4,9 @@ const types = @import("../types.zig");
 const Handle = @import("../quic/Engine.zig").Handle;
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const assert = std.debug.assert;
+const score_mod = @import("score.zig");
+const options_mod = @import("options.zig");
+const layout = @import("layout.zig");
 
 pub const capacity = constants.retained_peers_cap;
 pub const outbound_reserve = 32;
@@ -38,7 +41,7 @@ pub const Admission = union(enum) {
 };
 
 pub const PeerBook = struct {
-    scores: @import("score.zig").PeerScore,
+    scores: score_mod.PeerScore,
     ip_allowlist: [32]Ip = undefined,
     ip_allowlist_len: u8 = 0,
     rows: []Row,
@@ -46,7 +49,7 @@ pub const PeerBook = struct {
     retention_ms: u64,
     reserved: u16,
 
-    pub fn init(a: std.mem.Allocator, options: *const @import("options.zig").Options) !PeerBook {
+    pub fn init(a: std.mem.Allocator, options: *const options_mod.Options) !PeerBook {
         const retention_ms = options.retained_score_ms;
         const count = options.retained_capacity;
         const reserved = options.retained_outbound_reserve;
@@ -56,11 +59,11 @@ pub const PeerBook = struct {
         const rows = try a.alloc(Row, count);
         errdefer a.free(rows);
         @memset(rows, .{});
-        const topic_count = @import("layout.zig").Layout.residentTopics(options);
+        const topic_count = layout.Layout.residentTopics(options);
         const backoffs = try a.alloc(Backoff, @as(usize, count) * topic_count);
         errdefer a.free(backoffs);
         @memset(backoffs, .{});
-        const scores = try @import("score.zig").PeerScore.initForTopics(a, options.score_params, count, topic_count);
+        const scores = try score_mod.PeerScore.initForTopics(a, options.score_params, count, topic_count);
         var book: PeerBook = .{ .rows = rows, .backoffs = backoffs, .scores = scores, .retention_ms = retention_ms, .reserved = reserved };
         @memcpy(book.ip_allowlist[0..options.ip_allowlist.len], options.ip_allowlist);
         book.ip_allowlist_len = @intCast(options.ip_allowlist.len);
@@ -166,7 +169,7 @@ pub const PeerBook = struct {
         return self.scores.snapshot(ref.index, now, self.scorePopulation(ref));
     }
 
-    pub fn snapshotWeights(self: *const PeerBook, ref: Ref, now: u64, out: *@import("score.zig").Breakdown) f64 {
+    pub fn snapshotWeights(self: *const PeerBook, ref: Ref, now: u64, out: *score_mod.Breakdown) f64 {
         return self.scores.snapshotWeights(ref.index, now, self.scorePopulation(ref), out);
     }
 
@@ -175,7 +178,7 @@ pub const PeerBook = struct {
     }
 
     pub fn backingBytesForTopics(count: usize, topics: usize) usize {
-        return count * (@sizeOf(Row) + topics * @sizeOf(Backoff)) + @import("score.zig").PeerScore.backingBytesForTopics(count, topics);
+        return count * (@sizeOf(Row) + topics * @sizeOf(Backoff)) + score_mod.PeerScore.backingBytesForTopics(count, topics);
     }
 
     pub fn invalid(self: *PeerBook, ref: Ref, topic: u16) void {
@@ -184,7 +187,7 @@ pub const PeerBook = struct {
         self.rows[ref.index].negative = true;
     }
 
-    pub fn penalize(self: *PeerBook, ref: Ref, violation: @import("score.zig").Penalty) void {
+    pub fn penalize(self: *PeerBook, ref: Ref, violation: score_mod.Penalty) void {
         assert(self.matches(ref));
         self.scores.penalizeFor(ref.index, violation);
         self.rows[ref.index].negative = true;

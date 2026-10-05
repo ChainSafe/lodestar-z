@@ -1,5 +1,8 @@
 const std = @import("std");
 const root = @import("root.zig");
+const constants = @import("constants.zig");
+const Reservations = @import("../reservations.zig").Reservations;
+const sessions = @import("sessions.zig");
 
 test "topic namespace implements immutable canonical lookup and subscriptions" {
     try canonical();
@@ -88,7 +91,7 @@ test "topic namespace validates descriptors before allocation" {
     for ([_]p.Rule{
         .{ .count = 0, .ssz_min = 0, .ssz_max = 1 },
         .{ .count = 1, .ssz_min = 11, .ssz_max = 10 },
-        .{ .count = 1, .ssz_min = 0, .ssz_max = @import("constants.zig").MAX_PAYLOAD_SIZE + 1 },
+        .{ .count = 1, .ssz_min = 0, .ssz_max = constants.MAX_PAYLOAD_SIZE + 1 },
     }) |rule| {
         boundary = full(.{ 1, 2, 3, 4 });
         boundary.rules[0] = rule;
@@ -121,7 +124,7 @@ test "topic namespace exact bitmap capacity clears and isolates physical rows" {
         .{ .boundaries = &hoodi_boundaries, .count = 784, .words = 13 },
     };
     for (cases) |case| {
-        var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+        var ledger: Reservations = .{ .backing = std.testing.allocator };
         var ns = try p.Namespace.init(ledger.allocator(), case.boundaries, 256);
         try std.testing.expectEqual(case.count, ns.topic_count);
         try std.testing.expectEqual(case.words, ns.words_per_peer);
@@ -134,7 +137,7 @@ test "topic namespace exact bitmap capacity clears and isolates physical rows" {
         try std.testing.expectEqual(@as(usize, 2), ns.subscription_count);
         try std.testing.expect(ns.subscribed(0, case.count - 1));
         try std.testing.expect(!ns.subscribed(1, case.count - 1));
-        var subscribers: @import("sessions.zig").PeerSet = .initEmpty();
+        var subscribers: sessions.PeerSet = .initEmpty();
         ns.initializeSubscribers(case.count - 1, &subscribers);
         try std.testing.expectEqual(@as(usize, 2), subscribers.count());
         ns.clearPeer(0);

@@ -1,9 +1,15 @@
 const Gossipsub = @import("Gossipsub.zig");
 const Engine = @import("../quic/Engine.zig");
 const MessageEvent = @import("messages.zig").MessageEvent;
+const protocols_test_support = @import("../protocols_test_support.zig");
+const ReqResp = @import("../reqresp/ReqResp.zig");
+const policy_fixture = @import("../reqresp/policy_fixture.zig");
+const topic_fixture = @import("topic_fixture.zig");
+const test_support = @import("test_support.zig");
+const constants = @import("constants.zig");
 
 pub const Pair = struct {
-    shared: @import("../protocols_test_support.zig").ProtocolsPair = .{},
+    shared: protocols_test_support.ProtocolsPair = .{},
 
     pub fn init(self: *Pair) !void {
         try self.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1 });
@@ -16,8 +22,8 @@ pub const Pair = struct {
     /// As `initOpts`, with the server granting `stream_window` bytes of credit on each stream the
     /// client opens until it reads them.
     pub fn initWindow(self: *Pair, client: Gossipsub.Options, server: Gossipsub.Options, stream_window: ?u64) !void {
-        const reqresp: @import("../reqresp/ReqResp.zig").Options = .{ .forks = &.{}, .connections = 128, .outbound_max = 1, .serving_max = 1, .inbound_per_connection_max = 1, .admission = try @import("../reqresp/ReqResp.zig").Options.Admission.defaults(&@import("../reqresp/policy_fixture.zig").config(), 128, 128, 1) };
-        const topics = &.{ @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 }), @import("topic_fixture.zig").bytes(.{ 0x6a, 0x95, 0xa1, 0xa9 }) };
+        const reqresp: ReqResp.Options = .{ .forks = &.{}, .connections = 128, .outbound_max = 1, .serving_max = 1, .inbound_per_connection_max = 1, .admission = try ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 128, 1) };
+        const topics = &.{ topic_fixture.bytes(.{ 1, 2, 3, 4 }), topic_fixture.bytes(.{ 0x6a, 0x95, 0xa1, 0xa9 }) };
         var client_options = client;
         client_options.topic_policy = client.topic_policy orelse topics;
         var server_options = server;
@@ -26,10 +32,10 @@ pub const Pair = struct {
     }
 
     pub fn connectMesh(self: *Pair) !void {
-        try @import("test_support.zig").subscribe(self.shared.client.gossipsub, "/eth2/01020304/beacon_block/ssz_snappy");
-        try @import("test_support.zig").subscribe(self.shared.server.gossipsub, "/eth2/01020304/beacon_block/ssz_snappy");
+        try test_support.subscribe(self.shared.client.gossipsub, "/eth2/01020304/beacon_block/ssz_snappy");
+        try test_support.subscribe(self.shared.server.gossipsub, "/eth2/01020304/beacon_block/ssz_snappy");
         for (0..20) |_| try self.pumpOnce();
-        self.shared.pair.advance(@import("constants.zig").heartbeat_interval_ms + 1);
+        self.shared.pair.advance(constants.heartbeat_interval_ms + 1);
         for (0..20) |_| try self.pumpOnce();
     }
 
@@ -54,11 +60,11 @@ pub const Pair = struct {
     /// Routes the client's stream events polled since the last call to its gossip sessions,
     /// for tests that drive the gossip turn directly.
     pub fn forwardClient(self: *Pair) void {
-        @import("../protocols_test_support.zig").forward(&self.shared.pair, &self.shared.pair.client, .{ .gossip = self.shared.client.gossipsub });
+        protocols_test_support.forward(&self.shared.pair, &self.shared.pair.client, .{ .gossip = self.shared.client.gossipsub });
     }
 
     pub fn forwardServer(self: *Pair) void {
-        @import("../protocols_test_support.zig").forward(&self.shared.pair, &self.shared.pair.server, .{ .gossip = self.shared.server.gossipsub });
+        protocols_test_support.forward(&self.shared.pair, &self.shared.pair.server, .{ .gossip = self.shared.server.gossipsub });
     }
 
     /// Messages the client admitted in the last step.

@@ -8,10 +8,13 @@ const constants = @import("constants.zig");
 const snappy = @import("snappy");
 const receiveForTest = support.receiveMessage;
 const testMessage = support.message;
+const test_pair = @import("test_pair.zig");
+const configuration = @import("../configuration.zig");
+const policy_fixture = @import("../reqresp/policy_fixture.zig");
 
 test "gossipsub legal maximum host acceptance forwards retained pages through actual IO" {
-    var setup: @import("test_pair.zig").Pair = .{};
-    const small = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = @import("../reqresp/policy_fixture.zig").config() });
+    var setup: test_pair.Pair = .{};
+    const small = try configuration.resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     try setup.initOpts(small.core.protocols.gossipsub, small.core.protocols.gossipsub);
     defer setup.deinit();
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -20,13 +23,13 @@ test "gossipsub legal maximum host acceptance forwards retained pages through ac
     for (0..20) |_| try setup.pumpOnce();
     const destination = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
     // The small profile finds sessions among 16 connection slots.
-    const source = @import("test_support.zig").addPeer(setup.shared.server.gossipsub, .{ .index = 7, .generation = 1 }, .v1_2).?;
+    const source = support.addPeer(setup.shared.server.gossipsub, .{ .index = 7, .generation = 1 }, .v1_2).?;
     setup.shared.server.gossipsub.overlay.rows[setup.shared.server.gossipsub.overlay.findTopic(topic).?].mesh.set(destination);
     const payload = try std.testing.allocator.alloc(u8, constants.MAX_PAYLOAD_SIZE);
     defer std.testing.allocator.free(payload);
     var rng = std.Random.DefaultPrng.init(91);
     rng.random().bytes(payload);
-    _ = @import("test_support.zig").pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now);
+    _ = support.pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now);
     // The sink path decodes into msg_scratch, so the wire bytes live elsewhere.
     const compressed = try std.testing.allocator.alloc(u8, constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE));
     defer std.testing.allocator.free(compressed);
@@ -36,7 +39,7 @@ test "gossipsub legal maximum host acceptance forwards retained pages through ac
     const message = setup.shared.server.gossipsub.messages.validation.entries[handle.index].state.pending.message;
     try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, setup.shared.server.gossipsub.report(handle, .accept, setup.shared.pair.now));
     try std.testing.expectEqual(@as(u32, 1), setup.shared.server.gossipsub.messages.store.get(message).?.tx);
-    for (0..constants.mcache_len) |_| @import("test_support.zig").ageHistory(setup.shared.server.gossipsub);
+    for (0..constants.mcache_len) |_| support.ageHistory(setup.shared.server.gossipsub);
     try std.testing.expect(!setup.shared.server.gossipsub.messages.store.get(message).?.history);
     var received = false;
     for (0..2000) |_| {
@@ -54,8 +57,8 @@ test "gossipsub legal maximum host acceptance forwards retained pages through ac
 test "gossipsub configured IDONTWANT uses admitted compressed wire bytes" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .idontwant_min_data_size = 128 });
     defer g.deinit();
-    const source = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    const destination = @import("test_support.zig").addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
+    const source = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const destination = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     var inbox: support.Inbox = .{};
@@ -92,7 +95,7 @@ test "gossipsub configured IDONTWANT uses admitted compressed wire bytes" {
 }
 
 test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event through local publication" {
-    var pair: @import("test_pair.zig").Pair = .{};
+    var pair: test_pair.Pair = .{};
     try pair.init();
     defer pair.deinit();
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -100,7 +103,7 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
     try support.subscribe(pair.shared.server.gossipsub, name);
     for (0..20) |_| try pair.pumpOnce();
     const destination = pair.shared.server.gossipsub.sessions.find(pair.shared.handles.server).?;
-    const source = @import("test_support.zig").addPeer(pair.shared.server.gossipsub, .{ .index = 77, .generation = 1 }, .v1_2).?;
+    const source = support.addPeer(pair.shared.server.gossipsub, .{ .index = 77, .generation = 1 }, .v1_2).?;
     pair.shared.server.gossipsub.overlay.rows[pair.shared.server.gossipsub.overlay.findTopic(name).?].mesh.set(destination);
     const suppressed_id = topic_mod.validMessageId(name, "remote suppressed", .{});
     pair.shared.server.gossipsub.sessions.suppress(destination, suppressed_id, pair.shared.pair.now.millis(), 60_000);

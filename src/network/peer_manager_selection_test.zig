@@ -4,6 +4,9 @@ const DiscoveryNeed = @import("peer_manager.zig").DiscoveryNeed;
 const t = @import("peers/types.zig");
 const Now = @import("types.zig").Now;
 const Gossipsub = @import("gossipsub/Gossipsub.zig");
+const test_support = @import("gossipsub/test_support.zig");
+const policy = @import("peers/policy.zig");
+const quic_test_support = @import("quic/test_support.zig");
 
 const Fixture = struct {
     manager: PeerManager,
@@ -19,7 +22,7 @@ const Fixture = struct {
             .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 1 },
         }, .initEmpty(), 4);
         errdefer manager.deinit();
-        const gossip = try @import("gossipsub/test_support.zig").init(std.testing.allocator, .{
+        const gossip = try test_support.init(std.testing.allocator, .{
             .random_seed = 1,
             .connected_capacity = 4,
             .retained_capacity = 8,
@@ -44,7 +47,7 @@ test "peer manager reconciliation reads preserve completed demand and catalog ev
     const g = &fixture.gossip;
     const now = Now.fromMilliseconds(.{ .mono_ms = 1000, .unix_s = 0 });
     const view: *const PeerManager = owner;
-    try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
+    try std.testing.expectEqualDeep(policy.Deficits{}, view.coverageDeficits());
     try std.testing.expectEqualDeep(DiscoveryNeed{}, view.discoveryNeed());
     var demand: t.Demand = .{ .attnets = 0x81, .syncnets = 1 };
     demand.group_targets[0] = 1;
@@ -68,19 +71,19 @@ test "peer manager reconciliation reads preserve completed demand and catalog ev
     }
     try std.testing.expectEqualDeep(dirty, view.counters);
     owner.reconcile(g, now);
-    try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
+    try std.testing.expectEqualDeep(policy.Deficits{}, view.coverageDeficits());
     try std.testing.expectEqualDeep(DiscoveryNeed{ .general = true }, view.discoveryNeed());
 
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
-    const peer = owner.catalog.admit(&identity, &view.local_identity, conn, &.{ .direction = .outbound, .endpoint = @import("quic/test_support.zig").server_address, .now_ms = now.millis() }).admitted.peer;
+    const peer = owner.catalog.admit(&identity, &view.local_identity, conn, &.{ .direction = .outbound, .endpoint = quic_test_support.server_address, .now_ms = now.millis() }).admitted.peer;
     try std.testing.expect(owner.catalog.updateStatus(peer, conn, &owner.local.status, now.millis()));
     try std.testing.expect(owner.catalog.setDirect(peer, true));
     try std.testing.expect(owner.policySchedule(g).runnable);
-    try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
+    try std.testing.expectEqualDeep(policy.Deficits{}, view.coverageDeficits());
     try std.testing.expectEqualDeep(DiscoveryNeed{ .general = true }, view.discoveryNeed());
     owner.reconcile(g, now);
-    try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
+    try std.testing.expectEqualDeep(policy.Deficits{}, view.coverageDeficits());
     try std.testing.expectEqualDeep(DiscoveryNeed{}, view.discoveryNeed());
 }
 

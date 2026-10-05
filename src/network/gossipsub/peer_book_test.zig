@@ -3,6 +3,7 @@ const Handle = @import("../quic/Engine.zig").Handle;
 const Metadata = @import("peer_book.zig").Metadata;
 const PeerBook = @import("peer_book.zig").PeerBook;
 const Ref = @import("peer_book.zig").Ref;
+const peer_id = @import("../wire/peer_id.zig");
 fn allocateBook(a: std.mem.Allocator) !void {
     var book = try PeerBook.init(a, &.{ .retained_score_ms = 10, .retained_capacity = 2, .retained_outbound_reserve = 1 });
     defer book.deinit(a);
@@ -24,7 +25,7 @@ test "gossip policy peers retain identity and reserve outbound recovery under ne
     defer peers.deinit(std.testing.allocator);
     var metadata: Metadata = .{ .identity = undefined, .address = .unspecified, .direction = .inbound };
     for (0..capacity) |i| {
-        metadata.identity.bytes = [_]u8{0} ** @import("../wire/peer_id.zig").length;
+        metadata.identity.bytes = [_]u8{0} ** peer_id.length;
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
         if (i == capacity - outbound_reserve) {
             metadata.direction = .outbound;
@@ -59,7 +60,7 @@ test "gossip policy IP colocation normalizes ports mapping and current path gene
     var peers = try PeerBook.init(std.testing.allocator, &.{ .retained_score_ms = 100 });
     defer peers.deinit(std.testing.allocator);
     const first_conn: Handle = .{ .index = 0, .generation = 1 };
-    const first: Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } }, .direction = .inbound };
+    const first: Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** peer_id.length }, .address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } }, .direction = .inbound };
     var second = first;
     second.identity.bytes[0] = 2;
     second.address = .{ .ip6 = .{ .octets = normalize(first.address), .port = 2 } };
@@ -80,7 +81,7 @@ test "gossip policy identity generation exhaustion cannot revive stale reference
     var peers = try PeerBook.init(std.testing.allocator, &.{ .retained_score_ms = 100 });
     defer peers.deinit(std.testing.allocator);
     peers.rows[0].generation = std.math.maxInt(u64);
-    const metadata: Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
+    const metadata: Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** peer_id.length }, .address = .unspecified, .direction = .inbound };
     const first = peers.admit(.{ .index = 0, .generation = 1 }, &metadata, 0).admitted.peer;
     try std.testing.expectEqual(@as(u16, 1), first.index);
     peers.scores.penalize(first.index, 7);
@@ -94,7 +95,7 @@ test "gossip policy identity generation exhaustion cannot revive stale reference
 test "gossip pinned backoff survives identity churn" {
     var peers = try PeerBook.init(std.testing.allocator, &.{ .retained_score_ms = 100_000 });
     defer peers.deinit(std.testing.allocator);
-    var metadata: Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
+    var metadata: Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** peer_id.length }, .address = .unspecified, .direction = .inbound };
     const connection: Handle = .{ .index = 0, .generation = 1 };
     for (0..capacity - outbound_reserve) |i| {
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);

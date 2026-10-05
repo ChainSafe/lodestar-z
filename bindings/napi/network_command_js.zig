@@ -10,6 +10,7 @@ const js = @import("network_js.zig");
 const Runtime = r.Runtime;
 const cfg = @import("network_config.zig");
 const application_cfg = @import("network_application_config.zig");
+const network_gossip_diagnostics = @import("network_gossip_diagnostics.zig");
 
 /// A completed command's record: the result its promise resolves with, or the error it rejects with.
 pub fn completion(env: napi.Env, runtime: *Runtime, token: commands.Token) !Value {
@@ -28,7 +29,7 @@ fn result(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     const operation = &runtime.table.cells[index];
     const store = runtime.table.cells[index].store;
     const object = switch (operation.input.command) {
-        .getGossipDiagnostics => try @import("network_gossip_diagnostics.zig").copy(env, &runtime.stores.?.gossip_diagnostics[store.?]),
+        .getGossipDiagnostics => try network_gossip_diagnostics.copy(env, &runtime.stores.?.gossip_diagnostics[store.?]),
         .getIdentity => try identity(env, &operation.identity),
         .applyIntent, .getPeers, .getDirectPeers, .getRememberedPeers => try env.createObject(),
         .removeDirectPeer => return env.getBoolean(operation.boolean),
@@ -135,7 +136,7 @@ pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Comma
         },
     }
     // Prepared before admission commits, so every admitted command has a handle to complete.
-    const handle = try @import("network_js.zig").handle(env, token.index, token.generation);
+    const handle = try js.handle(env, token.index, token.generation);
     try runtime.queueCommand(token);
     runtime.notify.ref(env) catch {};
     return handle;

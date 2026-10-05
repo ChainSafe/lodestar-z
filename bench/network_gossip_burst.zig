@@ -547,7 +547,7 @@ const Spoke = struct {
                 now = try network.Transport.currentTime(io);
                 wake = now.millis();
             }
-            const result = network.driver.step(&self.core, io, now, outputs, .deadlineOnly(@import("network").time.optionalMilliseconds(wake)));
+            const result = network.driver.step(&self.core, io, now, outputs, .deadlineOnly(network.time.optionalMilliseconds(wake)));
             if (result.readiness.failure) |err| return err;
         }
         // A spoke runs without a host, so it refuses every message it receives for storage.

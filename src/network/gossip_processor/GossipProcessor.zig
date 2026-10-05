@@ -2,6 +2,11 @@ const std = @import("std");
 const native = @import("../gossipsub/root.zig");
 const storage = @import("../gossipsub/message_store.zig");
 const policy = @import("policy.zig");
+const peer_book = @import("../gossipsub/peer_book.zig");
+const ForkEntry = @import("../types.zig").ForkEntry;
+const PeerId = @import("../wire/peer_id.zig").PeerId;
+const Engine = @import("../quic/Engine.zig");
+const ForkSeq = @import("config").ForkSeq;
 pub const Options = @import("options.zig").Options;
 pub const Source = @import("../gossipsub/peer_book.zig").Ref;
 const limits_mod = @import("../gossip_limits.zig");
@@ -43,14 +48,14 @@ closed: bool = false,
 refusals: [limits_mod.kind_count][refusal_count]u64 = @splat(@splat(0)),
 used_items: [limits_mod.kind_count]usize = @splat(0),
 used_bytes: [limits_mod.kind_count]usize = @splat(0),
-waiting_per_peer: [@import("../gossipsub/peer_book.zig").capacity][limits_mod.kind_count]u16 = @splat(@splat(0)),
+waiting_per_peer: [peer_book.capacity][limits_mod.kind_count]u16 = @splat(@splat(0)),
 waiting_items: [limits_mod.kind_count]usize = @splat(0),
 executing_items: [limits_mod.kind_count]usize = @splat(0),
 executing_bytes: [limits_mod.kind_count]usize = @splat(0),
-forks: [native.topic_policy.boundary_max]@import("../types.zig").ForkEntry = undefined,
+forks: [native.topic_policy.boundary_max]ForkEntry = undefined,
 fork_count: usize = 0,
 source_maximum: [limits_mod.kind_count]usize = @splat(payload_max),
-sources: [@import("../gossipsub/peer_book.zig").capacity]struct {
+sources: [peer_book.capacity]struct {
     generation: u64 = 0,
     items: [limits_mod.kind_count]usize = @splat(0),
     bytes: [limits_mod.kind_count]usize = @splat(0),
@@ -71,9 +76,9 @@ pub const Cell = struct {
     /// order, never replacement age or the absolute deadline.
     order: u64 = 0,
     handle: native.Gossipsub.ValidationHandle = undefined,
-    identity: @import("../wire/peer_id.zig").PeerId = undefined,
+    identity: PeerId = undefined,
     source: ?Source = null,
-    connection: @import("../quic/Engine.zig").Handle = undefined,
+    connection: Engine.Handle = undefined,
     id: native.Gossipsub.MessageId = undefined,
     topic: [topic_max]u8 = undefined,
     topic_len: u16 = 0,
@@ -162,7 +167,7 @@ const GossipProcessor = @This();
 
 pub const admit = @import("admission.zig").admit;
 
-pub fn fork(self: *const GossipProcessor, digest: [4]u8) ?@import("config").ForkSeq {
+pub fn fork(self: *const GossipProcessor, digest: [4]u8) ?ForkSeq {
     for (self.forks[0..self.fork_count]) |entry| if (std.mem.eql(u8, &entry.digest, &digest)) return entry.fork;
     return null;
 }

@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const js = @import("zapi:zapi").js;
 const pool = @import("./pool.zig");
+const network_logging = @import("network").logging;
 pub const shuffle = @import("./shuffle.zig");
 pub const config = @import("./config.zig");
 pub const metrics = @import("./metrics.zig");
@@ -17,8 +18,8 @@ pub const pubkeys = @import("./pubkeys.zig");
 
 const options = @import("bls_options");
 pub const std_options: std.Options = .{
-    .log_scope_levels = @import("network").logging.scope_levels,
-    .logFn = @import("network").logging.logFn,
+    .log_scope_levels = network_logging.scope_levels,
+    .logFn = network_logging.logFn,
 };
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;

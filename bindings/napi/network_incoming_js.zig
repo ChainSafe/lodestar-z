@@ -5,6 +5,8 @@ const decode = @import("network_js_input.zig");
 const r = @import("network_runtime.zig");
 const incoming = @import("network_incoming.zig");
 const Runtime = r.Runtime;
+const network_js = @import("network_js.zig");
+const network = @import("network");
 
 const bytes = @import("network_js.zig").bytes;
 const errorValue = @import("network_js.zig").errorValue;
@@ -24,9 +26,9 @@ fn refNotify(runtime: *Runtime) void {
 pub fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const incoming.Cell) !Value {
     const env = runtime.env;
     const object = try env.createObject();
-    try object.setNamedProperty("handle", try @import("network_js.zig").handle(env, token.index, token.generation));
-    try object.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
-    try object.setNamedProperty("connection", try @import("network_js.zig").connection(env, cell.connection));
+    try object.setNamedProperty("handle", try network_js.handle(env, token.index, token.generation));
+    try object.setNamedProperty("peerId", try network_js.peerIdValue(env, &cell.identity));
+    try object.setNamedProperty("connection", try network_js.connection(env, cell.connection));
     try object.setNamedProperty("protocol", try env.createStringUtf8(cell.protocol.id()));
     var destination: [*]u8 = undefined;
     const buffer = try env.createArrayBuffer(cell.input.len, &destination);
@@ -35,7 +37,7 @@ pub fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const in
     try object.setNamedProperty("data", data);
     return object;
 }
-fn contextFor(value: Value) !?@import("network").types.ForkEntry {
+fn contextFor(value: Value) !?network.types.ForkEntry {
     if (try value.typeof() == .null) return null;
     try decode.completeObject(value, &.{ "digest", "fork" });
     const digest = try decode.get(value, "digest");
@@ -118,7 +120,7 @@ pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_val
     var len: usize = 0;
     if (action == .fail) {
         status = @intCast(decode.integer(status_value, 255) catch return rejectInput(runtime.env, .invalid_error));
-        if (!@import("network").reqresp.constants.isErrorResult(status)) return rejectInput(runtime.env, .invalid_error);
+        if (!network.reqresp.constants.isErrorResult(status)) return rejectInput(runtime.env, .invalid_error);
         len = viewLength(message_value, message.len) catch return rejectInput(runtime.env, .invalid_error);
         try decode.bytes(message_value, message[0..len]);
     }
@@ -197,16 +199,16 @@ fn ackError(env: napi.Env, ack: incoming.Ack) !Value {
 pub fn completion(env: napi.Env, delivered: incoming.Completion) !Value {
     const object = try env.createObject();
     try object.setNamedProperty("family", try env.createStringUtf8("incoming"));
-    try object.setNamedProperty("handle", try @import("network_js.zig").handle(env, delivered.token.index, delivered.token.generation));
+    try object.setNamedProperty("handle", try network_js.handle(env, delivered.token.index, delivered.token.generation));
     if (delivered.ack) |ack| {
         const outcome = try env.createObject();
-        if (ack != .sent) try outcome.setNamedProperty("error", try @import("network_js.zig").settled(env, ackError(env, ack)));
+        if (ack != .sent) try outcome.setNamedProperty("error", try network_js.settled(env, ackError(env, ack)));
         try object.setNamedProperty("response", outcome);
     }
     if (delivered.closed) try object.setNamedProperty("closed", try env.getBoolean(true));
     if (delivered.permission) |permitted| {
         const outcome = try env.createObject();
-        if (!permitted) try outcome.setNamedProperty("error", try @import("network_js.zig").settled(env, errorValue(env, "NetworkIncomingClosed")));
+        if (!permitted) try outcome.setNamedProperty("error", try network_js.settled(env, errorValue(env, "NetworkIncomingClosed")));
         try object.setNamedProperty("ready", outcome);
     }
     return object;

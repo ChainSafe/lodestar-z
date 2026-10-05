@@ -6,6 +6,7 @@ const prom = @import("registry.zig");
 const processor = @import("../gossip_processor/root.zig");
 const gossip_limits = @import("../gossip_limits.zig");
 const Kind = gossip_limits.Kind;
+const timing = @import("timing.zig");
 
 /// Native calls timed on the JS thread.
 pub const Entry = enum { exchange, publish_gossip, get_metrics, request_start, request_pull, request_retire, incoming_ready, incoming_respond, incoming_terminal, incoming_release };
@@ -19,7 +20,7 @@ pub const Duration = histogram.Histogram(u64, &.{ 100_000, 250_000, 500_000, 1_0
 
 /// Monotonic nanoseconds on any thread.
 pub fn now() u64 {
-    return @import("timing.zig").now(std.Io.Threaded.global_single_threaded.io());
+    return timing.now(std.Io.Threaded.global_single_threaded.io());
 }
 
 /// A Duration written without the runtime mutex. Each word is an independent relaxed counter,

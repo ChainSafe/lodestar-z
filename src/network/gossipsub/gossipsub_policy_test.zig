@@ -12,6 +12,11 @@ const Now = @import("../types.zig").Now;
 const snappy = @import("snappy");
 const support = @import("test_support.zig");
 const testMessage = support.message;
+const peer_id = @import("../wire/peer_id.zig");
+const test_pair = @import("test_pair.zig");
+const test_support = @import("../quic/test_support.zig");
+const topic_fixture = @import("topic_fixture.zig");
+const Reservations = @import("../reservations.zig").Reservations;
 
 test "gossip accepts a full namespace subscription transition in one RPC" {
     const policy = @import("topic_policy.zig");
@@ -50,7 +55,7 @@ test "gossip accepts a full namespace subscription transition in one RPC" {
 test "gossipsub IHAVE security ignores unknown and unsubscribed topics through RPC decoding" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const subscribed = "/eth2/01020304/beacon_block/ssz_snappy";
     const retired = "/eth2/01020304/beacon_aggregate_and_proof/ssz_snappy";
     try support.subscribe(&g, subscribed);
@@ -65,7 +70,7 @@ test "gossipsub IHAVE security ignores unknown and unsubscribed topics through R
         io.startRpc(writer.written());
         var items: usize = 128;
         var count: usize = 0;
-        try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 1 }), &count, &items));
+        try std.testing.expect(try support.processRpc(&g, peer.index, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 1 }), &count, &items));
         try std.testing.expectEqual(@as(usize, @intFromBool(std.mem.eql(u8, name, subscribed))), g.recovery.len);
         try std.testing.expect(!g.sessions.finishFrame(io));
     }
@@ -77,7 +82,7 @@ test "gossip policy reconnect retains authenticated penalty" {
     });
     defer g.deinit();
     const metadata: peers_mod.Metadata = .{
-        .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length },
+        .identity = .{ .bytes = [_]u8{1} ** peer_id.length },
         .address = .unspecified,
         .direction = .inbound,
     };
@@ -104,7 +109,7 @@ test "gossip policy GRAFT rejects negative peers and excludes direct peers" {
     });
     defer g.deinit();
     const conn: Handle = .{ .index = 0, .generation = 1 };
-    const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    const peer = support.addPeer(&g, conn, .v1_2).?;
     const topic_str = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, topic_str);
     const topic = g.overlay.findTopic(topic_str).?;
@@ -122,7 +127,7 @@ test "gossip policy GRAFT rejects negative peers and excludes direct peers" {
 }
 
 test "gossip policy combined transport calls respect one shared peer allowance" {
-    var setup: @import("test_pair.zig").Pair = .{};
+    var setup: test_pair.Pair = .{};
     try setup.init();
     defer setup.deinit();
     for (0..20) |_| try setup.pumpOnce();
@@ -140,7 +145,7 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
             try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.server.write(setup.serverStream(), &.{0}, false));
             try setup.shared.pair.pump();
             setup.forwardClient();
-            const turn = @import("test_support.zig").pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
+            const turn = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
             const calls = global - turn.budget.calls;
             try std.testing.expect(calls <= 1);
             if (calls > 0) {
@@ -150,7 +155,7 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
         try std.testing.expect(read_turns > 0 and write_turns > 0);
         for (0..32) |_| {
             if (support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.millis()) break;
-            const turn = @import("test_support.zig").pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
+            const turn = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
             try std.testing.expect(global - turn.budget.calls <= 1);
         }
         try std.testing.expect(!g.sessions.rows[peer].io.tx.pending());
@@ -161,7 +166,7 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
 test "gossip policy sent promise survives reconnect without token rearming" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
-    const metadata: peers_mod.Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
+    const metadata: peers_mod.Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** peer_id.length }, .address = .unspecified, .direction = .inbound };
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const first = g.addPeer(conn, &metadata, now).admitted;
@@ -181,7 +186,7 @@ test "gossip policy sent promise survives reconnect without token rearming" {
 test "gossip policy duplicate connections preserve one logical owner and direct deliveries" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
-    var metadata: peers_mod.Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .outbound };
+    var metadata: peers_mod.Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** peer_id.length }, .address = .unspecified, .direction = .outbound };
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const first = g.addPeer(conn, &metadata, now).admitted;
@@ -212,7 +217,7 @@ test "gossip policy topic reuse waits for attribution and preserves copied event
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const conn: Handle = .{ .index = 0, .generation = 1 };
-    const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    const peer = support.addPeer(&g, conn, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     const topic = g.overlay.findTopic(name).?;
@@ -248,7 +253,7 @@ test "gossip policy topic reuse waits for attribution and preserves copied event
 test "gossip policy topic retirement bounds arbitrarily slow active score decay" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .retained_score_ms = 10, .score_params = .{ .decay_interval_ms = 1, .topic = .{ .first_delivery_decay = 0.999999999999 } } });
     defer g.deinit();
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     const topic = g.overlay.findTopic(name).?;
@@ -263,17 +268,17 @@ test "gossip policy topic retirement bounds arbitrarily slow active score decay"
 }
 
 test "gossip policy unsent subscriptions cannot pin retired topics indefinitely" {
-    var pair: @import("../quic/test_support.zig").Pair = .{};
+    var pair: test_support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .pressure_timeout_ms = 10 });
     defer g.deinit();
     const conn: Handle = .{ .index = 0, .generation = 1 };
-    _ = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    _ = support.addPeer(&g, conn, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     try support.unsubscribe(&g, name);
-    _ = @import("test_support.zig").pump(&g, &pair.server, Now.fromMilliseconds(.{ .mono_ms = 11, .unix_s = 0 }));
+    _ = support.pump(&g, &pair.server, Now.fromMilliseconds(.{ .mono_ms = 11, .unix_s = 0 }));
     try std.testing.expect(g.sessions.find(conn) == null);
     try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
     const topic = g.overlay.findTopic(name).?;
@@ -284,7 +289,7 @@ test "gossip policy unsent subscriptions cannot pin retired topics indefinitely"
 test "gossip policy subscription retry preserves its first pressure deadline" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     try support.subscribe(&g, "/eth2/01020304/beacon_block/ssz_snappy");
     g.last_now_ms = 1;
     g.sendSubscriptions(peer.index);
@@ -299,7 +304,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     _ = g.overlay.internTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), first_name).?;
     const second = g.overlay.internTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), second_name).?;
     for (0..9) |i| {
-        const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+        const peer = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
         _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, first_name, true);
         _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, second_name, true);
         g.sessions.rows[peer.index].outbound = .{ .live = .{ .stream = .{ .conn = g.sessions.rows[peer.index].conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
@@ -350,7 +355,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
 
 test "gossip topic rejection preserves expired scores and retained obligations" {
     var opts: Gossipsub.Options = .{
-        .topic_policy = &@import("topic_fixture.zig").churn,
+        .topic_policy = &topic_fixture.churn,
         .random_seed = 1,
         .connected_capacity = 2,
         .retained_capacity = 4,
@@ -362,7 +367,7 @@ test "gossip topic rejection preserves expired scores and retained obligations" 
     defer g.deinit();
     var name: [topic_mod.topic_max_len]u8 = undefined;
     for (0..constants.topics_cap) |index| {
-        const text = try @import("topic_fixture.zig").churnTopic(index, &name);
+        const text = try topic_fixture.churnTopic(index, &name);
         try support.subscribe(&g, text);
     }
     for (g.overlay.rows[constants.topics_cap..]) |*row| row.generation = std.math.maxInt(u64);
@@ -440,7 +445,7 @@ test "gossip topic retirement clears expired scores while backoff remains" {
 
 test "fanout interning snapshots aliased text under full capacity" {
     var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
+    var ledger: Reservations = .{ .backing = backing.allocator() };
     var g = try Gossipsub.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
     defer g.deinit();
     const calls = backing.allocations;
@@ -465,7 +470,7 @@ test "publication subscribed fanout expires through owner maintenance" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const conn: Handle = .{ .index = 0, .generation = 1 };
-    const p = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    const p = support.addPeer(&g, conn, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     const t = g.overlay.findTopic(name).?;
@@ -482,7 +487,7 @@ test "publication subscribed fanout expires through owner maintenance" {
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), p.index, name, false);
     g.sessions.rows[p.index].io.tx.cancelStream(&g.messages.store);
     const next_conn: Handle = .{ .index = 1, .generation = 1 };
-    const next = @import("test_support.zig").addPeer(&g, next_conn, .v1_2).?;
+    const next = support.addPeer(&g, next_conn, .v1_2).?;
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), next.index, name, true);
     g.sessions.rows[next.index].outbound = .{ .live = .{ .stream = .{ .conn = next_conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     const result = try g.publish(name, "fresh fanout", Now.fromMilliseconds(.{ .mono_ms = 60_001, .unix_s = 0 }));
@@ -500,7 +505,7 @@ test "local intent reclaimed history answers actual IWANT with original wire top
         .connected_capacity = 2,
         .retained_capacity = 4,
         .retained_outbound_reserve = 1,
-        .topic_policy = &.{@import("topic_fixture.zig").full(.{ 1, 2, 3, 4 })},
+        .topic_policy = &.{topic_fixture.full(.{ 1, 2, 3, 4 })},
     });
     defer g.deinit();
     const workspace = try std.testing.allocator.create(local_intent.Workspace);
@@ -514,9 +519,9 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     _ = try g.publish(name, "original payload", now);
     const id = topic_mod.validMessageId(name, "original payload", .{});
     const message = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
-    try std.testing.expect(try g.prepareSubscriptions(@import("topic_fixture.zig").subscriptions(&.{replacement}), workspace, now, 0));
+    try std.testing.expect(try g.prepareSubscriptions(topic_fixture.subscriptions(&.{replacement}), workspace, now, 0));
     g.commitSubscriptions(workspace);
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     var request: [64]u8 = undefined;
     var writer = protobuf.Writer.init(&request);
     protobuf.beginIwantRpc(&writer, 1, id.len);
@@ -551,7 +556,7 @@ test "gossip advertisements sample the whole burst independently for each recipi
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     const t = g.overlay.internTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), name).?;
     for (0..2) |i| {
-        const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+        const peer = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
         _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, name, true);
         g.sessions.rows[peer.index].outbound = .{ .live = .{ .stream = .{ .conn = g.sessions.rows[peer.index].conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     }

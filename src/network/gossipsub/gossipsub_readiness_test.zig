@@ -3,6 +3,8 @@ const schedule_test_support = @import("../schedule_test_support.zig");
 const gossip_test = @import("test_support.zig");
 const Engine = @import("../quic/Engine.zig");
 const Pair = @import("test_pair.zig").Pair;
+const topic_mod = @import("topic.zig");
+const metrics = @import("metrics.zig");
 
 const topic = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
 const heartbeat = @import("constants.zig").heartbeat_interval_ms;
@@ -224,7 +226,7 @@ test "gossip resumes a small frame cut by a short write once the stream is writa
     for (&payloads, &frames) |*payload, *frame| {
         random.random().bytes(payload);
         try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, payload, setup.shared.pair.now)).queued);
-        const id = @import("topic.zig").validMessageId(topic, payload, g.options.message_id_policy);
+        const id = topic_mod.validMessageId(topic, payload, g.options.message_id_policy);
         frame.* = g.messages.store.get(g.messages.history.message(g.messages.history.get(&g.messages.store, id).?)).?.frameLen();
         total += frame.*;
     }
@@ -275,7 +277,7 @@ test "gossip local publications lead each turn for a bounded run and cannot star
     _ = try g.publish(topic, "retained", setup.shared.pair.now);
     for (0..8) |_| _ = gossip_test.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
     try std.testing.expect(!io.tx.pending());
-    const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, @import("topic.zig").validMessageId(topic, "retained", g.options.message_id_policy)).?);
+    const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(topic, "retained", g.options.message_id_policy)).?);
     const ordinary = [_]Origin{ .forward, .forward, .forward, .iwant, .forward, .forward };
     for (ordinary) |origin| try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, retained, origin, .{ .bytes = g.options.tx_peer_bytes }, setup.shared.pair.now.millis()));
     for (0..8) |i| {
@@ -287,10 +289,10 @@ test "gossip local publications lead each turn for a bounded run and cannot star
     const expected = [_]Origin{ .publication, .publication, .publication, .publication, .forward, .publication, .publication, .publication, .publication, .forward, .forward, .iwant, .forward, .forward };
     for (expected) |origin| {
         var before: [3]u64 = undefined;
-        for (&before, g.delivery_metrics.recipients) |*count, outcomes| count.* = outcomes[@intFromEnum(@import("metrics.zig").Delivery.Outcome.completed)];
+        for (&before, g.delivery_metrics.recipients) |*count, outcomes| count.* = outcomes[@intFromEnum(metrics.Delivery.Outcome.completed)];
         _ = gossip_test.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
         for (before, g.delivery_metrics.recipients, 0..) |count, outcomes, o| {
-            const completed = outcomes[@intFromEnum(@import("metrics.zig").Delivery.Outcome.completed)] - count;
+            const completed = outcomes[@intFromEnum(metrics.Delivery.Outcome.completed)] - count;
             try std.testing.expectEqual(@as(u64, @intFromBool(o == @intFromEnum(origin))), completed);
         }
     }

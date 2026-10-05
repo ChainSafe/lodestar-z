@@ -3,6 +3,7 @@ const n = @import("network");
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
 const t = n.peers.types;
+const network_js = @import("network_js.zig");
 pub const Entry = struct { event: t.Event, sequence: u64 };
 pub const Lane = struct {
     entries: [64]Entry = undefined,
@@ -72,8 +73,8 @@ fn identify(env: napi.Env, value: *const n.identify.Metadata) !Value {
 }
 pub fn state(env: napi.Env, value: *const t.Snapshot) !Value {
     const object = try env.createObject();
-    try object.setNamedProperty("identity", try @import("network_js.zig").peerIdValue(env, &value.identity));
-    try object.setNamedProperty("connection", if (value.connection) |handle| try @import("network_js.zig").connection(env, handle) else try env.getNull());
+    try object.setNamedProperty("identity", try network_js.peerIdValue(env, &value.identity));
+    try object.setNamedProperty("connection", if (value.connection) |handle| try network_js.connection(env, handle) else try env.getNull());
     try object.setNamedProperty("direction", try env.createStringUtf8(@tagName(value.direction)));
     try object.setNamedProperty("endpoint", try endpoint(env, value.endpoint));
     try object.setNamedProperty("relevant", try env.getBoolean(value.relevant));
@@ -97,8 +98,8 @@ pub fn observation(env: napi.Env, entry: *const Entry) !Value {
     switch (entry.event) {
         .ready, .updated => |*value| try object.setNamedProperty("state", try state(env, value)),
         .closed => |value| {
-            try object.setNamedProperty("connection", try @import("network_js.zig").connection(env, value.connection));
-            try object.setNamedProperty("identity", try @import("network_js.zig").peerIdValue(env, &value.identity));
+            try object.setNamedProperty("connection", try network_js.connection(env, value.connection));
+            try object.setNamedProperty("identity", try network_js.peerIdValue(env, &value.identity));
             try object.setNamedProperty("reason", try env.createStringUtf8(@tagName(value.reason)));
         },
     }

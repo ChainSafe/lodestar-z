@@ -8,6 +8,8 @@ const policy = @import("reqresp/request_policy.zig");
 const advertisement = @import("advertisement.zig");
 const values = @import("control_values.zig");
 const capabilities = @import("capabilities.zig");
+const ForkEntry = @import("types.zig").ForkEntry;
+const gossipsub_constants = @import("gossipsub/constants.zig");
 
 pub const boundary_max = topics.boundary_max;
 pub const Boundary = struct { epoch: u64, fork: config.ForkSeq, digest: [4]u8, version: [4]u8 };
@@ -16,7 +18,7 @@ pub const Boundary = struct { epoch: u64, fork: config.ForkSeq, digest: [4]u8, v
 pub const Config = struct {
     boundaries: [boundary_max]Boundary = undefined,
     boundary_count: u8 = 0,
-    forks: [boundary_max]@import("types.zig").ForkEntry = undefined,
+    forks: [boundary_max]ForkEntry = undefined,
     topics: [boundary_max]topics.Boundary = undefined,
     policy: policy.Policy,
     phase0_digest: ?[4]u8 = null,
@@ -29,7 +31,7 @@ pub const Config = struct {
     pub fn init(cfg: *const config.BeaconConfig, serve_light_clients: bool) !Config {
         const chain = &cfg.chain;
         if (chain.PRESET_BASE != preset.active_preset or chain.BLOB_SCHEDULE.len > boundary_max - config.ForkSeq.count or
-            chain.MAX_PAYLOAD_SIZE == 0 or chain.MAX_PAYLOAD_SIZE > @import("gossipsub/constants.zig").MAX_PAYLOAD_SIZE or
+            chain.MAX_PAYLOAD_SIZE == 0 or chain.MAX_PAYLOAD_SIZE > gossipsub_constants.MAX_PAYLOAD_SIZE or
             chain.NUMBER_OF_CUSTODY_GROUPS == 0 or chain.NUMBER_OF_CUSTODY_GROUPS > preset.NUMBER_OF_CUSTODY_GROUPS or
             chain.CUSTODY_REQUIREMENT == 0 or chain.CUSTODY_REQUIREMENT > chain.NUMBER_OF_CUSTODY_GROUPS or
             chain.SAMPLES_PER_SLOT == 0 or chain.SAMPLES_PER_SLOT > chain.NUMBER_OF_CUSTODY_GROUPS)
@@ -105,7 +107,7 @@ pub const Config = struct {
                 if (i + 1 < self.boundary_count and epoch >= self.boundaries[i + 1].epoch +| lookahead) continue;
                 demand += counts[i];
             }
-            if (demand > @import("gossipsub/constants.zig").topics_cap) return error.UnsupportedTopicOverlap;
+            if (demand > gossipsub_constants.topics_cap) return error.UnsupportedTopicOverlap;
         }
     }
 

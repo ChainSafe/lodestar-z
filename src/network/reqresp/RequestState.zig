@@ -8,6 +8,7 @@ const RequestIO = @import("RequestIO.zig");
 const Engine = @import("../quic/Engine.zig");
 const Router = @import("../router.zig").Router;
 const types = @import("../types.zig");
+const protocol_mod = @import("protocol.zig");
 
 const assert = std.debug.assert;
 const Event = events.Event;
@@ -22,7 +23,7 @@ direction: types.Direction = .outbound,
 generation: u32 = 0,
 conn: Engine.Handle = undefined,
 stream: Engine.StreamHandle = undefined,
-protocol: @import("protocol.zig").Protocol = .status_v1,
+protocol: protocol_mod.Protocol = .status_v1,
 started_ms: u64 = 0,
 chunks: u32 = 0,
 chunks_max: u32 = 1,

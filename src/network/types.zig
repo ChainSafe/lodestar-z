@@ -1,6 +1,7 @@
+const ForkSeq = @import("config").ForkSeq;
 pub const ForkEntry = struct {
     digest: [4]u8,
-    fork: @import("config").ForkSeq,
+    fork: ForkSeq,
 };
 
 pub const Address = @import("udp").Address;

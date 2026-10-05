@@ -6,6 +6,8 @@ const Router = @import("../router.zig").Router;
 const support = @import("../quic/test_support.zig");
 const Engine = @import("../quic/Engine.zig");
 const reservedOptions = @import("control_fixture.zig").reservedOptions;
+const protocols_test_support = @import("../protocols_test_support.zig");
+const consensus_types = @import("consensus_types");
 
 test "reqresp drain retains blocked terminals across control and application partitions" {
     var pair: support.Pair = .{};
@@ -94,9 +96,9 @@ test "reqresp protocol integration retains request and chunk bytes through contr
     const handles = try support.connectPair(&pair);
     var options = try reservedOptions();
     options.forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }};
-    var client = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.client);
+    var client = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.client);
     defer client.deinit();
-    var server = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const sink = try std.testing.allocator.alloc(
@@ -161,7 +163,7 @@ test "reqresp protocol integration retains request and chunk bytes through contr
     );
     const request = output[0].request;
     try std.testing.expectEqualSlices(u8, &root, request.bytes);
-    const block = [_]u8{0x5a} ** @import("consensus_types").deneb.SignedBeaconBlock.min_size;
+    const block = [_]u8{0x5a} ** consensus_types.deneb.SignedBeaconBlock.min_size;
     try server.reqresp.respond(request.request, &block, .{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }, pair.now);
     for (0..16) |_| {
         try pair.pump();

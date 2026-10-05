@@ -2,6 +2,7 @@ const std = @import("std");
 const mod = @import("dialing.zig");
 const t = @import("types.zig");
 const a = std.testing.allocator;
+const dial_history = @import("dial_history.zig");
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 1234 } };
 
 const support = @import("dialing_test_support.zig");
@@ -93,7 +94,7 @@ test "peer dial dead discovery endpoints do not return as untried candidates" {
     try std.testing.expectEqual(@as(u64, 1), q.retries[@intFromEnum(t.DialFailure.unanswered)]);
     try std.testing.expectError(error.RecentlyFailed, q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, now));
     try std.testing.expectEqual(@as(u64, 1), q.refused.endpoint);
-    try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, now + @import("dial_history.zig").endpoint_memory_ms);
+    try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, now + dial_history.endpoint_memory_ms);
     const row = catalog.rowFor(catalog.find(&candidate.peer).?).?;
     try std.testing.expectEqual(@as(u8, 0), row.dial.failures);
 }
@@ -243,7 +244,7 @@ test "peer dial peer id mismatch blocks the endpoint even for a newer record" {
     try std.testing.expectEqual(@as(u64, 1), q.outcomes[@intFromEnum(t.DialOutcome.peer_id_mismatch)]);
     candidate.sequence = 2;
     try std.testing.expectError(error.RecentlyFailed, q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 100));
-    try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 100 + @import("dial_history.zig").mismatch_memory_ms);
+    try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 100 + dial_history.mismatch_memory_ms);
 }
 
 test "peer dial local transport closes leave no endpoint strike" {
@@ -338,7 +339,7 @@ test "peer dial redundant mismatch blocks its endpoint without failing the inten
         try std.testing.expectEqual(@as(u8, 0), row.dial.failures);
         try std.testing.expectEqual(@as(u64, 0), row.dial.eligible_at_ms);
         disconnect(&catalog, &candidate.peer, 10, .transport_closed, 30);
-        const due = support.refreshAndWakeup(&q, &catalog, 30, 1) orelse 30 + @import("dial_history.zig").endpoint_memory_ms;
+        const due = support.refreshAndWakeup(&q, &catalog, 30, 1) orelse 30 + dial_history.endpoint_memory_ms;
         try std.testing.expectEqual(@as(usize, count - 1), q.poll(&catalog, due, &out));
         if (count == 2) try std.testing.expect(out[0].address.eql(alternate));
         for (q.retries) |retried| try std.testing.expectEqual(@as(u64, 0), retried);

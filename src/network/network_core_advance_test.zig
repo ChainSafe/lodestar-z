@@ -1,6 +1,13 @@
 const std = @import("std");
 const Setup = @import("network_core_test_support.zig").Setup;
 const Source = @import("wake_sources.zig").Source;
+const types = @import("types.zig");
+const Dialing = @import("peers/dialing.zig").Dialing;
+const time = @import("time.zig");
+const NetworkCore = @import("network_core.zig").NetworkCore;
+const test_support = @import("quic/test_support.zig");
+const fault_io = @import("fault_io");
+const wait = @import("wait.zig");
 
 test "core connection deadlines preserve fractions through millisecond expiry" {
     const setup = try std.testing.allocator.create(Setup);
@@ -12,20 +19,20 @@ test "core connection deadlines preserve fractions through millisecond expiry" {
     var now = setup.pair.now;
     now.monotonic.raw.nanoseconds += 900_000;
     const identity = setup.server.peerId();
-    const addresses = [_]@import("types.zig").Address{setup.server.transport.localAddress()};
+    const addresses = [_]types.Address{setup.server.transport.localAddress()};
     try std.testing.expectError(error.InvalidDeadline, core.connectUntil(&identity, &addresses, now, now.monotonic));
     const deadline = now.monotonic.addDuration(.{ .clock = .awake, .raw = .fromNanoseconds(500_000) });
     try core.connectUntil(&identity, &addresses, now, deadline);
     const catalog = &core.peer_manager.catalog;
     const peer = catalog.find(&identity).?;
-    var close: [@import("peers/dialing.zig").Dialing.attempts_max]@import("types.zig").Handle = undefined;
+    var close: [Dialing.attempts_max]types.Handle = undefined;
     const due_ms = now.millis() + 2;
     try std.testing.expectEqual(due_ms, catalog.rowFor(peer).?.dial.manual_until_ms);
-    now.monotonic = @import("time.zig").milliseconds(due_ms - 1);
+    now.monotonic = time.milliseconds(due_ms - 1);
     try std.testing.expectEqual(@as(usize, 0), core.peer_manager.expireDials(now, &close).len);
     try std.testing.expectEqual(due_ms, catalog.rowFor(peer).?.dial.manual_until_ms);
     try std.testing.expectError(error.InvalidDeadline, core.connectUntil(&identity, &addresses, now, setup.pair.now.monotonic));
-    now.monotonic = @import("time.zig").milliseconds(due_ms);
+    now.monotonic = time.milliseconds(due_ms);
     try std.testing.expectEqual(@as(usize, 0), core.peer_manager.expireDials(now, &close).len);
     try std.testing.expect(catalog.find(&identity) == null);
 }
@@ -41,7 +48,7 @@ test "core advance uses supplied time and schedules deferred application shutdow
     const before = core.wakeups(setup.pair.now, .{});
     try std.testing.expect(before.sources[@intFromEnum(Source.gossip)].runnable);
     var tick = setup.pair.now;
-    tick.monotonic = @import("time.zig").milliseconds(tick.millis() + 1);
+    tick.monotonic = time.milliseconds(tick.millis() + 1);
     const result = core.advance(setup.pair.io(), .{ .now = tick, .readiness = .{} }, .{}, .{});
     try std.testing.expect(result.failure == null);
     try std.testing.expectEqual(tick, result.transport.now);
@@ -176,7 +183,7 @@ test "core shutdown waits for retained host serving work after stream retirement
         serving: rr.ReqResp.ServingHandle,
         released: bool = false,
 
-        fn apply(context: *anyopaque, owner: *@import("network_core.zig").NetworkCore, _: @import("types.zig").Now) @import("network_core.zig").NetworkCore.HostProgress {
+        fn apply(context: *anyopaque, owner: *NetworkCore, _: types.Now) NetworkCore.HostProgress {
             const self: *@This() = @ptrCast(@alignCast(context));
             var byte: [1]u8 = undefined;
             const packet = self.socket.receiveTimeout(std.testing.io, &byte, .{ .duration = .{ .clock = .awake, .raw = .zero } }) catch return .{};
@@ -186,7 +193,7 @@ test "core shutdown waits for retained host serving work after stream retirement
     };
     var completion: Completion = .{ .socket = host_socket, .serving = serving.? };
     try host_socket.send(std.testing.io, &host_socket.address, "c");
-    const ready = @import("wait.zig").poll(std.testing.io, core.waitPlan(setup.pair.now, .{}, .{}).sources, .{ .duration = .{ .clock = .awake, .raw = .zero } });
+    const ready = wait.poll(std.testing.io, core.waitPlan(setup.pair.now, .{}, .{}).sources, .{ .duration = .{ .clock = .awake, .raw = .zero } });
     try std.testing.expect(ready.host);
     const result = core.advance(setup.pair.io(), .{ .now = setup.pair.now, .readiness = ready }, .{}, .{ .handler = .{ .context = &completion, .apply = Completion.apply } });
     try std.testing.expect(result.failure == null);
@@ -201,7 +208,7 @@ test "core clock failure preserves dial intent without starting a connection" {
     try setup.initOwners(&.{});
     defer setup.deinit();
     const core = &setup.client;
-    try core.connectUntil(&setup.server.peerId(), &.{setup.server.transport.localAddress()}, setup.pair.now, @import("time.zig").milliseconds(setup.pair.now.millis() + 10_000));
+    try core.connectUntil(&setup.server.peerId(), &.{setup.server.transport.localAddress()}, setup.pair.now, time.milliseconds(setup.pair.now.millis() + 10_000));
     const pending = core.waitPlan(setup.pair.now, .{}, .{});
     const dirty = core.peer_manager.catalog.dial.dirty_count;
     const visits = core.peer_manager.dialing.visits;
@@ -230,7 +237,7 @@ test "core lifecycle only advances and closed owners reject new connections" {
             core.beginGracefulClose(setup.pair.now);
             core.beginGracefulClose(setup.pair.now);
             try std.testing.expectEqual(.quiescing, core.phase());
-            try std.testing.expectError(error.Stopped, core.connectUntil(&setup.client.peerId(), &.{}, setup.pair.now, @import("time.zig").milliseconds(setup.pair.now.millis() + 1)));
+            try std.testing.expectError(error.Stopped, core.connectUntil(&setup.client.peerId(), &.{}, setup.pair.now, time.milliseconds(setup.pair.now.millis() + 1)));
             try std.testing.expectError(error.Stopped, core.addDirectPeer(&setup.client.peerId(), &.{}, setup.pair.now));
         } else core.shutdown(setup.pair.now);
         _ = try setup.pair.dial();
@@ -242,7 +249,7 @@ test "core lifecycle only advances and closed owners reject new connections" {
         try std.testing.expectEqual(.stopping, core.phase());
         for (0..3) |_| _ = core.advance(setup.pair.io(), .{ .now = setup.pair.now }, .{}, .{});
         try std.testing.expect(core.isClosed());
-        try std.testing.expectError(error.Stopped, core.transport.engine.dial(&@import("quic/test_support.zig").client_address, setup.client.peerId(), setup.pair.now));
+        try std.testing.expectError(error.Stopped, core.transport.engine.dial(&test_support.client_address, setup.client.peerId(), setup.pair.now));
         try setup.pair.pump();
         _ = core.advance(setup.pair.io(), .{ .now = setup.pair.now }, .{}, .{});
         try std.testing.expect(core.isClosed());
@@ -253,7 +260,7 @@ test "core cancellation preserves prior failure and events while stopping furthe
     const Core = @import("network_core.zig").NetworkCore;
     const Host = struct {
         calls: usize = 0,
-        fn apply(context: *anyopaque, _: *Core, _: @import("types.zig").Now) Core.HostProgress {
+        fn apply(context: *anyopaque, _: *Core, _: types.Now) Core.HostProgress {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             return .{};
@@ -268,9 +275,9 @@ test "core cancellation preserves prior failure and events while stopping furthe
         const core = &setup.client;
         const failed = try setup.pair.dial();
         try std.testing.expect(core.transport.engine.failSend(failed));
-        try core.connectUntil(&setup.server.peerId(), &.{@import("quic/test_support.zig").server_address}, setup.pair.now, @import("time.zig").milliseconds(setup.pair.now.millis() + 1000));
+        try core.connectUntil(&setup.server.peerId(), &.{test_support.server_address}, setup.pair.now, time.milliseconds(setup.pair.now.millis() + 1000));
         var host: Host = .{};
-        var faults: @import("fault_io") = .{ .base = setup.pair.io(), .receive = .{} };
+        var faults: fault_io = .{ .base = setup.pair.io(), .receive = .{} };
         const result = core.advance(faults.io(), .{
             .now = setup.pair.now,
             .readiness = .{ .cancelled = already_cancelled, .failure = error.WaitFailed, .host = true },

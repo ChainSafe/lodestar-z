@@ -1,5 +1,6 @@
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
+const network = @import("network");
 
 /// An error whose `message` and `code` are `code`.
 pub fn errorValue(env: napi.Env, code: []const u8) !Value {
@@ -27,7 +28,7 @@ pub fn handle(env: napi.Env, index: u32, generation: u64) !Value {
     return object;
 }
 
-pub fn connection(env: napi.Env, value: @import("network").quic.Engine.Handle) !Value {
+pub fn connection(env: napi.Env, value: network.quic.Engine.Handle) !Value {
     const object = try env.createObject();
     try object.setNamedProperty("index", try env.createUint32(value.index));
     try object.setNamedProperty("generation", try env.createUint32(value.generation));
@@ -38,12 +39,12 @@ pub fn bytes(env: napi.Env, value: []const u8) !Value {
     return env.createTypedarray(.uint8, value.len, try env.createArrayBufferCopy(value, null), 0);
 }
 
-pub fn peerIdValue(env: napi.Env, identity: *const @import("network").PeerId) !Value {
-    var text: [@import("network").wire.peer_id.text_length_max]u8 = undefined;
+pub fn peerIdValue(env: napi.Env, identity: *const network.PeerId) !Value {
+    var text: [network.wire.peer_id.text_length_max]u8 = undefined;
     return env.createStringUtf8(identity.toText(&text));
 }
 
-pub fn endpoint(env: napi.Env, value: @import("network").Address) !Value {
+pub fn endpoint(env: napi.Env, value: network.Address) !Value {
     const object = try env.createObject();
     switch (value) {
         inline else => |ip, tag| {

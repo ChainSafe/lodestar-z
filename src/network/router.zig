@@ -166,7 +166,7 @@ pub const Router = struct {
         self: *Router,
         engine: *Engine,
         conn: Engine.Handle,
-        protocol: @import("reqresp/protocol.zig").Protocol,
+        protocol: reqresp.Protocol,
         now: types.Now,
         timeout: std.Io.Duration,
     ) Error!Engine.StreamHandle {

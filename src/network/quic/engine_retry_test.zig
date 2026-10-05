@@ -3,6 +3,7 @@ const retry = @import("retry.zig");
 const binding = @import("binding.zig");
 const limits = @import("limits.zig");
 const support = @import("test_support.zig");
+const constants = @import("../constants.zig");
 
 test "QUIC Retry admits an address-validated handshake" {
     var pair: support.Pair = .{};
@@ -17,7 +18,7 @@ test "QUIC Retry does not allocate a connection for repeated unvalidated Initial
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handle = try pair.dial();
-    var packet: [@import("../constants.zig").datagram_size_max]u8 = undefined;
+    var packet: [constants.datagram_size_max]u8 = undefined;
     const initial = pair.sendOne(&pair.client, handle.index, &packet).?;
     var out: [packet.len]u8 = undefined;
     for (0..4) |_| {
@@ -34,7 +35,7 @@ test "QUIC cached tokens of bounded wire lengths get Retry without connection al
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var packet: [@import("../constants.zig").datagram_size_max]u8 = undefined;
+    var packet: [constants.datagram_size_max]u8 = undefined;
     var output: [packet.len]u8 = undefined;
     const cached: [1024]u8 = @splat(0xa5);
     for ([_]usize{ 1, 256, 300, 1024 }) |length| {
@@ -59,7 +60,7 @@ test "QUIC invalid local Retry tokens do not receive another Retry" {
     var token: [retry.token_max]u8 = undefined;
     const issued = retry.mint(&pair.server.retry_key, &support.client_address, &original, &scid, pair.now.millis(), &token);
     try std.testing.expect(retry.isLocal(issued));
-    var packet: [@import("../constants.zig").datagram_size_max]u8 = undefined;
+    var packet: [constants.datagram_size_max]u8 = undefined;
     var output: [packet.len]u8 = undefined;
     for ([_]usize{ 8, 9, issued.len }) |length| {
         const outcome = pair.server.receive(initialWithToken(&packet, issued[0..length]), &support.client_address, pair.now, &output);
@@ -75,7 +76,7 @@ test "QUIC Retry validates a token received after a longer foreign token" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var packet: [@import("../constants.zig").datagram_size_max]u8 = undefined;
+    var packet: [constants.datagram_size_max]u8 = undefined;
     var output: [packet.len]u8 = undefined;
     const cached: [1024]u8 = @splat(0xa5);
     try std.testing.expect(pair.server.receive(initialWithToken(&packet, &cached), &support.client_address, pair.now, &output) == .retry);

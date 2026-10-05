@@ -5,6 +5,11 @@ const topic_mod = @import("topic.zig");
 const assert = std.debug.assert;
 const lists = @import("../index_list.zig");
 const none = lists.none;
+const local_intent = @import("local_intent.zig");
+const peer_book = @import("peer_book.zig");
+const gossip_limits = @import("../gossip_limits.zig");
+const constants = @import("constants.zig");
+const topic_policy = @import("topic_policy.zig");
 
 pub const Handle = struct { index: u32, generation: u64 };
 const Peers = @import("peer_book.zig").PeerBook;
@@ -52,25 +57,25 @@ pub const Validation = struct {
     free_records: lists.List = .{},
     resolved_records: lists.List = .{},
     topic_pin_counts: []u32,
-    topic_pins: @import("local_intent.zig").TopicSet,
+    topic_pins: local_intent.TopicSet,
 
     timeout_ms: u64,
     tombstone_ms: u64,
-    pending_per_peer_kind: [@import("peer_book.zig").capacity][@import("../gossip_limits.zig").kind_count]u16 = @splat(@splat(0)),
-    pending_per_kind: [@import("../gossip_limits.zig").kind_count]usize = @splat(0),
-    pending_per_peer: [@import("peer_book.zig").capacity]u16 = @splat(0),
-    bytes_per_peer_kind: [@import("peer_book.zig").capacity][@import("../gossip_limits.zig").kind_count]usize = @splat(@splat(0)),
+    pending_per_peer_kind: [peer_book.capacity][gossip_limits.kind_count]u16 = @splat(@splat(0)),
+    pending_per_kind: [gossip_limits.kind_count]usize = @splat(0),
+    pending_per_peer: [peer_book.capacity]u16 = @splat(0),
+    bytes_per_peer_kind: [peer_book.capacity][gossip_limits.kind_count]usize = @splat(@splat(0)),
 
     pub fn init(a: std.mem.Allocator, capacity: usize, timeout_ms: u64, tombstone_ms: u64) !Validation {
-        return initForTopics(a, capacity, timeout_ms, tombstone_ms, @import("constants.zig").topics_cap);
+        return initForTopics(a, capacity, timeout_ms, tombstone_ms, constants.topics_cap);
     }
 
     pub fn initForTopics(a: std.mem.Allocator, capacity: usize, timeout_ms: u64, tombstone_ms: u64, topics: usize) !Validation {
-        if (capacity == 0 or capacity > 65535 or timeout_ms == 0 or tombstone_ms == 0 or topics == 0 or topics > @import("topic_policy.zig").topic_max) return error.InvalidLimits;
+        if (capacity == 0 or capacity > 65535 or timeout_ms == 0 or tombstone_ms == 0 or topics == 0 or topics > topic_policy.topic_max) return error.InvalidLimits;
         const topic_pin_counts = try a.alloc(u32, topics);
         errdefer a.free(topic_pin_counts);
         @memset(topic_pin_counts, 0);
-        var topic_pins = try @import("local_intent.zig").TopicSet.initEmpty(a, topics);
+        var topic_pins = try local_intent.TopicSet.initEmpty(a, topics);
         errdefer topic_pins.deinit(a);
         const entries = try a.alloc(Entry, capacity);
         errdefer a.free(entries);
@@ -124,11 +129,11 @@ pub const Validation = struct {
     }
 
     pub fn backingBytes(capacity: usize) usize {
-        return backingBytesForTopics(capacity, @import("constants.zig").topics_cap);
+        return backingBytesForTopics(capacity, constants.topics_cap);
     }
 
     pub fn backingBytesForTopics(capacity: usize, topics: usize) usize {
-        return topics * @sizeOf(u32) + @import("local_intent.zig").topicSetBytes(topics) + capacity * @sizeOf(Entry) + attributionCapacity(capacity) * @sizeOf(Attribution) +
+        return topics * @sizeOf(u32) + local_intent.topicSetBytes(topics) + capacity * @sizeOf(Entry) + attributionCapacity(capacity) * @sizeOf(Attribution) +
             mcache.indexCapacity(attributionCapacity(capacity)) * @sizeOf(u32);
     }
 

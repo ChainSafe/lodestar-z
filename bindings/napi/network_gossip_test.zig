@@ -1,8 +1,10 @@
 const std = @import("std");
 const g = @import("network_gossip.zig");
 const limits_mod = @import("network").gossip_processor.limits;
+const network = @import("network");
+const network_commands = @import("network_commands.zig");
 
-fn options(block: limits_mod.Limit) @import("network").gossip_processor.GossipProcessor.Options {
+fn options(block: limits_mod.Limit) network.gossip_processor.GossipProcessor.Options {
     var limits: limits_mod.Limits = @splat(.{ .items = 2, .bytes = 4096 });
     limits[@intFromEnum(limits_mod.Kind.beacon_block)] = block;
     return .{ .limits = limits, .execution = limits };
@@ -68,13 +70,13 @@ test "gossip batch bounds, rollback and expiry keep pins until full completion" 
 }
 
 test "gossip original admission wall projection is precise and independent of drain" {
-    try std.testing.expectEqual(@as(u64, 1700000000123), try g.projectWall(100, .{ .monotonic = @import("network").time.milliseconds(150), .wall = .{ .clock = .real, .raw = .fromNanoseconds(@as(i96, 1700000000173) * std.time.ns_per_ms) } }));
-    try std.testing.expectEqual(@as(u64, 1700000000623), try g.projectWall(100, .{ .monotonic = @import("network").time.milliseconds(150), .wall = .{ .clock = .real, .raw = .fromNanoseconds(@as(i96, 1700000000673) * std.time.ns_per_ms) } }));
-    try std.testing.expectError(error.InvalidNetworkClock, g.projectWall(151, .{ .monotonic = @import("network").time.milliseconds(150), .wall = .{ .clock = .real, .raw = .fromNanoseconds(@as(i96, 1700000000173) * std.time.ns_per_ms) } }));
+    try std.testing.expectEqual(@as(u64, 1700000000123), try g.projectWall(100, .{ .monotonic = network.time.milliseconds(150), .wall = .{ .clock = .real, .raw = .fromNanoseconds(@as(i96, 1700000000173) * std.time.ns_per_ms) } }));
+    try std.testing.expectEqual(@as(u64, 1700000000623), try g.projectWall(100, .{ .monotonic = network.time.milliseconds(150), .wall = .{ .clock = .real, .raw = .fromNanoseconds(@as(i96, 1700000000673) * std.time.ns_per_ms) } }));
+    try std.testing.expectError(error.InvalidNetworkClock, g.projectWall(151, .{ .monotonic = network.time.milliseconds(150), .wall = .{ .clock = .real, .raw = .fromNanoseconds(@as(i96, 1700000000173) * std.time.ns_per_ms) } }));
 }
 
 test "gossip flags remain independent of full command capacity and reject stale generations" {
-    var commands: @import("network_commands.zig").Table = .{};
+    var commands: network_commands.Table = .{};
     for (0..32) |_| _ = try commands.reserve(.getIdentity);
     var table = try g.Table.init(std.testing.allocator, options(.{ .items = 64, .bytes = 64 * 4096 }));
     defer table.deinit();

@@ -6,6 +6,7 @@ const Verdict = @import("validation.zig").Verdict;
 const std = @import("std");
 const storage = @import("message_store.zig");
 const topic_mod = @import("topic.zig");
+const validation = @import("validation.zig");
 
 test "gossip validation topic pins follow attribution ownership through replacement expiry and clear" {
     const a = std.testing.allocator;
@@ -17,7 +18,7 @@ test "gossip validation topic pins follow attribution ownership through replacem
     defer store.deinit(a);
     var v = try Validation.init(a, 2, 10, 20);
     defer v.deinit(a, &store, &peers);
-    var handles: [2]@import("validation.zig").Handle = undefined;
+    var handles: [2]validation.Handle = undefined;
     for (&handles, 0..) |*handle, i| {
         const m = store.put(@splat(@intCast(i)), "topic", "payload").?;
         var r = v.reserve(store.get(m).?.id).?;

@@ -8,6 +8,11 @@ const client = @import("client.zig");
 const goodbye = @import("goodbye.zig");
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
+const control_metrics = @import("control_metrics.zig");
+const logging = @import("../logging.zig");
+const identify_mod = @import("../identify/root.zig");
+const types = @import("../types.zig");
+const time = @import("../time.zig");
 
 const health_probe_count = @typeInfo(Control.HealthProbe).@"enum".fields.len;
 const ConnectionState = struct {
@@ -72,7 +77,7 @@ pub const Control = struct {
         deferred: u64 = 0,
         closed: [@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
         health_failures: [health_probe_count]u64 = @splat(0),
-        events: @import("control_metrics.zig").Counters = .{},
+        events: control_metrics.Counters = .{},
     };
     /// One maintain turn: the rows taken from the heap in rotation order, and the starts left.
     pub const Pass = struct { next: usize = 0, count: usize, starts_remaining: u16 };
@@ -204,7 +209,7 @@ pub const Control = struct {
             }
             const snapshot = catalog.rowFor(peer).?;
             const agent = client.agent(&snapshot.identify);
-            std.log.scoped(.network_peers).debug("peer_disconnect_scheduled peer={f} connection={d}:{d} reason={s} grace_ms=2000 agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, @tagName(reason), std.json.fmt(agent, .{}) });
+            std.log.scoped(.network_peers).debug("peer_disconnect_scheduled peer={f} connection={d}:{d} reason={s} grace_ms=2000 agent={f}", .{ logging.peer(&snapshot.identity), conn.index, conn.generation, @tagName(reason), std.json.fmt(agent, .{}) });
             row.closing = .{ .reason = reason, .deadline_ms = now.millis() +| 2_000 };
         }
         self.rekey(catalog, peer.index);
@@ -372,7 +377,7 @@ pub const Control = struct {
         if (due.request.?.protocol == .goodbye_v1) row.closing.?.sent = true;
     }
 
-    pub fn identifyResults(self: *Control, catalog: *Catalog, results: []const @import("../identify/root.zig").Handler.Result) void {
+    pub fn identifyResults(self: *Control, catalog: *Catalog, results: []const identify_mod.Handler.Result) void {
         std.debug.assert(results.len <= 64);
         for (results) |*completion| {
             const row = self.connectionState(completion.peer, completion.conn) orelse continue;
@@ -383,12 +388,12 @@ pub const Control = struct {
                 .success => |*metadata| {
                     if (catalog.updateIdentify(completion.peer, completion.conn, metadata)) {
                         const snapshot = catalog.rowFor(completion.peer).?;
-                        std.log.scoped(.network_peers).debug("identify_completed peer={f} connection={d}:{d} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), completion.conn.index, completion.conn.generation, std.json.fmt(client.agent(&snapshot.identify), .{}) });
+                        std.log.scoped(.network_peers).debug("identify_completed peer={f} connection={d}:{d} agent={f}", .{ logging.peer(&snapshot.identity), completion.conn.index, completion.conn.generation, std.json.fmt(client.agent(&snapshot.identify), .{}) });
                     }
                 },
                 .failed => |failure| {
                     const snapshot = catalog.rowFor(completion.peer).?;
-                    std.log.scoped(.network_peers).debug("identify_failed peer={f} connection={d}:{d} reason={s}", .{ @import("../logging.zig").peer(&snapshot.identity), completion.conn.index, completion.conn.generation, @tagName(failure) });
+                    std.log.scoped(.network_peers).debug("identify_failed peer={f} connection={d}:{d} reason={s}", .{ logging.peer(&snapshot.identity), completion.conn.index, completion.conn.generation, @tagName(failure) });
                 },
             }
         }
@@ -398,7 +403,7 @@ pub const Control = struct {
         const reason = goodbye.reason(code);
         const snapshot = catalog.rowFor(peer).?;
         self.counters.events.goodbyeReceived(code);
-        std.log.scoped(.network_peers).debug("peer_goodbye_received peer={f} connection={d}:{d} code={d} reason={s} during_close={any} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, code, @tagName(reason), during_close, std.json.fmt(client.agent(&snapshot.identify), .{}) });
+        std.log.scoped(.network_peers).debug("peer_goodbye_received peer={f} connection={d}:{d} code={d} reason={s} during_close={any} agent={f}", .{ logging.peer(&snapshot.identity), conn.index, conn.generation, code, @tagName(reason), during_close, std.json.fmt(client.agent(&snapshot.identify), .{}) });
         const row = self.connectionState(peer, conn) orelse return;
         if (row.closing == null and row.rejection == null) row.rejection = goodbye.rejection(code);
     }
@@ -605,7 +610,7 @@ pub const Control = struct {
                         _ = catalog.report(op.peer, .low_tolerance, now.millis());
                     if (connectedRow(catalog, op.peer, op.conn)) |snapshot| {
                         std.log.scoped(.network_peers).debug("metadata_rejected peer={f} connection={d}:{d} method={s} reason={s} bytes={d}", .{
-                            @import("../logging.zig").peer(&snapshot.identity),
+                            logging.peer(&snapshot.identity),
                             op.conn.index,
                             op.conn.generation,
                             @tagName(op.protocol),
@@ -682,9 +687,9 @@ pub const Control = struct {
         self.counters.health_failures[@intFromEnum(probe)] +|= 1;
         std.log.scoped(.network_peers).debug("peer_health_failure connection={d}:{d} probe={s} reason={s} failures={d} limit={d} close={s}", .{ op.conn.index, op.conn.generation, @tagName(probe), @tagName(failure), row.health_failures[@intFromEnum(probe)], self.options.health_failures_max, @tagName(closes) });
     }
-    pub fn schedule(self: *const Control, catalog: *const Catalog, now: Now) @import("../types.zig").Schedule {
+    pub fn schedule(self: *const Control, catalog: *const Catalog, now: Now) types.Schedule {
         if (@import("builtin").is_test) self.checkDeadlines(catalog, now.millis());
-        return .{ .deadline = @import("../time.zig").optionalMilliseconds(if (self.deadlines.peek()) |top| top.deadline else null) };
+        return .{ .deadline = time.optionalMilliseconds(if (self.deadlines.peek()) |top| top.deadline else null) };
     }
 
     /// Test builds compare heap keys with a full scan, so every due connection stays on the heap.

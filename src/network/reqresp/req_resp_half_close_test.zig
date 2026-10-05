@@ -5,6 +5,10 @@ const rr = @import("ReqResp.zig");
 const harness = @import("test_pair.zig");
 const Engine = @import("../quic/Engine.zig");
 const Router = @import("../router.zig").Router;
+const protocols_test_support = @import("../protocols_test_support.zig");
+const policy_fixture = @import("policy_fixture.zig");
+const ErrorReason = @import("metrics.zig").ErrorReason;
+const admission_fixture = @import("admission_fixture.zig");
 
 const Pair = harness.Pair;
 const Request = struct { handle: rr.RequestHandle, remote: Engine.StreamHandle };
@@ -39,7 +43,7 @@ fn negotiate(pair: *Pair, method: protocol.Protocol, bytes: []const u8, sink: []
 fn pump(pair: *Pair) ![]const rr.Event {
     try pair.shared.pair.pump();
     pair.shared.client.reqresp.cleanupPending(&pair.shared.pair.client, &pair.shared.client.router);
-    @import("../protocols_test_support.zig").forward(&pair.shared.pair, &pair.shared.pair.client, .{ .reqresp = &pair.shared.client.reqresp });
+    protocols_test_support.forward(&pair.shared.pair, &pair.shared.pair.client, .{ .reqresp = &pair.shared.client.reqresp });
     const counts = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .application = pair.client_events[0..16], .control = pair.client_events[16..] });
     std.mem.copyForwards(rr.Event, pair.client_events[counts.application..], pair.client_events[16..][0..counts.control]);
     pair.client_count = counts.application + counts.control;
@@ -101,8 +105,8 @@ fn expectFailure(pair: *Pair, expected: rr.Failure) !void {
 test "reqresp recovers only complete Goodbye bytes retained by a closed authenticated connection" {
     for ([_]bool{ false, true }) |truncated| for ([_]bool{ false, true }) |fin| {
         var pair: Pair = .{};
-        const quotas = @import("admission_fixture.zig").quotas(100, 1000);
-        try pair.init(.{}, .{ .admission = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } } });
+        const quotas = admission_fixture.quotas(100, 1000);
+        try pair.init(.{}, .{ .admission = .{ .policy = policy_fixture.config(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } } });
         defer pair.deinit();
         var payload: [8]u8 = undefined;
         std.mem.writeInt(u64, &payload, 129, .little);
@@ -211,7 +215,7 @@ test "reqresp dispatches a complete Goodbye before FIN and keeps other request f
         var requests: usize = 0;
         for (0..8) |_| {
             try pair.shared.pair.pump();
-            @import("../protocols_test_support.zig").forward(&pair.shared.pair, &pair.shared.pair.server, .{ .reqresp = &pair.shared.server.reqresp });
+            protocols_test_support.forward(&pair.shared.pair, &pair.shared.pair.server, .{ .reqresp = &pair.shared.server.reqresp });
             const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &pair.server_events }).control;
             for (pair.server_events[0..count]) |event| if (event == .request) {
                 try std.testing.expectEqualSlices(u8, &payload, event.request.bytes);
@@ -226,7 +230,7 @@ test "reqresp dispatches a complete Goodbye before FIN and keeps other request f
         }
         for (0..8) |_| {
             try pair.shared.pair.pump();
-            @import("../protocols_test_support.zig").forward(&pair.shared.pair, &pair.shared.pair.server, .{ .reqresp = &pair.shared.server.reqresp });
+            protocols_test_support.forward(&pair.shared.pair, &pair.shared.pair.server, .{ .reqresp = &pair.shared.server.reqresp });
             const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &pair.server_events }).control;
             for (pair.server_events[0..count]) |event| if (event == .request) {
                 try std.testing.expectEqualSlices(u8, &payload, event.request.bytes);
@@ -329,7 +333,7 @@ test "reqresp half close without a response retains the absolute response deadli
         try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
         pair.shared.pair.advance(1);
         try expectFailure(&pair, .timeout);
-        try std.testing.expectEqual(@as(u64, 1), pair.shared.client.reqresp.outgoing_error_reasons[@intFromEnum(@import("metrics.zig").ErrorReason.REQUEST_ERROR_RESP_TIMEOUT)]);
+        try std.testing.expectEqual(@as(u64, 1), pair.shared.client.reqresp.outgoing_error_reasons[@intFromEnum(ErrorReason.REQUEST_ERROR_RESP_TIMEOUT)]);
     }
 }
 
@@ -419,7 +423,7 @@ test "reqresp FIN before the first chunk fails single-response methods with empt
         const request = try negotiate(&pair, method, bytes[0..method.info().request_min], &sink, .{});
         _ = try pair.shared.pair.server.write(request.remote, &.{}, true);
         try expectFailure(&pair, .empty_response);
-        try std.testing.expectEqual(@as(u64, 1), pair.shared.client.reqresp.outgoing_error_reasons[@intFromEnum(@import("metrics.zig").ErrorReason.REQUEST_ERROR_EMPTY_RESPONSE)]);
+        try std.testing.expectEqual(@as(u64, 1), pair.shared.client.reqresp.outgoing_error_reasons[@intFromEnum(ErrorReason.REQUEST_ERROR_EMPTY_RESPONSE)]);
     }
 }
 

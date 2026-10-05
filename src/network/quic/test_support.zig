@@ -4,6 +4,7 @@ const Engine = @import("Engine.zig");
 const keys = @import("../wire/keys.zig");
 const tls = @import("../tls/context.zig");
 const types = @import("../types.zig");
+const time = @import("../time.zig");
 
 const Event = Engine.Event;
 const Limits = Engine.Limits;
@@ -87,7 +88,7 @@ pub const Pair = struct {
     }
 
     pub fn advance(self: *Pair, ms: u64) void {
-        self.now.monotonic = @import("../time.zig").milliseconds(self.now.millis() + ms);
+        self.now.monotonic = time.milliseconds(self.now.millis() + ms);
     }
 
     /// Delivers datagrams both ways and runs both engines' timer and readiness phases until

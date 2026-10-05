@@ -1,4 +1,6 @@
 import {expect, test} from "vitest";
+import type {NativeForkEntry, NativeIdentity} from "../src/network.js";
+import type {NativeAction, NativeExchange, NativeExchangeDemand} from "../src/network-runtime.js";
 import {
   applicationConfig,
   capacity,
@@ -36,18 +38,15 @@ interface IncomingDescriptor {
   handle: IncomingHandle;
 }
 interface DirectIncomingBridge {
-  initialize(
-    config: ReturnType<typeof applicationConfig>,
-    onWorkAvailable: () => void
-  ): {identity: import("../src/network.js").NativeIdentity};
+  initialize(config: ReturnType<typeof applicationConfig>, onWorkAvailable: () => void): {identity: NativeIdentity};
   applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): IncomingHandle;
   exchange(
-    actions: readonly import("../src/network-runtime.js").NativeAction[],
-    demand: import("../src/network-runtime.js").NativeExchangeDemand
-  ): import("../src/network-runtime.js").NativeExchange & {serving: IncomingDescriptor[]};
+    actions: readonly NativeAction[],
+    demand: NativeExchangeDemand
+  ): NativeExchange & {serving: IncomingDescriptor[]};
   incomingTerminal(handle: IncomingHandle, action: number, status?: number, message?: Uint8Array): void;
   incomingRelease(handle: IncomingHandle): void;
-  incomingRespond(handle: IncomingHandle, data: Uint8Array, context: import("../src/network.js").NativeForkEntry): void;
+  incomingRespond(handle: IncomingHandle, data: Uint8Array, context: NativeForkEntry): void;
   requestPull(handle: IncomingHandle): void;
   close(): void;
 }

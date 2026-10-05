@@ -3,19 +3,22 @@ const Now = @import("../types.zig").Now;
 const support = @import("test_support.zig");
 const Pair = @import("test_pair.zig").Pair;
 const Budget = @import("turn.zig").Budget;
+const topic = @import("topic.zig");
+const constants = @import("constants.zig");
+const frame_mod = @import("frame.zig");
 
 test "gossip maintenance yields between bounded topics and resumes without repeating them" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topics_per_pump = 4 });
     defer g.deinit();
     for ([_][]const u8{ "beacon_block", "beacon_aggregate_and_proof", "voluntary_exit" }) |name| {
-        var wire: [@import("topic.zig").topic_max_len]u8 = undefined;
-        try support.subscribe(&g, @import("topic.zig").build(.{ 1, 2, 3, 4 }, name, &wire));
+        var wire: [topic.topic_max_len]u8 = undefined;
+        try support.subscribe(&g, topic.build(.{ 1, 2, 3, 4 }, name, &wire));
     }
     const Clock = struct {
         elapsed: i96 = 0,
         fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.elapsed += @import("constants.zig").maintenance_slice_target_ns;
+            self.elapsed += constants.maintenance_slice_target_ns;
             return .{ .nanoseconds = self.elapsed };
         }
     };
@@ -23,7 +26,7 @@ test "gossip maintenance yields between bounded topics and resumes without repea
     var vtable = std.Io.failing.vtable.*;
     vtable.now = Clock.now;
     g.clock = .{ .userdata = &clock, .vtable = &vtable };
-    const now: @import("../types.zig").Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     support.heartbeat(&g, now);
     for (1..4) |serviced| {
         g.maintainTopics(now);
@@ -97,7 +100,7 @@ fn readerAhead(setup: *Pair, writers: *[3]u16) !u16 {
     var rpc = protobuf.Writer.init(&body);
     for (0..3) |_| protobuf.writeSubscription(&rpc, true, "/eth2/01020304/beacon_block/ssz_snappy");
     var frame: [260]u8 = undefined;
-    try std.testing.expect(g.sessions.receiveHandoff(reader, @import("frame.zig").writeFrame(&frame, rpc.written()), false));
+    try std.testing.expect(g.sessions.receiveHandoff(reader, frame_mod.writeFrame(&frame, rpc.written()), false));
     g.settle(reader);
     for (writers) |index| {
         g.sessions.setOutbound(index, .{ .live = .{ .stream = stream, .version = .v1_2 } });

@@ -3,6 +3,7 @@ const constants = @import("constants.zig");
 const topic = @import("topic.zig");
 const PeerSet = @import("sessions.zig").PeerSet;
 const assert = std.debug.assert;
+const ForkSeq = @import("config").ForkSeq;
 
 pub const boundary_max = 64;
 pub const topics_per_boundary_max = 333;
@@ -10,7 +11,7 @@ pub const topic_max = boundary_max * topics_per_boundary_max;
 pub const Kind = topic.Kind;
 pub const kind_count = @typeInfo(Kind).@"enum".fields.len;
 pub const Rule = struct { count: u16 = 0, ssz_min: u32 = 0, ssz_max: u32 = 0 };
-pub const Boundary = struct { digest: [4]u8, fork: ?@import("config").ForkSeq = null, epoch: u64 = 0, rules: [kind_count]Rule = @splat(.{}) };
+pub const Boundary = struct { digest: [4]u8, fork: ?ForkSeq = null, epoch: u64 = 0, rules: [kind_count]Rule = @splat(.{}) };
 pub const Match = struct { ordinal: u16, rule: Rule };
 pub const Error = error{InvalidTopicPolicy};
 

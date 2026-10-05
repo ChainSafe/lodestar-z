@@ -4,6 +4,11 @@ const adapter = @import("enr.zig");
 const discovery = @import("discovery.zig");
 const types = @import("types.zig");
 const context = types.ForkContext{ .digest = .{ 1, 2, 3, 4 } };
+const Sockets = @import("udp").Sockets;
+const protocols_test_support = @import("../protocols_test_support.zig");
+const PeerManager = @import("../peer_manager.zig").PeerManager;
+const KeyPair = @import("../wire/keys.zig").KeyPair;
+const network_core_test_support = @import("../network_core_test_support.zig");
 
 pub const Node = struct {
     io: std.Io,
@@ -14,13 +19,13 @@ pub const Node = struct {
         fork: types.ForkContext = context,
         bootstrap: []const d.identity.enr.Record = &.{},
         discovery: discovery.Discovery.Options = .{},
-        bindings: @import("udp").Sockets.Bindings = .{ .ip4 = .loopback(0) },
+        bindings: Sockets.Bindings = .{ .ip4 = .loopback(0) },
         alternate_ip4: ?[4]u8 = null,
     };
 
     pub fn init(self: *Node, io: std.Io, scalar: u8, quic: ?u16, options: *const Options) !void {
         self.io = io;
-        var sockets = try @import("udp").Sockets.bind(io, options.bindings);
+        var sockets = try Sockets.bind(io, options.bindings);
         errdefer sockets.close(io);
         const address = sockets.localAddress();
         const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{scalar}));
@@ -55,12 +60,12 @@ pub fn handoff(candidate: *const adapter.Candidate) !void {
     var pair = support.Pair{};
     try pair.init(.{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 }, .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 });
     defer pair.deinit();
-    const opts = @import("../network_core_test_support.zig").resolvedOptions().core;
-    const local = @import("../network_core_test_support.zig").localState(.{ .fork = context, .status = .{ .fork_digest = context.digest } });
-    var protocols = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, opts.protocols, &pair.client);
+    const opts = network_core_test_support.resolvedOptions().core;
+    const local = network_core_test_support.localState(.{ .fork = context, .status = .{ .fork_digest = context.digest } });
+    var protocols = try protocols_test_support.initProtocols(std.testing.allocator, opts.protocols, &pair.client);
     defer protocols.deinit();
     const gossipsub = protocols.gossipsub;
-    var core = try @import("../peer_manager.zig").PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, opts.peerManager(), protocols.router.capabilities().receive, pair.client.limits.connections_max);
+    var core = try PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, opts.peerManager(), protocols.router.capabilities().receive, pair.client.limits.connections_max);
     defer core.deinit();
     try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &.{candidate.*}, pair.now).accepted);
     try std.testing.expectEqual(candidate.sequence, core.catalog.rows[0].dial.hints.?.sequence);
@@ -72,11 +77,11 @@ pub fn handoff(candidate: *const adapter.Candidate) !void {
     try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &.{candidate.*}, pair.now).accepted);
     try std.testing.expectEqual(@as(usize, 0), core.selectDials(gossipsub, &pair.client, pair.now, &intents));
     for (3..6) |scalar| {
-        const key = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{@as(u8, @intCast(scalar))}));
+        const key = try KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{@as(u8, @intCast(scalar))}));
         const identity = types.PeerId.fromPublicKey(&key.publicKey());
         try core.connect(&identity, candidate.addresses[0..candidate.address_count], pair.now);
     }
-    const key = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{6}));
+    const key = try KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{6}));
     try std.testing.expectError(error.Capacity, core.connect(&types.PeerId.fromPublicKey(&key.publicKey()), candidate.addresses[0..candidate.address_count], pair.now));
     try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &.{candidate.*}, pair.now).accepted);
     const count = core.selectDials(gossipsub, &pair.client, pair.now, &intents);
@@ -89,14 +94,14 @@ pub fn admitBatch(candidates: []const adapter.Candidate) !void {
     var pair = support.Pair{};
     try pair.init(.{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 }, .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 });
     defer pair.deinit();
-    const opts = @import("../network_core_test_support.zig").resolvedOptions().core;
-    const local = @import("../network_core_test_support.zig").localState(.{ .fork = context, .status = .{ .fork_digest = context.digest } });
-    var protocols = try @import("../protocols_test_support.zig").initProtocols(std.testing.allocator, opts.protocols, &pair.client);
+    const opts = network_core_test_support.resolvedOptions().core;
+    const local = network_core_test_support.localState(.{ .fork = context, .status = .{ .fork_digest = context.digest } });
+    var protocols = try protocols_test_support.initProtocols(std.testing.allocator, opts.protocols, &pair.client);
     defer protocols.deinit();
     var options = opts.peerManager();
     options.peers.capacity = discovery.Discovery.candidates_per_step;
     options.dial.capacity = discovery.Discovery.candidates_per_step;
-    var manager = try @import("../peer_manager.zig").PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, options, protocols.router.capabilities().receive, pair.client.limits.connections_max);
+    var manager = try PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, options, protocols.router.capabilities().receive, pair.client.limits.connections_max);
     defer manager.deinit();
     const result = manager.discoveredBatch(protocols.gossipsub, candidates, pair.now);
     try std.testing.expectEqual(candidates.len, result.accepted);
@@ -110,7 +115,7 @@ pub fn admitBatch(candidates: []const adapter.Candidate) !void {
     }
 }
 
-pub fn advance(owner: *@import("discovery.zig").Discovery, io: std.Io, now_ms: u64, output: []adapter.Candidate) !@import("discovery.zig").Discovery.Result {
+pub fn advance(owner: *discovery.Discovery, io: std.Io, now_ms: u64, output: []adapter.Candidate) !discovery.Discovery.Result {
     var ready: [2]bool = @splat(true);
     return owner.advance(io, now_ms, &ready, output);
 }

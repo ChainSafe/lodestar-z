@@ -1,12 +1,14 @@
 const Options = @import("options.zig").Options;
 const constants = @import("constants.zig");
+const preset = @import("preset");
+const delivery = @import("delivery.zig");
 
 test "gossip policy default epoch timers follow the selected preset and require entropy" {
     const std = @import("std");
     try std.testing.expectError(error.InvalidLimits, Options.validate(&.{}));
     const o: Options = .{ .random_seed = 1 };
     try o.validate();
-    const expected: u64 = switch (@import("preset").active_preset) {
+    const expected: u64 = switch (preset.active_preset) {
         .mainnet => 768_000,
         .minimal => 192_000,
         .gnosis => 384_000,
@@ -34,7 +36,7 @@ test "gossip policy wire limits validate inclusive boundaries" {
 test "gossip local publication reserve leaves ordinary frames a maximal message and one descriptor" {
     const std = @import("std");
     const compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
-    var o: Options = .{ .random_seed = 1, .tx_local_descriptors = @import("delivery.zig").per_peer_limit - 1 };
+    var o: Options = .{ .random_seed = 1, .tx_local_descriptors = delivery.per_peer_limit - 1 };
     o.tx_local_bytes = o.tx_peer_bytes - compressed;
     try o.validate();
     o.tx_local_bytes += 1;

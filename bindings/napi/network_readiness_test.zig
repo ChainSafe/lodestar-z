@@ -2,12 +2,13 @@ const std = @import("std");
 const readiness = @import("network_readiness.zig");
 const Readiness = readiness.Readiness;
 const DeliveryKind = readiness.DeliveryKind;
+const network = @import("network");
 
 fn order(ready: *const Readiness) [readiness.delivery_kind_count]?DeliveryKind {
     var result: [readiness.delivery_kind_count]?DeliveryKind = @splat(null);
     var index = ready.payload.head;
     for (&result) |*slot| {
-        if (index == @import("network").index_list.none) break;
+        if (index == network.index_list.none) break;
         slot.* = @enumFromInt(index);
         index = ready.entries[index].link.next;
     }
