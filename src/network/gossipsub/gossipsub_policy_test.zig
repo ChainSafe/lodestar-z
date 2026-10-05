@@ -333,10 +333,12 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expect(g.overlay.fanoutMembers(second).isSet(retained));
     try std.testing.expectEqual(@as(usize, 8), g.overlay.fanoutMembers(second).count());
-    try std.testing.expectEqual(@as(usize, 1), g.sessions.rows[advertised].io.tx.control.count);
+    try std.testing.expect(g.sessions.rows[advertised].io.tx.gossip_len > 0);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[advertised].io.tx.control.count);
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[retained].io.tx.control.count);
     Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }));
     try std.testing.expect(!g.cycle.isActive());
+    try std.testing.expectEqual(@as(usize, 1), g.sessions.rows[advertised].io.tx.control.count);
     try std.testing.expectEqual(epoch, g.cycle.epoch);
     for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
     g.last_now_ms = 701;

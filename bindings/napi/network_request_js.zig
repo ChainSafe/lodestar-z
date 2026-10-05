@@ -121,6 +121,7 @@ fn terminalError(env: napi.Env, terminal: requests.Terminal, cell: *const reques
             const object = try errorValue(env, "NetworkRequestFailed");
             try object.setNamedProperty("reason", try env.createStringUtf8(@tagName(failure.reason)));
             try object.setNamedProperty("phase", if (failure.phase) |phase| try env.createStringUtf8(@tagName(phase)) else try env.getNull());
+            try object.setNamedProperty("peerFault", if (failure.peer_fault) |fault| try env.createStringUtf8(@tagName(fault)) else try env.getNull());
             const detail: ?[]const u8 = switch (failure.reason) {
                 .invalid_response => |err| @errorName(err),
                 .negotiation_failed => |err| @tagName(err),

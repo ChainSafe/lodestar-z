@@ -117,8 +117,12 @@ fn ihaveWorkBound(body_len: usize, topics: usize, probes: usize, batches: usize,
 fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
     if (belowGossip(self, index, now.millis())) return;
     const io = &self.sessions.rows[index].io;
-    if (io.ihave_recv >= constants.max_ihave_per_heartbeat) return;
-    io.ihave_recv += 1;
+    const rpc = &io.rpc.?;
+    if (rpc.ihave_allowed == null) {
+        rpc.ihave_allowed = io.ihave_recv < constants.max_ihave_per_heartbeat;
+        if (rpc.ihave_allowed.?) io.ihave_recv += 1;
+    }
+    if (!rpc.ihave_allowed.?) return;
     const topic = self.overlay.findTopic(ihave.topic);
     if (topic == null or !self.overlay.subscribed(topic.?)) return;
     const id_budget = constants.max_ihave_ids_per_heartbeat -| @as(usize, io.iwant_ids_sent);
@@ -205,12 +209,11 @@ fn broadcastIdontwant(self: *Gossipsub, topic: u16, id: MessageId, source: u16, 
 fn onIdontwant(self: *Gossipsub, index: u16, idontwant: protobuf.IdList, now: Now) void {
     const io = &self.sessions.rows[index].io;
     if (io.idontwant_recv >= constants.max_idontwant_per_heartbeat) return;
-    io.idontwant_recv += 1;
-    var examined: usize = 0;
+
     var it = idontwant.ids();
     while (it.next() catch return) |id_bytes| {
-        if (examined >= constants.dont_send_cap) break;
-        examined += 1;
+        if (io.idontwant_recv >= constants.max_idontwant_per_heartbeat) break;
+        io.idontwant_recv += 1;
         if (id_bytes.len != constants.message_id_length) continue;
         self.sessions.suppress(index, id_bytes[0..constants.message_id_length].*, now.millis(), constants.mcache_len * self.options.heartbeat_interval_ms);
     }

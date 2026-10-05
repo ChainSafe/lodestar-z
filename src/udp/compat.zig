@@ -135,7 +135,7 @@ pub fn sendManyNative(io: std.Io, handle: net.Socket.Handle, messages: []const S
 pub fn sendError(errno: std.posix.E) SendError {
     return switch (errno) {
         .SUCCESS => unreachable,
-        .PERM => error.DestinationRefused,
+        .PERM, .INVAL => error.DestinationRefused,
         .ACCES => error.AccessDenied,
         .ALREADY => error.FastOpenAlreadyInProgress,
         .CONNRESET => error.ConnectionResetByPeer,
@@ -147,7 +147,7 @@ pub fn sendError(errno: std.posix.E) SendError {
         .HOSTUNREACH => error.HostUnreachable,
         .NETUNREACH => error.NetworkUnreachable,
         .NETDOWN => error.NetworkDown,
-        .BADF, .DESTADDRREQ, .FAULT, .INVAL, .ISCONN, .NOTSOCK, .OPNOTSUPP => |err| std.Io.Threaded.errnoBug(err),
+        .BADF, .DESTADDRREQ, .FAULT, .ISCONN, .NOTSOCK, .OPNOTSUPP => |err| std.Io.Threaded.errnoBug(err),
         else => |err| std.posix.unexpectedErrno(err),
     };
 }

@@ -103,10 +103,9 @@ export interface NativeGossipProcessorLimit {
 }
 
 export interface NativeGossipStartupPolicy {
-  /** Fixed limits in NativeTopicKind declaration order. */
-  processor: readonly NativeGossipProcessorLimit[];
+  processor: Readonly<Record<NativeTopicKind, NativeGossipProcessorLimit>>;
   /** Outstanding decoded payloads and messages, held until host completion. Requires processor. */
-  execution?: readonly NativeGossipProcessorLimit[];
+  execution?: Readonly<Record<NativeTopicKind, NativeGossipProcessorLimit>>;
   heartbeatIntervalMs: bigint;
   iwantFollowupMs: bigint;
   idontwantMinDataSize: number;
@@ -402,6 +401,8 @@ export type NativeRequestError = Error &
         code: "NetworkRequestFailed";
         reason: NativeRequestFailure;
         phase: NativeRequestPhase | null;
+        /** Native already recorded this fault against the peer. */
+        peerFault: "protocol" | "non_completion" | null;
         detail: string | null;
         context: Uint8Array | null;
         peerStatus: number | null;

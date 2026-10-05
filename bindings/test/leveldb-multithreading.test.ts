@@ -10,13 +10,13 @@ it("validates engine option ranges even when joining an existing database", asyn
   await withPath(async (path) => {
     const first = await LevelDb.open(path, {multithreading: true});
     try {
-      for (const options of [{maxOpenFiles: 19}, {writeBufferBytes: 65535}]) {
+      for (const options of [{maxOpenFiles: 73}, {writeBufferBytes: 65535}]) {
         await expect(LevelDb.open(path, {...options, multithreading: true})).rejects.toMatchObject({
           code: "InvalidOptions",
         });
       }
       const second = await LevelDb.open(path, {
-        maxOpenFiles: 20,
+        maxOpenFiles: 74,
         multithreading: true,
         writeBufferBytes: 65536,
       });

@@ -1,5 +1,6 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test} from "vitest";
+import type {NativeGossipProcessorLimit, NativeTopicKind} from "../src/network.js";
 import type {
   NativeAction,
   NativeGossipDependencyCheck,
@@ -18,6 +19,7 @@ import {
   settleOnly,
   startRuntime,
   subscriptions,
+  topicKinds,
   topicName,
   waitForGossipReady,
 } from "./utils/network.js";
@@ -25,6 +27,16 @@ import {incomingPair} from "./utils/network-incoming.js";
 
 const BLOCK = topicName();
 const ATTESTATION = topicName("beacon_attestation_0");
+
+function limits(
+  make: (index: number) => NativeGossipProcessorLimit,
+  length = topicKinds.length
+): Record<NativeTopicKind, NativeGossipProcessorLimit> {
+  return Object.fromEntries(topicKinds.slice(0, length).map((kind, index) => [kind, make(index)])) as Record<
+    NativeTopicKind,
+    NativeGossipProcessorLimit
+  >;
+}
 
 function classify(handle: NativeGossipHandle, available: boolean): NativeAction {
   return {available, handle, type: "classify"};
@@ -41,7 +53,7 @@ test.each([
   {bytes: 32 * 1024 * 1024, items: 8, length: 13},
 ])("rejects incompatible processor plan %j before allocation", ({length, items, bytes}) => {
   const config = applicationConfig();
-  config.gossipPolicy.processor = Array.from({length}, () => ({bytes, items}));
+  config.gossipPolicy.processor = limits(() => ({bytes, items}), length);
   expect(() => startRuntime(config, () => undefined)).toThrow("InvalidGossipProcessorLimits");
 });
 
@@ -52,8 +64,8 @@ test.each([
 ])("rejects unusable execution limits %j before starting the owner", (limit) => {
   const config = applicationConfig();
   config.resources.nativeBudgetBytes = 512 * 1024 * 1024;
-  config.gossipPolicy.processor = Array.from({length: 13}, () => ({bytes: 16 * 1024 * 1024, items: 8}));
-  config.gossipPolicy.execution = Array.from({length: 13}, () => limit);
+  config.gossipPolicy.processor = limits(() => ({bytes: 16 * 1024 * 1024, items: 8}));
+  config.gossipPolicy.execution = limits(() => limit);
   expect(() => startRuntime(config, () => undefined)).toThrow();
 });
 
@@ -95,7 +107,7 @@ async function checks(runtime: NativeNetworkApplicationRuntime, count: number) {
 test("native processor retains dependencies, protects blocks, batches ready work and bounds future slots", async () => {
   const pair = await incomingPair(undefined, undefined, (left, right) => {
     for (const config of [left, right]) {
-      config.gossipPolicy.processor = Array.from({length: 13}, (_, kind) => ({
+      config.gossipPolicy.processor = limits((kind) => ({
         bytes: (kind === 0 || kind === 12 ? 16 : kind === 4 ? 4 : 1) * 1024 * 1024,
         items: 8,
       }));
@@ -219,7 +231,7 @@ test("native processor retains dependencies, protects blocks, batches ready work
 test("expired validation execution remains visible until late host completion", async () => {
   const pair = await incomingPair(undefined, undefined, (left, right) => {
     for (const config of [left, right]) {
-      config.gossipPolicy.processor = Array.from({length: 13}, (_, kind) => ({
+      config.gossipPolicy.processor = limits((kind) => ({
         bytes: (kind === 0 || kind === 12 ? 16 : kind === 4 ? 4 : 1) * 1024 * 1024,
         items: 8,
       }));

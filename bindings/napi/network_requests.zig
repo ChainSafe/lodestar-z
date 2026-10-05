@@ -14,7 +14,7 @@ pub const Terminal = union(enum) {
     done,
     closed,
     rejected: Rejection,
-    failed: struct { reason: rr.ReqResp.Failure, phase: ?rr.ReqResp.RequestPhase },
+    failed: struct { reason: rr.ReqResp.Failure, phase: ?rr.ReqResp.RequestPhase, peer_fault: ?@FieldType(rr.ReqResp.PeerFault, "kind") = null },
 };
 pub const Rejection = enum { disconnected, protocol_disabled, invalid_request, invalid_request_options, too_many_requests, slots_exhausted, negotiation_table_full, transport };
 pub const Chunk = struct { len: usize, fork: ?@FieldType(n.types.ForkEntry, "fork") };
@@ -379,7 +379,8 @@ pub fn capture(runtime: *Runtime, events: []const rr.ReqResp.Event, now: n.Now) 
                     @memcpy(cell.peer_message[0..message.len], message);
                     cell.peer_message_len = @intCast(message.len);
                     cell.native = null;
-                    cell.terminal = .{ .failed = .{ .reason = failed.reason, .phase = failed.phase } };
+                    const fault = core.protocols.reqresp.peerFault(event);
+                    cell.terminal = .{ .failed = .{ .reason = failed.reason, .phase = failed.phase, .peer_fault = if (fault) |value| value.kind else null } };
                 },
                 else => unreachable,
             }

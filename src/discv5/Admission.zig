@@ -19,8 +19,9 @@ pub const global_quota: Quota = .{ .interval_ms = 50, .burst = 20 };
 // Packet and expected-response stages each permit two complete NODES exchanges per burst.
 pub const packet_source_quota: Quota = .{ .interval_ms = 25, .burst = 2 * (types.findnode_response_packets_max + 2) };
 pub const packet_global_quota: Quota = .{ .interval_ms = 10, .burst = 4 * packet_source_quota.burst };
-pub const record_source_quota: Quota = .{ .interval_ms = 40, .burst = 2 * types.findnode_result_max };
-pub const record_global_quota: Quota = .{ .interval_ms = 10, .burst = 4 * types.findnode_result_max };
+pub const record_source_quota: Quota = .{ .interval_ms = 5, .burst = 2 * types.findnode_result_max };
+// The default 64 call slots can each return 16 useful records within a one-second timeout.
+pub const record_global_quota: Quota = .{ .interval_ms = 1, .burst = 64 * types.findnode_result_max };
 
 fn quotas(stage: Stage) struct { source: Quota, global: Quota } {
     return switch (stage) {
@@ -130,7 +131,7 @@ comptime {
     std.debug.assert(source_quota.interval_ms * source_quota.burst == 1_000);
     std.debug.assert(global_quota.interval_ms * global_quota.burst == 1_000);
     std.debug.assert(@sizeOf(Source) <= 40);
-    std.debug.assert(source_capacity <= 1_024);
+    std.debug.assert(source_capacity <= 2_048);
 }
 
 test {

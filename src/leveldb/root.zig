@@ -25,8 +25,15 @@ pub const Options = struct {
     error_if_exists: bool = false,
     cache_bytes: usize = 8 * 1024 * 1024,
     write_buffer_bytes: usize = 4 * 1024 * 1024,
-    max_open_files: u32 = 64,
+    max_open_files: u32 = 1000,
     clear_max_entries: u64 = std.math.maxInt(u32),
+
+    pub fn validate(options: *const Options) error{InvalidOptions}!void {
+        if (options.cache_bytes > 1024 * 1024 * 1024 or
+            options.write_buffer_bytes < 64 * 1024 or options.write_buffer_bytes > 1024 * 1024 * 1024 or
+            options.max_open_files < 74 or options.max_open_files > 4096 or
+            options.clear_max_entries > std.math.maxInt(u32)) return error.InvalidOptions;
+    }
 };
 pub const Operation = struct { key: []const u8, value: ?[]const u8 };
 pub const RangeOptions = ranges.Options;
@@ -50,10 +57,7 @@ pub const Database = struct {
     /// POSIX process-scoped engine locks do not enforce this obligation between independent library copies.
     pub fn open(allocator: Allocator, path: [:0]const u8, options: Options, diagnostics: ?*Diagnostics) !Database {
         try checkPath(path);
-        if (options.cache_bytes > 1024 * 1024 * 1024 or
-            options.write_buffer_bytes < 64 * 1024 or options.write_buffer_bytes > 1024 * 1024 * 1024 or
-            options.max_open_files < 20 or options.max_open_files > 4096 or
-            options.clear_max_entries > std.math.maxInt(u32)) return error.InvalidOptions;
+        try options.validate();
         var raw_options = try raw.Options.create();
         defer raw_options.destroy();
         var cache = try raw.Cache.createLru(options.cache_bytes);

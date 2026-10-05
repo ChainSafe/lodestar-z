@@ -8,6 +8,7 @@ const ItemKind = std.meta.Tag(protobuf.Item);
 const delivery = @import("delivery.zig");
 const frame = @import("frame.zig");
 const test_support = @import("test_support.zig");
+const wire = @import("../wire/protobuf.zig");
 pub const data_capacity = delivery.per_peer_limit;
 pub const control_frames = 128;
 pub const critical_frames = 2 * constants.topics_cap;
@@ -131,6 +132,10 @@ pub const encodePrefix = storage.encodePrefix;
 
 pub const Outbox = struct {
     control: ControlQueue,
+    gossip: []u8 = &.{},
+    gossip_len: usize = 0,
+    gossip_ids: usize = 0,
+    history_expired: bool = false,
     critical: FrameQueue(critical_frames),
     data: delivery.Queue,
     active: enum { none, critical, control, data } = .none,
@@ -201,6 +206,40 @@ pub const Outbox = struct {
             else => false,
         };
         return self.appendControl(control.encode(scratch), critical, now_ms);
+    }
+
+    /// Accumulates the heartbeat's topic advertisements into one control RPC per peer.
+    pub fn gossipTopic(self: *Outbox, name: []const u8, ids: []const topic.MessageId) void {
+        const body_len = wire.bytesFieldSize(1, name.len) + ids.len * wire.bytesFieldSize(2, constants.message_id_length);
+        const entry_len = wire.bytesFieldSize(1, body_len);
+        if (self.gossip_ids + ids.len > constants.max_ihave_ids_per_heartbeat or
+            self.gossip.len < 10 or entry_len > self.gossip.len - 10 - self.gossip_len)
+        {
+            self.dropped(.control_bytes);
+            return;
+        }
+        var writer = protobuf.Writer.init(self.gossip[10 + self.gossip_len ..]);
+        writer.tag(1, protobuf.wire_len);
+        writer.varint(body_len);
+        writer.bytesField(1, name);
+        for (ids) |id| protobuf.writeIhaveId(&writer, &id);
+        self.gossip_len += writer.len;
+        self.gossip_ids += ids.len;
+    }
+
+    pub fn finishGossip(self: *Outbox, now_ms: u64) bool {
+        if (self.gossip_len == 0) return false;
+        var prefix: [10]u8 = undefined;
+        var writer = protobuf.Writer.init(&prefix);
+        writer.varint(wire.bytesFieldSize(3, self.gossip_len));
+        writer.tag(3, protobuf.wire_len);
+        writer.varint(self.gossip_len);
+        const begin = 10 - writer.len;
+        @memcpy(self.gossip[begin..10], writer.written());
+        const result = self.appendControl(self.gossip[begin .. 10 + self.gossip_len], false, now_ms);
+        self.gossip_len = 0;
+        self.gossip_ids = 0;
+        return result != null;
     }
 
     pub fn inject(self: *Outbox, bytes: []const u8, now_ms: u64) bool {
@@ -305,6 +344,7 @@ pub const Outbox = struct {
         // Receipt tokens can still identify sent recovery promises on the same transport.
         self.* = .{
             .control = self.control,
+            .gossip = self.gossip,
             .critical = self.critical,
             .data = self.data,
             .sequence = self.sequence,
@@ -317,6 +357,8 @@ pub const Outbox = struct {
         self.subscription_dirty.setRangeValue(.{ .start = 0, .end = self.subscription_dirty.bit_length }, false);
         self.control.reset();
         self.critical.reset();
+        self.gossip_len = 0;
+        self.gossip_ids = 0;
     }
 
     pub fn cancelStream(self: *Outbox, store: *storage.Store) void {
@@ -329,6 +371,9 @@ pub const Outbox = struct {
         self.active = .none;
         self.control.reset();
         self.critical.reset();
+        self.gossip_len = 0;
+        self.gossip_ids = 0;
+        self.history_expired = false;
         self.progress_ms = null;
         self.ready = false;
         self.blocked_since = null;

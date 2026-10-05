@@ -607,3 +607,24 @@ test "engine stopped admission preserves streams and close progress on existing 
     try std.testing.expect(closed.len > 0);
     try std.testing.expect(closed[closed.len - 1] == .closed);
 }
+
+test "engine prefix admission leaves handshake room for an unrelated network" {
+    var server = try initAdmissionEngine(&.{ server_address, server_ip6 }, 1);
+    defer server.deinit();
+    server.limits.handshaking_per_prefix_max = 1;
+    var first_client = try initAdmissionEngine(&.{ client_address, null }, 2);
+    defer first_client.deinit();
+    _ = try admitSource(&server, &first_client, &client_address);
+    var neighbor = client_address;
+    neighbor.ip4.octets[3] += 1;
+    var second_client = try initAdmissionEngine(&.{ neighbor, null }, 3);
+    defer second_client.deinit();
+    const handle = try second_client.dial(&server_address, server.tls.local_peer_id, admission_now);
+    var packet: [constants.datagram_size_max]u8 = undefined;
+    var response: [constants.datagram_size_max]u8 = undefined;
+    const initial = second_client.sendOne(handle.index, admission_now, &packet).?;
+    try std.testing.expect(server.receive(initial.bytes, &neighbor, admission_now, &response) == .dropped);
+    neighbor.ip4.octets[2] +%= 1;
+    try std.testing.expect(server.receive(initial.bytes, &neighbor, admission_now, &response) == .retry);
+    try std.testing.expectEqual(@as(u16, 1), server.registry.handshaking);
+}

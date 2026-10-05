@@ -480,8 +480,8 @@ pub const NetworkCore = struct {
         self.protocols.router.setCapabilities(prepared.capabilities);
         const pm = &self.peer_manager;
         if (!std.meta.eql(pm.local.fork, prepared.local.fork)) {
-            for (0..pm.control.connections.len) |index| {
-                const stale = pm.revalidateConnection(index, now) orelse continue;
+            var cursor: usize = 0;
+            while (pm.nextRevalidation(&cursor, now)) |stale| {
                 self.control_protocol.cancel(&self.protocols.reqresp, stale.peer, stale.conn, now);
             }
         }
@@ -722,14 +722,7 @@ pub const NetworkCore = struct {
         for ([_][]const rr.ReqResp.Event{ outputs.application[0..counts.application], controls[0..counts.control] }) |batch| {
             for (batch) |event| {
                 const fault = self.protocols.reqresp.peerFault(event) orelse continue;
-                const peer = pm.catalog.find(fault.identity) orelse continue;
-                switch (fault.kind) {
-                    .protocol => _ = pm.reportPeer(peer, .low_tolerance, now),
-                    .non_completion => {
-                        _ = pm.catalog.nonCompletion(peer, now.millis());
-                        pm.selection_revision = null;
-                    },
-                }
+                pm.requestFault(&fault, now);
             }
         }
         pm.identified(identify_results[0..counts.identify]);
@@ -808,10 +801,9 @@ pub const NetworkCore = struct {
                 requests.respond(reqresp, peer, request, &pm.local, now);
             },
             else => {
-                const index = requests.result(reqresp, event.*, now) orelse continue;
-                const reply = requests.operations[index].reply();
-                pm.controlReplied(&reply, event.*, now, self.current_slot);
-                requests.settle(reqresp, &self.protocols.router, &self.transport.engine, index, event.*, now);
+                const result = requests.result(reqresp, event.*, now) orelse continue;
+                pm.controlReplied(&result.reply, event.*, now, self.current_slot);
+                requests.settle(reqresp, &self.protocols.router, &self.transport.engine, result.index, event.*, now);
             },
         };
     }

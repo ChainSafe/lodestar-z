@@ -550,38 +550,39 @@ fn dispatchResponse(
 ) Error!Event {
     const handle = try self.calls.match(peer, &decoded, now_ms);
     try self.calls.checkResponseNonce(handle, nonce);
+    var filtered = decoded;
     const parsed_records = switch (decoded) {
         .nodes => |nodes| blk: {
-            if (nodes.enrs.len != 0 and !self.channel.admission.allowRecords(&peer.address, @intCast(nodes.enrs.len), now_ms))
+            for (nodes.enrs, scratch.node_ids[0..nodes.enrs.len]) |raw, *node_id|
+                node_id.* = try enr.Record.unverifiedNodeId(raw);
+            const selected = try self.calls.selectNodes(handle, scratch.node_ids[0..nodes.enrs.len]);
+            if (selected.count() != 0 and !self.channel.admission.allowRecords(&peer.address, @intCast(selected.count()), now_ms))
                 return error.RecordAdmissionLimited;
-            break :blk try validateNodeRecords(nodes.enrs, scratch);
+            var count: usize = 0;
+            for (nodes.enrs, 0..) |raw, index| {
+                if (!selected.isSet(index)) continue;
+                scratch.node_records[count] = try enr.Record.init(raw);
+                scratch.node_ids[count] = scratch.node_records[count].node_id;
+                scratch.message_decode.enrs[count] = raw;
+                count += 1;
+            }
+            filtered.nodes.enrs = scratch.message_decode.enrs[0..count];
+            break :blk scratch.node_records[0..count];
         },
         else => &.{},
     };
     const match_result = try self.calls.accept(
         handle,
-        &decoded,
+        &filtered,
         scratch.node_ids[0..parsed_records.len],
         nonce,
     );
-    var matched = match_result.matched;
-    const node_records = if (parsed_records.len == 0)
-        parsed_records
-    else blk: {
-        const filtered = retainAcceptedNodeRecords(
-            decoded.nodes.enrs,
-            parsed_records,
-            match_result.accepted_nodes,
-            scratch,
-        );
-        matched.response.nodes.enrs = filtered.raw;
-        break :blk filtered.records;
-    };
+    std.debug.assert(match_result.accepted_nodes.count() == parsed_records.len);
     return .{ .response = .{
         .peer = peer,
-        .matched = matched,
+        .matched = match_result.matched,
         .record = record,
-        .node_records = node_records,
+        .node_records = parsed_records,
     } };
 }
 
@@ -631,46 +632,6 @@ fn rejectReason(err: Error) ?types.RejectReason {
 
 fn requestEvent(peer: types.Endpoint, request: Request, record: ?enr.Record) Event {
     return .{ .request = .{ .peer = peer, .message = request, .record = record } };
-}
-
-fn validateNodeRecords(
-    raw_records: []const []const u8,
-    scratch: *Scratch,
-) Error![]const enr.Record {
-    if (raw_records.len > scratch.node_records.len) return error.InvalidMessage;
-    for (raw_records, scratch.node_records[0..raw_records.len]) |raw, *record| {
-        record.* = try enr.Record.init(raw);
-    }
-    for (scratch.node_records[0..raw_records.len], scratch.node_ids[0..raw_records.len]) |
-        *record,
-        *node_id,
-    | node_id.* = record.node_id;
-    return scratch.node_records[0..raw_records.len];
-}
-
-const FilteredNodeRecords = struct {
-    raw: []const []const u8,
-    records: []const enr.Record,
-};
-
-fn retainAcceptedNodeRecords(
-    raw_records: []const []const u8,
-    parsed_records: []const enr.Record,
-    accepted: CallTable.AcceptedNodes,
-    scratch: *Scratch,
-) FilteredNodeRecords {
-    std.debug.assert(raw_records.len == parsed_records.len);
-    var retained: usize = 0;
-    for (raw_records, parsed_records, 0..) |raw, record, index| {
-        if (!accepted.isSet(index)) continue;
-        scratch.message_decode.enrs[retained] = raw;
-        scratch.node_records[retained] = record;
-        retained += 1;
-    }
-    return .{
-        .raw = scratch.message_decode.enrs[0..retained],
-        .records = scratch.node_records[0..retained],
-    };
 }
 
 fn deadline(now_ms: u64, timeout_ms: u64) Error!u64 {

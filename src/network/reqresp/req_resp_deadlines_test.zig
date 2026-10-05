@@ -423,3 +423,41 @@ test "reqresp partial response writes cannot renew the chunk deadline" {
     try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .application = &events }).application);
     try std.testing.expect(events[0].failed.reason == .timeout);
 }
+
+test "reqresp serving expires across progressing chunks without blaming host work on the peer" {
+    var setup: Pair = .{};
+    try setup.init(.{}, .{ .progress_timeout_ms = 80, .host_timeout_ms = 80 });
+    defer setup.deinit();
+    const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_range_v2.info().response_max);
+    defer std.testing.allocator.free(sink);
+    var request: [24]u8 = undefined;
+    const outbound = try requestBlocks(&setup, &request, 4, sink);
+    try waitForRequest(&setup);
+    const incoming = setup.serverEvents()[0].request.request;
+    const started = setup.shared.pair.now.millis();
+    const block: [5000]u8 = @splat(0);
+    for (0..2) |_| {
+        setup.shared.pair.advance(60);
+        try setup.shared.server.reqresp.respond(incoming, &block, .{ .digest = deneb_digest, .fork = .deneb }, setup.shared.pair.now);
+        var sent = false;
+        var received = false;
+        for (0..30) |_| {
+            try setup.pumpOnce();
+            for (setup.serverEvents()) |event| if (event == .chunk_sent) {
+                sent = true;
+            };
+            for (setup.clientEvents()) |event| if (event == .chunk) {
+                received = true;
+                try std.testing.expect(setup.shared.client.reqresp.consume(outbound, setup.shared.pair.now));
+            };
+            if (sent and received) break;
+        }
+        try std.testing.expect(sent and received);
+    }
+    setup.shared.pair.now.monotonic = time.milliseconds(started + 160);
+    try setup.pumpOnce();
+    try std.testing.expectEqual(reqresp.Failure.host_timeout, firstFailure(setup.serverEvents()).?);
+    try std.testing.expect(setup.shared.server.reqresp.peerFault(setup.serverEvents()[0]) == null);
+    for (0..3) |_| try setup.pumpOnce();
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
+}

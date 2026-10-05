@@ -115,6 +115,17 @@ pub const Record = struct {
         return fromParsed(data, &parsed, &key);
     }
 
+    /// Derives the claimed identity without authenticating the record. Only use it to reject
+    /// irrelevant records before init; accepting one still requires signature verification.
+    pub fn unverifiedNodeId(data: []const u8) Error!types.NodeId {
+        const parsed = try parse(data);
+        const key = crypto.PublicKey.fromSec1(&parsed.public_key) catch return error.InvalidPublicKey;
+        const uncompressed = key.toUncompressedSec1();
+        var node_id: types.NodeId = undefined;
+        Keccak256.hash(uncompressed[1..], &node_id, .{});
+        return node_id;
+    }
+
     fn fromSigned(data: []const u8, key_pair: *const crypto.KeyPair) Error!Record {
         const parsed = try parse(data);
         if (!std.mem.eql(u8, &parsed.public_key, &crypto.compressedPublicKey(key_pair)))

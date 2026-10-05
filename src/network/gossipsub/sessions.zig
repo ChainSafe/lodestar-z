@@ -53,6 +53,21 @@ pub const Sessions = struct {
     /// a local so ReleaseSafe does not fill it for every control frame.
     control_scratch: ControlScratch = undefined,
 
+    /// Selects a larger incomplete frame to discard before refusing a smaller receiver.
+    pub fn receiveVictim(self: *const Sessions, incoming: u16) ?u16 {
+        const current = &self.rows[incoming].io;
+        var largest = current.overflow.pages;
+        var victim: ?u16 = null;
+        for (self.rows, 0..) |*session, index| {
+            const io = &session.io;
+            if (index == incoming or !session.active or io.rpc != null or io.discarding) continue;
+            if (io.overflow.pages <= largest) continue;
+            largest = io.overflow.pages;
+            victim = @intCast(index);
+        }
+        return victim;
+    }
+
     /// An opening or a close is ready work. Callers settle any other change.
     pub fn setOutbound(self: *Sessions, index: u16, outbound: peer_session.Outbound) void {
         assert(self.rows[index].active);

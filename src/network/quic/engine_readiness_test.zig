@@ -20,7 +20,7 @@ fn drainEvents(pair: *Pair, engine: *Engine) usize {
 
 test "engine idle connections cost no timer, collect or flush visits" {
     var pair: Pair = .{};
-    try pair.init(.{}, .{ .handshaking_per_source_max = 32 });
+    try pair.init(.{}, .{ .handshaking_per_prefix_max = 32, .handshaking_per_source_max = 32 });
     defer pair.deinit();
     for (0..32) |_| _ = try pair.dial();
     try pair.pump();

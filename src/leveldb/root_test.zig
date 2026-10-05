@@ -388,7 +388,7 @@ test "open rejects invalid paths and options before creating database" {
         .{ .cache_bytes = 1024 * 1024 * 1024 + 1 },
         .{ .write_buffer_bytes = 64 * 1024 - 1 },
         .{ .write_buffer_bytes = 1024 * 1024 * 1024 + 1 },
-        .{ .max_open_files = 19 },
+        .{ .max_open_files = 73 },
         .{ .max_open_files = 4097 },
     }) |options| {
         try testing.expectError(error.InvalidOptions, leveldb.Database.open(
@@ -402,7 +402,7 @@ test "open rejects invalid paths and options before creating database" {
         .create_if_missing = false,
         .cache_bytes = 0,
         .write_buffer_bytes = 64 * 1024,
-        .max_open_files = 20,
+        .max_open_files = 74,
     }, null);
     fixture.closed = false;
     try fixture.db.put("key", "value", false, null);

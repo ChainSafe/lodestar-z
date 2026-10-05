@@ -251,6 +251,24 @@ pub fn match(
     return .{ .index = @intCast(index), .generation = entry.generation };
 }
 
+/// Selects new identities at requested distances without advancing the call. Authenticate
+/// selected records before accept; unsigned claims may only exclude work.
+pub fn selectNodes(self: *const CallTable, handle: Handle, node_ids: []const types.NodeId) Error!AcceptedNodes {
+    const entry = self.get(handle) orelse return error.StaleHandle;
+    if (entry.expected != .nodes) return error.UnexpectedResponse;
+    if (node_ids.len > types.findnode_result_max) return error.InvalidNodeCount;
+    const state = &entry.expected.nodes;
+    var selected = AcceptedNodes.empty;
+    for (node_ids, 0..) |*node_id, index| {
+        if (state.accepted + selected.count() == types.findnode_result_max) break;
+        if (!state.distances.isSet(types.logDistance(&entry.peer.node_id, node_id))) continue;
+        if (containsNode(state.seen[0..state.accepted], node_id)) continue;
+        if (containsNode(node_ids[0..index], node_id)) continue;
+        selected.set(index);
+    }
+    return selected;
+}
+
 /// Applies a matched response. A non-terminal NODES fragment keeps the entry open, and
 /// `accepted_nodes` marks the records that were new and at a requested distance.
 pub fn accept(

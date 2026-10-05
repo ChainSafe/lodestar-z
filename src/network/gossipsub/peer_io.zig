@@ -12,6 +12,7 @@ pub const TimeoutReason = enum { subscriptions, receive_frame, send_queue, send_
 
 pub const ActiveRpc = struct {
     reader: protobuf.RpcReader,
+    ihave_allowed: ?bool = null,
     item: ?protobuf.RpcReader.ItemRange = null,
     pub fn consumeItem(self: *ActiveRpc) void {
         self.item = null;
@@ -39,15 +40,16 @@ pub const Deadlines = struct {
 
 pub const PeerIo = struct {
     pub fn bufferBytes(options: *const options_mod.Options) usize {
-        return options.control_bytes + options.critical_bytes + options.body_buffer_bytes + constants.read_scratch_len;
+        return 2 * options.control_bytes + 10 + options.critical_bytes + options.body_buffer_bytes + constants.read_scratch_len;
     }
 
     pub fn init(bytes: []u8, options: *const options_mod.Options, deliveries: *delivery.Pool) PeerIo {
         assert(bytes.len == bufferBytes(options));
         const critical = options.control_bytes;
-        const body = critical + options.critical_bytes;
+        const gossip = critical + options.critical_bytes;
+        const body = gossip + options.control_bytes + 10;
         const unread = body + options.body_buffer_bytes;
-        return .{ .tx = .{ .data = .{ .pool = deliveries }, .control = .{ .bytes = bytes[0..critical] }, .critical = .{ .bytes = bytes[critical..body] } }, .body = bytes[body..unread], .unread = bytes[unread..] };
+        return .{ .tx = .{ .data = .{ .pool = deliveries }, .control = .{ .bytes = bytes[0..critical] }, .critical = .{ .bytes = bytes[critical..gossip] }, .gossip = bytes[gossip..body] }, .body = bytes[body..unread], .unread = bytes[unread..] };
     }
 
     write_first: bool = false,
@@ -140,7 +142,7 @@ pub const PeerIo = struct {
                 since +| options.pressure_timeout_ms;
         }
         if (self.tx.oldest()) |since| {
-            result.values[@intFromEnum(TimeoutReason.send_queue)] = since +| options.tx_timeout_ms;
+            result.values[@intFromEnum(TimeoutReason.send_queue)] = if (self.tx.history_expired) 0 else since +| options.tx_timeout_ms;
             if (self.tx.progress_ms) |progress| result.values[@intFromEnum(TimeoutReason.send_progress)] = progress +| options.large_frame_timeout_ms;
         }
         return result;

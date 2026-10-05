@@ -13,7 +13,6 @@ import {
   settleOnly,
   startRuntime,
   subscriptions,
-  topicKinds,
   topicName,
   waitForGossipReady,
 } from "./utils/network.js";
@@ -468,7 +467,7 @@ for (const hoodi of [false, true]) {
           });
         }
         // One peer holds at most half of a kind's processor items pending validation.
-        const held = config.gossipPolicy.processor[topicKinds.indexOf("beacon_block")].items / 2;
+        const held = config.gossipPolicy.processor.beacon_block.items / 2;
         if (!hoodi) {
           for (let i = 0; i < 64; i++)
             await peer.command("gossipPublish", {length: 4000, seed: 900 + i, slot: 100, topic: firstTopic});

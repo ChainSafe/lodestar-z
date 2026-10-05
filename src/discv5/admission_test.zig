@@ -58,14 +58,15 @@ test "record verification charges records rather than packets without spending r
     var admission = try Admission.init(std.testing.allocator);
     defer admission.deinit(std.testing.allocator);
     var address = types.Address{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } };
-    for (0..2) |_| try std.testing.expect(admission.allowRecords(&address, types.findnode_result_max, 0));
-    try std.testing.expect(!admission.allowRecords(&address, 1, 39));
+    for (0..Admission.record_global_quota.burst / Admission.record_source_quota.burst) |i| {
+        address.ip4.octets[3] = @intCast(i + 1);
+        for (0..2) |_| try std.testing.expect(admission.allowRecords(&address, types.findnode_result_max, 0));
+        try std.testing.expect(!admission.allowRecords(&address, 1, 0));
+    }
     address.ip4.octets[3] += 1;
-    for (0..2) |_| try std.testing.expect(admission.allowRecords(&address, types.findnode_result_max, 0));
-    address.ip4.octets[3] += 1;
-    try std.testing.expect(!admission.allowRecords(&address, 1, 9));
-    try std.testing.expect(admission.allowRecords(&address, 1, 10));
-    try std.testing.expect(admission.allow(.handshake, &address, 10));
+    try std.testing.expect(!admission.allowRecords(&address, 1, 0));
+    try std.testing.expect(admission.allowRecords(&address, 1, Admission.record_global_quota.interval_ms));
+    try std.testing.expect(admission.allow(.handshake, &address, 0));
 }
 
 test "packet quotas admit full response bursts and bound repeated traffic from established sources" {
@@ -123,4 +124,15 @@ test "discovery admission fails closed when a charge would overflow monotonic ti
     const source = types.Address{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } };
     try std.testing.expect(!admission.allow(.handshake, &source, std.math.maxInt(u64)));
     try std.testing.expectEqual(@as(u64, 0), admission.global[1].charged_until_ms);
+}
+
+test "record admission sustains three full responses per hundred milliseconds" {
+    var admission = try Admission.init(std.testing.allocator);
+    defer admission.deinit(std.testing.allocator);
+    for (0..100) |tick| {
+        for (0..3) |peer| {
+            const address: types.Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, @intCast(peer + 1) }, .port = 1 } };
+            try std.testing.expect(admission.allowRecords(&address, types.findnode_result_max, tick * 100));
+        }
+    }
 }

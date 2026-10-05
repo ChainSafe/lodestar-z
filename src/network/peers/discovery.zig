@@ -9,7 +9,6 @@ const control_values = @import("../control_values.zig");
 const advertisement = @import("../advertisement.zig");
 const Sockets = @import("udp").Sockets;
 const KeyPair = @import("../wire/keys.zig").KeyPair;
-const configuration = @import("../configuration.zig");
 const types_mod = @import("../types.zig");
 
 const Storage = struct {
@@ -114,7 +113,7 @@ pub const Discovery = struct {
     pub fn init(self: *Discovery, allocator: std.mem.Allocator, io: std.Io, options: Config, buffers: Sockets.Buffers, host: *const KeyPair, local: *const types.LocalState, fork_schedule: control_values.ForkSchedule, quic: [2]?types.Address, now_ms: u64) !void {
         var sockets = try Sockets.bind(io, options.bind);
         errdefer sockets.close(io);
-        configuration.requestBuffers(&sockets, buffers, .network_discovery);
+        sockets.requestBuffersLogged(buffers, .network_discovery);
         var udp_addresses: [2]?d.types.Address = .{ null, null };
         for (sockets.values, 0..) |socket, i| if (socket) |value| {
             udp_addresses[i] = d.types.Address.fromNetwork(value.address);

@@ -55,6 +55,8 @@ pub const Limits = struct {
     handshaking_max: u16 = bounds.handshaking_max,
     /// Concurrent inbound handshakes per IPv4 host or IPv6 /64, ignoring ports and interface.
     handshaking_per_source_max: u16 = bounds.handshaking_per_source_max,
+    /// Concurrent inbound handshakes per IPv4 /24 or IPv6 /56.
+    handshaking_per_prefix_max: u16 = 8,
     dialing_max: u16 = bounds.dialing_max,
     outbound_max: ?u16 = null,
     outbound_reserved: u16 = 0,
@@ -70,7 +72,7 @@ pub const Limits = struct {
         if (wanted.handshaking_max == 0 or wanted.handshaking_max > wanted.connections_max) {
             return error.InvalidLimits;
         }
-        if (wanted.handshaking_per_source_max == 0) return error.InvalidLimits;
+        if (wanted.handshaking_per_source_max == 0 or wanted.handshaking_per_prefix_max == 0) return error.InvalidLimits;
         const minimum_receive_budget = @as(u64, wanted.connections_max) * bounds.connection_window_min;
         if (wanted.receive_budget_bytes < minimum_receive_budget) return error.InvalidLimits;
         if (wanted.idle_timeout_ms > bounds.timeout_ms_max or wanted.handshake_timeout_ms > bounds.timeout_ms_max or
@@ -571,7 +573,9 @@ pub fn receive(
     if (self.registry.handshaking >= self.limits.handshaking_max) {
         return .dropped;
     }
-    if (self.handshakingFromSource(from) >= self.limits.handshaking_per_source_max) {
+    if (self.handshakingFromSource(from, false) >= self.limits.handshaking_per_source_max or
+        self.handshakingFromSource(from, true) >= self.limits.handshaking_per_prefix_max)
+    {
         return .dropped;
     }
     if (!retry.isLocal(header.token)) {
@@ -1043,7 +1047,7 @@ fn slotForPeer(self: *const Engine, from: *const Address) ?u16 {
     return found;
 }
 
-fn handshakingFromSource(self: *const Engine, from: *const Address) u16 {
+fn handshakingFromSource(self: *const Engine, from: *const Address, prefix: bool) u16 {
     assert(self.registry.active_len <= self.registry.active.len);
     var count: u16 = 0;
     for (self.registry.activeIndices()) |index| {
@@ -1051,12 +1055,12 @@ fn handshakingFromSource(self: *const Engine, from: *const Address) u16 {
         if (slot.state != .handshaking or slot.direction != .inbound) continue;
         const same_source = switch (slot.peer) {
             .ip4 => |peer| switch (from.*) {
-                .ip4 => |source| std.mem.eql(u8, &peer.octets, &source.octets),
+                .ip4 => |source| std.mem.eql(u8, peer.octets[0..if (prefix) @as(usize, 3) else 4], source.octets[0..if (prefix) @as(usize, 3) else 4]),
                 .ip6 => false,
             },
             .ip6 => |peer| switch (from.*) {
                 .ip4 => false,
-                .ip6 => |source| std.mem.eql(u8, peer.octets[0..8], source.octets[0..8]),
+                .ip6 => |source| std.mem.eql(u8, peer.octets[0..if (prefix) @as(usize, 7) else 8], source.octets[0..if (prefix) @as(usize, 7) else 8]),
             },
         };
         if (same_source) count += 1;

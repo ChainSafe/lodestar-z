@@ -19,7 +19,6 @@ import {
   metricValue,
   runChild,
   subscriptions,
-  topicKinds,
   topicName,
   unreachableConnect,
   waitForGossipReady,
@@ -28,7 +27,6 @@ import {BLOCKS} from "./utils/network-incoming.js";
 import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
 
 const TOPIC = topicName();
-const BLOCK = topicKinds.indexOf("beacon_block");
 
 function blockPayload(byte: number): Uint8Array {
   const bytes = new Uint8Array(4000).fill(byte);
@@ -147,7 +145,7 @@ test("a job's deferred handler runs only after the owner applied its verdicts, a
   });
   // The first peer publishes; the second receives what the facade forwards.
   const {network: facade, peers} = await facadeWithPeers(networkHost, 2, (config) => {
-    config.gossipPolicy.processor[BLOCK].items = 256;
+    config.gossipPolicy.processor.beacon_block.items = 256;
   });
   network = facade;
   const [publisher, receiver] = peers;

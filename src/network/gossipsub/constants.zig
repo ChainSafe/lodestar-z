@@ -57,7 +57,7 @@ pub const max_control_per_rpc: usize = 4_096;
 pub const max_ihave_per_heartbeat: usize = 10;
 pub const max_ihave_ids_per_heartbeat: usize = 5_000;
 pub const max_iwant_ids_per_rpc: usize = 5_000;
-pub const max_idontwant_per_heartbeat: usize = 10;
+pub const max_idontwant_per_heartbeat: usize = 512;
 pub const gossip_retransmission: u8 = 3;
 
 pub fn seenTtlMs(slots_per_epoch: u64, seconds_per_slot: u64) u64 {
@@ -69,7 +69,7 @@ pub const peers_cap: usize = 256;
 pub const retained_peers_cap: u16 = 512;
 pub const topics_cap: usize = 512;
 /// Message ids a single peer may suppress at once through IDONTWANT.
-pub const dont_send_cap: usize = 128;
+pub const dont_send_cap: usize = 512;
 
 /// Ordinary inbound frames use the body buffer; larger frames claim a shared lease.
 pub const body_buffer_len: usize = 64 * 1024;

@@ -506,7 +506,17 @@ pub fn maintainTopics(self: *Gossipsub, now: Now) void {
         if (timing.now(self.clock) -| start >= constants.maintenance_slice_target_ns) break;
         if (serviced == self.options.topics_per_pump) break;
     }
-    if (self.cycle.complete()) |epoch| self.messages.history.age(&self.messages.store, epoch);
+    if (self.cycle.complete()) |epoch| {
+        for (self.sessions.rows, 0..) |*session, index| {
+            if (session.active and session.io.tx.finishGossip(now.millis())) self.settle(@intCast(index));
+        }
+        self.messages.history.age(&self.messages.store, epoch);
+        for (self.sessions.rows, 0..) |*session, index| {
+            if (!session.active or !session.io.tx.data.hasExpiredHistory(&self.messages.store)) continue;
+            session.io.tx.history_expired = true;
+            self.settle(@intCast(index));
+        }
+    }
 }
 
 fn emitGossip(self: *Gossipsub, topic: u16, context: *const overlay_mod.Context) void {
@@ -522,7 +532,7 @@ fn emitGossip(self: *Gossipsub, topic: u16, context: *const overlay_mod.Context)
             const j = self.overlay.rng.random().uintLessThan(usize, count - i) + i;
             std.mem.swap(MessageId, &ids[i], &ids[j]);
         }
-        if (self.sessions.rows[peer].io.tx.submit(&.{ .ihave = .{ .topic = topic_str, .ids = ids[0..n] } }, &self.sessions.control_scratch, self.last_now_ms) != null) self.settle(@intCast(peer));
+        self.sessions.rows[peer].io.tx.gossipTopic(topic_str, ids[0..n]);
     }
 }
 

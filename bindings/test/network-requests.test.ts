@@ -468,12 +468,14 @@ stockTest(
       const surplus = runtime.request(id, BLOCKS, new Uint8Array(32), {expectedChunks: 0});
       await expect(surplus.next()).rejects.toMatchObject({
         code: "NetworkRequestFailed",
+        peerFault: null,
         phase: "response",
         reason: "too_many_chunks",
       });
       await peer.command("scenario", {count: 1, digest: "deadbeef", scenario: "chunks"});
       await expect(runtime.request(id, BLOCKS, new Uint8Array(32)).next()).rejects.toMatchObject({
         context: Uint8Array.of(222, 173, 190, 239),
+        peerFault: "protocol",
         phase: "response",
         reason: "unknown_context",
       });
