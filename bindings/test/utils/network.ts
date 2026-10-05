@@ -75,24 +75,33 @@ export function nextIncoming<T = NativeIncomingRequest>(runtime: {
  * Lodestar's processor plan for a small validator set, in topicKinds order. Each kind's byte weight exceeds its
  * largest compressed message on the test chain, so the weight sets the bytes.
  */
-function gossipProcessor(): NativeGossipProcessorLimit[] {
+function gossipProcessor(): Record<NativeTopicKind, NativeGossipProcessorLimit> {
   const items = [8, 2048, 128, 32, 32, 128, 128, 1024, 8, 8, 128, 256, 256];
   const byteWeights = [24, 8, 8, 1, 4, 1, 2, 2, 2, 2, 1, 8, 16];
-  return topicKinds.map((_, i) => ({bytes: byteWeights[i] * MIB, items: items[i]}));
+  return Object.fromEntries(
+    topicKinds.map((kind, i) => [kind, {bytes: byteWeights[i] * MIB, items: items[i]}])
+  ) as Record<NativeTopicKind, NativeGossipProcessorLimit>;
 }
 
 /** Lodestar's default host execution limits, capped by the processor items. */
-function gossipExecution(processor: readonly NativeGossipProcessorLimit[]): NativeGossipProcessorLimit[] {
+function gossipExecution(
+  processor: Record<NativeTopicKind, NativeGossipProcessorLimit>
+): Record<NativeTopicKind, NativeGossipProcessorLimit> {
   const byteWeights = [32, 4, 8, 1, 4, 1, 2, 2, 2, 2, 1, 8, 24];
   const itemWeights = [1, 8, 32, 1, 1, 1, 2, 4, 1, 1, 1, 4, 8];
   const byteTotal = byteWeights.reduce((sum, weight) => sum + weight, 0);
   const itemTotal = itemWeights.reduce((sum, weight) => sum + weight, 0);
   const itemBudget = 4096;
   const byteBudget = 64 * MIB;
-  return topicKinds.map((_, i) => ({
-    bytes: Math.floor((byteBudget * byteWeights[i]) / byteTotal),
-    items: Math.min(Math.floor((itemBudget * itemWeights[i]) / itemTotal), processor[i].items),
-  }));
+  return Object.fromEntries(
+    topicKinds.map((kind, i) => [
+      kind,
+      {
+        bytes: Math.floor((byteBudget * byteWeights[i]) / byteTotal),
+        items: Math.min(Math.floor((itemBudget * itemWeights[i]) / itemTotal), processor[kind].items),
+      },
+    ])
+  ) as Record<NativeTopicKind, NativeGossipProcessorLimit>;
 }
 
 export function networkConfig(): NativeRuntimeConfig {

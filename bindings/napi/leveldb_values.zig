@@ -60,9 +60,9 @@ pub fn parseOptions(value: Value) !leveldb.Options {
         .error_if_exists = try optionalBoolean(value, "errorIfExists", false),
         .cache_bytes = try optionalInteger(value, "cacheBytes", 8 * 1024 * 1024, 256 * 1024 * 1024),
         .write_buffer_bytes = try optionalInteger(value, "writeBufferBytes", 4 * 1024 * 1024, 64 * 1024 * 1024),
-        .max_open_files = @intCast(try optionalInteger(value, "maxOpenFiles", 64, 4096)),
+        .max_open_files = @intCast(try optionalInteger(value, "maxOpenFiles", 1000, 4096)),
     };
-    if (options.write_buffer_bytes < 64 * 1024 or options.max_open_files < 20) return error.InvalidOptions;
+    try options.validate();
     return options;
 }
 

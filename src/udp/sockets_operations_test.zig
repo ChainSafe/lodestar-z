@@ -382,3 +382,9 @@ test "UDP provider lifetime clears descriptors and telemetry without probing fab
     try std.testing.expect(sockets.localAddress().port() > 0);
     if (sockets.drops()[0]) |drops| try std.testing.expectEqual(@as(u64, 0), drops);
 }
+
+test "UDP refuses a destination with port zero without panicking" {
+    var socket = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer socket.close(std.testing.io);
+    try std.testing.expectError(error.DestinationRefused, socket.sendTo(std.testing.io, Address.fromNetwork(.{ .ip4 = .loopback(0) }), "x", payload_max));
+}

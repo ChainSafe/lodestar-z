@@ -297,7 +297,9 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
             const take = @min(io.unread_end - io.unread_start, peer.input, turn.budget.input);
             const result = io.feedUnread(&self.sessions.receive_pool, take, now.millis()) catch |err| {
                 if (err == error.ReceiveCapacity) {
-                    const work = discardInboundFrame(self, index);
+                    const victim = self.sessions.receiveVictim(index) orelse index;
+                    const work = discardInboundFrame(self, victim) + self.sessions.rows.len;
+                    if (victim != index) self.settle(victim);
                     turn.budget.work -|= work;
                     peer.work -|= work;
                     if (peer.work == 0 or turn.budget.work == 0) return;

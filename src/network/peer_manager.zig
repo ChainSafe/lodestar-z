@@ -243,10 +243,15 @@ pub const PeerManager = struct {
     pub fn controlSchedule(self: *const PeerManager, now: Now) types.Schedule {
         return self.control.schedule(&self.catalog, now);
     }
-    /// Revalidates the connection at this bounded cursor after a fork change. The caller cancels
+    /// Advances the cursor to the next connection needing revalidation after a fork change. The caller cancels
     /// the returned request; its reservation survives until the protocol's terminal event.
-    pub fn revalidateConnection(self: *PeerManager, index: usize, now: Now) ?peers.Control.Connection {
-        return self.control.revalidate(&self.catalog, index, self.local.fork, now);
+    pub fn nextRevalidation(self: *PeerManager, cursor: *usize, now: Now) ?peers.Control.Connection {
+        while (cursor.* < self.control.connections.len) {
+            const index = cursor.*;
+            cursor.* += 1;
+            if (self.control.revalidate(&self.catalog, index, self.local.fork, now)) |connection| return connection;
+        }
+        return null;
     }
     fn catalogDeadline(self: *PeerManager, now_ms: u64) ?u64 {
         self.counters.catalog_deadline_rows +|= self.catalog.rows.len;
@@ -451,6 +456,16 @@ pub const PeerManager = struct {
     pub fn reStatusPeers(self: *PeerManager, now: Now) void {
         self.control.reStatusPeers(&self.catalog, now);
     }
+    pub fn requestFault(self: *PeerManager, fault: *const ReqResp.PeerFault, now: Now) void {
+        const peer = self.catalog.find(fault.identity) orelse return;
+        switch (fault.kind) {
+            .protocol => _ = self.reportPeer(peer, .low_tolerance, now),
+            .non_completion => {
+                _ = self.catalog.nonCompletion(peer, now.millis());
+                self.selection_revision = null;
+            },
+        }
+    }
     pub fn reportPeer(
         self: *PeerManager,
         peer: t.PeerRef,
@@ -543,7 +558,7 @@ pub const PeerManager = struct {
     pub fn selectDials(
         self: *PeerManager,
         gossipsub: *gossip.Gossipsub,
-        engine: *Engine,
+        engine: *const Engine,
         now: Now,
         out: []peers.Dialing.SelectedDial,
     ) usize {

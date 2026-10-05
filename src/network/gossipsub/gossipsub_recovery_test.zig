@@ -44,7 +44,7 @@ fn expectControlFloodBounded(control_tag: u8) !void {
         try std.testing.expect(done);
         _ = g.sessions.finishFrame(io);
     }
-    try std.testing.expectEqual(@as(u16, 10), if (control_tag == 0x0a) io.ihave_recv else io.idontwant_recv);
+    try std.testing.expectEqual(@as(u16, if (control_tag == 0x0a) 10 else 0), if (control_tag == 0x0a) io.ihave_recv else io.idontwant_recv);
 }
 
 test "gossipsub bounds more than 65535 IHAVE controls per heartbeat" {
@@ -359,4 +359,45 @@ test "gossip recovery refusal restores promise slots and identity pins before re
     try std.testing.expectEqual(available, g.recovery.available());
     try std.testing.expect(std.mem.allEqual(u16, g.recovery.buckets, std.math.maxInt(u16)));
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[row.logical.index].pins);
+}
+
+test "gossip batches more than ten topic advertisements into one RPC" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const tx = &g.sessions.rows[peer.index].io.tx;
+    for (0..20) |index| {
+        const id: MessageId = @splat(@intCast(index));
+        tx.gossipTopic(test_topic, &.{id});
+    }
+    try std.testing.expectEqual(@as(usize, 0), tx.control.count);
+    try std.testing.expect(tx.finishGossip(1));
+    try std.testing.expectEqual(@as(usize, 1), tx.control.count);
+    var framed = protobuf.Reader.init(tx.control.segment());
+    const length = try framed.varint();
+    var reader = protobuf.RpcReader.init(tx.control.segment()[protobuf.varintLen(length)..]);
+    for (0..20) |index| {
+        const item = (try reader.next()).?;
+        try std.testing.expectEqualStrings(test_topic, item.ihave.topic);
+        var ids = item.ihave.ids();
+        try std.testing.expectEqualSlices(u8, &(@as(MessageId, @splat(@intCast(index)))), (try ids.next()).?);
+        try std.testing.expect(try ids.next() == null);
+    }
+    try std.testing.expect(try reader.next() == null);
+}
+
+test "gossip IDONTWANT admits a burst of ids across RPCs and bounds the total" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    var bytes: [32]u8 = undefined;
+    for (0..constants.max_idontwant_per_heartbeat + 1) |index| {
+        var id: MessageId = @splat(0);
+        std.mem.writeInt(u16, id[0..2], @intCast(index), .little);
+        var writer = protobuf.Writer.init(&bytes);
+        writer.bytesField(1, &id);
+        support.control(&g, peer.index, .{ .idontwant = .{ .body = writer.written() } }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
+        try std.testing.expectEqual(index < constants.max_idontwant_per_heartbeat, g.sessions.suppresses(peer.index, id, 1));
+    }
+    try std.testing.expectEqual(constants.max_idontwant_per_heartbeat, g.sessions.rows[peer.index].io.idontwant_recv);
 }

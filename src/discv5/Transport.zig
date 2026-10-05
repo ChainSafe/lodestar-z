@@ -183,6 +183,10 @@ pub fn advance(self: *Transport, io: std.Io, now_ms: u64, expired_calls: []CallT
     result.progress.sessions_expired = expired.sessions;
     const datagram = input catch |err| switch (err) {
         error.Timeout => null,
+        error.InvalidSourceAddress => blk: {
+            result.datagram = .{ .rejected = .malformed_packet };
+            break :blk null;
+        },
         error.DatagramTooLarge => blk: {
             result.datagram = .{ .rejected = .oversized_datagram };
             break :blk null;

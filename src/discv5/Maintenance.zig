@@ -174,7 +174,15 @@ pub fn onFailure(
                     return true;
                 }
                 if (pending.origin == .replacement and pending.kind == .ping) {
-                    if (reason == .local) {
+                    if (core.peerRecord(&pending.entry.peer.node_id)) |entry| {
+                        if (entry.last_verified_ms != pending.entry.last_verified_ms) {
+                            core.routing.abandonRevalidation(&pending.entry.peer.node_id);
+                            self.pending = null;
+                            self.next_start_ms = now_ms;
+                            return true;
+                        }
+                    }
+                    if (reason == .local or pending.attempts < probe_attempts_max) {
                         if (pending.attempts >= probe_attempts_max) {
                             core.routing.abandonRevalidation(&pending.entry.peer.node_id);
                             self.pending = null;

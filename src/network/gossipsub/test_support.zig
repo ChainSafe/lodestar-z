@@ -254,6 +254,10 @@ pub fn message(g: *Gossipsub, peer: u16, text: []const u8, now_ms: u64) !?usize 
 }
 
 pub fn control(g: *Gossipsub, index: u16, item: protobuf.Item, now: Now) void {
+    const io = &g.sessions.rows[index].io;
+    std.debug.assert(io.rpc == null);
+    io.startRpc(&.{});
+    defer io.rpc = null;
     var turn = Turn.init(&g.options, now, g.msg_scratch);
     var peer = Credits.peer(&g.options);
     std.debug.assert(g.receiveItem(g.sessions.ref(index), item, &turn, &peer) == .done);

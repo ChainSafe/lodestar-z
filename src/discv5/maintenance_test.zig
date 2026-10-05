@@ -675,6 +675,15 @@ test "maintenance replaces an expired incumbent but preserves later authenticate
         const result = pair.transport_a.engine.expire(1, &expired);
         try std.testing.expectEqual(@as(usize, 1), result.calls);
         try std.testing.expect(controller.onFailure(&pair.transport_a.engine, expired[0].handle, 1, .expired));
+        if (!authenticated_later) {
+            try std.testing.expectEqual(@as(usize, 1), pair.transport_a.engine.routing.pendingCount());
+            const retry_ms = controller.next_start_ms.?;
+            const retried = (try controller.startNext(&pair.transport_a.engine, &out, try .init(&.{2}), retry_ms, &test_support.sealEntropy(11))).?;
+            try std.testing.expect(started.peer.eql(&retried.peer));
+            const retried_expiry = pair.transport_a.engine.expire(retry_ms + 1, &expired);
+            try std.testing.expectEqual(@as(usize, 1), retried_expiry.calls);
+            try std.testing.expect(controller.onFailure(&pair.transport_a.engine, expired[0].handle, retry_ms + 1, .expired));
+        }
         try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.routing.pendingCount());
         try std.testing.expectEqual(authenticated_later, pair.transport_a.engine.routing.contains(&pair.record_b.node_id));
         try std.testing.expectEqual(!authenticated_later, pair.transport_a.engine.routing.contains(&pair.candidate_id));

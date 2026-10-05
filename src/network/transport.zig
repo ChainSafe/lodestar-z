@@ -8,7 +8,6 @@ const peer_id = @import("wire/peer_id.zig");
 const tls = @import("tls/context.zig");
 const types = @import("types.zig");
 const Sockets = @import("udp").Sockets;
-const configuration = @import("configuration.zig");
 
 const assert = std.debug.assert;
 
@@ -125,7 +124,7 @@ pub const Transport = struct {
         errdefer if (context_owned) context.deinit();
         target.sockets = try Sockets.bind(io, options.bind);
         errdefer target.sockets.close(io);
-        if (options.socket_buffers) |request| configuration.requestBuffers(&target.sockets, request, .network_quic);
+        if (options.socket_buffers) |request| target.sockets.requestBuffersLogged(request, .network_quic);
         target.engine = try Engine.init(allocator, .{
             .tls = context,
             .limits = options.limits,
@@ -405,6 +404,7 @@ pub const Transport = struct {
         const datagram = received catch |err| switch (err) {
             error.Timeout => return .timeout,
             error.DatagramTooLarge,
+            error.InvalidSourceAddress,
             error.PortUnreachable,
             error.ConnectionResetByPeer,
             error.NetworkDown,

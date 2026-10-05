@@ -7,7 +7,7 @@ export type LevelDbOptions = {
   cacheBytes?: number;
   /** Defaults to 4 MiB. Must be an integer from 64 KiB through 64 MiB. */
   writeBufferBytes?: number;
-  /** Defaults to 64. Must be an integer from 20 through 4096. */
+  /** Defaults to 1000. Must be an integer from 74 through 4096. */
   maxOpenFiles?: number;
   /** Defaults to 4096. Must be an integer from 1 through 65536. */
   maxPendingOperations?: number;

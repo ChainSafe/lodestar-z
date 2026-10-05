@@ -30,8 +30,8 @@ pub const Session = struct {
     in_stream: ?StreamHandle = null,
     dont_send: [constants.dont_send_cap]MessageId = undefined,
     dont_send_until: [constants.dont_send_cap]u64 = undefined,
-    dont_send_head: u8 = 0,
-    dont_send_len: u8 = 0,
+    dont_send_head: u16 = 0,
+    dont_send_len: u16 = 0,
 
     pub fn start(self: *Session, conn: Handle) void {
         std.debug.assert(!self.active and self.generation < std.math.maxInt(u64));

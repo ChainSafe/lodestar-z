@@ -68,3 +68,32 @@ test "gossip stream cancellation discards unsent work and session reuse preserve
     try std.testing.expect(peer.io.tx.injectFrame("next", false, 2).? > token);
     peer.io.tx.cancelStream(&store);
 }
+
+test "gossip receive contention reclaims a larger partial frame and preserves completed work" {
+    var sessions = try test_support.sessions(std.testing.allocator, 4);
+    defer sessions.deinit(std.testing.allocator);
+    for (0..4) |i| _ = sessions.addPeer(.{ .index = @intCast(i), .generation = 1 }).?;
+    const incoming = &sessions.rows[0].io;
+    const stalled = &sessions.rows[1].io;
+    const complete = &sessions.rows[2].io;
+    const pages = sessions.receive_pool.next.len;
+    const page_bytes = @import("receive_pool.zig").page_bytes;
+    for (0..pages) |i| {
+        const io = &sessions.rows[1 + i % 3].io;
+        @memset(sessions.receive_pool.writable(&io.overflow).?, 7);
+        io.overflow.len += page_bytes;
+    }
+    stalled.reader.declared = constants.GOSSIP_MAX_SIZE;
+    stalled.reader.filled = stalled.body.len + stalled.overflow.len;
+    sessions.rows[3].io.reader.declared = constants.GOSSIP_MAX_SIZE;
+    complete.startRpc("done");
+    try std.testing.expect(sessions.receive_pool.writable(&incoming.overflow) == null);
+    try std.testing.expectEqual(@as(?u16, 1), sessions.receiveVictim(0));
+    sessions.discardFrame(stalled);
+    try std.testing.expect(sessions.receive_pool.writable(&incoming.overflow) != null);
+    incoming.overflow.len += page_bytes;
+    try std.testing.expect(complete.rpc != null);
+    try std.testing.expect(stalled.discarding);
+    for (0..4) |i| _ = sessions.resetRx(@intCast(i));
+    try std.testing.expectEqual(pages, sessions.receive_pool.free_pages);
+}

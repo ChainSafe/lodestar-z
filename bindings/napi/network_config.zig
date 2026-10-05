@@ -111,6 +111,20 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
     try parseGossip(value, out);
 }
 
+fn parseGossipLimits(value: Value, items_max: u32, bytes_max: u32) !n.gossip_processor.limits.Limits {
+    try decode.completeObject(value, &topic_kind_names);
+    var limits: n.gossip_processor.limits.Limits = undefined;
+    inline for (std.meta.fields(n.gossip_processor.limits.Kind), 0..) |field, index| {
+        const entry = try decode.get(value, field.name);
+        try decode.completeObject(entry, &.{ "items", "bytes" });
+        limits[index] = .{
+            .items = @intCast(try decode.integer(try decode.get(entry, "items"), items_max)),
+            .bytes = @intCast(try decode.integer(try decode.get(entry, "bytes"), bytes_max)),
+        };
+    }
+    return limits;
+}
+
 fn parseGossip(value: Value, out: *Config) !void {
     out.gossip = .{};
     const policy = try decode.get(value, "gossipPolicy");
@@ -118,17 +132,7 @@ fn parseGossip(value: Value, out: *Config) !void {
     const processor = try decode.get(policy, "processor");
     {
         const limits_mod = n.gossip_processor.limits;
-        const count = try decode.array(processor, limits_mod.kind_count);
-        if (count != limits_mod.kind_count) return error.InvalidGossipProcessorLimits;
-        var limits: limits_mod.Limits = undefined;
-        for (&limits, 0..) |*limit, i| {
-            const value_limit = try processor.getElement(@intCast(i));
-            try decode.completeObject(value_limit, &.{ "items", "bytes" });
-            limit.* = .{
-                .items = @intCast(try decode.integer(try decode.get(value_limit, "items"), limits_mod.capacity_max)),
-                .bytes = @intCast(try decode.integer(try decode.get(value_limit, "bytes"), 256 * 1024 * 1024)),
-            };
-        }
+        const limits = parseGossipLimits(processor, limits_mod.capacity_max, 256 * 1024 * 1024) catch return error.InvalidGossipProcessorLimits;
         try limits_mod.validate(&limits);
         out.processor_limits = limits;
         out.gossip.payload_limits = limits;
@@ -137,18 +141,7 @@ fn parseGossip(value: Value, out: *Config) !void {
     }
     const execution = try decode.get(policy, "execution");
     if (try execution.typeof() != .undefined) {
-        const limits_mod = n.gossip_processor.limits;
-        if (try decode.array(execution, limits_mod.kind_count) != limits_mod.kind_count) return error.InvalidGossipExecutionLimits;
-        var limits: limits_mod.Limits = undefined;
-        for (&limits, 0..) |*limit, i| {
-            const value_limit = try execution.getElement(@intCast(i));
-            try decode.completeObject(value_limit, &.{ "items", "bytes" });
-            limit.* = .{
-                .items = @intCast(try decode.integer(try decode.get(value_limit, "items"), 16384)),
-                .bytes = @intCast(try decode.integer(try decode.get(value_limit, "bytes"), 1024 * 1024 * 1024)),
-            };
-        }
-        out.execution_limits = limits;
+        out.execution_limits = parseGossipLimits(execution, 16384, 1024 * 1024 * 1024) catch return error.InvalidGossipExecutionLimits;
     }
     out.gossip.iwant_followup_ms = try decode.bigint(try decode.get(policy, "iwantFollowupMs"));
     out.gossip.idontwant_min_data_size = @as(usize, @intCast(try decode.integer(try decode.get(policy, "idontwantMinDataSize"), n.gossipsub.constants.GOSSIP_MAX_SIZE)));

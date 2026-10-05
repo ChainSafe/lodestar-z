@@ -177,7 +177,7 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
     peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expect(turn.large_used);
-    try std.testing.expectEqual(@as(u16, 2), io.ihave_recv);
+    try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
     turn = turn_mod.Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }), &scratch);
     turn.sink = g.message_sink;
     peer = Credits.peer(&g.options);
@@ -185,6 +185,6 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
     try std.testing.expectEqual(@as(usize, 1), inbox.count);
     try std.testing.expectEqualStrings("payload", inbox.last().bytes);
     try std.testing.expect(turn.large_used);
-    try std.testing.expectEqual(@as(u16, 2), io.ihave_recv);
+    try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
 }

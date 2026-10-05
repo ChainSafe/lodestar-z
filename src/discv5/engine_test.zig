@@ -347,9 +347,11 @@ test "matched NODES consumes record credit before validation and retains the cal
     defer pair.deinit();
     test_support.installSession(&pair.node_a, pair.peerB(), 0x55);
     test_support.installSession(&pair.node_b, pair.peerA(), 0x55);
-    const request = message.Message{ .find_node = .{ .request_id = try .init(&.{1}), .distances = &.{256} } };
+    const request = message.Message{ .find_node = .{ .request_id = try .init(&.{1}), .distances = &.{0} } };
     _ = try pair.node_a.startCall(&pair.a_to_b, pair.peerB(), &pair.record_b, &request, 1, &sealEntropy(0x20));
-    const response = message.Message{ .nodes = .{ .request_id = request.find_node.request_id, .total = 1, .enrs = &.{&.{0xc0}} } };
+    var corrupt = pair.record_b.bytes;
+    corrupt[10] ^= 1;
+    const response = message.Message{ .nodes = .{ .request_id = request.find_node.request_id, .total = 1, .enrs = &.{corrupt[0..pair.record_b.length]} } };
     var plaintext_buffer: [1_280]u8 = undefined;
     const plaintext = try response.encode(&plaintext_buffer);
     const sealed = try pair.node_b.channel.sealEstablished(&pair.b_to_a, pair.peerA(), plaintext, &sealEntropy(0x30), 1);
@@ -357,7 +359,7 @@ test "matched NODES consumes record credit before validation and retains the cal
     const refused = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..sealed.packet_length], pair.address_b, receiveArgs(2, 0x40), &pair.scratch_a);
     try std.testing.expectEqual(types.RejectReason.record_admission_limited, refused.rejected);
     try std.testing.expectEqual(@as(usize, 1), pair.node_a.calls.count());
-    const admitted = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..sealed.packet_length], pair.address_b, receiveArgs(40, 0x40), &pair.scratch_a);
+    const admitted = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..sealed.packet_length], pair.address_b, receiveArgs(5, 0x40), &pair.scratch_a);
     try std.testing.expectEqual(types.RejectReason.invalid_record, admitted.rejected);
 }
 
@@ -754,7 +756,7 @@ test "duplicate NODES datagrams do not complete a fragmented response" {
     try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
 }
 
-test "NODES rejects invalid ENRs even beyond distance duplicate and remaining result filters" {
+test "NODES excludes irrelevant identities before signature verification" {
     for ([_]enum { distance, duplicate, capacity }{ .distance, .duplicate, .capacity }) |filter| {
         var pair: Pair = undefined;
         try pair.init();
@@ -763,7 +765,7 @@ test "NODES rejects invalid ENRs even beyond distance duplicate and remaining re
         test_support.installSession(&pair.node_b, pair.peerA(), 0x55);
         const distance: u16 = if (filter == .capacity) 256 else 0;
         const request: message.Message = .{ .find_node = .{ .request_id = try .init(&.{1}), .distances = &.{distance} } };
-        const started = try pair.node_a.startCall(&pair.a_to_b, pair.peerB(), &pair.record_b, &request, 1, &sealEntropy(0x20));
+        _ = try pair.node_a.startCall(&pair.a_to_b, pair.peerB(), &pair.record_b, &request, 1, &sealEntropy(0x20));
         var records: [types.findnode_result_max]enr.Record = undefined;
         if (filter == .capacity) {
             var count: usize = 0;
@@ -795,14 +797,9 @@ test "NODES rejects invalid ENRs even beyond distance duplicate and remaining re
         const plaintext = try response.encode(&plaintext_buffer);
         const hostile = try pair.node_b.channel.sealEstablished(&pair.b_to_a, pair.peerA(), plaintext, &sealEntropy(0x50), 4);
         const received = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..hostile.packet_length], pair.address_b, receiveArgs(5, 0x60), &pair.scratch_a);
-        try std.testing.expectEqual(types.RejectReason.invalid_record, received.rejected);
-        try std.testing.expectEqual(@as(usize, 1), pair.node_a.calls.count());
-        const corrected: message.Message = .{ .nodes = .{ .request_id = request.find_node.request_id, .total = response.nodes.total, .enrs = &.{valid.slice()} } };
-        const final_length = try pair.node_b.sendResponse(&pair.b_to_a, pair.peerA(), &corrected, 6, &sealEntropy(0x70));
-        const completed = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..final_length], pair.address_b, receiveArgs(7, 0x80), &pair.scratch_a);
-        try std.testing.expectEqual(started.handle, completed.accepted.event.response.matched.handle);
-        try std.testing.expect(completed.accepted.event.response.matched.terminal);
-        try std.testing.expectEqual(@as(usize, 1), completed.accepted.event.response.node_records.len);
+        try std.testing.expect(received.accepted.event.response.matched.terminal);
+        try std.testing.expectEqual(@as(usize, 1), received.accepted.event.response.node_records.len);
+        try std.testing.expectEqual(valid.node_id, received.accepted.event.response.node_records[0].node_id);
         try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
     }
 }

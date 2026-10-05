@@ -671,6 +671,7 @@ test "transport bursts one busy connection among many idle ones in one flush vis
         .connections_max = connections,
         .handshaking_max = connections,
         .handshaking_per_source_max = connections,
+        .handshaking_per_prefix_max = connections,
         .dialing_max = 16,
         .outbound_max = connections,
     };

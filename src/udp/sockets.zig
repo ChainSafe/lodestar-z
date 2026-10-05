@@ -47,7 +47,7 @@ pub const Sockets = struct {
 
     pub const BindError = net.IpAddress.BindError;
     pub const ReceiveError = net.Socket.ReceiveTimeoutError || error{IncompatibleProvider};
-    pub const DatagramError = ReceiveError || error{DatagramTooLarge};
+    pub const DatagramError = ReceiveError || error{ DatagramTooLarge, InvalidSourceAddress };
     pub const SendError = net.Socket.SendError || error{
         IncompatibleProvider,
         DatagramTooLarge,
@@ -147,6 +147,14 @@ pub const Sockets = struct {
         }
         for (result.values, &result.native) |socket, *native| native.* = socket != null and native_sockets and compat.threaded(io);
         return result;
+    }
+
+    pub fn requestBuffersLogged(self: *Sockets, request: Buffers, comptime scope: @EnumLiteral()) void {
+        const short = self.requestBuffers(request);
+        for (short, self.buffers, [_][]const u8{ "ip4", "ip6" }) |below, reported, family| {
+            if (!below) continue;
+            std.log.scoped(scope).warn("socket_buffers_below_request family={s} receive_bytes={?d} receive_requested={d} send_bytes={?d} send_requested={d}", .{ family, reported.?.receive, request.receive, reported.?.send, request.send });
+        }
     }
 
     /// Requests `request` on each socket and records what the kernel reports. The kernel caps a
@@ -330,6 +338,7 @@ pub const Sockets = struct {
     }
 
     fn datagram(incoming: net.IncomingMessage, buffer: []u8) DatagramError!Datagram {
+        if (incoming.from.getPort() == 0) return error.InvalidSourceAddress;
         if (incoming.flags.trunc) return error.DatagramTooLarge;
         assert(incoming.data.len <= buffer.len);
         return .{ .from = Address.fromNetwork(incoming.from), .bytes = buffer[0..incoming.data.len] };

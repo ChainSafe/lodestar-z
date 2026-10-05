@@ -1,6 +1,7 @@
 const std = @import("std");
 const storage = @import("message_store.zig");
 const constants = @import("constants.zig");
+const gossip_limits = @import("../gossip_limits.zig");
 const assert = std.debug.assert;
 const none = std.math.maxInt(u32);
 
@@ -106,6 +107,8 @@ pub const Queue = struct {
     count: usize = 0,
     bytes: usize = 0,
     local_bytes: usize = 0,
+    kind_entries: [gossip_limits.kind_count]usize = @splat(0),
+    kind_bytes: [gossip_limits.kind_count]usize = @splat(0),
     /// The class of the frame being written. It stays chosen until the frame completes, so
     /// frames never interleave.
     current: ?Class = null,
@@ -126,6 +129,13 @@ pub const Queue = struct {
         const entry = store.get(message).?;
         assert(!entry.provisional and self.bytes <= limits.bytes);
         assert(self.pool.local_descriptors < per_peer_limit and limits.local_bytes <= limits.bytes);
+        const kind = @intFromEnum(entry.kind);
+        if (store.limits) |allowances| {
+            const allowance = allowances[kind];
+            // A recipient may hold a quarter of a kind, or one maximum-sized message.
+            if (self.kind_entries[kind] >= @max(1, allowance.items / 4)) return error.Descriptors;
+            if (self.kind_entries[kind] > 0 and entry.len > allowance.bytes / 4 -| self.kind_bytes[kind]) return error.Bytes;
+        }
         const class = classOf(origin);
         const reserved_bytes = if (class == .local) 0 else limits.local_bytes -| self.local_bytes;
         if (if (class == .local) self.count >= per_peer_limit else self.full()) return error.Descriptors;
@@ -136,6 +146,8 @@ pub const Queue = struct {
         if (fifo.tail == none) fifo.head = slot else self.pool.slots[fifo.tail].next = slot;
         fifo.tail = slot;
         self.count += 1;
+        self.kind_entries[kind] += 1;
+        self.kind_bytes[kind] += entry.len;
         self.origins[@intFromEnum(origin)] += 1;
         self.bytes += entry.len;
         if (class == .local) self.local_bytes += entry.len;
@@ -198,7 +210,10 @@ pub const Queue = struct {
         const fifo = &self.fifos[@intFromEnum(class)];
         const slot = fifo.head;
         const tx = &self.pool.slots[slot].tx;
-        const len = store.get(tx.message).?.len;
+        const entry = store.get(tx.message).?;
+        const len = entry.len;
+        self.kind_entries[@intFromEnum(entry.kind)] -= 1;
+        self.kind_bytes[@intFromEnum(entry.kind)] -= len;
         fifo.head = self.pool.slots[slot].next;
         if (fifo.head == none) fifo.tail = none;
         self.origins[@intFromEnum(tx.origin)] -= 1;
@@ -215,6 +230,18 @@ pub const Queue = struct {
         assert(self.fifos[0].head == none and self.fifos[1].head == none);
         self.current = null;
         self.endRun();
+    }
+
+    pub fn hasExpiredHistory(self: *const Queue, store: *const storage.Store) bool {
+        for (self.fifos) |fifo| {
+            var slot = fifo.head;
+            for (0..self.count) |_| {
+                if (slot == none) break;
+                if (!store.get(self.pool.slots[slot].tx.message).?.history) return true;
+                slot = self.pool.slots[slot].next;
+            }
+        }
+        return false;
     }
 
     pub fn retains(self: *const Queue, message: storage.Handle) usize {

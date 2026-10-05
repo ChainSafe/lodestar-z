@@ -70,7 +70,7 @@ it("rejects invalid options and paths without leaving the target database locked
     await expect(LevelDb.open(path, {maxPendingOperations: 65537})).rejects.toThrow("InvalidLimit");
     await expect(LevelDb.open(path, {maxPendingBytes: 0})).rejects.toThrow("InvalidLimit");
     await expect(LevelDb.open(path, {maxPendingBytes: 16 * 1024 * 1024 * 1024 + 1})).rejects.toThrow("InvalidLimit");
-    await expect(LevelDb.open(path, {maxOpenFiles: 19})).rejects.toThrow("InvalidOptions");
+    await expect(LevelDb.open(path, {maxOpenFiles: 73})).rejects.toThrow("InvalidOptions");
     await expect(LevelDb.open(path, {writeBufferBytes: 1})).rejects.toThrow("InvalidOptions");
     await expect(LevelDb.open("")).rejects.toThrow("InvalidPath");
     await expect(LevelDb.open(`${path}\0suffix`)).rejects.toThrow("InvalidPath");

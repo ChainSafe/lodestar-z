@@ -216,7 +216,7 @@ pub const ControlProtocol = struct {
 
     /// Settles a result for a response this module serves, or returns the operation an outbound
     /// result belongs to. Peer control reads that operation before `settle` consumes or retires it.
-    pub fn result(self: *ControlProtocol, reqresp: *rr.ReqResp, event: rr.ReqResp.Event, now: Now) ?u16 {
+    pub fn result(self: *ControlProtocol, reqresp: *rr.ReqResp, event: rr.ReqResp.Event, now: Now) ?struct { index: u16, reply: wire.ControlReply } {
         const request = switch (event) {
             .chunk => |e| e.request,
             .done => |e| e.request,
@@ -240,7 +240,7 @@ pub const ControlProtocol = struct {
             return null;
         }
         for (self.operations, 0..) |*op, index| {
-            if (std.meta.eql(op.request, request)) return @intCast(index);
+            if (std.meta.eql(op.request, request)) return .{ .index = @intCast(index), .reply = op.reply() };
         }
         return null;
     }

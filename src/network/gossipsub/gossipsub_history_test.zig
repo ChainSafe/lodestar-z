@@ -12,6 +12,7 @@ const topic_policy = @import("topic_policy.zig");
 const Reservations = @import("../reservations.zig").Reservations;
 const IwantOutcome = @import("metrics.zig").IwantOutcome;
 const protobuf = @import("protobuf.zig");
+const QueueResult = @import("outbox.zig").QueueResult;
 
 fn requestOne(g: *Gossipsub, peer: u16, id: *const topic_mod.MessageId) void {
     var body: [32]u8 = undefined;
@@ -107,14 +108,14 @@ test "gossip retention makes room from its own kind's oldest copy and refuses wh
     _ = try g.publish(name, "fifth", Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expect(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(name, &[_]u8{0}, .{})) == null);
     try std.testing.expectEqual(@as(usize, 4), g.messages.history.count);
-    // Copies queued to a peer stay retained, so a full allowance refuses the next message.
+    // One stalled recipient cannot consume every retained entry of a kind.
     var slot = g.messages.history.head;
-    for (0..g.messages.history.count) |_| {
-        try std.testing.expectEqual(.queued, g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, g.messages.history.message(slot), .forward, .{ .bytes = g.options.tx_peer_bytes }, 2));
+    for (0..g.messages.history.count) |i| {
+        try std.testing.expectEqual(@as(QueueResult, if (i == 0) .queued else .full), g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, g.messages.history.message(slot), .forward, .{ .bytes = g.options.tx_peer_bytes }, 2));
         slot = g.messages.history.entries[slot].next;
     }
-    try std.testing.expectError(error.ResourceExhausted, g.publish(name, "sixth", Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 })));
-    try std.testing.expectEqual(@as(u64, 1), g.messages.retention_refusals[kind]);
+    _ = try g.publish(name, "sixth", Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }));
+    try std.testing.expectEqual(@as(u64, 0), g.messages.retention_refusals[kind]);
     try std.testing.expectEqual(@as(usize, 4), g.messages.history.count);
     g.cancelWrites(g.sessions.ref(peer.index));
 }
@@ -160,4 +161,27 @@ test "gossip refused retention leaves the history unchanged" {
     try std.testing.expectEqual(@as(u64, 1), g.messages.retention_refusals[@intFromEnum(block)]);
     try std.testing.expectEqual(@as(u64, 1), g.messages.retention_refusals[@intFromEnum(exit)]);
     g.cancelWrites(g.sessions.ref(peer.index));
+}
+
+test "gossip history expiry also retires slow recipients' retained payloads" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    _ = try g.publish(name, "held", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
+    const handle = g.messages.history.message(g.messages.history.head);
+    const tx = &g.sessions.rows[peer.index].io.tx;
+    try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, handle, .forward, g.deliveryLimits(), 1));
+    for (1..constants.mcache_len + 2) |epoch| {
+        const now = Now.fromMilliseconds(.{ .mono_ms = epoch * g.options.heartbeat_interval_ms, .unix_s = 0 });
+        support.heartbeat(&g, now);
+        for (0..g.overlay.rows.len + 1) |_| {
+            Gossipsub.finishPump(&g, now);
+            if (!g.cycle.isActive()) break;
+        }
+    }
+    try std.testing.expect(tx.history_expired);
+    try std.testing.expectEqual(@as(?u64, 0), g.sessions.rows[peer.index].io.deadlines(&g.options).next());
+    g.cancelWrites(g.sessions.ref(peer.index));
+    try std.testing.expectEqual(@as(usize, 0), g.messages.store.used_entries);
 }

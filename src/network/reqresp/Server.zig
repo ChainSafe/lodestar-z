@@ -29,6 +29,7 @@ const Server = @This();
 
 request: RequestState = .{ .direction = .inbound },
 progress_ms: u64 = 0,
+serving_started_ms: ?u64 = null,
 pending_result: u8 = constants.result_success,
 close_after_write: bool = false,
 state: State = .receiving_request,
@@ -88,7 +89,11 @@ pub fn deadline(self: *const Server, ctx: *const ReqResp) ?u64 {
         ctx.options.host_timeout_ms
     else
         ctx.options.progress_timeout_ms;
-    return self.progress_ms +| duration;
+    const progress = self.progress_ms +| duration;
+    // The entire response gets one host-work allowance and one transfer allowance.
+    // Chunk progress cannot keep a serving lease alive indefinitely.
+    const total = (self.serving_started_ms orelse self.progress_ms) +| ctx.options.host_timeout_ms +| ctx.options.progress_timeout_ms;
+    return @min(progress, total);
 }
 
 pub fn advance(self: *Server, ctx: *ReqResp, engine: *Engine, index: u16, now: Now) void {
@@ -221,6 +226,7 @@ pub fn admit(self: *Server, index: u16, lease: *const InboundAdmission.Lease, no
     request.io.scratch = lease.scratch;
     self.execution = lease.execution;
     self.state = .serving;
+    self.serving_started_ms = now.millis();
     self.progress_ms = now.millis();
     request.queue(.{ .request = .{
         .request = request.handle(index),
