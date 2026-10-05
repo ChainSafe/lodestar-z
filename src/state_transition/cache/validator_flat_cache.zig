@@ -169,19 +169,6 @@ pub const ValidatorFlatCache = struct {
         self.entries.set(i, .fromValidator(v));
         self.last_patched += 1;
     }
-
-    /// Number of validators whose cached fields differ from the tree. For tests and benchmarks.
-    pub fn countMismatches(self: *const ValidatorFlatCache, root: Node.Id, depth: usize, list_len: usize) !usize {
-        if (self.len() != list_len) return std.math.maxInt(usize);
-        var mismatches: usize = 0;
-        const entries = self.entries.slice();
-        var it = Node.DepthIterator.init(self.pool, root, @intCast(depth), 0);
-        for (0..list_len) |i| {
-            const v = try Validator.tree.getValuePtr(try it.next(), self.pool);
-            if (!std.meta.eql(entries.get(i), ValidatorFields.fromValidator(v))) mismatches += 1;
-        }
-        return mismatches;
-    }
 };
 
 test {

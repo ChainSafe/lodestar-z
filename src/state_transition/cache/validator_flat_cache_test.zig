@@ -7,13 +7,27 @@ const Validator = types.phase0.Validator;
 const Validators = types.phase0.Validators;
 const flat = @import("validator_flat_cache.zig");
 const ValidatorFlatCache = flat.ValidatorFlatCache;
+const ValidatorFields = flat.ValidatorFields;
+
+/// Number of validators whose cached fields differ from the tree.
+pub fn countMismatches(cache: *const ValidatorFlatCache, root: Node.Id, depth: usize, list_len: usize) !usize {
+    if (cache.len() != list_len) return std.math.maxInt(usize);
+    var mismatches: usize = 0;
+    const entries = cache.entries.slice();
+    var it = Node.DepthIterator.init(cache.pool, root, @intCast(depth), 0);
+    for (0..list_len) |i| {
+        const v = try Validator.tree.getValuePtr(try it.next(), cache.pool);
+        if (!std.meta.eql(entries.get(i), ValidatorFields.fromValidator(v))) mismatches += 1;
+    }
+    return mismatches;
+}
 
 fn expectInSync(cache: *ValidatorFlatCache, view: *Validators.TreeView) !void {
     try view.commit();
     const depth = view.iteratorReadonly(0).depth_iterator.base_gindex.pathLen();
     const list_len = try view.length();
     try cache.sync(view.getRoot(), depth, list_len);
-    try testing.expectEqual(@as(usize, 0), try cache.countMismatches(view.getRoot(), depth, list_len));
+    try testing.expectEqual(@as(usize, 0), try countMismatches(cache, view.getRoot(), depth, list_len));
 }
 
 fn testValidator(i: usize) Validator.Type {

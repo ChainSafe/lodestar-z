@@ -234,7 +234,7 @@ pub fn main(init: std.process.Init) !void {
 
         if (epoch % report_every == 0) {
             const ref = try validatorsRef(head.state);
-            const mismatches = try flat_cache.countMismatches(ref.root, ref.depth, ref.len);
+            const mismatches = try state_transition.flatCacheCountMismatches(&flat_cache, ref.root, ref.depth, ref.len);
             if (mismatches != 0) return error.FlatCacheOutOfSync;
 
             const transition = try runTransition(allocator, io, head);
