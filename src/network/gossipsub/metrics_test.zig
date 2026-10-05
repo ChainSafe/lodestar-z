@@ -31,9 +31,9 @@ test "score populations count cumulative gates, distinct mesh peers and empty sc
     defer g.deinit();
     var buffer: [4096]u8 = undefined;
     const empty = try render(&ScorePopulations.collect(&g.peers, g.overlay, g.sessions, 1), &buffer);
-    try std.testing.expect(std.mem.indexOf(u8, empty, "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"all\"} 0\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, empty, "# TYPE lodestar_native_gossip_score gauge\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, empty, "lodestar_native_gossip_score{") == null);
+    try std.testing.expect(std.mem.find(u8, empty, "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"all\"} 0\n") != null);
+    try std.testing.expect(std.mem.find(u8, empty, "# TYPE lodestar_native_gossip_score gauge\n") != null);
+    try std.testing.expect(std.mem.find(u8, empty, "lodestar_native_gossip_score{") == null);
     const names = [_][]const u8{ "/eth2/01020304/beacon_block/ssz_snappy", "/eth2/01020304/voluntary_exit/ssz_snappy" };
     for (names) |name| try support.subscribe(&g, name);
     // Behaviour b scores -b^2: the peers sit on each gate, between gates and below the lowest.
@@ -70,8 +70,8 @@ test "score populations count cumulative gates, distinct mesh peers and empty sc
         "lodestar_native_gossip_score{scope=\"mesh\",stat=\"min\"} -9\n",
         "lodestar_native_gossip_score{scope=\"mesh\",stat=\"mean\"} -4.416666666666667\n",
         "lodestar_native_gossip_score{scope=\"mesh\",stat=\"max\"} -0.25\n",
-    }) |line| try std.testing.expect(std.mem.indexOf(u8, output, line) != null);
+    }) |line| try std.testing.expect(std.mem.find(u8, output, line) != null);
     var mean: [96]u8 = undefined;
     const connected_mean = try std.fmt.bufPrint(&mean, "lodestar_native_gossip_score{{scope=\"connected\",stat=\"mean\"}} {d}\n", .{@as(f64, -54.25) / 6});
-    try std.testing.expect(std.mem.indexOf(u8, output, connected_mean) != null);
+    try std.testing.expect(std.mem.find(u8, output, connected_mean) != null);
 }

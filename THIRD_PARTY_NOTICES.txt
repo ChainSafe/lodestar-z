@@ -211,7 +211,7 @@ and scripts/lodestar_package_provenance.mjs checks this file against it.
    See the License for the specific language governing permissions and
    limitations under the License.
 
-=== zig:hashtree: ChainSafe/hashtree-z f5c1b81d (MIT)
+=== zig:hashtree: ChainSafe/hashtree-z 9b0fdad8 (MIT)
 
 Copyright 2025+ ChainSafe Systems
 
@@ -463,7 +463,7 @@ Some of the benchmark data in testdata/ is licensed differently:
    public domain according to the license information
    (http://www.gutenberg.org/ebooks/53).
 
-=== zig:zapi: ChainSafe/zapi ca55a240 (MIT)
+=== zig:zapi: ChainSafe/zapi ff6e70e8 (MIT)
 
 Copyright 2025+ ChainSafe Systems
 

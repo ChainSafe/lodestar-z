@@ -110,7 +110,10 @@ export async function startPeer(config: NativeApplicationConfig): Promise<PeerRu
     return stopping;
   }
   try {
-    const identity = await call<NativeIdentity>("initialize", [config, configuredChain()]);
+    const identity = await call<NativeIdentity>("initialize", [
+      {...config, beaconConfig: null},
+      configuredChain(config),
+    ]);
     const closed = call<NativeRuntimeCloseResult>("closed");
     void closed.catch(() => undefined);
     const overrides = {

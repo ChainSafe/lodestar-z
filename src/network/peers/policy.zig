@@ -24,7 +24,7 @@ pub const Deficits = struct {
     missing: t.Coverage = .{},
 };
 pub const Result = struct {
-    retained: std.StaticBitSet(256) = .initEmpty(),
+    retained: std.StaticBitSet(256) = .empty,
     retained_count: u16 = 0,
     reasons: [256]?t.DisconnectReason = @splat(null),
     deficits: Deficits = .{},
@@ -154,7 +154,7 @@ fn removal(
     const scarce = result.coverage.scarce(demand);
     const wanted = demand.wanted();
     var essential = scarce;
-    essential.groups = .initEmpty();
+    essential.groups = .empty;
     const sampled = scarce.groups.intersectWith(wanted.custody_groups);
     const missing = result.coverage.deficits(demand, options.min_outbound);
     const essential_missing = missing.outbound > 0 or missing.attestation > 0 or missing.sync > 0 or missing.custody_groups > 0;

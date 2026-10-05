@@ -33,9 +33,9 @@ pub const Row = struct {
     kind: ?topic_mod.Kind = null,
     string: [topic_mod.topic_max_len]u8 = undefined,
     string_len: u8 = 0,
-    subscribers: PeerSet = PeerSet.initEmpty(),
-    mesh: PeerSet = PeerSet.initEmpty(),
-    fanout: PeerSet = PeerSet.initEmpty(),
+    subscribers: PeerSet = PeerSet.empty,
+    mesh: PeerSet = PeerSet.empty,
+    fanout: PeerSet = PeerSet.empty,
     fanout_last_ms: u64 = 0,
 
     fn topicString(self: *const Row) []const u8 {
@@ -114,7 +114,7 @@ pub const Overlay = struct {
         assert(row.active);
         if (row.subscribed == on) return;
         if (on) {
-            row.fanout = .initEmpty();
+            row.fanout = .empty;
             row.retire_after_ms = null;
         } else {
             var it = row.mesh.iterator(.{});
@@ -231,7 +231,7 @@ pub const Overlay = struct {
         if (observed.expired) context.peers.scores.resetTopic(topic);
         if (!observed.reusable) return;
         self.rows[topic].active = false;
-        self.rows[topic].subscribers = .initEmpty();
+        self.rows[topic].subscribers = .empty;
         context.peers.scores.applyValidatedTopic(topic, context.options.score_params.topic);
     }
 
@@ -251,12 +251,12 @@ pub const Overlay = struct {
         if (subscriptions.len > topic_policy.boundary_max) return error.TopicCapacity;
         if (subscriptions.len > 0 and self.namespace == null) return error.TopicPolicyRequired;
         workspace.len = 0;
-        workspace.desired = .initEmpty();
+        workspace.desired = .empty;
         assert(workspace.reserved.bit_length == self.rows.len);
         workspace.reserved.setRangeValue(.{ .start = 0, .end = self.rows.len }, false);
         workspace.now_ms = @max(context.now, now_ms);
         workspace.slot = slot;
-        var boundaries = std.StaticBitSet(topic_policy.boundary_max).initEmpty();
+        var boundaries = std.StaticBitSet(topic_policy.boundary_max).empty;
         var count: usize = 0;
         for (subscriptions) |*subscription| {
             const ns = &self.namespace.?;
@@ -568,7 +568,7 @@ pub const Overlay = struct {
         }
         sort(context, ordered[0..count]);
         self.shuffle(ordered[c.mesh_d_score..count]);
-        var survivors: Set = .initEmpty();
+        var survivors: Set = .empty;
         for (ordered[0..c.mesh_d_score]) |peer| survivors.set(peer);
         var out = outboundCount(context, &survivors);
         for (ordered[c.mesh_d_score..count]) |peer| {
@@ -626,7 +626,7 @@ pub const Overlay = struct {
     }
 
     pub fn publicationRecipients(self: *Overlay, context: *const Context, topic: u16, flood: bool) Set {
-        var result: Set = .initEmpty();
+        var result: Set = .empty;
         const threshold = context.peers.scores.params.publish_threshold;
         if (flood) {
             for (0..context.sessions.rows.len) |index| {
@@ -668,7 +668,7 @@ pub const Overlay = struct {
     pub fn maintainFanout(self: *Overlay, context: *const Context, topic: u16, publishing: bool) *Set {
         const row = &self.rows[topic];
         if (!publishing and context.now -| row.fanout_last_ms >= c.fanout_ttl_ms) {
-            row.fanout = .initEmpty();
+            row.fanout = .empty;
             return &row.fanout;
         }
         if (publishing) row.fanout_last_ms = context.now;
@@ -692,7 +692,7 @@ pub const Overlay = struct {
         }
         self.shuffle(candidates_buf[0..n]);
         const wanted = @min(n, @max(c.mesh_d_lazy, @as(usize, @intFromFloat(@ceil(factor * @as(f64, @floatFromInt(n)))))));
-        var result: Set = .initEmpty();
+        var result: Set = .empty;
         for (candidates_buf[0..wanted]) |peer| result.set(peer);
         return result;
     }
@@ -738,7 +738,7 @@ test "gossip policy review I3 shuffle budget holds at empty singleton and capaci
         for (members[0..len], 0..) |*peer, i| peer.* = @intCast(i);
         mesh.shuffle(members[0..len]);
         try std.testing.expectEqualSlices(u64, &expected.s, &mesh.rng.s);
-        var seen: Set = .initEmpty();
+        var seen: Set = .empty;
         for (members[0..len]) |peer| {
             try std.testing.expect(peer < len and !seen.isSet(peer));
             seen.set(peer);

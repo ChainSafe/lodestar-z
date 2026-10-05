@@ -410,7 +410,7 @@ pub const PeerManager = struct {
         }
         if (self.local.fork.fork.gte(.fulu) and snapshot.score >= peers.reputation.prune_score and
             gossip_score >= 0)
-            input.coverage.custody_groups = snapshot.custody_groups orelse .initEmpty();
+            input.coverage.custody_groups = snapshot.custody_groups orelse .empty;
         return input;
     }
     fn refreshDiscoveryNeed(self: *PeerManager) void {

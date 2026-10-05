@@ -25,6 +25,7 @@ const processParticipationRecordUpdates = @import("./process_participation_recor
 const processParticipationFlagUpdates = @import("./process_participation_flag_updates.zig").processParticipationFlagUpdates;
 const processSyncCommitteeUpdates = @import("./process_sync_committee_updates.zig").processSyncCommitteeUpdates;
 const processProposerLookahead = @import("./process_proposer_lookahead.zig").processProposerLookahead;
+const startProposerLookaheadShuffling = @import("./process_proposer_lookahead.zig").startProposerLookaheadShuffling;
 const Node = @import("persistent_merkle_tree").Node;
 
 pub fn processEpoch(
@@ -36,6 +37,10 @@ pub fn processEpoch(
     state: *BeaconState(fork),
     cache: *EpochTransitionCache,
 ) !void {
+    if (comptime fork.gte(.fulu)) {
+        try startProposerLookaheadShuffling(fork, io, epoch_cache, state, cache);
+    }
+
     var timer = time.start(io);
     try processJustificationAndFinalization(fork, state, cache);
     try observeEpochTransitionStep(.{ .step = .process_justification_and_finalization }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
@@ -57,7 +62,7 @@ pub fn processEpoch(
     try observeEpochTransitionStep(.{ .step = .process_slashings }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
     timer = time.start(io);
-    try processRewardsAndPenalties(fork, allocator, config, epoch_cache, state, cache, slashing_penalties);
+    try processRewardsAndPenalties(fork, config, epoch_cache, state, cache, slashing_penalties);
     try observeEpochTransitionStep(.{ .step = .process_rewards_and_penalties }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
     try processEth1DataReset(fork, state, cache);

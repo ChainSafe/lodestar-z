@@ -32,7 +32,7 @@ test "RLP writer leaves state unchanged when capacity is exhausted" {
     const length_before = writer.bytes().len;
     const bytes_before = buffer;
 
-    try std.testing.expectError(rlp.Error.BufferTooSmall, writer.writeBytes("long"));
+    try std.testing.expectError(error.BufferTooSmall, writer.writeBytes("long"));
     try std.testing.expectEqual(length_before, writer.bytes().len);
     try std.testing.expectEqualSlices(u8, &bytes_before, &buffer);
 }
@@ -40,26 +40,26 @@ test "RLP writer leaves state unchanged when capacity is exhausted" {
 test "RLP rejects non-canonical encodings" {
     const single = [_]u8{ 0x81, 0x01 };
     var single_reader = rlp.Reader.init(&single);
-    try std.testing.expectError(rlp.Error.InvalidEncoding, single_reader.readBytes());
+    try std.testing.expectError(error.InvalidEncoding, single_reader.readBytes());
 
     const long_string = [_]u8{ 0xb8, 0x01, 0x80 };
     var string_reader = rlp.Reader.init(&long_string);
-    try std.testing.expectError(rlp.Error.InvalidEncoding, string_reader.readRawItem());
+    try std.testing.expectError(error.InvalidEncoding, string_reader.readRawItem());
 
     const long_list = [_]u8{ 0xf8, 0x01, 0xc0 };
     var list_reader = rlp.Reader.init(&long_list);
-    try std.testing.expectError(rlp.Error.InvalidEncoding, list_reader.readList());
+    try std.testing.expectError(error.InvalidEncoding, list_reader.readList());
 
     const leading_zero = [_]u8{0x00};
     var integer_reader = rlp.Reader.init(&leading_zero);
-    try std.testing.expectError(rlp.Error.InvalidEncoding, integer_reader.readUint());
+    try std.testing.expectError(error.InvalidEncoding, integer_reader.readUint());
 }
 
 test "RLP raw item requires exactly one canonical item" {
     var buffer: [32]u8 = undefined;
     var writer = rlp.Writer.init(&buffer);
     try std.testing.expectError(
-        rlp.Error.InvalidEncoding,
+        error.InvalidEncoding,
         writer.writeRawItem(&.{ 0x80, 0x80 }),
     );
     try std.testing.expectEqual(@as(usize, 0), writer.bytes().len);

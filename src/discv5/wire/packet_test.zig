@@ -119,7 +119,7 @@ test "authentication failure does not publish plaintext" {
     var decrypt_scratch: packet.DecryptScratch = .{};
 
     try std.testing.expectError(
-        packet.Error.DecryptionFailed,
+        error.DecryptionFailed,
         packet.decrypt(&decoded, &wrong_key, &decrypt_scratch),
     );
     try std.testing.expectEqualStrings("secret", try packet.decrypt(&decoded, &key, &decrypt_scratch));
@@ -142,7 +142,7 @@ test "packet decode recovers after invalid framing" {
     var decode_scratch: packet.DecodeScratch = .{};
 
     try std.testing.expectError(
-        packet.Error.InvalidProtocolId,
+        error.InvalidProtocolId,
         packet.decode(&raw, &recipient_id, &decode_scratch),
     );
     raw[constants.masking_iv_size] ^= 1;
@@ -160,7 +160,7 @@ test "packet size and handshake bounds fail before output mutation" {
     var raw = [_]u8{0xa5} ** constants.packet_size_max;
     const before = raw;
 
-    try std.testing.expectError(packet.Error.InvalidPacket, packet.encodeOrdinary(&raw, .{
+    try std.testing.expectError(error.InvalidPacket, packet.encodeOrdinary(&raw, .{
         .packet = .{
             .masking_iv = &masking_iv,
             .recipient_id = &recipient_id,
@@ -183,7 +183,7 @@ test "handshake plaintext capacity accounts for the transmitted ENR" {
         try packet.handshakePlaintextCapacity(constants.enr_size_max),
     );
     try std.testing.expectError(
-        packet.Error.InvalidAuthdata,
+        error.InvalidAuthdata,
         packet.handshakePlaintextCapacity(constants.enr_size_max + 1),
     );
 }

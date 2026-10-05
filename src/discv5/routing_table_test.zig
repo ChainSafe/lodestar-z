@@ -197,7 +197,7 @@ test "routing table revalidates the least recent entry before replacement" {
     );
     try std.testing.expectEqual(RoutingTable.bucket_size, table.count());
     try std.testing.expectError(
-        RoutingTable.Error.NoPendingRevalidation,
+        error.NoPendingRevalidation,
         table.resolveRevalidation(&ids[2], false, 28),
     );
 }
@@ -223,7 +223,7 @@ test "routing table enforces bucket and table subnet limits" {
         .address = rejected_address,
     };
     try std.testing.expectError(
-        RoutingTable.Error.AddressLimit,
+        error.AddressLimit,
         table.upsertVerified(&rejected_peer, &rejected_record, 1, .outgoing),
     );
 
@@ -245,7 +245,7 @@ test "routing table enforces bucket and table subnet limits" {
         .address = table_rejected_address,
     };
     try std.testing.expectError(
-        RoutingTable.Error.AddressLimit,
+        error.AddressLimit,
         other_table.upsertVerified(&table_rejected_peer, &table_rejected_record, 1, .outgoing),
     );
 }
@@ -442,7 +442,7 @@ test "routing table applies subnet limits to IPv6 prefixes" {
         .address = rejected_address,
     };
     try std.testing.expectError(
-        RoutingTable.Error.AddressLimit,
+        error.AddressLimit,
         table.upsertVerified(&rejected_peer, &rejected_record, 1, .outgoing),
     );
 }
@@ -489,15 +489,15 @@ test "routing FINDNODE selection filters exact distances and caps the aggregate"
     try std.testing.expectEqual(types.findnode_result_max, self_last.len);
     try std.testing.expectEqualSlices(u8, &local_id, &self_last[0].node_id);
     for (self_last[1..]) |record| try std.testing.expectEqual(@as(u16, 256), types.logDistance(&local_id, &record.node_id));
-    try std.testing.expectError(RoutingTable.Error.InvalidDistance, table.findNodes(&local_record, null, &.{ 256, 257 }, &out));
+    try std.testing.expectError(error.InvalidDistance, table.findNodes(&local_record, null, &.{ 256, 257 }, &out));
 
     try std.testing.expectError(
-        RoutingTable.Error.InvalidDistance,
+        error.InvalidDistance,
         table.findNodes(&local_record, null, &.{ 0, 257 }, &out),
     );
     var too_many = [_]u16{0} ** (types.distance_count + 1);
     try std.testing.expectError(
-        RoutingTable.Error.TooManyDistances,
+        error.TooManyDistances,
         table.findNodes(&local_record, null, &too_many, &out),
     );
 }
@@ -577,26 +577,26 @@ test "routing table rejects inconsistent records and unusable endpoints" {
     var record = fakeRecord(remote_id, address, 1);
     var peer = types.Endpoint{ .node_id = local_id, .address = address };
     try std.testing.expectError(
-        RoutingTable.Error.SelfEntry,
+        error.SelfEntry,
         table.upsertVerified(&peer, &record, 1, .outgoing),
     );
 
     peer.node_id = remote_id;
     record.node_id = nodeAtDistance(255, 2);
     try std.testing.expectError(
-        RoutingTable.Error.InvalidRemoteRecord,
+        error.InvalidRemoteRecord,
         table.upsertVerified(&peer, &record, 1, .outgoing),
     );
     record.node_id = remote_id;
     peer.address = address4(203, 0, 113, 2, 9_000);
     try std.testing.expectError(
-        RoutingTable.Error.InvalidRemoteRecord,
+        error.InvalidRemoteRecord,
         table.upsertVerified(&peer, &record, 1, .outgoing),
     );
     peer.address = address4(203, 0, 113, 1, 0);
     record.udp = 0;
     try std.testing.expectError(
-        RoutingTable.Error.InvalidRemoteRecord,
+        error.InvalidRemoteRecord,
         table.upsertVerified(&peer, &record, 1, .outgoing),
     );
 }

@@ -211,7 +211,7 @@ pub const Database = struct {
 
     /// Caller frees a non-null result with Database.allocator.
     pub fn propertyValue(self: *Database, name: [:0]const u8) !?[]u8 {
-        if (name.len > max_path_bytes or std.mem.indexOfScalar(u8, name, 0) != null)
+        if (name.len > max_path_bytes or std.mem.findScalar(u8, name, 0) != null)
             return error.InvalidProperty;
         const value = (try (try self.handle()).propertyValue(name)) orelse return null;
         defer raw.free(value.ptr);
@@ -400,7 +400,7 @@ pub fn destroy(path: [:0]const u8) !void {
 }
 
 fn checkPath(path: [:0]const u8) !void {
-    if (path.len == 0 or path.len > max_path_bytes or std.mem.indexOfScalar(u8, path, 0) != null)
+    if (path.len == 0 or path.len > max_path_bytes or std.mem.findScalar(u8, path, 0) != null)
         return error.InvalidPath;
 }
 

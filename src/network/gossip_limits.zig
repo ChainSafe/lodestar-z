@@ -32,7 +32,7 @@ pub const priority = [_]Kind{ .beacon_block, .blob_sidecar, .data_column_sidecar
 
 comptime {
     std.debug.assert(priority.len == kind_count);
-    var seen = std.StaticBitSet(kind_count).initEmpty();
+    var seen = std.StaticBitSet(kind_count).empty;
     for (priority) |kind| {
         std.debug.assert(!seen.isSet(@intFromEnum(kind)));
         seen.set(@intFromEnum(kind));

@@ -1,3 +1,5 @@
+import type {BeaconConfig} from "./state-transition.js";
+
 /** Canonical unprefixed base58btc secp256k1 identity multihash, equal to libp2p PeerId.toString(). */
 export type PeerIdStr = string;
 
@@ -212,8 +214,9 @@ export interface NativeRememberedPeersSnapshot extends NativeRememberedPeers {
   ownerSequence: bigint;
 }
 
-/** Configure the shared BeaconConfig before constructing a network runtime. */
 export interface NativeApplicationConfig extends NativeRuntimeConfig {
+  /** Startup copies the derived network settings; this instance need not outlive initialization. */
+  beaconConfig: BeaconConfig;
   resources: NativeResources;
   identify: {agentVersion: string; protocolVersion: string};
   serveLightClients: boolean;
@@ -651,7 +654,7 @@ export interface NativeNetwork {
 }
 
 /**
- * Initialize from the owning thread, after configuring BeaconConfig. One network is live per process; another
+ * Initialize from the owning thread using config.beaconConfig. One network is live per process; another
  * initializes only after the previous one is garbage collected. Copies configuration and returns a running network
  * whose binding drains it for `host`; failure is terminal. Invokes no host callback synchronously.
  */

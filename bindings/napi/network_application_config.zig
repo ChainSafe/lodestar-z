@@ -3,7 +3,7 @@ const n = @import("network");
 const cfg = @import("network_config.zig");
 const Value = @import("zapi:zapi").napi.Value;
 const decode = @import("network_js_input.zig");
-const config = @import("config.zig");
+const BeaconConfig = @import("config").BeaconConfig;
 const network_logs = @import("network_logs.zig");
 
 pub const Config = struct {
@@ -68,12 +68,12 @@ const resource_maxima: Resources = .{
     .bridgeBudgetBytes = 1024 * 1024 * 1024,
 };
 
-const required = .{ "profile", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "gossipPolicy", "resources", "identify", "serveLightClients", "logLevel" };
+const required = .{ "beaconConfig", "profile", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "gossipPolicy", "resources", "identify", "serveLightClients", "logLevel" };
 
-pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
+pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out: *Config) !void {
     const remembered = try value.hasNamedProperty("rememberedPeers");
     if (remembered) try decode.completeObject(value, &(required ++ .{"rememberedPeers"})) else try decode.completeObject(value, &required);
-    try cfg.parse(value, common);
+    try cfg.parse(value, beacon, common);
     errdefer common.wipe();
     const resources = try decode.get(value, "resources");
     try decode.completeObject(resources, &.{ "peerCapacity", "targetPeers", "maxPeers", "minOutbound", "outboundReserve", "connectionCapacity", "handshakingCapacity", "dialingCapacity", "receiveBudgetBytes", "nativeBudgetBytes", "bridgeBudgetBytes" });
@@ -86,7 +86,7 @@ pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
     try decode.completeObject(identify, &.{ "agentVersion", "protocolVersion" });
     out.agent_len = @intCast(try decode.text(try decode.get(identify, "agentVersion"), &out.agent));
     out.version_len = @intCast(try decode.text(try decode.get(identify, "protocolVersion"), &out.version));
-    out.genesis_root = config.state.config.genesis_validator_root;
+    out.genesis_root = beacon.genesis_validator_root;
     out.log_level = try network_logs.level(try decode.get(value, "logLevel"));
     out.remembered_count = 0;
     if (remembered) try parseRemembered(try decode.get(value, "rememberedPeers"), out);

@@ -163,7 +163,7 @@ test "gossipsub IHAVE samples eligible IDs across the advertisement independentl
         support.control(&g, peer.index, .{ .ihave = .{ .topic = name, .body = writer.written() } }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     }
     try std.testing.expectEqual(@as(usize, 2), g.recovery.batch_len);
-    var selected: [2]std.StaticBitSet(512) = @splat(.initEmpty());
+    var selected: [2]std.StaticBitSet(512) = @splat(.empty);
     for (g.recovery.batches[0..2], 0..) |batch, peer| {
         try std.testing.expectEqual(@as(u16, constants.gossip_ids_max), batch.count);
         var slot = batch.head;

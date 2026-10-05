@@ -24,9 +24,9 @@ pub const PublicKey = Ecdsa.PublicKey;
 
 pub fn keyPairFromSecret(secret: *const [32]u8) Error!KeyPair {
     var secret_key = Ecdsa.SecretKey.fromBytes(secret.*) catch
-        return Error.InvalidSecretKey;
+        return error.InvalidSecretKey;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&secret_key));
-    return KeyPair.fromSecretKey(secret_key) catch return Error.InvalidSecretKey;
+    return KeyPair.fromSecretKey(secret_key) catch return error.InvalidSecretKey;
 }
 
 pub fn compressedPublicKey(key_pair: *const KeyPair) [33]u8 {
@@ -35,15 +35,15 @@ pub fn compressedPublicKey(key_pair: *const KeyPair) [33]u8 {
 
 pub fn uncompressedPublicKey(compressed: *const [33]u8) Error![65]u8 {
     const public_key = Ecdsa.PublicKey.fromSec1(compressed) catch
-        return Error.InvalidPublicKey;
+        return error.InvalidPublicKey;
     return public_key.toUncompressedSec1();
 }
 
 pub fn ecdh(public_key: *const [33]u8, key_pair: *const KeyPair) Error![33]u8 {
-    const peer = Secp256k1.fromSec1(public_key) catch return Error.InvalidPublicKey;
+    const peer = Secp256k1.fromSec1(public_key) catch return error.InvalidPublicKey;
     var secret = key_pair.secret_key.toBytes();
     defer std.crypto.secureZero(u8, &secret);
-    var shared = peer.mul(secret, .big) catch return Error.EcdhFailed;
+    var shared = peer.mul(secret, .big) catch return error.EcdhFailed;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&shared));
     return shared.toCompressedSec1();
 }
@@ -54,7 +54,7 @@ pub fn sign(digest: *const [32]u8, key_pair: *const KeyPair) Error![64]u8 {
     var generator = Rfc6979.init(secret_bytes, digest.*);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&generator));
     var secret = Scalar.fromBytes(secret_bytes, .big) catch
-        return Error.SigningFailed;
+        return error.SigningFailed;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&secret));
     const z = scalarFromDigest(digest.*);
 
@@ -78,7 +78,7 @@ pub fn sign(digest: *const [32]u8, key_pair: *const KeyPair) Error![64]u8 {
         }
         return r.toBytes(.big) ++ canonicalLowS(s.toBytes(.big));
     }
-    return Error.SigningFailed;
+    return error.SigningFailed;
 }
 
 /// Rejects high-S signatures, since a third party could otherwise re-encode a valid one.
@@ -93,10 +93,10 @@ pub fn verify(
 /// Returns the authenticated public point so identity derivation need not decode it again.
 pub fn verifyAndDecode(digest: *const [32]u8, signature: *const [64]u8, public_key: *const [33]u8) Error!PublicKey {
     const s = std.mem.readInt(u256, signature[32..64], .big);
-    if (s == 0 or s > half_scalar_order) return Error.InvalidSignature;
-    const key = PublicKey.fromSec1(public_key) catch return Error.InvalidPublicKey;
+    if (s == 0 or s > half_scalar_order) return error.InvalidSignature;
+    const key = PublicKey.fromSec1(public_key) catch return error.InvalidPublicKey;
     const parsed = Ecdsa.Signature.fromBytes(signature.*);
-    parsed.verifyPrehashed(digest.*, key) catch return Error.InvalidSignature;
+    parsed.verifyPrehashed(digest.*, key) catch return error.InvalidSignature;
     return key;
 }
 

@@ -223,7 +223,6 @@ pub const TestCachedBeaconState = struct {
         errdefer allocator.destroy(epoch_transition_cache);
         epoch_transition_cache.* = try state_transition.EpochTransitionCache.init(
             allocator,
-            std.testing.io,
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state,
@@ -244,8 +243,8 @@ pub const TestCachedBeaconState = struct {
         self.allocator.destroy(self.cached_state);
         self.pubkey_cache.deinit();
         self.allocator.destroy(self.pubkey_cache);
-        self.epoch_transition_cache.deinit(self.allocator);
-        @import("../state_transition.zig").deinitReusedEpochTransitionCache(std.testing.io);
+        self.epoch_transition_cache.deinit();
+        @import("../state_transition.zig").deinitReusedEpochTransitionCache();
         self.allocator.destroy(self.epoch_transition_cache);
         self.allocator.destroy(self.config);
     }

@@ -41,7 +41,7 @@ pub const Record = struct {
         sequence: u64,
         endpoint_value: types.Address,
     ) Error!Record {
-        if (!endpoint_value.isUsable()) return Error.InvalidRecord;
+        if (!endpoint_value.isUsable()) return error.InvalidRecord;
         const public_key = crypto.compressedPublicKey(key_pair);
 
         var content_buffer: [constants.enr_size_max]u8 = undefined;
@@ -64,7 +64,7 @@ pub const Record = struct {
 
     /// Borrows a complete sorted field list, including id and secp256k1, for this call.
     pub fn createFields(key_pair: *const crypto.KeyPair, sequence: u64, fields: []const Field) Error!Record {
-        if (fields.len > field_pairs_max) return Error.TooManyFields;
+        if (fields.len > field_pairs_max) return error.TooManyFields;
         var content_buffer: [constants.enr_size_max]u8 = undefined;
         var content_writer = rlp.Writer.init(&content_buffer);
         const content = try content_writer.beginList();
@@ -98,7 +98,7 @@ pub const Record = struct {
                 .lt => {},
             }
         }
-        return Error.TooManyFields;
+        return error.TooManyFields;
     }
 
     pub fn fieldBytes(self: *const Record, key: []const u8) Error!?[]const u8 {
@@ -118,7 +118,7 @@ pub const Record = struct {
     fn fromSigned(data: []const u8, key_pair: *const crypto.KeyPair) Error!Record {
         const parsed = try parse(data);
         if (!std.mem.eql(u8, &parsed.public_key, &crypto.compressedPublicKey(key_pair)))
-            return Error.InvalidSignature;
+            return error.InvalidSignature;
         return fromParsed(data, &parsed, &key_pair.public_key);
     }
 
@@ -142,14 +142,14 @@ pub const Record = struct {
     }
 
     pub fn initText(text: []const u8) Error!Record {
-        if (!std.mem.startsWith(u8, text, "enr:")) return Error.InvalidRecord;
+        if (!std.mem.startsWith(u8, text, "enr:")) return error.InvalidRecord;
         const encoded = text[4..];
         const decoded_size = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(encoded) catch
-            return Error.InvalidRecord;
-        if (decoded_size > constants.enr_size_max) return Error.InvalidRecord;
+            return error.InvalidRecord;
+        if (decoded_size > constants.enr_size_max) return error.InvalidRecord;
         var decoded: [constants.enr_size_max]u8 = undefined;
         std.base64.url_safe_no_pad.Decoder.decode(decoded[0..decoded_size], encoded) catch
-            return Error.InvalidRecord;
+            return error.InvalidRecord;
         return Record.init(decoded[0..decoded_size]);
     }
 
@@ -197,7 +197,7 @@ fn writeGenericFields(writer: *rlp.Writer, sequence: u64, fields: []const Field)
     var previous: ?[]const u8 = null;
     for (fields) |field_value| {
         if (previous) |key| {
-            if (std.mem.order(u8, key, field_value.key) != .lt) return Error.InvalidRecord;
+            if (std.mem.order(u8, key, field_value.key) != .lt) return error.InvalidRecord;
         }
         previous = field_value.key;
         try writer.writeBytes(field_value.key);
@@ -215,10 +215,10 @@ fn writeGenericFields(writer: *rlp.Writer, sequence: u64, fields: []const Field)
 // A byte bounds each entered item and each list exit. End offsets retain nesting without
 // recursion; all offsets fit because a complete ENR has at most 300 bytes.
 fn validateRawItem(encoded: []const u8) Error!void {
-    if (encoded.len == 0 or encoded.len > constants.enr_size_max) return Error.InvalidRecord;
+    if (encoded.len == 0 or encoded.len > constants.enr_size_max) return error.InvalidRecord;
     var outer = rlp.Reader.init(encoded);
-    _ = outer.readRawItem() catch return Error.InvalidRecord;
-    if (!outer.atEnd()) return Error.InvalidRecord;
+    _ = outer.readRawItem() catch return error.InvalidRecord;
+    if (!outer.atEnd()) return error.InvalidRecord;
     var ends: [constants.enr_size_max]u16 = undefined;
     ends[0] = @intCast(encoded.len);
     var depth: usize = 1;
@@ -232,17 +232,17 @@ fn validateRawItem(encoded: []const u8) Error!void {
             continue;
         }
         var reader = rlp.Reader.init(encoded[position..end]);
-        const item = reader.readRawItem() catch return Error.InvalidRecord;
+        const item = reader.readRawItem() catch return error.InvalidRecord;
         position += item.len;
         if (item[0] < 0xc0) continue;
         var list_reader = rlp.Reader.init(item);
-        const children = list_reader.readList() catch return Error.InvalidRecord;
-        if (depth == ends.len) return Error.InvalidRecord;
+        const children = list_reader.readList() catch return error.InvalidRecord;
+        if (depth == ends.len) return error.InvalidRecord;
         ends[depth] = @intCast(position);
         depth += 1;
         position -= children.data.len;
     }
-    return Error.InvalidRecord;
+    return error.InvalidRecord;
 }
 
 fn writeFields(
@@ -290,14 +290,14 @@ const Parsed = struct {
 };
 
 fn parse(data: []const u8) Error!Parsed {
-    if (data.len > constants.enr_size_max) return Error.InvalidRecord;
+    if (data.len > constants.enr_size_max) return error.InvalidRecord;
     var outer = rlp.Reader.init(data);
-    var list = outer.readList() catch return Error.InvalidRecord;
-    if (!outer.atEnd()) return Error.InvalidRecord;
-    const signature_bytes = list.readBytes() catch return Error.InvalidRecord;
-    if (signature_bytes.len != 64) return Error.InvalidRecord;
+    var list = outer.readList() catch return error.InvalidRecord;
+    if (!outer.atEnd()) return error.InvalidRecord;
+    const signature_bytes = list.readBytes() catch return error.InvalidRecord;
+    if (signature_bytes.len != 64) return error.InvalidRecord;
     const signed_payload = list.data[list.position..];
-    const sequence = list.readUint() catch return Error.InvalidRecord;
+    const sequence = list.readUint() catch return error.InvalidRecord;
     var parsed = Parsed{ .signature = signature_bytes[0..64].*, .signed_payload = signed_payload, .sequence = sequence, .public_key = undefined };
     var saw_public_key = false;
     var saw_v4 = false;
@@ -305,18 +305,18 @@ fn parse(data: []const u8) Error!Parsed {
 
     var fields: usize = 0;
     while (!list.atEnd() and fields < field_pairs_max) : (fields += 1) {
-        const key = list.readBytes() catch return Error.InvalidRecord;
-        const value = list.readRawItem() catch return Error.InvalidRecord;
+        const key = list.readBytes() catch return error.InvalidRecord;
+        const value = list.readRawItem() catch return error.InvalidRecord;
         try validateRawItem(value);
         if (previous_key) |previous| {
-            if (std.mem.order(u8, previous, key) != .lt) return Error.InvalidRecord;
+            if (std.mem.order(u8, previous, key) != .lt) return error.InvalidRecord;
         }
         previous_key = key;
         try parseField(&parsed, key, value, &saw_public_key, &saw_v4);
     }
-    if (!list.atEnd()) return Error.TooManyFields;
-    if (!saw_v4) return Error.UnsupportedScheme;
-    if (!saw_public_key) return Error.InvalidRecord;
+    if (!list.atEnd()) return error.TooManyFields;
+    if (!saw_v4) return error.UnsupportedScheme;
+    if (!saw_public_key) return error.InvalidRecord;
 
     return parsed;
 }
@@ -330,20 +330,20 @@ fn parseField(
 ) Error!void {
     if (std.mem.eql(u8, key, "id")) {
         const decoded = try decodeFieldBytes(value);
-        if (!std.mem.eql(u8, decoded, "v4")) return Error.UnsupportedScheme;
+        if (!std.mem.eql(u8, decoded, "v4")) return error.UnsupportedScheme;
         saw_v4.* = true;
     } else if (std.mem.eql(u8, key, "secp256k1")) {
         const decoded = try decodeFieldBytes(value);
-        if (decoded.len != 33) return Error.InvalidRecord;
+        if (decoded.len != 33) return error.InvalidRecord;
         parsed.public_key = decoded[0..33].*;
         saw_public_key.* = true;
     } else if (std.mem.eql(u8, key, "ip")) {
         const decoded = try decodeFieldBytes(value);
-        if (decoded.len != 4) return Error.InvalidRecord;
+        if (decoded.len != 4) return error.InvalidRecord;
         parsed.ip4 = decoded[0..4].*;
     } else if (std.mem.eql(u8, key, "ip6")) {
         const decoded = try decodeFieldBytes(value);
-        if (decoded.len != 16) return Error.InvalidRecord;
+        if (decoded.len != 16) return error.InvalidRecord;
         parsed.ip6 = decoded[0..16].*;
     } else if (std.mem.eql(u8, key, "udp")) {
         parsed.udp = try parsePort(try decodeFieldBytes(value));
@@ -354,14 +354,14 @@ fn parseField(
 
 fn decodeFieldBytes(encoded: []const u8) Error![]const u8 {
     var reader = rlp.Reader.init(encoded);
-    const decoded = reader.readBytes() catch return Error.InvalidRecord;
-    if (!reader.atEnd()) return Error.InvalidRecord;
+    const decoded = reader.readBytes() catch return error.InvalidRecord;
+    if (!reader.atEnd()) return error.InvalidRecord;
     return decoded;
 }
 
 fn parsePort(bytes: []const u8) Error!u16 {
-    if (bytes.len > 2) return Error.InvalidRecord;
-    if (bytes.len > 0 and bytes[0] == 0) return Error.InvalidRecord;
+    if (bytes.len > 2) return error.InvalidRecord;
+    if (bytes.len > 0 and bytes[0] == 0) return error.InvalidRecord;
     var value: u16 = 0;
     for (bytes) |byte| value = (value << 8) | byte;
     return value;

@@ -559,15 +559,19 @@ pub const EpochCache = struct {
         const epoch_after_upcoming = upcoming_epoch + 1;
         const slot = try state.slot();
 
-        const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
-        std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
+        const next_shuffling_rc = if (epoch_transition_cache.next_shuffling) |next_shuffling| blk: {
+            break :blk next_shuffling.ref();
+        } else blk: {
+            const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
+            std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
 
-        const next_shuffling_rc = try initEpochShufflingRc(
-            self.allocator,
-            state,
-            next_shuffling_active_indices,
-            epoch_after_upcoming,
-        );
+            break :blk try initEpochShufflingRc(
+                self.allocator,
+                state,
+                next_shuffling_active_indices,
+                epoch_after_upcoming,
+            );
+        };
         errdefer next_shuffling_rc.unref();
 
         const next_decision_root = try calculateShufflingDecisionRoot(state, epoch_after_upcoming);
@@ -716,10 +720,10 @@ pub const EpochCache = struct {
         return error.EpochTooFar;
     }
 
-    /// consumer takes ownership of the returned indexed attestation
-    /// hence it needs to deinit attesting_indices inside
-    pub fn computeIndexedAttestationPhase0(self: *const EpochCache, attestation: *const types.phase0.Attestation.Type, out: *types.phase0.IndexedAttestation.Type) !void {
-        const attesting_indices = try self.getAttestingIndicesPhase0(attestation);
+    /// Consumer takes ownership of the returned indexed attestation and must deinit
+    /// its `attesting_indices` with `allocator`.
+    pub fn computeIndexedAttestationPhase0(self: *const EpochCache, allocator: Allocator, attestation: *const types.phase0.Attestation.Type, out: *types.phase0.IndexedAttestation.Type) !void {
+        const attesting_indices = try self.getAttestingIndicesPhase0(allocator, attestation);
         const sort_fn = struct {
             pub fn sort(_: void, a: ValidatorIndex, b: ValidatorIndex) bool {
                 return a < b;
@@ -737,10 +741,10 @@ pub const EpochCache = struct {
         };
     }
 
-    /// consumer takes ownership of the returned indexed attestation
-    /// hence it needs to deinit attesting_indices inside
-    pub fn computeIndexedAttestationElectra(self: *const EpochCache, attestation: *const types.electra.Attestation.Type, out: *types.electra.IndexedAttestation.Type) !void {
-        const attesting_indices = try self.getAttestingIndicesElectra(attestation);
+    /// Consumer takes ownership of the returned indexed attestation and must deinit
+    /// its `attesting_indices` with `allocator`.
+    pub fn computeIndexedAttestationElectra(self: *const EpochCache, allocator: Allocator, attestation: *const types.electra.Attestation.Type, out: *types.electra.IndexedAttestation.Type) !void {
+        const attesting_indices = try self.getAttestingIndicesElectra(allocator, attestation);
         const sort_fn = struct {
             pub fn sort(_: void, a: ValidatorIndex, b: ValidatorIndex) bool {
                 return a < b;
@@ -761,24 +765,25 @@ pub const EpochCache = struct {
     pub fn getAttestingIndices(
         self: *const EpochCache,
         comptime fork: ForkSeq,
+        allocator: Allocator,
         attestation: *const ForkTypes(fork).Attestation.Type,
     ) !std.ArrayList(ValidatorIndex) {
         return switch (fork) {
-            .phase0 => self.getAttestingIndicesPhase0(attestation),
-            .electra => self.getAttestingIndicesElectra(attestation),
+            .phase0 => self.getAttestingIndicesPhase0(allocator, attestation),
+            .electra => self.getAttestingIndicesElectra(allocator, attestation),
         };
     }
 
-    /// Consumer takes ownership of the returned array
-    pub fn getAttestingIndicesPhase0(self: *const EpochCache, attestation: *const types.phase0.Attestation.Type) !std.ArrayList(ValidatorIndex) {
+    /// Consumer takes ownership of the returned array and must free it with `allocator`.
+    pub fn getAttestingIndicesPhase0(self: *const EpochCache, allocator: Allocator, attestation: *const types.phase0.Attestation.Type) !std.ArrayList(ValidatorIndex) {
         const aggregation_bits = attestation.aggregation_bits;
         const data = attestation.data;
         const validator_indices = try self.getBeaconCommittee(data.slot, data.index);
-        return try aggregation_bits.intersectValues(ValidatorIndex, self.allocator, validator_indices);
+        return try aggregation_bits.intersectValues(ValidatorIndex, allocator, validator_indices);
     }
 
-    /// consumer takes ownership of the returned array
-    pub fn getAttestingIndicesElectra(self: *const EpochCache, attestation: *const types.electra.Attestation.Type) !std.ArrayList(ValidatorIndex) {
+    /// Consumer takes ownership of the returned array and must free it with `allocator`.
+    pub fn getAttestingIndicesElectra(self: *const EpochCache, allocator: Allocator, attestation: *const types.electra.Attestation.Type) !std.ArrayList(ValidatorIndex) {
         const aggregation_bits = attestation.aggregation_bits;
         const committee_bits = attestation.committee_bits;
         const data = attestation.data;
@@ -798,8 +803,8 @@ pub const EpochCache = struct {
             total_len += committee.len;
         }
 
-        var committee_validators = try self.allocator.alloc(ValidatorIndex, total_len);
-        defer self.allocator.free(committee_validators);
+        var committee_validators = try allocator.alloc(ValidatorIndex, total_len);
+        defer allocator.free(committee_validators);
 
         var offset: usize = 0;
         for (committee_indices) |committee_index| {
@@ -808,7 +813,7 @@ pub const EpochCache = struct {
             offset += committee.len;
         }
 
-        return try aggregation_bits.intersectValues(ValidatorIndex, self.allocator, committee_validators);
+        return try aggregation_bits.intersectValues(ValidatorIndex, allocator, committee_validators);
     }
 
     // TODO: getCommitteeAssignments
@@ -863,11 +868,11 @@ pub const EpochCache = struct {
         }
     }
 
-    pub fn rotateSyncCommitteeIndexed(self: *EpochCache, allocator: Allocator, next_sync_committee_indices: []const ValidatorIndex) !void {
-        var next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(allocator, next_sync_committee_indices);
+    pub fn rotateSyncCommitteeIndexed(self: *EpochCache, next_sync_committee_indices: []const ValidatorIndex) !void {
+        var next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
         errdefer next_sync_committee_indexed.deinit();
 
-        const next_sync_committee_indexed_rc = try SyncCommitteeCacheRc.init(allocator, next_sync_committee_indexed);
+        const next_sync_committee_indexed_rc = try SyncCommitteeCacheRc.init(self.allocator, next_sync_committee_indexed);
 
         // unref the old instance
         self.current_sync_committee_indexed.unref();
@@ -901,21 +906,53 @@ pub const EpochCache = struct {
         self.current_sync_committee_indexed = current_sync_committee_indexed_rc;
     }
 
-    /// This is different from typescript version: only allocate new EffectiveBalanceIncrements if needed
-    pub fn effectiveBalanceIncrementsSet(self: *EpochCache, allocator: Allocator, index: usize, effective_balance: u64) !void {
-        if (index >= self.effective_balance_increments.get().items.len) {
-            const old = self.effective_balance_increments.get();
+    /// Append an `effective_balance`, extending the arraylist if necessary
+    /// and detach it when shared.
+    ///
+    /// We directly write to indices (without extending the arraylist) in two places:
+    /// 1) process_effective_balance_updates.zig
+    /// 2) upgrade_state_to_electra.zig
+    ///
+    /// These calls never grow the arraylist, which makes direct writes safe.
+    ///
+    /// SAFETY: `index` must equal the current effective-balance-increments length.
+    pub fn effectiveBalanceIncrementsAppend(
+        self: *EpochCache,
+        index: usize,
+        effective_balance: u64,
+    ) !void {
+        const old = self.effective_balance_increments.get();
+        std.debug.assert(index == old.items.len);
+
+        grow: {
+            if (index < old.capacity) {
+                // Fast path: allow `self.effective_balance_increments` to grow
+                // in-place while this is the only reference.
+                // Avoids up to `preset.MAX_PENDING_DEPOSITS_PER_EPOCH`
+                // full-array copies of `effective_balance_increments`
+                // (which is a function of validator count) every epoch.
+                //
+                // NOTE: We run `beforeEpochTransition()` before this,
+                // which guarantees a ref count of 1 since we init a new
+                // rc prior to processing pending deposits.
+                if (self.effective_balance_increments.getMutIfUnique()) |increments| {
+                    increments.items.len = index + 1;
+                    @memset(increments.items[old.items.len..], 0);
+                    break :grow;
+                }
+            }
+
             const new_len = index + 1;
             const capacity = 1024 * @divFloor(new_len + 1024, 1024);
 
-            var new_increments = try EffectiveBalanceIncrements.initCapacity(allocator, capacity);
-            errdefer new_increments.deinit(allocator);
+            var new_increments = try EffectiveBalanceIncrements.initCapacity(self.allocator, capacity);
+            errdefer new_increments.deinit(self.allocator);
 
-            try new_increments.resize(allocator, new_len);
+            try new_increments.resize(self.allocator, new_len);
             @memcpy(new_increments.items[0..old.items.len], old.items);
             @memset(new_increments.items[old.items.len..new_len], 0);
 
-            const new_rc = try EffectiveBalanceIncrementsRc.init(allocator, new_increments);
+            const new_rc = try EffectiveBalanceIncrementsRc.init(self.allocator, new_increments);
             self.effective_balance_increments.unref();
             self.effective_balance_increments = new_rc;
         }

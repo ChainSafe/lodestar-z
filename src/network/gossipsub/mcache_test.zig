@@ -171,7 +171,7 @@ test "gossip ID index bounds sparse misses and repairs wrapped collision cluster
         if (count == ids.len) break;
     }
     try std.testing.expectEqual(ids.len, count);
-    var present = std.StaticBitSet(64).initFull();
+    var present = std.StaticBitSet(64).full;
     for ([_]usize{ 0, 32, 63, 1, 31, 62 }) |removed| {
         index.remove(ids[removed]);
         present.unset(removed);

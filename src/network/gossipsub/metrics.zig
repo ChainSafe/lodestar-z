@@ -85,7 +85,7 @@ pub const ScorePopulations = struct {
     /// Evaluates each connected peer's score once, without changing decay, cache validity or
     /// policy metrics. Each active session holds a distinct logical peer.
     pub fn collect(peers: *const PeerBook, overlay: *const Overlay, sessions: *const Sessions, now_ms: u64) ScorePopulations {
-        var meshed = PeerSet.initEmpty();
+        var meshed = PeerSet.empty;
         for (overlay.rows) |*row| if (row.active) meshed.setUnion(row.mesh);
         const params = &peers.scores.params;
         const gates = [_]f64{ -std.math.inf(f64), 0, params.gossip_threshold, params.publish_threshold, params.graylist_threshold };

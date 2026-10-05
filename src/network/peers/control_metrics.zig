@@ -57,5 +57,5 @@ test "peer event metrics bound unknown Goodbye reasons" {
     var writer = std.Io.Writer.fixed(&buffer);
     var encoder: prom.Encoder = .{ .writer = &writer };
     try counters.write(&encoder);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "lodestar_peer_goodbye_received_total{reason=\"Unknown\"} 1\n") != null);
+    try std.testing.expect(std.mem.find(u8, writer.buffered(), "lodestar_peer_goodbye_received_total{reason=\"Unknown\"} 1\n") != null);
 }

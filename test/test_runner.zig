@@ -425,7 +425,7 @@ fn select(arena: std.mem.Allocator, tests: []const std.builtin.TestFn) ![]const 
 fn matchesFilter(name: []const u8) bool {
     if (filter_count == 0) return true;
     for (filters[0..filter_count]) |filter| {
-        if (std.mem.indexOf(u8, name, filter) != null) return true;
+        if (std.mem.find(u8, name, filter) != null) return true;
     }
     return false;
 }

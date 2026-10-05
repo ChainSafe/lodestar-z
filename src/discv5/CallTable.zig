@@ -52,7 +52,7 @@ pub const AcceptedNodes = std.StaticBitSet(types.findnode_result_max);
 
 pub const MatchResult = struct {
     matched: Matched,
-    accepted_nodes: AcceptedNodes = AcceptedNodes.initEmpty(),
+    accepted_nodes: AcceptedNodes = AcceptedNodes.empty,
 };
 
 pub const Expired = struct {
@@ -98,7 +98,7 @@ pub fn init(
     allocator: std.mem.Allocator,
     capacity: usize,
 ) InitError!void {
-    if (capacity == 0 or capacity > capacity_max) return InitError.InvalidCapacity;
+    if (capacity == 0 or capacity > capacity_max) return error.InvalidCapacity;
 
     const entries = try allocator.alloc(?Entry, capacity);
     errdefer allocator.free(entries);
@@ -128,16 +128,16 @@ pub fn begin(
     deadline_ms: u64,
     request_capacity: usize,
 ) Error!Handle {
-    if (self.findNode(&peer.node_id) != null) return Error.PeerBusy;
+    if (self.findNode(&peer.node_id) != null) return error.PeerBusy;
     const expected = try expectedResponse(request);
     var encoded: [constants.ordinary_plaintext_size_max]u8 = undefined;
     defer std.crypto.secureZero(u8, &encoded);
     const request_bytes = try request.encode(&encoded);
-    if (request_bytes.len > request_capacity) return Error.RequestTooLarge;
+    if (request_bytes.len > request_capacity) return error.RequestTooLarge;
     const index = try self.availableIndex();
     const generation = self.next_generations[index];
     const successor = std.math.add(u64, generation, 1) catch
-        return Error.GenerationExhausted;
+        return error.GenerationExhausted;
     var entry = Entry{
         .generation = generation,
         .peer = peer,
@@ -205,9 +205,9 @@ pub fn markSent(
     sent_nonce: *const [constants.nonce_size]u8,
     deadline_ms: u64,
 ) Error!void {
-    const entry = self.getMut(handle) orelse return Error.StaleHandle;
+    const entry = self.getMut(handle) orelse return error.StaleHandle;
     if (self.findNonce(entry.peer.address, sent_nonce, handle) != null)
-        return Error.NonceInUse;
+        return error.NonceInUse;
     entry.sent_nonce = sent_nonce.*;
     entry.sent = true;
     entry.deadline_ms = deadline_ms;
@@ -225,7 +225,7 @@ pub fn acceptChallenge(
     const index = self.findNonce(address, nonce, null) orelse return null;
     const entry = &self.entries[index].?;
     if (now_ms >= entry.deadline_ms) return null;
-    if (entry.handshake_attempted) return Error.HandshakeAttempted;
+    if (entry.handshake_attempted) return error.HandshakeAttempted;
     entry.handshake_attempted = true;
     return .{ .index = @intCast(index), .generation = entry.generation };
 }
@@ -238,13 +238,13 @@ pub fn match(
     response: *const message.Message,
     now_ms: u64,
 ) Error!Handle {
-    const index = self.findPeer(peer) orelse return Error.UnknownCall;
+    const index = self.findPeer(peer) orelse return error.UnknownCall;
     const entry = &self.entries[index].?;
-    if (now_ms >= entry.deadline_ms) return Error.CallExpired;
+    if (now_ms >= entry.deadline_ms) return error.CallExpired;
     const response_id = response.requestId();
     if (!std.mem.eql(u8, entry.request_id.slice(), response_id.slice()))
-        return Error.RequestIdMismatch;
-    if (!expectsResponse(entry.expected, response)) return Error.UnexpectedResponse;
+        return error.RequestIdMismatch;
+    if (!expectsResponse(entry.expected, response)) return error.UnexpectedResponse;
     if (response.* == .nodes) {
         try validateNodesHeader(&entry.expected.nodes, response.nodes.total);
     }
@@ -260,8 +260,8 @@ pub fn accept(
     node_ids: []const types.NodeId,
     nonce: *const [constants.nonce_size]u8,
 ) Error!MatchResult {
-    const entry = self.getMut(handle) orelse return Error.StaleHandle;
-    if (!expectsResponse(entry.expected, response)) return Error.UnexpectedResponse;
+    const entry = self.getMut(handle) orelse return error.StaleHandle;
+    if (!expectsResponse(entry.expected, response)) return error.UnexpectedResponse;
     const index: usize = handle.index;
     return switch (response.*) {
         .pong => |pong| self.complete(index, handle, .{ .pong = pong }),
@@ -280,11 +280,11 @@ pub fn checkResponseNonce(
     handle: Handle,
     nonce: *const [constants.nonce_size]u8,
 ) Error!void {
-    const entry = self.get(handle) orelse return Error.StaleHandle;
+    const entry = self.get(handle) orelse return error.StaleHandle;
     if (entry.expected != .nodes) return;
     const state = &entry.expected.nodes;
     for (state.nonces[0..state.received]) |*seen| {
-        if (std.mem.eql(u8, seen, nonce)) return Error.DuplicateResponse;
+        if (std.mem.eql(u8, seen, nonce)) return error.DuplicateResponse;
     }
 }
 
@@ -338,13 +338,13 @@ fn acceptNodes(
     nonce: *const [constants.nonce_size]u8,
 ) Error!MatchResult {
     if (node_ids.len != nodes.enrs.len or node_ids.len > types.findnode_result_max)
-        return Error.InvalidNodeCount;
+        return error.InvalidNodeCount;
     const state = &self.entries[index].?.expected.nodes;
     try self.checkResponseNonce(handle, nonce);
     try validateNodesHeader(state, nodes.total);
     const total: u8 = @intCast(nodes.total);
 
-    var accepted_nodes = AcceptedNodes.initEmpty();
+    var accepted_nodes = AcceptedNodes.empty;
     for (node_ids, 0..) |*node_id, node_index| {
         if (state.accepted == types.findnode_result_max) break;
         const distance = types.logDistance(&self.entries[index].?.peer.node_id, node_id);
@@ -400,7 +400,7 @@ fn availableIndex(self: *const CallTable) Error!usize {
         }
         return index;
     }
-    return if (saw_exhausted) Error.GenerationExhausted else Error.TableFull;
+    return if (saw_exhausted) error.GenerationExhausted else error.TableFull;
 }
 
 fn get(self: *const CallTable, handle: Handle) ?*const Entry {
@@ -459,16 +459,16 @@ fn expectedResponse(request: *const message.Message) Error!Expected {
         .ping => .pong,
         .find_node => |find_node| blk: {
             if (find_node.distances.len > types.distance_count)
-                return Error.InvalidMessage;
-            var distances = std.StaticBitSet(types.distance_count).initEmpty();
+                return error.InvalidMessage;
+            var distances = std.StaticBitSet(types.distance_count).empty;
             for (find_node.distances) |distance| {
-                if (distance > types.distance_max) return Error.InvalidMessage;
+                if (distance > types.distance_max) return error.InvalidMessage;
                 distances.set(distance);
             }
             break :blk .{ .nodes = .{ .distances = distances } };
         },
         .talk_request => .talk_response,
-        else => Error.InvalidRequest,
+        else => error.InvalidRequest,
     };
 }
 
@@ -488,10 +488,10 @@ fn containsNode(nodes: []const types.NodeId, target: *const types.NodeId) bool {
 
 fn validateNodesHeader(state: *const NodesState, total_value: u64) Error!void {
     if (total_value == 0 or total_value > types.findnode_response_packets_max)
-        return Error.InvalidResponseCount;
+        return error.InvalidResponseCount;
     const total: u8 = @intCast(total_value);
-    if (state.total != 0 and state.total != total) return Error.InvalidResponseCount;
-    if (state.received >= total) return Error.InvalidResponseCount;
+    if (state.total != 0 and state.total != total) return error.InvalidResponseCount;
+    if (state.received >= total) return error.InvalidResponseCount;
 }
 
 fn clearEntry(entry: *?Entry) void {

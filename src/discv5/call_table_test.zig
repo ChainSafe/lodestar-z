@@ -14,11 +14,11 @@ test "one active call per peer uses stale-safe handles" {
     const peer = fakeEndpoint(1, 9_001);
     const ping = pingRequest(1);
     const first = try begin(&table, peer, &ping, 10);
-    try std.testing.expectError(CallTable.Error.PeerBusy, begin(&table, peer, &ping, 10));
+    try std.testing.expectError(error.PeerBusy, begin(&table, peer, &ping, 10));
     var moved_peer = peer;
     moved_peer.address.ip4.port = 9_101;
     try std.testing.expectError(
-        CallTable.Error.PeerBusy,
+        error.PeerBusy,
         begin(&table, moved_peer, &ping, 10),
     );
     try std.testing.expect(table.cancel(first));
@@ -54,14 +54,14 @@ test "call table owns encoded request bytes and tracks challenge nonce" {
         (try table.acceptChallenge(peer.address, &nonce, 9)).?,
     );
     try std.testing.expectError(
-        CallTable.Error.HandshakeAttempted,
+        error.HandshakeAttempted,
         table.acceptChallenge(peer.address, &nonce, 9),
     );
     const replacement_nonce = [_]u8{0x22} ** 12;
     try table.markSent(handle, &replacement_nonce, 20);
     try std.testing.expect((try table.acceptChallenge(peer.address, &nonce, 9)) == null);
     try std.testing.expectError(
-        CallTable.Error.HandshakeAttempted,
+        error.HandshakeAttempted,
         table.acceptChallenge(peer.address, &replacement_nonce, 19),
     );
 }
@@ -69,11 +69,11 @@ test "call table owns encoded request bytes and tracks challenge nonce" {
 test "call table rejects zero and excessive configured capacities" {
     var table: CallTable = undefined;
     try std.testing.expectError(
-        CallTable.InitError.InvalidCapacity,
+        error.InvalidCapacity,
         table.init(std.testing.allocator, 0),
     );
     try std.testing.expectError(
-        CallTable.InitError.InvalidCapacity,
+        error.InvalidCapacity,
         table.init(std.testing.allocator, CallTable.capacity_max + 1),
     );
 }
@@ -91,7 +91,7 @@ test "only sent calls participate in nonce and response matching" {
     const nonce = [_]u8{0x11} ** 12;
     try table.markSent(handle_a, &nonce, 100);
     try std.testing.expectError(
-        CallTable.Error.NonceInUse,
+        error.NonceInUse,
         table.markSent(handle_b, &nonce, 100),
     );
     const pong = message.Message{ .pong = .{
@@ -101,7 +101,7 @@ test "only sent calls participate in nonce and response matching" {
         .recipient_port = 9_001,
     } };
     try std.testing.expectError(
-        CallTable.Error.UnknownCall,
+        error.UnknownCall,
         accept(&table, peer_b, &pong, 99, &.{}),
     );
 }
@@ -120,12 +120,12 @@ test "response matching validates type ID and NODES packet count before mutation
     try table.markSent(handle, &nonce, 100);
     const wrong_id = nodesResponse(2, 2);
     try std.testing.expectError(
-        CallTable.Error.RequestIdMismatch,
+        error.RequestIdMismatch,
         accept(&table, peer, &wrong_id, 99, &.{}),
     );
     const invalid_total = nodesResponse(1, 0);
     try std.testing.expectError(
-        CallTable.Error.InvalidResponseCount,
+        error.InvalidResponseCount,
         accept(&table, peer, &invalid_total, 99, &.{}),
     );
 
@@ -135,7 +135,7 @@ test "response matching validates type ID and NODES packet count before mutation
     try std.testing.expect(!first_result.matched.terminal);
     const inconsistent = nodesResponse(1, 3);
     try std.testing.expectError(
-        CallTable.Error.InvalidResponseCount,
+        error.InvalidResponseCount,
         accept(&table, peer, &inconsistent, 99, &.{}),
     );
     const second = nodesResponse(1, 2);
@@ -253,7 +253,7 @@ test "begin refuses a message that is not a request" {
         .recipient_port = 9_001,
     } };
     try std.testing.expectError(
-        CallTable.Error.InvalidRequest,
+        error.InvalidRequest,
         begin(&table, fakeEndpoint(1, 9_001), &pong, 10),
     );
 }
@@ -276,7 +276,7 @@ test "accept refuses a handle whose call ended after matching" {
     try std.testing.expectEqual(handle, matched);
     try std.testing.expect(table.cancel(handle));
     try std.testing.expectError(
-        CallTable.Error.StaleHandle,
+        error.StaleHandle,
         table.accept(matched, &response, &.{}, &([_]u8{0} ** 12)),
     );
 }
@@ -296,7 +296,7 @@ test "responses at the deadline are not published" {
         .recipient_port = 9_001,
     } };
     try std.testing.expectError(
-        CallTable.Error.CallExpired,
+        error.CallExpired,
         accept(&table, peer, &response, 100, &.{}),
     );
     try std.testing.expectEqual(@as(usize, 1), table.count());

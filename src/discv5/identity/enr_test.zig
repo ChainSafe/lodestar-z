@@ -53,7 +53,7 @@ test "EIP-778 record validates signature identity and endpoint" {
     var tampered = record.bytes;
     tampered[record.length - 1] ^= 1;
     try std.testing.expectError(
-        crypto.Error.InvalidSignature,
+        error.InvalidSignature,
         enr.Record.init(tampered[0..record.length]),
     );
 }
@@ -92,7 +92,7 @@ test "EIP-778 record creation round-trips IPv4 and IPv6 endpoints" {
     }
 
     try std.testing.expectError(
-        enr.Error.InvalidRecord,
+        error.InvalidRecord,
         enr.Record.create(
             &key_pair,
             1,

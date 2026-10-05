@@ -47,7 +47,7 @@ pub fn init(
     ip_mode: types.Mode,
 ) Error!void {
     inline for (std.meta.fields(Config)) |field| {
-        if (@field(config, field.name) == 0) return Error.InvalidConfig;
+        if (@field(config, field.name) == 0) return error.InvalidConfig;
     }
     const probe_due_ms = now_ms +| config.probe_interval_ms;
     self.* = .{

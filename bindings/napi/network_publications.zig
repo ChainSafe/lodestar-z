@@ -48,7 +48,7 @@ pub const Diagnostics = struct {
 pub const Table = struct {
     cells: []Cell,
     /// The terminal cells, whose completions an exchange delivers. `transition` keeps it current.
-    terminal: std.StaticBitSet(capacity_max) = .initEmpty(),
+    terminal: std.StaticBitSet(capacity_max) = .empty,
     /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
     settle_cursor: usize = 0,
     backing: std.mem.Allocator,

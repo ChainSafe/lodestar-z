@@ -69,7 +69,7 @@ pub const Table = struct {
     cells: []Cell = &.{},
     /// The cells whose completion is due now, one set per combination of the runtime's stop and
     /// quiescent flags. `refresh` keeps them current after each change to a cell.
-    due: [4]std.StaticBitSet(capacity_max) = @splat(.initEmpty()),
+    due: [4]std.StaticBitSet(capacity_max) = @splat(.empty),
     /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
     settle_cursor: usize = 0,
     backing: std.mem.Allocator,

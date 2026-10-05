@@ -79,7 +79,7 @@ fn base58Decode(text: []const u8, out: *[length]u8) error{InvalidText}![]u8 {
     var bytes: [length]u8 = undefined;
     var bytes_len: usize = 0;
     for (text[zeros..]) |char| {
-        const digit = std.mem.indexOfScalar(u8, alphabet, char) orelse return error.InvalidText;
+        const digit = std.mem.findScalar(u8, alphabet, char) orelse return error.InvalidText;
         var carry: u32 = @intCast(digit);
         for (bytes[0..bytes_len]) |*byte| {
             carry += @as(u32, byte.*) * 58;

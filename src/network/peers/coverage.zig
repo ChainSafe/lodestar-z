@@ -19,7 +19,7 @@ pub fn stable(actual: *const t.Coverage, metadata: *const t.Metadata, sampled: ?
     return .{
         .attnets = actual.attnets & std.mem.readInt(u64, &metadata.attnets, .little),
         .syncnets = actual.syncnets & @as(u4, @intCast(metadata.syncnets)),
-        .groups = actual.groups.intersectWith(sampled orelse .initEmpty()),
+        .groups = actual.groups.intersectWith(sampled orelse .empty),
     };
 }
 

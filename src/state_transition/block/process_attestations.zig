@@ -64,7 +64,7 @@ test "process attestations - sanity" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
     defer test_state.deinit();
 
-    var electra: std.ArrayListUnmanaged(types.electra.Attestation.Type) = .empty;
+    var electra: std.ArrayList(types.electra.Attestation.Type) = .empty;
     const attestation = types.electra.Attestation.default_value;
     try electra.append(allocator, attestation);
     try std.testing.expectError(

@@ -128,7 +128,7 @@ fn missWork(recovery: *const Recovery, chained: usize) usize {
 /// Checks that the id chains hold exactly the requests of live batches, each in its id's bucket,
 /// and that every request names the batch holding it.
 fn expectIndexed(recovery: *const Recovery) !void {
-    var batched = std.StaticBitSet(constants.promises_cap).initEmpty();
+    var batched = std.StaticBitSet(constants.promises_cap).empty;
     for (recovery.batches[0..recovery.batch_len], 0..) |batch, index| {
         var slot = batch.head;
         var sampled = batch.sample == none;

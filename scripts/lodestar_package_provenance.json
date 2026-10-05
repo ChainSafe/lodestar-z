@@ -47,14 +47,14 @@
       },
       {
         "name": "hashtree",
-        "url": "git+https://github.com/ChainSafe/hashtree-z.git#f5c1b81da167f84376fb94aef29a57fc6c08dc28",
-        "hash": "hashtree-0.1.0-sBOovj8WAAAGCN62cybnffy7b4ITTQsog2oOG2AQZl9L",
+        "url": "git+https://github.com/ChainSafe/hashtree-z.git#9b0fdad8f5159b8d7ccc3b5d74f18f63a3881482",
+        "hash": "hashtree-0.1.0-sBOovn0WAAC0xm013qX6iNDJGmZ3OVnomsF-F19Y_Yxy",
         "use": "addon",
         "reviewed": {
           "license": "MIT",
           "contributes": "code",
           "licenseFile": null,
-          "evidence": "LICENSE at f5c1b81d upstream; the package omits it"
+          "evidence": "LICENSE at 9b0fdad8 upstream; the package omits it"
         },
         "dependencies": [
           {
@@ -165,14 +165,14 @@
       },
       {
         "name": "zapi",
-        "url": "https://github.com/ChainSafe/zapi/archive/ca55a240a07cbeaba7ac543125a108bca4076a5a.tar.gz",
-        "hash": "zapi-4.0.0-rIqzUasFBQBedS0-MCZXl1BnemstdjIhb5OUdGD305rI",
+        "url": "https://github.com/ChainSafe/zapi/archive/ff6e70e820781bda86d49bdb99fadc2d1d3bf3a0.tar.gz",
+        "hash": "zapi-4.1.0-rIqzUaUlBQAhcLLX5ucd8L0BfxosVdV5ywYO9rVb7gYT",
         "use": "addon",
         "reviewed": {
           "license": "MIT",
           "contributes": "code",
           "licenseFile": null,
-          "evidence": "LICENSE at ca55a240 upstream; the package omits it"
+          "evidence": "LICENSE at ff6e70e8 upstream; the package omits it"
         },
         "dependencies": [
           {
@@ -374,8 +374,8 @@
     "runtime": [
       {
         "name": "@chainsafe/zapi",
-        "version": "4.0.0",
-        "integrity": "sha512-jcWUJT7bsS7F3H2aycUEs7sBTw+oL+MgKOC2CZ80n2asvCmAXjz6D0H2ZYuAbfmwG12myBDezGHs+JzIUQEs+A==",
+        "version": "4.1.0",
+        "integrity": "sha512-U/JgUc9KAfDeKlgJWWTvBuKEMezhnb4GVEGd3zYaMB3Vi85YTJtcd2b9eO+upk5buROwRo9DEF+ev32PaO98mg==",
         "license": "MIT"
       }
     ]

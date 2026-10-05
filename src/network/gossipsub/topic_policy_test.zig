@@ -137,7 +137,7 @@ test "topic namespace exact bitmap capacity clears and isolates physical rows" {
         try std.testing.expectEqual(@as(usize, 2), ns.subscription_count);
         try std.testing.expect(ns.subscribed(0, case.count - 1));
         try std.testing.expect(!ns.subscribed(1, case.count - 1));
-        var subscribers: sessions.PeerSet = .initEmpty();
+        var subscribers: sessions.PeerSet = .empty;
         ns.initializeSubscribers(case.count - 1, &subscribers);
         try std.testing.expectEqual(@as(usize, 2), subscribers.count());
         ns.clearPeer(0);

@@ -16,7 +16,7 @@ pub const RequestId = struct {
     length: u8,
 
     pub fn init(bytes: []const u8) Error!RequestId {
-        if (bytes.len > 8) return Error.InvalidMessage;
+        if (bytes.len > 8) return error.InvalidMessage;
         var request_id = RequestId{
             .bytes = [_]u8{0} ** 8,
             .length = @intCast(bytes.len),
@@ -88,19 +88,19 @@ pub const Message = union(enum) {
         encoded[0] = self.code();
         var writer = rlp.Writer.init(encoded[1..]);
         encodePayload(self, &writer) catch |err| switch (err) {
-            Error.BufferTooSmall => return Error.InvalidMessage,
+            error.BufferTooSmall => return error.InvalidMessage,
             else => return err,
         };
         const encoded_length = writer.bytes().len + 1;
         std.debug.assert(encoded_length <= encoded.len);
-        if (out.len < encoded_length) return Error.BufferTooSmall;
+        if (out.len < encoded_length) return error.BufferTooSmall;
         @memcpy(out[0..encoded_length], encoded[0..encoded_length]);
         return out[0..encoded_length];
     }
 
     pub fn decode(data: []const u8, scratch: *DecodeScratch) Error!Message {
-        if (data.len == 0) return Error.InvalidMessage;
-        if (data.len > constants.ordinary_plaintext_size_max) return Error.InvalidMessage;
+        if (data.len == 0) return error.InvalidMessage;
+        if (data.len > constants.ordinary_plaintext_size_max) return error.InvalidMessage;
         return switch (data[0]) {
             0x01 => .{ .ping = try decodePing(data) },
             0x02 => .{ .pong = try decodePong(data) },
@@ -108,7 +108,7 @@ pub const Message = union(enum) {
             0x04 => .{ .nodes = try decodeNodes(data, scratch) },
             0x05 => .{ .talk_request = try decodeTalkRequest(data) },
             0x06 => .{ .talk_response = try decodeTalkResponse(data) },
-            else => Error.UnsupportedMessage,
+            else => error.UnsupportedMessage,
         };
     }
 
@@ -159,18 +159,18 @@ fn encodePong(writer: *rlp.Writer, pong: *const Pong) Error!void {
 }
 
 fn encodeFindNode(writer: *rlp.Writer, find_node: *const FindNode) Error!void {
-    if (find_node.distances.len > types.distance_count) return Error.InvalidMessage;
+    if (find_node.distances.len > types.distance_count) return error.InvalidMessage;
     try writer.writeBytes(find_node.request_id.slice());
     const distances_mark = try writer.beginList();
     for (find_node.distances) |distance| {
-        if (distance > types.distance_max) return Error.InvalidMessage;
+        if (distance > types.distance_max) return error.InvalidMessage;
         try writer.writeUint(distance);
     }
     writer.finishList(distances_mark);
 }
 
 fn encodeNodes(writer: *rlp.Writer, nodes: *const Nodes) Error!void {
-    if (nodes.enrs.len > types.findnode_result_max) return Error.InvalidMessage;
+    if (nodes.enrs.len > types.findnode_result_max) return error.InvalidMessage;
     try writer.writeBytes(nodes.request_id.slice());
     try writer.writeUint(nodes.total);
     const enrs_mark = try writer.beginList();
@@ -203,7 +203,7 @@ fn decodePong(data: []const u8) Error!Pong {
     const enr_sequence = try readUint(&list);
     const ip_bytes = try readBytes(&list);
     const port = try readUint(&list);
-    if (port > std.math.maxInt(u16)) return Error.InvalidMessage;
+    if (port > std.math.maxInt(u16)) return error.InvalidMessage;
     try expectEnd(&list);
     return .{
         .request_id = request_id,
@@ -211,7 +211,7 @@ fn decodePong(data: []const u8) Error!Pong {
         .recipient_ip = switch (ip_bytes.len) {
             4 => .{ .ip4 = ip_bytes[0..4].* },
             16 => .{ .ip6 = ip_bytes[0..16].* },
-            else => return Error.InvalidMessage,
+            else => return error.InvalidMessage,
         },
         .recipient_port = @intCast(port),
     };
@@ -221,11 +221,11 @@ fn decodeFindNode(data: []const u8, scratch: *DecodeScratch) Error!FindNode {
     var list = try readMessageList(data);
     const request_id = try readRequestId(&list);
     var distances = try readList(&list);
-    var seen = std.StaticBitSet(types.distance_count).initEmpty();
+    var seen = std.StaticBitSet(types.distance_count).empty;
     var distances_count: usize = 0;
     while (!distances.atEnd()) {
         const distance = try readUint(&distances);
-        if (distance > types.distance_max) return Error.InvalidMessage;
+        if (distance > types.distance_max) return error.InvalidMessage;
         const index: usize = @intCast(distance);
         if (seen.isSet(index)) continue;
         seen.set(index);
@@ -244,8 +244,8 @@ fn decodeNodes(data: []const u8, scratch: *DecodeScratch) Error!Nodes {
     var enrs = try readList(&list);
     var enrs_count: usize = 0;
     while (!enrs.atEnd()) {
-        if (enrs_count == types.findnode_result_max) return Error.InvalidMessage;
-        scratch.enrs[enrs_count] = enrs.readRawItem() catch return Error.InvalidEncoding;
+        if (enrs_count == types.findnode_result_max) return error.InvalidMessage;
+        scratch.enrs[enrs_count] = enrs.readRawItem() catch return error.InvalidEncoding;
         enrs_count += 1;
     }
     try expectEnd(&list);
@@ -275,10 +275,10 @@ fn decodeTalkResponse(data: []const u8) Error!TalkResponse {
 }
 
 fn readMessageList(data: []const u8) Error!rlp.Reader {
-    if (data.len < 2) return Error.InvalidMessage;
+    if (data.len < 2) return error.InvalidMessage;
     var outer = rlp.Reader.init(data[1..]);
-    const list = outer.readList() catch return Error.InvalidEncoding;
-    if (!outer.atEnd()) return Error.InvalidEncoding;
+    const list = outer.readList() catch return error.InvalidEncoding;
+    if (!outer.atEnd()) return error.InvalidEncoding;
     return list;
 }
 
@@ -287,19 +287,19 @@ fn readRequestId(reader: *rlp.Reader) Error!RequestId {
 }
 
 fn readBytes(reader: *rlp.Reader) Error![]const u8 {
-    return reader.readBytes() catch return Error.InvalidEncoding;
+    return reader.readBytes() catch return error.InvalidEncoding;
 }
 
 fn readList(reader: *rlp.Reader) Error!rlp.Reader {
-    return reader.readList() catch return Error.InvalidEncoding;
+    return reader.readList() catch return error.InvalidEncoding;
 }
 
 fn readUint(reader: *rlp.Reader) Error!u64 {
-    return reader.readUint() catch return Error.InvalidEncoding;
+    return reader.readUint() catch return error.InvalidEncoding;
 }
 
 fn expectEnd(reader: *const rlp.Reader) Error!void {
-    if (!reader.atEnd()) return Error.InvalidEncoding;
+    if (!reader.atEnd()) return error.InvalidEncoding;
 }
 
 comptime {

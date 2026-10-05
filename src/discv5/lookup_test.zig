@@ -321,7 +321,7 @@ test "lookup initialization cleans up after an invalid seed" {
     seed.record.node_id = nodeId(2);
     var operation: Lookup = undefined;
     var operation_candidates: Lookup.Candidates = undefined;
-    try std.testing.expectError(Lookup.Error.InvalidSeed, operation.init(&operation_candidates, [_]u8{0} ** 32, [_]u8{0xff} ** 32, &.{seed}, .dual));
+    try std.testing.expectError(error.InvalidSeed, operation.init(&operation_candidates, [_]u8{0} ** 32, [_]u8{0xff} ** 32, &.{seed}, .dual));
 }
 
 test "empty lookup finishes without creating a call" {

@@ -8,8 +8,8 @@ pub fn write(g: *const Gossipsub, running: bool, digest: [4]u8, w: *prom.Encoder
     const overlay = g.overlay;
     const ns = if (overlay.namespace) |*value| value else return;
     var mesh: [policy.topic_max]u16 = @splat(0);
-    var subscribed = std.StaticBitSet(policy.topic_max).initEmpty();
-    var visible = std.StaticBitSet(policy.boundary_max).initEmpty();
+    var subscribed = std.StaticBitSet(policy.topic_max).empty;
+    var visible = std.StaticBitSet(policy.boundary_max).empty;
     if (running) {
         for (ns.boundaries, 0..) |*boundary, index| {
             if (std.mem.eql(u8, &boundary.digest, &digest)) visible.set(index);

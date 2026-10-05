@@ -31,7 +31,7 @@ const methods = new Set([
 ]);
 async function execute(method, args) {
   if (method === "initialize") {
-    bindings.config.set(args[1], args[1].genesisValidatorsRoot);
+    args[0].beaconConfig = new bindings.BeaconConfig(args[1], args[1].genesisValidatorsRoot);
     runtime = startRuntime(args[0]);
     return runtime.identity;
   }

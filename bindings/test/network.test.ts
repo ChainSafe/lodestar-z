@@ -504,7 +504,7 @@ it("publishes copied peer observations without repeating unread notifications", 
   const {setTimeout: delay} = await import("node:timers/promises");
   const config = applicationConfig();
   config.initialSlot = 0x08070605n;
-  configureChain({BLOB_SCHEDULE: [], ELECTRA_FORK_EPOCH: Infinity, FULU_FORK_EPOCH: Infinity});
+  configureChain(config, {BLOB_SCHEDULE: [], ELECTRA_FORK_EPOCH: Infinity, FULU_FORK_EPOCH: Infinity});
   config.local.status.headSlot = config.initialSlot;
   config.local.status.finalizedEpoch = 0x01020304n;
   config.local.status.finalizedRoot = Uint8Array.from({length: 32}, (_, i) => i);

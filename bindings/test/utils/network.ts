@@ -8,7 +8,7 @@ import {initializeNativeNetworkRuntime} from "../../src/network-runtime.js";
 export {testChain};
 
 import {type ChainConfig, createBeaconConfig} from "@lodestar/config";
-import bindings from "../../src/index.js";
+import bindings, {type BeaconConfig} from "../../src/index.js";
 import type {
   IpEndpoint,
   NativeApplicationConfig,
@@ -184,20 +184,21 @@ export function discoveryConfig(): NativeApplicationConfig & {
   };
 }
 
-let chainOverrides: Partial<ChainConfig> = {};
+const configuredChains = new WeakMap<BeaconConfig, ReturnType<typeof createBeaconConfig>>();
 
-export function configuredChain() {
+export function configuredChain(config: NativeApplicationConfig) {
+  const chain = configuredChains.get(config.beaconConfig);
+  if (!chain) throw new Error("Network test config has no chain fixture");
   return {
-    ...Object.fromEntries(Object.entries(testChain).filter(([key]) => key.toUpperCase() === key)),
-    ...chainOverrides,
-    genesisValidatorsRoot: testChain.genesisValidatorsRoot,
+    ...Object.fromEntries(Object.entries(chain).filter(([key]) => key.toUpperCase() === key)),
+    genesisValidatorsRoot: chain.genesisValidatorsRoot,
   };
 }
 
-export function configureChain(overrides: Partial<ChainConfig> = {}) {
-  chainOverrides = overrides;
+export function configureChain(config: NativeApplicationConfig, overrides: Partial<ChainConfig> = {}) {
   const chain = createBeaconConfig({...testChain, ...overrides}, testChain.genesisValidatorsRoot);
-  bindings.config.set(chain, chain.genesisValidatorsRoot);
+  config.beaconConfig = new bindings.BeaconConfig(chain, chain.genesisValidatorsRoot);
+  configuredChains.set(config.beaconConfig, chain);
   return chain;
 }
 
@@ -210,10 +211,9 @@ export function topicName(kind = "beacon_block", boundary = 0): string {
 }
 
 export function applicationConfig(): NativeApplicationConfig {
-  const config = networkConfig();
-  configureChain();
-  return {
-    ...config,
+  const config: NativeApplicationConfig = {
+    ...networkConfig(),
+    beaconConfig: new bindings.BeaconConfig(testChain, testChain.genesisValidatorsRoot),
     identify: {agentVersion: "lodestar-z/application-test", protocolVersion: "eth2/1.0.0"},
     logLevel: "info",
     resources: {
@@ -231,6 +231,8 @@ export function applicationConfig(): NativeApplicationConfig {
     },
     serveLightClients: false,
   };
+  configuredChains.set(config.beaconConfig, testChain);
+  return config;
 }
 
 export function localIntent(config: NativeApplicationConfig): NativeLocalIntent {

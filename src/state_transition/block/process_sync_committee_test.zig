@@ -50,7 +50,6 @@ test "process sync aggregate - sanity" {
 
     const res = processSyncAggregate(
         .electra,
-        allocator,
         std.testing.io,
         config,
         epoch_cache,
@@ -65,7 +64,6 @@ test "process sync aggregate - sanity" {
     try sync_aggregate.sync_committee_bits.set(1, true);
     try processSyncAggregate(
         .electra,
-        allocator,
         std.testing.io,
         config,
         epoch_cache,
@@ -132,7 +130,6 @@ test "process sync aggregate - proposer penalty floors at zero" {
 
         try processSyncAggregate(
             .electra,
-            allocator,
             std.testing.io,
             config,
             epoch_cache,

@@ -413,7 +413,7 @@ const Pair = struct {
     fn beginRecovery(self: *Pair) !Recovery {
         const ping_message = self.ping(1);
         var too_small: [1]u8 = undefined;
-        try std.testing.expectError(packet.Error.BufferTooSmall, self.node_a.startCall(
+        try std.testing.expectError(error.BufferTooSmall, self.node_a.startCall(
             &too_small,
             self.peerB(),
             &self.record_b,
@@ -430,7 +430,7 @@ const Pair = struct {
             1,
             &sealEntropy(0x10),
         );
-        try std.testing.expectError(CallTable.Error.PeerBusy, self.node_a.startCall(
+        try std.testing.expectError(error.PeerBusy, self.node_a.startCall(
             &self.a_to_b,
             self.peerB(),
             &self.record_b,
@@ -496,7 +496,7 @@ const Pair = struct {
         try self.node_b.prepareStandardResponse(request, &response);
         var too_small: [1]u8 = undefined;
         try std.testing.expectError(
-            packet.Error.BufferTooSmall,
+            error.BufferTooSmall,
             self.node_b.encodeNextStandardResponse(
                 &too_small,
                 &response,
@@ -579,7 +579,7 @@ test "engine rejects a local record owned by another key" {
     const record_b = try enr.Record.create(&key_b, 1, loopback(2, 9_002));
     var invalid: TestEngine = undefined;
     try std.testing.expectError(
-        Engine.InitError.InvalidLocalRecord,
+        error.InvalidLocalRecord,
         invalid.init(std.testing.allocator, key_a, record_b, .{}),
     );
 }
@@ -604,7 +604,7 @@ test "cold oversized requests fail before transmission" {
     } };
     var output = [_]u8{0xa5} ** 1_280;
     const before = output;
-    try std.testing.expectError(Engine.Error.SessionRequired, node.startCall(
+    try std.testing.expectError(error.SessionRequired, node.startCall(
         &output,
         peer,
         &remote_record,
@@ -639,7 +639,7 @@ test "engine configuration rejects zero retention windows" {
     var config = engineConfig();
     config.challenge_timeout_ms = 0;
     try std.testing.expectError(
-        Engine.InitError.InvalidTimeout,
+        error.InvalidTimeout,
         node.init(std.testing.allocator, key, local_record, config),
     );
 }
