@@ -77,14 +77,14 @@ test "state transition - electra block" {
         }
     }
 
-    deinitReusedEpochTransitionCache(std.testing.io);
+    deinitReusedEpochTransitionCache();
 }
 
 test "state transition - a rejected block leaves the pre-state unchanged" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 180_000 });
     defer pool.deinit();
-    defer deinitReusedEpochTransitionCache(std.testing.io);
+    defer deinitReusedEpochTransitionCache();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
@@ -133,7 +133,7 @@ test "state transition - records per-block and per-epoch metrics" {
 
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 180_000 });
     defer pool.deinit();
-    defer deinitReusedEpochTransitionCache(std.testing.io);
+    defer deinitReusedEpochTransitionCache();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
@@ -199,6 +199,74 @@ test "state transition - records per-block and per-epoch metrics" {
     try testing.expectEqual(
         @as(?u64, 1),
         metricValue(out, "lodestar_stfn_progressive_balances_mismatches_total{target=\"current\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_block_step_seconds_count{step=\"processBlockHeader\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_block_step_seconds_count{step=\"processWithdrawals\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_block_step_seconds_count{step=\"processExecutionPayload\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_block_step_seconds_count{step=\"processRandao\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_block_step_seconds_count{step=\"processEth1Data\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_block_step_seconds_count{step=\"processOperations\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_block_step_seconds_count{step=\"processSyncAggregate\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_block_step_seconds_count{step=\"processBlobKzgCommitments\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_operations_step_seconds_count{step=\"processProposerSlashing\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_operations_step_seconds_count{step=\"processAttesterSlashing\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_operations_step_seconds_count{step=\"processAttestations\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_operations_step_seconds_count{step=\"processDeposit\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_operations_step_seconds_count{step=\"processVoluntaryExit\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_operations_step_seconds_count{step=\"processBlsToExecutionChange\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_operations_step_seconds_count{step=\"processDepositRequest\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_operations_step_seconds_count{step=\"processWithdrawalRequest\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_operations_step_seconds_count{step=\"processConsolidationRequest\"}"),
     );
     const proposer_rewards = post_state.getProposerRewards();
     try testing.expectEqual(

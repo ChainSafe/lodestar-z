@@ -77,7 +77,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
                 post.deinit();
                 self.pre.allocator.destroy(post);
             }
-            state_transition.deinitReusedEpochTransitionCache(std.testing.io);
+            state_transition.deinitReusedEpochTransitionCache();
         }
 
         fn runTest(self: *Self) !void {
@@ -104,7 +104,6 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
 
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
-                std.testing.io,
                 config,
                 epoch_cache,
                 state,

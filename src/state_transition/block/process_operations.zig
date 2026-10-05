@@ -1,4 +1,6 @@
 const std = @import("std");
+const metrics = @import("../metrics.zig");
+const time = @import("time");
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
@@ -45,55 +47,116 @@ pub fn processOperations(
 
     const current_epoch = epoch_cache.epoch;
 
-    for (body.inner.proposer_slashings.items) |*proposer_slashing| {
-        try processProposerSlashing(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, proposer_slashing, opts.verify_signature);
-    }
-
-    for (body.inner.attester_slashings.items) |*attester_slashing| {
-        try processAttesterSlashing(
-            fork,
-            allocator,
-            io,
-            config,
-            epoch_cache,
-            state,
-            proposer_rewards,
-            slashings_cache,
-            current_epoch,
-            attester_slashing,
-            opts.verify_signature,
+    {
+        const timer = time.start(io);
+        for (body.inner.proposer_slashings.items) |*proposer_slashing| {
+            try processProposerSlashing(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, proposer_slashing, opts.verify_signature);
+        }
+        try metrics.state_transition.process_operations_step.observe(
+            .{ .step = .processProposerSlashing },
+            time.durationSeconds(time.since(io, timer)),
         );
     }
 
-    try processAttestations(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, body.inner.attestations.items, opts.verify_signature);
-
-    for (body.inner.deposits.items) |*deposit| {
-        try processDeposit(fork, io, config, epoch_cache, state, deposit);
+    {
+        const timer = time.start(io);
+        for (body.inner.attester_slashings.items) |*attester_slashing| {
+            try processAttesterSlashing(
+                fork,
+                allocator,
+                io,
+                config,
+                epoch_cache,
+                state,
+                proposer_rewards,
+                slashings_cache,
+                current_epoch,
+                attester_slashing,
+                opts.verify_signature,
+            );
+        }
+        try metrics.state_transition.process_operations_step.observe(
+            .{ .step = .processAttesterSlashing },
+            time.durationSeconds(time.since(io, timer)),
+        );
     }
 
-    for (body.inner.voluntary_exits.items) |*voluntary_exit| {
-        try processVoluntaryExit(fork, io, config, epoch_cache, state, voluntary_exit, opts.verify_signature);
+    {
+        const timer = time.start(io);
+        try processAttestations(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, body.inner.attestations.items, opts.verify_signature);
+        try metrics.state_transition.process_operations_step.observe(
+            .{ .step = .processAttestations },
+            time.durationSeconds(time.since(io, timer)),
+        );
+    }
+
+    {
+        const timer = time.start(io);
+        for (body.inner.deposits.items) |*deposit| {
+            try processDeposit(fork, io, config, epoch_cache, state, deposit);
+        }
+        try metrics.state_transition.process_operations_step.observe(
+            .{ .step = .processDeposit },
+            time.durationSeconds(time.since(io, timer)),
+        );
+    }
+
+    {
+        const timer = time.start(io);
+        for (body.inner.voluntary_exits.items) |*voluntary_exit| {
+            try processVoluntaryExit(fork, io, config, epoch_cache, state, voluntary_exit, opts.verify_signature);
+        }
+        try metrics.state_transition.process_operations_step.observe(
+            .{ .step = .processVoluntaryExit },
+            time.durationSeconds(time.since(io, timer)),
+        );
     }
 
     if (comptime fork.gte(.capella)) {
+        const timer = time.start(io);
         for (body.inner.bls_to_execution_changes.items) |*bls_to_execution_change| {
             try processBlsToExecutionChange(fork, config, state, bls_to_execution_change);
         }
+        try metrics.state_transition.process_operations_step.observe(
+            .{ .step = .processBlsToExecutionChange },
+            time.durationSeconds(time.since(io, timer)),
+        );
     }
 
     // Gloas (ePBS): execution_requests moved to ExecutionPayloadEnvelope
     if (comptime fork.gte(.electra) and fork.lt(.gloas)) {
         const execution_requests = &body.inner.execution_requests;
-        for (execution_requests.deposits.items) |*deposit_request| {
-            try processDepositRequest(fork, state, deposit_request);
+        {
+            const timer = time.start(io);
+            for (execution_requests.deposits.items) |*deposit_request| {
+                try processDepositRequest(fork, state, deposit_request);
+            }
+            try metrics.state_transition.process_operations_step.observe(
+                .{ .step = .processDepositRequest },
+                time.durationSeconds(time.since(io, timer)),
+            );
         }
 
-        for (execution_requests.withdrawals.items) |*withdrawal_request| {
-            try processWithdrawalRequest(fork, io, config, epoch_cache, state, withdrawal_request);
+        {
+            const timer = time.start(io);
+            for (execution_requests.withdrawals.items) |*withdrawal_request| {
+                try processWithdrawalRequest(fork, io, config, epoch_cache, state, withdrawal_request);
+            }
+            try metrics.state_transition.process_operations_step.observe(
+                .{ .step = .processWithdrawalRequest },
+                time.durationSeconds(time.since(io, timer)),
+            );
         }
 
-        for (execution_requests.consolidations.items) |*consolidation_request| {
-            try processConsolidationRequest(fork, io, config, epoch_cache, state, consolidation_request);
+        {
+            const timer = time.start(io);
+            for (execution_requests.consolidations.items) |*consolidation_request| {
+                try processConsolidationRequest(fork, io, config, epoch_cache, state, consolidation_request);
+            }
+            try metrics.state_transition.process_operations_step.observe(
+                .{ .step = .processConsolidationRequest },
+                time.durationSeconds(time.since(io, timer)),
+            );
         }
     }
 }

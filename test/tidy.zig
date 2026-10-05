@@ -53,7 +53,7 @@ const inline_test_allowlist = [_][]const u8{
     "src/fork_choice/proto_array.zig",
     // Private helper: compatibleUnionOptionsAreCompatible.
     "src/ssz/type/compatible_union.zig",
-    // Private diff internals: findModifiedValidators, loadValidators.
+    // Private diff internals: findModifiedIndices, loadValidators.
     "src/state_transition/load_state.zig",
     // Private helper: ComputeShuffledIndex.
     "src/state_transition/utils/committee_indices.zig",
@@ -690,7 +690,7 @@ fn tidyCiCoverage(gpa: Allocator, zon: []const u8, ci: []const u8, errors: *Erro
 /// ends there, rather than continuing into a longer name.
 fn containsStep(haystack: []const u8, step: []const u8) bool {
     var offset: usize = 0;
-    while (std.mem.indexOfPos(u8, haystack, offset, step)) |at| {
+    while (std.mem.findPos(u8, haystack, offset, step)) |at| {
         offset = at + step.len;
         if (offset == haystack.len) return true;
         const next = haystack[offset];
@@ -706,7 +706,7 @@ fn containsStep(haystack: []const u8, step: []const u8) bool {
 /// Names declared one level inside `build.zig.zon`'s `.tests` block.
 fn declaredTestModules(gpa: Allocator, zon: []const u8) ![]const []const u8 {
     const marker = ".tests = .{";
-    const start = std.mem.indexOf(u8, zon, marker) orelse return error.NoTestsBlock;
+    const start = std.mem.find(u8, zon, marker) orelse return error.NoTestsBlock;
 
     var modules: std.ArrayList([]const u8) = .empty;
     var depth: isize = 0;
@@ -715,9 +715,9 @@ fn declaredTestModules(gpa: Allocator, zon: []const u8) ![]const []const u8 {
         if (depth == 0) {
             const trimmed = std.mem.trim(u8, line, " \t");
             if (std.mem.startsWith(u8, trimmed, ".") and
-                std.mem.indexOf(u8, trimmed, "= .{") != null)
+                std.mem.find(u8, trimmed, "= .{") != null)
             {
-                if (std.mem.indexOfScalar(u8, trimmed[1..], ' ')) |end| {
+                if (std.mem.findScalar(u8, trimmed[1..], ' ')) |end| {
                     try modules.append(gpa, trimmed[1 .. 1 + end]);
                 }
             }
@@ -737,9 +737,9 @@ fn declaredRoots(gpa: Allocator, zon: []const u8) ![]const []const u8 {
     var roots: std.ArrayList([]const u8) = .empty;
     const marker = "root_source_file = \"";
     var rest = zon;
-    while (std.mem.indexOf(u8, rest, marker)) |at| {
+    while (std.mem.find(u8, rest, marker)) |at| {
         rest = rest[at + marker.len ..];
-        const end = std.mem.indexOfScalar(u8, rest, '"') orelse break;
+        const end = std.mem.findScalar(u8, rest, '"') orelse break;
         try roots.append(gpa, rest[0..end]);
         rest = rest[end..];
     }
@@ -1079,7 +1079,7 @@ test "rule: stale allowlist entry" {
         inline_test_allowlist.len + unimported_file_allowlist.len,
         errors.count,
     );
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         fixture.output(),
         "src/cpu_count.zig: error: allowlisted but the file does not exist",
@@ -1172,5 +1172,5 @@ test "rule: parse errors are reported, not silently skipped" {
 
     _ = try analyze(fixture.arena(), "broken.zig", "pub fn oops( {\n", errors);
     try testing.expect(errors.count > 0);
-    try testing.expect(std.mem.indexOf(u8, fixture.output(), "broken.zig:1: error:") != null);
+    try testing.expect(std.mem.find(u8, fixture.output(), "broken.zig:1: error:") != null);
 }

@@ -209,17 +209,12 @@ const ReusedEpochTransitionCache = struct {
 };
 
 threadlocal var _reused_cache: ?*ReusedEpochTransitionCache = null;
-threadlocal var _reused_lock: std.Io.Mutex = std.Io.Mutex.init;
-
+ 
 fn getReusedEpochTransitionCache(
     allocator: Allocator,
-    io: std.Io,
     pool: *Node.Pool,
     validator_count: usize,
 ) !*ReusedEpochTransitionCache {
-    try _reused_lock.lock(io);
-    defer _reused_lock.unlock(io);
-
     if (_reused_cache) |cache| {
         std.debug.assert(cache.validator_flat_cache.pool == pool);
         try cache.resize(validator_count);
@@ -236,12 +231,7 @@ fn getReusedEpochTransitionCache(
 }
 
 /// Callers must exclude cache initialization and use until teardown returns.
-/// Must run before this thread's node pool is torn down: the flat validator cache holds a ref
-/// into it.
-pub fn deinitReusedEpochTransitionCache(io: std.Io) void {
-    _reused_lock.lockUncancelable(io);
-    defer _reused_lock.unlock(io);
-
+pub fn deinitReusedEpochTransitionCache() void {
     if (_reused_cache) |cache| {
         const allocator = cache.allocator;
         cache.deinit();
@@ -252,7 +242,6 @@ pub fn deinitReusedEpochTransitionCache(io: std.Io) void {
 
 /// Borrows thread-local buffers. Callers must serialize cache lifetimes within each thread from
 /// `init` through `deinit` and exclude `deinitReusedEpochTransitionCache` throughout.
-/// The internal lock protects acquisition and resizing, not the borrowed lifetime.
 pub const EpochTransitionCache = struct {
     /// Allocator used for cache-owned lists.
     allocator: Allocator,
@@ -299,7 +288,6 @@ pub const EpochTransitionCache = struct {
     // this is the same to beforeProcessEpoch in typesript version
     pub fn init(
         allocator: Allocator,
-        io: std.Io,
         config: *const BeaconConfig,
         epoch_cache: *EpochCache,
         state: *AnyBeaconState,
@@ -356,6 +344,7 @@ pub const EpochTransitionCache = struct {
 
         var next_epoch_shuffling_active_indices_length: usize = 0;
 
+        var reused_cache = try getReusedEpochTransitionCache(allocator, validator_count);
         if (fork_seq.gte(.electra)) {
             try reused_cache.is_compounding_validator_arr.resize(reused_cache.allocator, validator_count);
         }

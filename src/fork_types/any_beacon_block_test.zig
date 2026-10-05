@@ -15,7 +15,7 @@ fn testBlockSanity(Block: type) !void {
     electra_block.slot = 12345;
     electra_block.proposer_index = 1;
     electra_block.body.randao_reveal = [_]u8{1} ** 96;
-    var attestations = try std.ArrayListUnmanaged(ct.electra.Attestation.Type).initCapacity(std.testing.allocator, 10);
+    var attestations = try std.ArrayList(ct.electra.Attestation.Type).initCapacity(std.testing.allocator, 10);
     defer attestations.deinit(allocator);
     var attestation0 = ct.electra.Attestation.default_value;
     attestation0.data.slot = 12345;

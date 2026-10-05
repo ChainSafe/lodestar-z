@@ -23,7 +23,7 @@ pub const Pool = struct {
     next_free: Id,
 
     /// denormalized parent data: parent -> children
-    parent_views: std.AutoHashMap(Id, std.AutoArrayHashMapUnmanaged(Id, void)),
+    parent_views: std.AutoHashMap(Id, std.array_hash_map.Auto(Id, void)),
 
     pub fn init(allocator: Allocator, initial_capacity: usize, node_pool: *Node.Pool) Allocator.Error!Pool {
         var pool = Pool{
@@ -31,7 +31,7 @@ pub const Pool = struct {
             .node_pool = node_pool,
             .views = std.ArrayList(View).empty,
             .next_free = @enumFromInt(0),
-            .parent_views = std.AutoHashMap(Id, std.AutoArrayHashMapUnmanaged(Id, void)).init(allocator),
+            .parent_views = std.AutoHashMap(Id, std.array_hash_map.Auto(Id, void)).init(allocator),
         };
         try pool.preheat(initial_capacity);
         return pool;
@@ -84,7 +84,7 @@ pub const Pool = struct {
         if (parent) |p| {
             const entry = try self.parent_views.getOrPut(p.root_view);
             if (!entry.found_existing) {
-                entry.value_ptr.* = std.AutoArrayHashMapUnmanaged(View.Id, void){};
+                entry.value_ptr.* = .empty;
             }
             try entry.value_ptr.put(self.allocator, n, {});
         }
@@ -157,7 +157,7 @@ pub const Id = enum(u32) {
     }
 
     /// Update linked children of the view affected by a change at gindex
-    fn updateChildrenUnsafe(pool: *Pool, root_node: Node.Id, children: std.AutoArrayHashMapUnmanaged(View.Id, void), gindex: Gindex) Node.Error!void {
+    fn updateChildrenUnsafe(pool: *Pool, root_node: Node.Id, children: std.array_hash_map.Auto(View.Id, void), gindex: Gindex) Node.Error!void {
         // update linked children that were affected
         for (children.keys()) |child_id| {
             // self + gindex

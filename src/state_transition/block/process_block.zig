@@ -1,6 +1,8 @@
 const std = @import("std");
 const Diagnostics = @import("diagnostics").Diagnostics;
 const Allocator = std.mem.Allocator;
+const metrics = @import("../metrics.zig");
+const time = @import("time");
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
@@ -47,11 +49,15 @@ pub fn processBlock(
     block: *const BeaconBlock(block_type, fork),
     external_data: BlockExternalData,
     opts: ProcessBlockOpts,
-    // TODO: metrics
 ) !void {
     // Build slashings cache against the *current* latest_block_header slot (pre-header update).
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
+    var timer = time.start(io);
     try processBlockHeader(fork, allocator, epoch_cache, state, block_type, block);
+    try metrics.state_transition.process_block_step.observe(
+        .{ .step = .processBlockHeader },
+        time.durationSeconds(time.since(io, timer)),
+    );
     // Keep cache slot in sync with latest_block_header without forcing a rebuild.
     slashings_cache.updateLatestBlockSlot(block.slot());
     const body = block.body();
@@ -65,6 +71,7 @@ pub fn processBlock(
             // TODO Deneb: Allow to disable withdrawals for interop testing
             // https://github.com/ethereum/consensus-specs/blob/b62c9e877990242d63aa17a2a59a49bc649a2f2e/specs/eip4844/beacon-chain.md#disabling-withdrawals
             if (comptime fork.gte(.capella)) {
+                timer = time.start(io);
                 var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
                 var withdrawals_result = WithdrawalsResult{ .withdrawals = Withdrawals.initBuffer(&withdrawals_buf) };
                 var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
@@ -95,8 +102,13 @@ pub fn processBlock(
                     .blinded => block.body().executionPayloadHeader().inner.withdrawals_root,
                 };
                 try processWithdrawals(fork, allocator, state, withdrawals_result, payload_withdrawals_root, opts.diagnostics);
+                try metrics.state_transition.process_block_step.observe(
+                    .{ .step = .processWithdrawals },
+                    time.durationSeconds(time.since(io, timer)),
+                );
             }
 
+            timer = time.start(io);
             try processExecutionPayload(
                 fork,
                 allocator,
@@ -107,13 +119,33 @@ pub fn processBlock(
                 body,
                 external_data,
             );
+            try metrics.state_transition.process_block_step.observe(
+                .{ .step = .processExecutionPayload },
+                time.durationSeconds(time.since(io, timer)),
+            );
         }
     }
 
+    timer = time.start(io);
     try processRandao(fork, io, config, epoch_cache, state, block_type, body, block.proposerIndex(), opts.verify_signature);
+    try metrics.state_transition.process_block_step.observe(
+        .{ .step = .processRandao },
+        time.durationSeconds(time.since(io, timer)),
+    );
+    timer = time.start(io);
     try processEth1Data(fork, state, body.eth1Data());
+    try metrics.state_transition.process_block_step.observe(
+        .{ .step = .processEth1Data },
+        time.durationSeconds(time.since(io, timer)),
+    );
+    timer = time.start(io);
     try processOperations(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, block_type, body, opts);
+    try metrics.state_transition.process_block_step.observe(
+        .{ .step = .processOperations },
+        time.durationSeconds(time.since(io, timer)),
+    );
     if (comptime fork.gte(.altair)) {
+        timer = time.start(io);
         try processSyncAggregate(
             fork,
             io,
@@ -124,10 +156,19 @@ pub fn processBlock(
             body.syncAggregate(),
             opts.verify_signature,
         );
+        try metrics.state_transition.process_block_step.observe(
+            .{ .step = .processSyncAggregate },
+            time.durationSeconds(time.since(io, timer)),
+        );
     }
 
     if (comptime fork.gte(.deneb)) {
+        timer = time.start(io);
         try processBlobKzgCommitments(external_data);
+        try metrics.state_transition.process_block_step.observe(
+            .{ .step = .processBlobKzgCommitments },
+            time.durationSeconds(time.since(io, timer)),
+        );
         // Only throw PreData so beacon can also sync/process blocks optimistically
         // and let forkChoice handle it
         if (external_data.data_availability_status == .pre_data) {
