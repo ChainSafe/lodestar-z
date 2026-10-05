@@ -34,7 +34,6 @@ const processPendingAttestations = @import("../epoch/process_pending_attestation
 const Node = @import("persistent_merkle_tree").Node;
 const vfc = @import("./validator_flat_cache.zig");
 const ValidatorFlatCache = vfc.ValidatorFlatCache;
-const ValidatorFields = vfc.ValidatorFields;
 const EpochShufflingRc = @import("../utils/epoch_shuffling.zig").EpochShufflingRc;
 const EpochShuffling = @import("../utils/epoch_shuffling.zig").EpochShuffling;
 
@@ -342,14 +341,13 @@ pub const EpochTransitionCache = struct {
         if (fork_seq.gte(.electra)) {
             try reused_cache.is_compounding_validator_arr.resize(reused_cache.allocator, validator_count);
         }
+        const flat_entries = validator_flat_cache.entries.slice();
         for (0..validator_count) |i| {
-            const validator: ValidatorFields = validator_flat_cache.fields(
-                i,
-                effective_balances_by_increments[i],
-            );
+            const validator = flat_entries.get(i);
+            const effective_balance = @as(u64, effective_balances_by_increments[i]) * preset.EFFECTIVE_BALANCE_INCREMENT;
             var flag: u8 = 0;
 
-            if (validator.slashed) {
+            if (validator.bits.slashed) {
                 if (slashings_epoch == validator.withdrawable_epoch) {
                     try indices_to_slash.append(allocator, i);
                 }
@@ -371,14 +369,14 @@ pub const EpochTransitionCache = struct {
             // Both active validators and slashed-but-not-yet-withdrawn validators are eligible to receive penalties.
             // This is done to prevent self-slashing from being a way to escape inactivity leaks.
             // TODO: Consider using an array of `eligible ValidatorIndex: number[]`
-            if (is_active_prev or (validator.slashed and prev_epoch + 1 < validator.withdrawable_epoch)) {
+            if (is_active_prev or (validator.bits.slashed and prev_epoch + 1 < validator.withdrawable_epoch)) {
                 flag |= FLAG_ELIGIBLE_ATTESTER;
             }
 
             reused_cache.flags.items[i] = flag;
 
             if (fork_seq.gte(.electra)) {
-                reused_cache.is_compounding_validator_arr.items[i] = validator.compounding;
+                reused_cache.is_compounding_validator_arr.items[i] = validator.bits.compounding;
             }
 
             if (is_active_curr) {
@@ -395,7 +393,7 @@ pub const EpochTransitionCache = struct {
             //     and validator.effective_balance >= MAX_EFFECTIVE_BALANCE # [Modified in Electra]
             //   )
             // ```
-            if (validator.activation_eligibility_epoch == FAR_FUTURE_EPOCH and validator.effective_balance >= MIN_ACTIVATION_BALANCE) {
+            if (validator.activation_eligibility_epoch == FAR_FUTURE_EPOCH and effective_balance >= MIN_ACTIVATION_BALANCE) {
                 try indices_eligible_for_activation_queue.append(allocator, i);
             }
 
@@ -426,7 +424,7 @@ pub const EpochTransitionCache = struct {
             // Adding extra condition `exitEpoch === FAR_FUTURE_EPOCH` to keep the array as small as possible. initiateValidatorExit() will ignore them anyway
             //
             // Use `else` since indicesEligibleForActivationQueue + indicesEligibleForActivation + indicesToEject are mutually exclusive
-            else if (is_active_curr and validator.exit_epoch == FAR_FUTURE_EPOCH and validator.effective_balance <= config.chain.EJECTION_BALANCE) {
+            else if (is_active_curr and validator.exit_epoch == FAR_FUTURE_EPOCH and effective_balance <= config.chain.EJECTION_BALANCE) {
                 try indices_to_eject.append(allocator, i);
             }
 
