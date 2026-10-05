@@ -32,6 +32,8 @@ const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCo
 const computeBaseRewardPerIncrement = @import("../utils/sync_committee.zig").computeBaseRewardPerIncrement;
 const processPendingAttestations = @import("../epoch/process_pending_attestations.zig").processPendingAttestations;
 const Node = @import("persistent_merkle_tree").Node;
+const vfc = @import("./validator_flat_cache.zig");
+const ValidatorFlatCache = vfc.ValidatorFlatCache;
 const EpochShufflingRc = @import("../utils/epoch_shuffling.zig").EpochShufflingRc;
 const EpochShuffling = @import("../utils/epoch_shuffling.zig").EpochShuffling;
 
@@ -144,8 +146,12 @@ const ReusedEpochTransitionCache = struct {
     penalties: U64Array,
     slashing_penalties: U64Array,
 
-    pub fn init(self: *ReusedEpochTransitionCache, allocator: Allocator, validator_count: usize) !void {
+    /// Holds a ref into the node pool. Teardown this struct before the pool.
+    validator_flat_cache: ValidatorFlatCache,
+
+    pub fn init(self: *ReusedEpochTransitionCache, allocator: Allocator, pool: *Node.Pool, validator_count: usize) !void {
         self.allocator = allocator;
+        self.validator_flat_cache = ValidatorFlatCache.init(allocator, pool);
         self.is_active_prev_epoch = try BoolArray.initCapacity(allocator, validator_count);
         errdefer self.is_active_prev_epoch.deinit(allocator);
         self.is_active_current_epoch = try BoolArray.initCapacity(allocator, validator_count);
@@ -183,6 +189,7 @@ const ReusedEpochTransitionCache = struct {
     }
 
     pub fn deinit(self: *ReusedEpochTransitionCache) void {
+        self.validator_flat_cache.deinit();
         self.is_active_prev_epoch.deinit(self.allocator);
         self.is_active_current_epoch.deinit(self.allocator);
         self.is_active_next_epoch.deinit(self.allocator);
@@ -202,8 +209,13 @@ const ReusedEpochTransitionCache = struct {
 
 threadlocal var _reused_cache: ?*ReusedEpochTransitionCache = null;
 
-fn getReusedEpochTransitionCache(allocator: Allocator, validator_count: usize) !*ReusedEpochTransitionCache {
+fn getReusedEpochTransitionCache(
+    allocator: Allocator,
+    pool: *Node.Pool,
+    validator_count: usize,
+) !*ReusedEpochTransitionCache {
     if (_reused_cache) |cache| {
+        std.debug.assert(cache.validator_flat_cache.pool == pool);
         try cache.resize(validator_count);
         return cache;
     }
@@ -212,7 +224,7 @@ fn getReusedEpochTransitionCache(allocator: Allocator, validator_count: usize) !
         allocator.destroy(_reused_cache.?);
         _reused_cache = null;
     }
-    try _reused_cache.?.init(allocator, validator_count);
+    try _reused_cache.?.init(allocator, pool, validator_count);
     try _reused_cache.?.resize(validator_count);
     return _reused_cache.?;
 }
@@ -305,7 +317,14 @@ pub const EpochTransitionCache = struct {
         var validators_view = try state.validators();
         try validators_view.commit();
         const validator_count = try validators_view.length();
-        var validators_it = validators_view.iteratorReadonly(0);
+
+        var reused_cache = try getReusedEpochTransitionCache(
+            allocator,
+            validators_view.chunks.state.pool,
+            validator_count,
+        );
+        const validator_flat_cache = &reused_cache.validator_flat_cache;
+        try validator_flat_cache.sync(validators_view.getRoot(), validator_count);
 
         // Clone before being mutated in processEffectiveBalanceUpdates
         try epoch_cache.beforeEpochTransition();
@@ -314,15 +333,15 @@ pub const EpochTransitionCache = struct {
 
         var next_epoch_shuffling_active_indices_length: usize = 0;
 
-        var reused_cache = try getReusedEpochTransitionCache(allocator, validator_count);
         if (fork_seq.gte(.electra)) {
             try reused_cache.is_compounding_validator_arr.resize(reused_cache.allocator, validator_count);
         }
+        const cached_fields = validator_flat_cache.fields.slice();
         for (0..validator_count) |i| {
-            const validator = try validators_it.nextValuePtr();
+            const validator = cached_fields.get(i);
             var flag: u8 = 0;
 
-            if (validator.slashed) {
+            if (validator.bits.slashed) {
                 if (slashings_epoch == validator.withdrawable_epoch) {
                     try indices_to_slash.append(allocator, i);
                 }
@@ -344,14 +363,14 @@ pub const EpochTransitionCache = struct {
             // Both active validators and slashed-but-not-yet-withdrawn validators are eligible to receive penalties.
             // This is done to prevent self-slashing from being a way to escape inactivity leaks.
             // TODO: Consider using an array of `eligible ValidatorIndex: number[]`
-            if (is_active_prev or (validator.slashed and prev_epoch + 1 < validator.withdrawable_epoch)) {
+            if (is_active_prev or (validator.bits.slashed and prev_epoch + 1 < validator.withdrawable_epoch)) {
                 flag |= FLAG_ELIGIBLE_ATTESTER;
             }
 
             reused_cache.flags.items[i] = flag;
 
             if (fork_seq.gte(.electra)) {
-                reused_cache.is_compounding_validator_arr.items[i] = hasCompoundingWithdrawalCredential(&validator.withdrawal_credentials);
+                reused_cache.is_compounding_validator_arr.items[i] = validator.bits.compounding;
             }
 
             if (is_active_curr) {
@@ -648,4 +667,5 @@ pub const EpochTransitionCache = struct {
 
 test {
     _ = @import("epoch_transition_cache_test.zig");
+    _ = @import("validator_flat_cache.zig");
 }
