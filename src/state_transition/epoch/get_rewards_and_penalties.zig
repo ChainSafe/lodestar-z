@@ -25,7 +25,7 @@ const hasMarkers = attester_status.hasMarkers;
 
 const isInInactivityLeak = @import("inactivity_leak.zig").isInInactivityLeak;
 
-pub const RewardPenaltyItem = struct {
+const RewardPenaltyItem = struct {
     base_reward: u64,
     timely_source_reward: u64,
     timely_source_penalty: u64,
