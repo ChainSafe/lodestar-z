@@ -2,14 +2,12 @@
 /**
  * @typedef {import("./network-runtime.js").NativeNetworkApplicationRuntime} NativeNetworkApplicationRuntime
  * @typedef {import("./network-runtime.js").NativeEscalation} NativeEscalation
- * @typedef {"now" | "later" | "retry" | "idle"} Continuation
+ * @typedef {"now" | "later" | "idle"} Continuation
  * @typedef {{turn(): Continuation}} Pump
  * @typedef {Pick<NativeNetworkApplicationRuntime, "exchange" | "fail">} Route
  */
 
 const RETRY_MS = 25;
-/** Consecutive exchanges that could not run before escalating. */
-export const FAILURES_MAX = 3;
 
 export const SETTLE_CELLS = 32;
 /** Settlement and acknowledgements only: every payload quota zero and the capacities unchanged. */
@@ -52,8 +50,6 @@ export class TurnScheduler {
   #stopped = false;
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   #retry = undefined;
-  /** Consecutive control-only exchanges that could not run. */
-  #failures = 0;
 
   /** @param {Route} route */
   constructor(route) {
@@ -105,10 +101,7 @@ export class TurnScheduler {
         this.schedule();
         break;
       case "later":
-        this.#retryLater(false);
-        break;
-      case "retry":
-        this.#retryLater(true);
+        this.#retryLater();
         break;
       case "idle":
         break;
@@ -129,22 +122,15 @@ export class TurnScheduler {
     try {
       result = this.#route.exchange([], CONTROL);
     } catch (error) {
-      if (++this.#failures >= FAILURES_MAX) {
-        this.stop();
-        escalate(this.#route, "failed_turns", error);
-      }
-      return "retry";
+      this.stop();
+      escalate(this.#route, "generated_batch", error);
     }
-    this.#failures = 0;
     return result.more ? "now" : "idle";
   }
 
-  /** @param {boolean} failed */
-  #retryLater(failed) {
+  #retryLater() {
     if (this.#stopped) return;
     this.#retry ??= setTimeout(TurnScheduler.#retryFired, RETRY_MS, this).unref();
-    // A failed exchange retries until it settles or escalates, also when nothing else keeps the process alive.
-    if (failed) this.#retry.ref();
   }
 
   /** @param {TurnScheduler} scheduler */

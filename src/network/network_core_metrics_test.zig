@@ -182,9 +182,6 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_gossipsub_receive_pages", .kind = "gauge" },
     .{ .name = "lodestar_native_gossipsub_receive_page_capacity", .kind = "gauge" },
     .{ .name = "lodestar_native_gossipsub_store_pages", .kind = "gauge" },
-    // Temporary, until the pump moves into the binding
-    .{ .name = "lodestar_native_bridge_call_seconds", .kind = "histogram", .labels = &.{"entry"} },
-    .{ .name = "lodestar_native_bridge_delivered_items_total", .kind = "counter", .labels = &.{"kind"} },
 };
 
 fn hasSeries(output: []const u8, series: Series) bool {

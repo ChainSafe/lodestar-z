@@ -208,6 +208,42 @@ test "gossip scheduler source limits cover unfinished execution and survive peer
     try verify(&table);
 }
 
+test "gossip dependency waiting room belongs to the peer generation" {
+    const limits: p.limits.Limits = @splat(.{ .items = 4, .bytes = 4096 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
+    defer table.deinit();
+    defer table.close();
+    const topic = "/eth2/01020304/beacon_attestation_0/ssz_snappy";
+    var message: Gossipsub.MessageEvent = .{
+        .source = .{ .index = 0, .generation = 1 },
+        .handle = .{ .index = 0, .generation = 1 },
+        .id = @splat(1),
+        .peer = .{ .index = 0, .generation = 1 },
+        .topic = topic,
+        .bytes = "data",
+        .identity = .{ .bytes = @splat(1) },
+        .admitted_ms = 1,
+        .deadline = 101,
+    };
+    var tokens: [2]p.GossipProcessor.Token = undefined;
+    for (&tokens, 0..) |*token, index| {
+        message.source.?.generation = index + 1;
+        try table.capture(&message, topic_mod.parseCanonical(topic).?, &.{ .root = @splat(3), .slot = 1 }, false, 1);
+        const checks = table.claimChecks(1, 1);
+        try t.expectEqual(@as(usize, 1), checks.len);
+        token.* = checks.tokens[0];
+        try t.expect(table.classify(token.*, false));
+        try t.expectEqual(p.GossipProcessor.State.waiting, table.get(token.*).?.state);
+    }
+    const kind = @intFromEnum(Kind.beacon_attestation);
+    try t.expectEqual(@as(u16, 1), table.sources[0].waiting[kind]);
+    table.retire(tokens[0]);
+    try t.expectEqual(@as(u16, 1), table.sources[0].waiting[kind]);
+    table.retire(tokens[1]);
+    try t.expectEqual(@as(u16, 0), table.sources[0].waiting[kind]);
+    try verify(&table);
+}
+
 test "gossip scheduler prefilter permits replacement only for eligible queued kinds" {
     const limits: p.limits.Limits = @splat(.{ .items = 2, .bytes = 4096 });
     var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });

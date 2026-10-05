@@ -1,3 +1,4 @@
+const processor_metrics = @import("processor.zig");
 const std = @import("std");
 const types = @import("../types.zig");
 const rr = @import("../reqresp/root.zig");
@@ -68,7 +69,7 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
         const dropped = try w.family(.{
             .name = "lodestar_native_udp_send_dropped_" ++ measure ++ "_total",
             .kind = .counter,
-            .help = "UDP " ++ measure ++ " discarded before kernel acceptance due to temporary local send pressure",
+            .help = "UDP " ++ measure ++ " discarded before kernel acceptance due to local send pressure or unreachable destinations",
             .labels = &.{ "role", "reason" },
         });
         inline for (std.meta.fields(udp.Sockets.SendDrops.Reason)) |reason| {
@@ -238,8 +239,7 @@ fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {
 }
 
 fn writeBridge(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    const bridge = @import("bridge.zig");
-    try bridge.write(self.bridge orelse &bridge.empty, self.running, w);
+    try processor_metrics.write(self.processor orelse &processor_metrics.empty, self.running, w);
 }
 
 fn writeGossipExecution(self: *const Context, w: *prom.Encoder) prom.Error!void {

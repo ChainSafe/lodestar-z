@@ -42,7 +42,8 @@ pub const Database = struct {
         return shared;
     }
 
-    pub fn release(self: *Database) !void {
+    /// Release this handle only after its work and cursors retire.
+    pub fn release(self: *Database) void {
         std.Io.Threaded.mutexLock(&mutex);
         defer std.Io.Threaded.mutexUnlock(&mutex);
         std.debug.assert(self.references > 0);
@@ -51,7 +52,7 @@ pub const Database = struct {
             self.references -= 1;
             return;
         }
-        try self.database.close();
+        self.database.close() catch unreachable;
         const removed = databases.remove(self.path);
         std.debug.assert(removed);
         allocator.free(self.path);

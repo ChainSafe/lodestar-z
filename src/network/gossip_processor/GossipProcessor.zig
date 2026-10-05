@@ -47,7 +47,6 @@ closed: bool = false,
 refusals: [limits_mod.kind_count][refusal_count]u64 = @splat(@splat(0)),
 used_items: [limits_mod.kind_count]usize = @splat(0),
 used_bytes: [limits_mod.kind_count]usize = @splat(0),
-waiting_per_peer: [peer_book.capacity][limits_mod.kind_count]u16 = @splat(@splat(0)),
 waiting_items: [limits_mod.kind_count]usize = @splat(0),
 executing_items: [limits_mod.kind_count]usize = @splat(0),
 executing_bytes: [limits_mod.kind_count]usize = @splat(0),
@@ -58,6 +57,7 @@ sources: [peer_book.capacity]struct {
     generation: u64 = 0,
     items: [limits_mod.kind_count]usize = @splat(0),
     bytes: [limits_mod.kind_count]usize = @splat(0),
+    waiting: [limits_mod.kind_count]u16 = @splat(0),
 } = @splat(.{}),
 /// The victims `admit` selects and retires within one call. Fields rather than locals so
 /// ReleaseSafe does not fill them for every admission.
@@ -373,7 +373,10 @@ fn transition(self: *GossipProcessor, index: u32, state: State) void {
     if (previous == .waiting) {
         self.dependencies.leave(self.cells, index);
         self.waiting_items[k] -= 1;
-        if (cell.source) |source| self.waiting_per_peer[source.index][k] -= 1;
+        if (cell.source) |source| {
+            const usage = &self.sources[source.index];
+            if (usage.generation == source.generation) usage.waiting[k] -= 1;
+        }
     }
     self.countState(previous, false, cell.input.len);
     self.queue(cell.kind, previous).remove(self.cells, "state_link", index);
@@ -386,7 +389,10 @@ fn transition(self: *GossipProcessor, index: u32, state: State) void {
     if (state == .waiting) {
         self.dependencies.join(self.cells, index);
         self.waiting_items[k] += 1;
-        if (cell.source) |source| self.waiting_per_peer[source.index][k] += 1;
+        if (cell.source) |source| {
+            const usage = &self.sources[source.index];
+            if (usage.generation == source.generation) usage.waiting[k] += 1;
+        }
     }
 }
 fn countState(self: *GossipProcessor, state: State, add: bool, bytes: usize) void {
@@ -683,7 +689,10 @@ pub fn classify(self: *GossipProcessor, handle: Token, available: bool) bool {
         self.transition(handle.index, .needs_check);
     } else {
         const k = @intFromEnum(cell.kind);
-        const peer_full = if (cell.source) |source| self.waiting_per_peer[source.index][k] >= @max(1, self.limits[k].items / 4) else false;
+        const peer_full = if (cell.source) |source|
+            self.sources[source.index].generation == source.generation and self.sources[source.index].waiting[k] >= @max(1, self.limits[k].items / 4)
+        else
+            false;
         if (peer_full or self.waiting_items[k] >= self.limits[k].items / 2) {
             self.ignore(cell);
             self.refuse(cell.kind, .dependency_full);

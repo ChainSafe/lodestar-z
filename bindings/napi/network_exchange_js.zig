@@ -151,7 +151,6 @@ pub const Results = struct {
             const result = try env.createObject();
             inline for (.{ "peers", "serving", "checks", "acknowledged", "completions" }) |field| try result.setNamedProperty(field, empty);
             try result.setNamedProperty("gossip", try env.getNull());
-            try result.setNamedProperty("failure", try env.getNull());
             try result.setNamedProperty("closed", try env.getNull());
             try schedule(env, result, @bitCast(@as(u4, @intCast(i))));
             try (try result.getNamedProperty("parked")).objectFreeze();
@@ -222,7 +221,6 @@ fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
         try completions.setElement(@intCast(i), try network_incoming_js.completion(env, completion));
     }
     try result.setNamedProperty("completions", completions);
-    try result.setNamedProperty("failure", try env.getNull());
     try result.setNamedProperty("closed", if (selection.closed) |closed| try closedValue(env, closed) else try env.getNull());
     return result;
 }

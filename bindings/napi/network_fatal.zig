@@ -8,16 +8,14 @@
 //! - `exchange_finish`: a committed delivery reaches JavaScript intact. `network_exchange.run`, for a finish failure
 //!   classified as a contract failure.
 //! - `generated_batch`: the actions and demand the pump generates satisfy the exchange's input contract. The pump,
-//!   through the runtime's `fail`, when an exchange refuses them with a coded error.
-//! - `failed_turns`: the only completion path does not stay unusable. The pump, through the runtime's `fail`, on its
-//!   third consecutive failed turn, during shutdown too.
+//!   through the runtime's `fail`, when an exchange throws.
 //! - `completion_contract`: every completion names the current generation of a record the completion owner installed,
 //!   of the kind it expects, and the close result leaves no promised completion missing. The completion owner
 //!   (network-tickets.js), through the runtime's `fail`; a completion for an older generation is obsolete and ignored.
 const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 
-pub const Site = enum { exchange_build, exchange_finish, generated_batch, failed_turns, completion_contract };
+pub const Site = enum { exchange_build, exchange_finish, generated_batch, completion_contract };
 
 /// A longer detail is cut to this many bytes.
 pub const detail_max = 64;

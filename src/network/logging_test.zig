@@ -8,7 +8,8 @@ const message_capacity = @import("logging.zig").message_capacity;
 const std = @import("std");
 
 test "native logging retains fatal context at the error threshold" {
-    var sink: Sink = .{ .level = .err };
+    var sink: Sink = .{};
+    sink.configure(.err);
     const previous = bind(&sink);
     defer _ = bind(previous);
     logFn(.debug, .network_runtime, "owner_poll_failed errno=NOMEM", .{});

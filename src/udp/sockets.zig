@@ -65,6 +65,7 @@ pub const Sockets = struct {
             error.ConnectionResetByPeer,
             error.DestinationRefused,
             error.HostUnreachable,
+            error.NetworkDown,
             error.NetworkUnreachable,
             => true,
             else => false,
@@ -81,6 +82,7 @@ pub const Sockets = struct {
         pub const Reason = enum {
             would_block,
             system_resources,
+            destination_unreachable,
 
             pub fn fromError(err: SendError) ?Reason {
                 return switch (err) {

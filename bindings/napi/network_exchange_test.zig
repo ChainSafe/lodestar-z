@@ -375,7 +375,7 @@ test "publications before phase B, during phase C and after phase D each reach a
 }
 const napi_queue_full = @import("zapi:zapi").napi.c.napi_queue_full;
 
-test "a stop ends checks and serving starts, and quiescence ends claims" {
+test "a stop ends new host work while quiescence preserves terminal delivery" {
     var fixture: Fixture = undefined;
     try fixture.init(false, 2);
     defer fixture.deinit();
@@ -389,9 +389,11 @@ test "a stop ends checks and serving starts, and quiescence ends claims" {
     var host: Host = .{ .runtime = runtime };
     const stopped = try host.turn(&.{}, deployed);
     try std.testing.expect(stopped.serving_count == 0 and stopped.checks.len == 0);
-    try std.testing.expectEqualSlices(g.Token, &.{exit}, stopped.gossip.?.tokens[0..stopped.gossip.?.len]);
+    try std.testing.expect(stopped.gossip == null);
+    try std.testing.expectEqual(State.queued, runtime.gossip.?.get(exit).?.state);
     try std.testing.expectEqual(r.Place.none, runtime.readiness.place(.serving));
     try std.testing.expectEqual(r.Place.none, runtime.readiness.place(.checks));
+    try std.testing.expectEqual(r.Place.none, runtime.readiness.place(.gossip));
     try std.testing.expectEqual(State.needs_check, runtime.gossip.?.get(checked).?.state);
     // Quiescence cancels the command, whose completion holds the close back: its exchange still delivers the peer
     // event but claims no gossip. The close then arrives alone.
@@ -505,7 +507,6 @@ test "exchange acknowledges owner dispositions under any demand, once, without c
     try std.testing.expectEqual(readiness.Place.control, runtime.readiness.place(.completions));
 
     // A failed build keeps them for the next exchange.
-    const items = runtime.bridge.delivered;
     host.fail = .acknowledged;
     try std.testing.expectError(error.PendingException, host.turn(&.{}, control));
     try std.testing.expectEqual(@as(usize, 2), table.diag.acknowledging);
@@ -516,7 +517,6 @@ test "exchange acknowledges owner dispositions under any demand, once, without c
     try std.testing.expect(!acknowledged.outcome.more);
     try std.testing.expectEqual(@as(usize, 0), table.diag.acknowledging);
     for (tokens) |token| try std.testing.expect(table.get(token) == null);
-    try std.testing.expectEqual(items, runtime.bridge.delivered);
     try std.testing.expectEqual(@as(usize, 0), (try host.turn(&.{}, control)).acknowledged_count);
 }
 
@@ -546,7 +546,6 @@ test "publication completions arrive at most `settle` per exchange whatever the 
     var host: Host = .{ .runtime = runtime };
     var demand = control;
     demand.settle = 1;
-    const delivered_before = runtime.bridge.delivered;
     var delivered: [4]publications.Token = undefined;
     for (&delivered, 0..) |*token, pass| {
         // The lowest cell completes again whenever it was delivered, with the next generation.
@@ -559,8 +558,6 @@ test "publication completions arrive at most `settle` per exchange whatever the 
     }
     // The highest cell comes second although the lowest refilled, and the reused cell carries a fresh generation.
     try std.testing.expectEqualSlices(publications.Token, &.{ low, high, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 3 } }, &delivered);
-    const completion = @intFromEnum(r.bridge.Delivery.completion);
-    try std.testing.expectEqual(delivered_before[completion] + 4, runtime.bridge.delivered[completion]);
     // Unfinished publications keep the runtime busy.
     try std.testing.expectEqual(@as(usize, 0), host.idled);
     for (unfinished) |token| runtime.retirePublication(token);
@@ -696,7 +693,6 @@ test "request completions arrive at most `settle` per exchange, fairly under ref
     var host: Host = .{ .runtime = runtime };
     var demand = control;
     demand.settle = 1;
-    const delivered_before = runtime.bridge.delivered;
     var delivered: [4]outgoing.Token = undefined;
     for (&delivered, 0..) |*token, pass| {
         // The lowest cell completes again whenever it was delivered, with the next generation.
@@ -709,8 +705,6 @@ test "request completions arrive at most `settle` per exchange, fairly under ref
     }
     // The highest cell comes second although the lowest refilled, and the reused cell carries a fresh generation.
     try std.testing.expectEqualSlices(outgoing.Token, &.{ low, high, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 3 } }, &delivered);
-    const completion = @intFromEnum(r.bridge.Delivery.completion);
-    try std.testing.expectEqual(delivered_before[completion] + 4, runtime.bridge.delivered[completion]);
     // Once no pull awaits a completion, unpulled requests let the event loop go: after the third and the fourth.
     try std.testing.expectEqual(@as(usize, 2), host.idled);
     for (unpulled) |token| {

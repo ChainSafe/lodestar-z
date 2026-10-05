@@ -189,6 +189,40 @@ test "transport surfaces a send failure to an unreachable destination" {
     );
 }
 
+test "transport treats temporary route failures as loss on authenticated connections" {
+    var client: Node = .{};
+    try client.init(1);
+    defer client.deinit();
+    var server: Node = .{};
+    try server.init(2);
+    defer server.deinit();
+    const handle = try client.transport.dialPeer(std.testing.io, server.transport.localAddress(), server.transport.peerId(), try Now.read(std.testing.io));
+    var client_events: [8]Engine.Event = undefined;
+    var server_events: [8]Engine.Event = undefined;
+    for (0..200) |_| {
+        _ = try stepBoth(&client, &server, &client_events, &server_events);
+        if (client.transport.engine.peerId(handle) != null) break;
+    }
+    try std.testing.expect(client.transport.engine.peerId(handle) != null);
+    const stream = try client.transport.engine.openStream(handle);
+    for ([_]net.Socket.SendError{ error.NetworkDown, error.NetworkUnreachable, error.HostUnreachable, error.AccessDenied }) |err| {
+        try std.testing.expectEqual(@as(usize, 64), try client.transport.engine.write(stream, &(@as([64]u8, @splat(1))), false));
+        var faults: FaultIo = .{ .send = .{}, .send_failure = err };
+        var progress: Transport.Progress = .{ .now = try Now.read(std.testing.io) };
+        const reason = @intFromEnum(udp_mod.Sockets.SendDrops.Reason.destination_unreachable);
+        const before = client.transport.send_drops.datagrams[reason];
+        try client.transport.flush(faults.io(), progress.now, &progress);
+        try std.testing.expectEqual(@as(u32, 0), progress.send_failures);
+        try std.testing.expect(client.transport.send_drops.datagrams[reason] > before);
+        try std.testing.expect(client.transport.engine.peerId(handle) != null);
+    }
+    try std.testing.expectEqual(@as(usize, 4), try client.transport.engine.write(stream, "live", false));
+    var recovered: Transport.Progress = .{ .now = try Now.read(std.testing.io) };
+    try client.transport.flush(std.testing.io, recovered.now, &recovered);
+    try std.testing.expect(recovered.datagrams_sent > 0);
+    try std.testing.expectEqual(@as(u32, 0), recovered.send_failures);
+}
+
 test "transport completes a libp2p ping over loopback sockets" {
     var client: Node = .{};
     try client.init(1);

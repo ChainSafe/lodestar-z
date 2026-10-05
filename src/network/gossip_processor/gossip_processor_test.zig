@@ -3,6 +3,7 @@ const topic_mod = @import("../gossipsub/topic.zig");
 const p = @import("root.zig");
 const t = std.testing;
 const index_list = @import("../index_list.zig");
+const Gossipsub = @import("../gossipsub/root.zig").Gossipsub;
 
 test "gossip processor validates explicit execution overrides before allocating" {
     const limits: p.limits.Limits = @splat(.{ .items = 4096, .bytes = 4096 });
@@ -198,16 +199,27 @@ test "gossip processor deferral leaves per-source capacity" {
     defer table.deinit();
     defer table.close();
     const root: [32]u8 = @splat(2);
+    const topic = "/eth2/01020304/beacon_attestation_0/ssz_snappy";
     for (0..3) |_| {
-        const token = try add(&table, .beacon_attestation, root);
-        table.get(token).?.source = .{ .index = 0, .generation = 1 };
+        const message: Gossipsub.MessageEvent = .{
+            .source = .{ .index = 0, .generation = 1 },
+            .handle = .{ .index = 0, .generation = 1 },
+            .id = @splat(1),
+            .peer = .{ .index = 0, .generation = 1 },
+            .topic = topic,
+            .bytes = "x",
+            .identity = .{ .bytes = @splat(1) },
+            .admitted_ms = 1,
+            .deadline = 101,
+        };
+        try table.capture(&message, topic_mod.parseCanonical(topic).?, &.{ .root = root, .slot = 1 }, false, 1);
     }
     const checks = table.claimChecks(1, p.GossipProcessor.batch_max);
     for (checks.tokens[0..checks.len]) |token| try t.expect(table.classify(token, false));
     try t.expectEqual(@as(usize, 2), table.snapshot(1).waiting);
     table.notifyBlock(root);
     table.maintain(1, 0);
-    try t.expectEqual(@as(u16, 0), table.waiting_per_peer[0][@intFromEnum(p.limits.Kind.beacon_attestation)]);
+    try t.expectEqual(@as(u16, 0), table.sources[0].waiting[@intFromEnum(p.limits.Kind.beacon_attestation)]);
 }
 
 test "gossip processor new attestation groups cannot postpone a mature group" {

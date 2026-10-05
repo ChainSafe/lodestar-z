@@ -37,7 +37,6 @@ pub const Runtime = struct {
     close_callbacks: [leveldb.max_cursors + 1]napi.Ref = undefined,
     close_callback_count: usize = 0,
     fallback_error: ?napi.Ref = null,
-    close_failure: ?anyerror = null,
 
     pub fn create(env: napi.Env, operation_limit: usize, byte_limit: usize) !*Runtime {
         std.debug.assert(operation_limit > 0 and operation_limit <= values.pending_operations_max);
@@ -193,10 +192,7 @@ pub const Runtime = struct {
             slot.cursor = null;
         }
         if (self.database) |database| {
-            database.release() catch |err| {
-                self.close_failure = err;
-                return;
-            };
+            database.release();
             self.database = null;
         }
     }
@@ -229,8 +225,7 @@ pub const Runtime = struct {
     }
 
     fn notifyClose(self: *Runtime, reference: napi.Ref) !void {
-        const reason = if (self.close_failure) |err| try values.failureReason(self.env, self.fallback_error.?, err, null) else null;
-        try values.notify(self.env, reference, reason, try self.env.getUndefined());
+        try values.notify(self.env, reference, null, try self.env.getUndefined());
     }
 
     pub fn deliveryFailure(self: *Runtime, err: anyerror) void {

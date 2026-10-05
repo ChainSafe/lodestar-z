@@ -126,6 +126,25 @@ test "gossip policy GRAFT rejects negative peers and excludes direct peers" {
     try std.testing.expectEqual(@as(usize, 0), g.overlay.mesh(topic).count());
 }
 
+test "gossip ignores GRAFT crossing a local unsubscribe without extending backoff or penalizing" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try support.subscribe(&g, name);
+    const topic = g.overlay.findTopic(name).?;
+    const logical = g.sessions.rows[peer.index].logical;
+    support.control(&g, peer.index, .{ .graft = name }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
+    try support.unsubscribe(&g, name);
+    const backoff = g.peers.backoff(logical, topic);
+    const queued = g.sessions.rows[peer.index].io.tx.critical.count;
+    const penalty = g.peers.scores.rows[logical.index].behaviour;
+    support.control(&g, peer.index, .{ .graft = name }, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
+    try std.testing.expectEqualDeep(backoff, g.peers.backoff(logical, topic));
+    try std.testing.expectEqual(queued, g.sessions.rows[peer.index].io.tx.critical.count);
+    try std.testing.expectEqual(penalty, g.peers.scores.rows[logical.index].behaviour);
+}
+
 test "gossip policy combined transport calls respect one shared peer allowance" {
     var setup: test_pair.Pair = .{};
     try setup.init();

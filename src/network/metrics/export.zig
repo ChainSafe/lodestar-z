@@ -3,7 +3,7 @@ const policy = @import("../gossipsub/topic_policy.zig");
 const collectors = @import("collectors.zig");
 pub const histogram = @import("histogram.zig");
 pub const registry = @import("registry.zig");
-pub const bridge = @import("bridge.zig");
+pub const processor = @import("processor.zig");
 const prom = registry;
 
 pub const Context = @import("context.zig").Context;

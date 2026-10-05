@@ -61,7 +61,7 @@ pub const Stats = struct {
 
 pub const Sink = struct {
     mutex: std.Io.Mutex = .init,
-    level: ?std.log.Level = .info,
+    threshold: std.atomic.Value(i8) = .init(@intFromEnum(std.log.Level.info)),
     records: [capacity]Record = undefined,
     head: u16 = 0,
     len: u16 = 0,
@@ -72,16 +72,17 @@ pub const Sink = struct {
     window_scopes: [scope_count][level_count]u8 = @splat(@splat(0)),
 
     pub fn configure(self: *Sink, level: ?std.log.Level) void {
-        self.lock();
-        defer self.unlock();
-        self.level = level;
+        self.threshold.store(if (level) |selected| @intFromEnum(selected) else -1, .monotonic);
+    }
+
+    fn enabled(self: *const Sink, level: std.log.Level) bool {
+        return @as(i8, @intFromEnum(level)) <= self.threshold.load(.monotonic);
     }
 
     pub fn write(self: *Sink, comptime level: std.log.Level, comptime scope: Scope, monotonic_ms: u64, timestamp_ms: u64, comptime format: []const u8, args: anytype) void {
+        if (!self.enabled(level)) return;
         self.lock();
         defer self.unlock();
-        const selected = self.level orelse return;
-        if (@intFromEnum(level) > @intFromEnum(selected)) return;
         const s = @intFromEnum(scope);
         const l = @intFromEnum(level);
         const counts = &self.stats.counts[s][l];
@@ -176,6 +177,7 @@ pub fn bind(sink: ?*Sink) ?*Sink {
 pub fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
     if (comptime std.meta.stringToEnum(Scope, @tagName(scope))) |known| {
         if (current) |sink| {
+            if (!sink.enabled(level)) return;
             const io = std.Options.debug_io;
             const mono: u64 = @intCast(@max(0, std.Io.Timestamp.now(io, .awake).toMilliseconds()));
             const timestamp: u64 = @intCast(@max(0, std.Io.Timestamp.now(io, .real).toMilliseconds()));

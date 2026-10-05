@@ -88,15 +88,6 @@ export class ActionQueue {
     return batch;
   }
 
-  /**
-   * Returns a batch native never applied to the queue.
-   * @param {Action[]} batch
-   */
-  restore(batch) {
-    this.#obligations.unshift(...batch.filter(({type}) => type === "verdict" || type === "classify"));
-    for (const action of batch) if (action.type !== "verdict" && action.type !== "classify") this.#add(action);
-  }
-
   pending() {
     return this.#obligations.length > 0 || this.#coalesced.size > 0;
   }

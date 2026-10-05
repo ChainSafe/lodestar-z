@@ -12,7 +12,7 @@ const gossip_mod = @import("network_gossip.zig");
 const incoming_mod = @import("network_incoming.zig");
 const requests_mod = @import("network_requests.zig");
 const publications = @import("network_publications.zig");
-const bridge = r.bridge;
+const processor_metrics = n.metrics.processor;
 const network_wake = @import("network_wake.zig");
 
 pub const Owner = struct {
@@ -27,8 +27,7 @@ pub const Owner = struct {
     outputs: [32]n.peers.Event = undefined,
     application_outputs: [32]n.reqresp.ReqResp.Event = undefined,
     application: application_config.Config = undefined,
-    /// The bridge measurements of the latest render.
-    bridge: bridge.Snapshot = .{},
+    processor_metrics: processor_metrics.Snapshot = .{},
 
     pub fn readIdentity(self: *const Owner) !r.Identity {
         var identity: r.Identity = undefined;
@@ -291,7 +290,6 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
 }
 
 fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n.Now, sequence: u64) void {
-    const counts = self.heavy.?.core.peerCounts();
     if (timestamp.millis() >= self.metrics_due_ms) {
         publishMetrics(self, timestamp) catch |err| {
             self.lock();
@@ -302,6 +300,7 @@ fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n
     }
     self.lock();
     if (timestamp.millis() >= self.health_log_due_ms) {
+        const counts = self.heavy.?.core.peerCounts();
         const active_requests = self.heavy.?.core.protocols.reqresp.pendingCounts();
         std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.heavy.?.resolved.core.peers.target_peers, active_requests.outbound, active_requests.inbound, self.heavy.?.core.counters.dial_started, self.heavy.?.core.counters.dial_deferred, if (self.heavy.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.heavy.?.core.protocols.gossipsub.counters.local_pressure_resets, self.heavy.?.core.transport.counters.received_bytes, self.heavy.?.core.transport.counters.sent_bytes });
         self.health_log_due_ms = timestamp.millis() +| 30000;
@@ -324,9 +323,9 @@ fn publishMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!voi
         const state = table.snapshot(timestamp.millis());
         context.expired_executing = state.expiredExecuting;
     }
-    self.captureBridgeLocked(&self.heavy.?.bridge);
+    self.captureProcessorLocked(&self.heavy.?.processor_metrics);
     self.unlock();
-    context.bridge = &self.heavy.?.bridge;
+    context.processor = &self.heavy.?.processor_metrics;
     const index = try self.metrics.render(&context);
     self.lock();
     self.metrics.published = index;
