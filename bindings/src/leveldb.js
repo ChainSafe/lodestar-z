@@ -236,16 +236,20 @@ class LevelDbIterator {
     this.#projection = projection;
   }
 
-  async *[Symbol.asyncIterator]() {
-    try {
-      for (;;) {
-        const row = await this.next();
-        if (row.done) return;
-        yield row.value;
-      }
-    } finally {
-      await this.close();
-    }
+  [Symbol.asyncIterator]() {
+    const cursor = this;
+    return {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      async next() {
+        const row = await cursor.next();
+        if (row.done) await cursor.close();
+        return row;
+      },
+      return: () => cursor.return(),
+      throw: (error) => cursor.throw(error),
+    };
   }
 
   seek(target) {
@@ -302,7 +306,7 @@ class LevelDbIterator {
           if (this.#finished) return [];
           if (this.#databaseClosing() !== undefined) throw failure("DatabaseClosed");
         }
-        const page = await submit(this.#native, "readCursorBatch", [
+        const page = await submit(this.#native, "readCursor", [
           cursor.id,
           this.#maxValueBytes,
           this.#maxTotalBytes,

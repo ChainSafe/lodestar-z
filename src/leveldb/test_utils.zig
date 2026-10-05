@@ -1,6 +1,7 @@
 const std = @import("std");
 const leveldb = @import("root.zig");
-const allocator = std.testing.allocator;
+const testing = std.testing;
+const allocator = testing.allocator;
 
 pub const Fixture = struct {
     tmp: std.testing.TmpDir,
@@ -15,13 +16,19 @@ pub const Fixture = struct {
         defer allocator.free(directory);
         self.path = try std.fmt.allocPrintSentinel(allocator, "{s}/database", .{directory}, 0);
         errdefer allocator.free(self.path);
-        self.db = try leveldb.Database.open(db_allocator, self.path, .{});
+        self.db = try leveldb.Database.open(db_allocator, self.path, .{}, null);
         self.closed = false;
     }
 
     pub fn close(self: *Fixture) !void {
         try self.db.close();
         self.closed = true;
+    }
+
+    pub fn reopen(self: *Fixture) !void {
+        try self.close();
+        self.db = try leveldb.Database.open(self.db.allocator, self.path, .{ .create_if_missing = false }, null);
+        self.closed = false;
     }
 
     pub fn deinit(self: *Fixture) void {
@@ -40,4 +47,23 @@ pub fn freeEntries(db_allocator: std.mem.Allocator, entries: []const leveldb.Ent
 
 pub fn freeValues(db_allocator: std.mem.Allocator, values: []const ?[]const u8) void {
     for (values) |value| if (value) |bytes| db_allocator.free(bytes);
+}
+
+pub fn expectValue(db: *leveldb.Database, key: []const u8, expected: ?[]const u8) !void {
+    var destination: [128]u8 = @splat(0xa5);
+    const actual = try db.getInto(key, &destination, null);
+    if (expected) |value| {
+        try testing.expect(actual != null);
+        try testing.expectEqualSlices(u8, value, actual.?);
+        try testing.expectEqual(@intFromPtr(&destination), @intFromPtr(actual.?.ptr));
+        for (destination[value.len..]) |byte| try testing.expectEqual(@as(u8, 0xa5), byte);
+    } else {
+        try testing.expectEqual(null, actual);
+        try testing.expectEqualSlices(u8, &(@as([128]u8, @splat(0xa5))), &destination);
+    }
+}
+
+pub fn expectEntry(entry: *const leveldb.Entry, key: []const u8, value: []const u8) !void {
+    try testing.expectEqualSlices(u8, key, entry.key);
+    try testing.expectEqualSlices(u8, value, entry.value);
 }

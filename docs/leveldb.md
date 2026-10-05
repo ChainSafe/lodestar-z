@@ -140,18 +140,25 @@ bounds do not bound LevelDB's engine workspace.
 
 ## Zig use and validation
 
-`src/leveldb/root.zig` owns the bounded API. Zig callers provide destination
+`src/leveldb/root.zig` exports the bounded API. Zig callers provide destination
 buffers to `getInto`, `getManyInto`, and `Cursor.readInto`, or use
 `getManyOwned` and `Cursor.readOwned` for exact-sized allocated results.
-`Cursor.readOwnedBatch` adds the soft watermark and keeps exhausted cursors
-seekable until explicit close; legacy reads retain their exhaustion cleanup. Callers
+`Cursor.readOwned` accepts the soft watermark. Both cursor read methods keep
+exhausted cursors seekable until explicit close. Callers
 free each owned result with the database allocator. Database operations may run
 concurrently with a thread-safe allocator; each cursor requires serialized access.
 Callers keep the database address stable and retire all operations and cursors
-before closing it. No iterator-owned pointer escapes into a returned result.
+before closing it. Each cursor uses its iterator's consistent view; it does not
+need a separate engine snapshot. No iterator-owned pointer escapes into a returned result.
 
-The sibling suites are `src/leveldb/root_test.zig` for the bounded API and
-`src/leveldb/raw_test.zig` for the raw handles. Run validation from the repository
+Engine-fallible operations accept an optional `Diagnostics` output. Each operation
+owns its diagnostic message until `deinit`; do not share it between concurrent
+operations. The binding carries that message to JavaScript's `Error.message` and
+keeps the stable error category in `Error.code`.
+
+The sibling suites are `src/leveldb/root_test.zig` for database operations,
+`src/leveldb/cursor_test.zig` for cursor traversal and ownership, and
+`src/leveldb/raw_test.zig` for raw handles. Run validation from the repository
 root:
 
 ```sh

@@ -5,7 +5,6 @@ const Options = leveldb.Options;
 const ReadOptions = leveldb.ReadOptions;
 const WriteOptions = leveldb.WriteOptions;
 const WriteBatch = leveldb.WriteBatch;
-const Error = leveldb.Error;
 const destroyDB = leveldb.destroyDB;
 const free = leveldb.free;
 
@@ -30,18 +29,18 @@ test "basic put and get" {
     var options = try Options.create();
     options.setCreateIfMissing(true);
     defer options.destroy();
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     const key = "test_key";
     const value = "test_value";
     var write_options = try WriteOptions.create();
     defer write_options.destroy();
-    try db.put(&write_options, key, value);
+    try db.put(&write_options, key, value, null);
 
     var read_options = try ReadOptions.create();
     defer read_options.destroy();
-    const retrieved = try db.get(&read_options, key) orelse return error.KeyNotFound;
+    const retrieved = try db.get(&read_options, key, null) orelse return error.KeyNotFound;
     defer free(retrieved.ptr);
     try std.testing.expectEqualStrings(value, retrieved);
 }
@@ -56,19 +55,19 @@ test "delete key" {
     var options = try Options.create();
     options.setCreateIfMissing(true);
     defer options.destroy();
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     const key = "test_key";
     const value = "test_value";
     var write_options = try WriteOptions.create();
     defer write_options.destroy();
-    try db.put(&write_options, key, value);
-    try db.delete(&write_options, key);
+    try db.put(&write_options, key, value, null);
+    try db.delete(&write_options, key, null);
 
     var read_options = try ReadOptions.create();
     defer read_options.destroy();
-    const retrieved = db.get(&read_options, key);
+    const retrieved = db.get(&read_options, key, null);
     try std.testing.expectEqual(null, retrieved);
 }
 
@@ -82,12 +81,12 @@ test "non-existent key" {
     var options = try Options.create();
     options.setCreateIfMissing(true);
     defer options.destroy();
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     var read_options = try ReadOptions.create();
     defer read_options.destroy();
-    const retrieved = db.get(&read_options, "nonexistent");
+    const retrieved = db.get(&read_options, "nonexistent", null);
     try std.testing.expectEqual(null, retrieved);
 }
 
@@ -100,8 +99,8 @@ test "invalid argument error - missing createIfMissing" {
 
     var options = try Options.create();
     defer options.destroy();
-    const result = DB.open(&options, db_path);
-    try std.testing.expectError(Error.InvalidArgument, result);
+    const result = DB.open(&options, db_path, null);
+    try std.testing.expectError(error.InvalidArgument, result);
 }
 
 test "iterator seek and next" {
@@ -114,13 +113,13 @@ test "iterator seek and next" {
     var options = try Options.create();
     options.setCreateIfMissing(true);
     defer options.destroy();
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     var write_options = try WriteOptions.create();
     defer write_options.destroy();
-    try db.put(&write_options, "key1", "value1");
-    try db.put(&write_options, "key2", "value2");
+    try db.put(&write_options, "key1", "value1", null);
+    try db.put(&write_options, "key2", "value2", null);
 
     var read_options = try ReadOptions.create();
     defer read_options.destroy();
@@ -148,7 +147,7 @@ test "write batch put and delete" {
     var options = try Options.create();
     options.setCreateIfMissing(true);
     defer options.destroy();
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     var batch = try WriteBatch.create();
@@ -158,21 +157,12 @@ test "write batch put and delete" {
 
     var write_options = try WriteOptions.create();
     defer write_options.destroy();
-    try db.write(&write_options, &batch);
+    try db.write(&write_options, &batch, null);
 
     var read_options = try ReadOptions.create();
     defer read_options.destroy();
-    const retrieved = db.get(&read_options, "batch_key");
+    const retrieved = db.get(&read_options, "batch_key", null);
     try std.testing.expectEqual(null, retrieved);
-}
-
-test "options setters" {
-    var options = try Options.create();
-    defer options.destroy();
-
-    options.setCreateIfMissing(true);
-    options.setWriteBufferSize(1024 * 1024);
-    options.setCompression(0);
 }
 
 test "destroy db" {
@@ -185,13 +175,13 @@ test "destroy db" {
     var options = try Options.create();
     options.setCreateIfMissing(true);
     defer options.destroy();
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     db.close();
 
-    try destroyDB(&options, db_path);
+    try destroyDB(&options, db_path, null);
     options.setCreateIfMissing(false);
-    const result = DB.open(&options, db_path);
-    try std.testing.expectError(Error.InvalidArgument, result);
+    const result = DB.open(&options, db_path, null);
+    try std.testing.expectError(error.InvalidArgument, result);
 }
 
 test "empty key and value" {
@@ -204,16 +194,16 @@ test "empty key and value" {
     var options = try Options.create();
     options.setCreateIfMissing(true);
     defer options.destroy();
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     var write_options = try WriteOptions.create();
     defer write_options.destroy();
-    try db.put(&write_options, "", "");
+    try db.put(&write_options, "", "", null);
 
     var read_options = try ReadOptions.create();
     defer read_options.destroy();
-    const retrieved = try db.get(&read_options, "") orelse return error.KeyNotFound;
+    const retrieved = try db.get(&read_options, "", null) orelse return error.KeyNotFound;
     defer free(retrieved.ptr);
     try std.testing.expectEqualStrings("", retrieved);
 }
@@ -228,7 +218,7 @@ test "overwrite key" {
     var options = try Options.create();
     options.setCreateIfMissing(true);
     defer options.destroy();
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     const key = "test_key";
@@ -237,13 +227,13 @@ test "overwrite key" {
     var write_options = try WriteOptions.create();
     defer write_options.destroy();
 
-    try db.put(&write_options, key, value1);
+    try db.put(&write_options, key, value1, null);
 
-    try db.put(&write_options, key, value2);
+    try db.put(&write_options, key, value2, null);
 
     var read_options = try ReadOptions.create();
     defer read_options.destroy();
-    const retrieved = try db.get(&read_options, key) orelse return error.KeyNotFound;
+    const retrieved = try db.get(&read_options, key, null) orelse return error.KeyNotFound;
     defer free(retrieved.ptr);
     try std.testing.expectEqualStrings(value2, retrieved);
 }
@@ -258,14 +248,14 @@ test "iterator seek to last and prev" {
     var options = try Options.create();
     options.setCreateIfMissing(true);
     defer options.destroy();
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     var write_options = try WriteOptions.create();
     defer write_options.destroy();
-    try db.put(&write_options, "key1", "value1");
-    try db.put(&write_options, "key2", "value2");
-    try db.put(&write_options, "key3", "value3");
+    try db.put(&write_options, "key1", "value1", null);
+    try db.put(&write_options, "key2", "value2", null);
+    try db.put(&write_options, "key3", "value3", null);
 
     var read_options = try ReadOptions.create();
     defer read_options.destroy();
@@ -298,14 +288,14 @@ test "iterator seek to specific key" {
     var options = try Options.create();
     options.setCreateIfMissing(true);
     defer options.destroy();
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     var write_options = try WriteOptions.create();
     defer write_options.destroy();
-    try db.put(&write_options, "key1", "value1");
-    try db.put(&write_options, "key2", "value2");
-    try db.put(&write_options, "key3", "value3");
+    try db.put(&write_options, "key1", "value1", null);
+    try db.put(&write_options, "key2", "value2", null);
+    try db.put(&write_options, "key3", "value3", null);
 
     var read_options = try ReadOptions.create();
     defer read_options.destroy();
@@ -328,12 +318,12 @@ test "iterator validity past end" {
     var options = try Options.create();
     options.setCreateIfMissing(true);
     defer options.destroy();
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     var write_options = try WriteOptions.create();
     defer write_options.destroy();
-    try db.put(&write_options, "key1", "value1");
+    try db.put(&write_options, "key1", "value1", null);
 
     var read_options = try ReadOptions.create();
     defer read_options.destroy();
@@ -357,7 +347,7 @@ test "iterator get error" {
     var options = try Options.create();
     options.setCreateIfMissing(true);
     defer options.destroy();
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     var read_options = try ReadOptions.create();
@@ -365,7 +355,7 @@ test "iterator get error" {
     var iter = try db.createIterator(&read_options);
     defer iter.destroy();
 
-    try iter.getError();
+    try iter.getError(null);
 }
 
 test "snapshot preserves overwritten and deleted values" {
@@ -379,13 +369,13 @@ test "snapshot preserves overwritten and deleted values" {
     defer options.destroy();
     options.setCreateIfMissing(true);
 
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     var write_options = try WriteOptions.create();
     defer write_options.destroy();
-    try db.put(&write_options, "a", "before");
-    try db.put(&write_options, "b", "deleted");
+    try db.put(&write_options, "a", "before", null);
+    try db.put(&write_options, "b", "deleted", null);
 
     var snapshot = try db.createSnapshot();
     defer db.releaseSnapshot(&snapshot);
@@ -396,14 +386,14 @@ test "snapshot preserves overwritten and deleted values" {
     read_options.setVerifyChecksums(true);
     read_options.setFillCache(false);
 
-    try db.put(&write_options, "a", "after");
-    try db.delete(&write_options, "b");
-    try db.put(&write_options, "c", "new");
+    try db.put(&write_options, "a", "after", null);
+    try db.delete(&write_options, "b", null);
+    try db.put(&write_options, "c", "new", null);
 
-    const value = (try db.get(&read_options, "a")).?;
+    const value = (try db.get(&read_options, "a", null)).?;
     defer free(value.ptr);
     try std.testing.expectEqualStrings("before", value);
-    try std.testing.expectEqual(null, try db.get(&read_options, "c"));
+    try std.testing.expectEqual(null, try db.get(&read_options, "c", null));
 
     var iter = try db.createIterator(&read_options);
     defer iter.destroy();
@@ -417,7 +407,7 @@ test "snapshot preserves overwritten and deleted values" {
     try std.testing.expectEqualStrings("deleted", iter.value());
     iter.next();
     try std.testing.expect(!iter.valid());
-    try iter.getError();
+    try iter.getError(null);
 }
 
 test "sync batch persists binary keys and values through reopen" {
@@ -458,25 +448,25 @@ test "sync batch persists binary keys and values through reopen" {
     batch.put("empty", "");
 
     {
-        var db = try DB.open(&options, db_path);
+        var db = try DB.open(&options, db_path, null);
         defer db.close();
-        try db.write(&write_options, &batch);
+        try db.write(&write_options, &batch, null);
         db.compactRange(null, null);
         batch.clear();
-        try db.write(&write_options, &batch);
+        try db.write(&write_options, &batch, null);
     }
 
     options.setCreateIfMissing(false);
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     var read_options = try ReadOptions.create();
     defer read_options.destroy();
-    const retrieved = (try db.get(&read_options, key)).?;
+    const retrieved = (try db.get(&read_options, key, null)).?;
     defer free(retrieved.ptr);
     try std.testing.expectEqualSlices(u8, &value, retrieved);
-    try std.testing.expectEqual(null, try db.get(&read_options, "ignored"));
-    const empty = (try db.get(&read_options, "empty")).?;
+    try std.testing.expectEqual(null, try db.get(&read_options, "ignored", null));
+    const empty = (try db.get(&read_options, "empty", null)).?;
     defer free(empty.ptr);
     try std.testing.expectEqual(@as(usize, 0), empty.len);
 }
@@ -493,12 +483,12 @@ test "open propagates lock and existing database errors" {
     options.setCreateIfMissing(true);
 
     {
-        var db = try DB.open(&options, db_path);
+        var db = try DB.open(&options, db_path, null);
         defer db.close();
-        try std.testing.expectError(error.IOError, DB.open(&options, db_path));
+        try std.testing.expectError(error.IOError, DB.open(&options, db_path, null));
     }
     options.setErrorIfExists(true);
-    try std.testing.expectError(error.InvalidArgument, DB.open(&options, db_path));
+    try std.testing.expectError(error.InvalidArgument, DB.open(&options, db_path, null));
 }
 
 fn corruptTable(tmp_dir: *std.testing.TmpDir) !void {
@@ -535,27 +525,27 @@ test "get and iterator propagate corrupt table errors instead of missing keys" {
     options.setCreateIfMissing(true);
 
     {
-        var db = try DB.open(&options, db_path);
+        var db = try DB.open(&options, db_path, null);
         defer db.close();
 
         var write_options = try WriteOptions.create();
         defer write_options.destroy();
-        try db.put(&write_options, "key", "value");
+        try db.put(&write_options, "key", "value", null);
         db.compactRange(null, null);
     }
     try corruptTable(&tmp_dir);
 
-    var db = try DB.open(&options, db_path);
+    var db = try DB.open(&options, db_path, null);
     defer db.close();
 
     var read_options = try ReadOptions.create();
     defer read_options.destroy();
     read_options.setVerifyChecksums(true);
-    try std.testing.expectError(error.Corruption, db.get(&read_options, "key"));
+    try std.testing.expectError(error.Corruption, db.get(&read_options, "key", null));
 
     var iter = try db.createIterator(&read_options);
     defer iter.destroy();
     iter.seek("key");
     try std.testing.expect(!iter.valid());
-    try std.testing.expectError(error.Corruption, iter.getError());
+    try std.testing.expectError(error.Corruption, iter.getError(null));
 }

@@ -11,16 +11,19 @@ pub const Database = struct {
     references: usize = 1,
     multithreading: bool,
 
-    pub fn open(path: [:0]const u8, options: leveldb.Options, multithreading: bool) !*Database {
+    pub fn open(path: [:0]const u8, options: leveldb.Options, multithreading: bool, diagnostics: *leveldb.Diagnostics) !*Database {
         std.Io.Threaded.mutexLock(&mutex);
         defer std.Io.Threaded.mutexUnlock(&mutex);
-        var resolved = try canonicalPath(path);
+        var resolved = try canonicalPath(path, diagnostics);
         errdefer if (resolved) |key| allocator.free(key);
         if (resolved) |key| {
             if (databases.get(key)) |shared| {
                 resolved = null;
                 defer allocator.free(key);
-                if (!multithreading or !shared.multithreading) return error.IOError;
+                if (!multithreading or !shared.multithreading) {
+                    diagnostics.format("Database already open without shared access: {s}", .{path});
+                    return error.IOError;
+                }
                 shared.references = try std.math.add(usize, shared.references, 1);
                 return shared;
             }
@@ -28,12 +31,12 @@ pub const Database = struct {
         const shared = try allocator.create(Database);
         errdefer allocator.destroy(shared);
         shared.* = .{
-            .database = try leveldb.Database.open(allocator, path, options),
+            .database = try leveldb.Database.open(allocator, path, options, diagnostics),
             .path = undefined,
             .multithreading = multithreading,
         };
         errdefer shared.database.close() catch unreachable;
-        if (resolved == null) resolved = (try canonicalPath(path)) orelse return error.IOError;
+        if (resolved == null) resolved = (try canonicalPath(path, diagnostics)) orelse return error.IOError;
         shared.path = resolved.?;
         try databases.put(allocator, shared.path, shared);
         return shared;
@@ -60,22 +63,28 @@ pub const Database = struct {
     }
 };
 
-pub fn destroy(path: [:0]const u8) !void {
+pub fn destroy(path: [:0]const u8, diagnostics: *leveldb.Diagnostics) !void {
     std.Io.Threaded.mutexLock(&mutex);
     defer std.Io.Threaded.mutexUnlock(&mutex);
-    if (try canonicalPath(path)) |key| {
+    if (try canonicalPath(path, diagnostics)) |key| {
         defer allocator.free(key);
-        if (databases.contains(key)) return error.IOError;
+        if (databases.contains(key)) {
+            diagnostics.format("Cannot destroy an open database: {s}", .{path});
+            return error.IOError;
+        }
     }
-    try leveldb.destroy(path);
+    try leveldb.destroy(path, diagnostics);
 }
 
-fn canonicalPath(path: [:0]const u8) !?[]u8 {
+fn canonicalPath(path: [:0]const u8, diagnostics: *leveldb.Diagnostics) !?[]u8 {
     var buffer: [std.posix.PATH_MAX]u8 = undefined;
     const resolved = std.c.realpath(path.ptr, &buffer) orelse return switch (std.c.errno(@as(c_int, -1))) {
         .NOENT => null,
         .NOMEM => error.OutOfMemory,
-        else => error.IOError,
+        else => |err| blk: {
+            diagnostics.format("Cannot resolve database path {s}: {t}", .{ path, err });
+            break :blk error.IOError;
+        },
     };
     return try allocator.dupe(u8, std.mem.span(resolved));
 }

@@ -1,24 +1,12 @@
-import {mkdtemp, rm} from "node:fs/promises";
-import {tmpdir} from "node:os";
-import {join} from "node:path";
 import {expect, it} from "vitest";
 import {LevelDb, type LevelDbEntry, type LevelDbIterator} from "../src/leveldb.js";
+import {bytes, withDatabase as withLevelDb} from "./utils/leveldb.js";
 
-const bytes = (...values: number[]): Uint8Array => Uint8Array.from(values);
+const withDatabase = (run: (db: LevelDb, path: string) => Promise<void>): Promise<void> =>
+  withLevelDb(run, {multithreading: true});
+
 const key = (index: number): Uint8Array => bytes(index >>> 8, index & 255);
 const indexOf = (entry: LevelDbEntry): number => entry.key[0] * 256 + entry.key[1];
-
-async function withDatabase(run: (db: LevelDb, path: string) => Promise<void>): Promise<void> {
-  const directory = await mkdtemp(join(tmpdir(), "lodestar-leveldb-iterator-"));
-  const path = join(directory, "db");
-  const db = await LevelDb.open(path, {multithreading: true});
-  try {
-    await run(db, path);
-  } finally {
-    await db.close();
-    await rm(directory, {force: true, recursive: true});
-  }
-}
 
 async function nextIndex(iterator: LevelDbIterator): Promise<number | undefined> {
   const row = await iterator.next();
@@ -28,6 +16,26 @@ async function nextIndex(iterator: LevelDbIterator): Promise<number | undefined>
 async function seed(db: LevelDb, count: number): Promise<void> {
   await db.batch(Array.from({length: count}, (_, i) => ({key: key(i), type: "put", value: bytes(i & 255)})));
 }
+
+it("releases async iteration adapters returned or thrown before their first pull", async () => {
+  await withDatabase(async (db) => {
+    await seed(db, 1);
+    const stopped = new Error("StoppedBeforePull");
+    for (let index = 0; index < 65; index++) {
+      const returned = db.iterator()[Symbol.asyncIterator]();
+      expect(await returned.return?.()).toEqual({done: true, value: undefined});
+      expect(await returned.next()).toEqual({done: true, value: undefined});
+      const thrown = db.iterator()[Symbol.asyncIterator]();
+      await expect(thrown.throw?.(stopped)).rejects.toBe(stopped);
+    }
+    const cursor = db.iterator();
+    try {
+      expect(await nextIndex(cursor)).toBe(0);
+    } finally {
+      await cursor.close();
+    }
+  });
+});
 
 it("reads one row first, refills 1000, and drains cached rows before a mixed nextv read", async () => {
   await withDatabase(async (db) => {

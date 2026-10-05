@@ -1,20 +1,9 @@
 import {spawnSync} from "node:child_process";
-import {mkdtemp, rm} from "node:fs/promises";
-import {tmpdir} from "node:os";
-import {join} from "node:path";
 import {expect, it} from "vitest";
 import {LevelDb} from "../src/leveldb.js";
+import {withPath} from "./utils/leveldb.js";
 
 const moduleUrl = new URL("../src/leveldb.js", import.meta.url).href;
-
-async function withPath(run: (path: string) => Promise<void>): Promise<void> {
-  const directory = await mkdtemp(join(tmpdir(), "lodestar-leveldb-lifecycle-"));
-  try {
-    await run(join(directory, "db"));
-  } finally {
-    await rm(directory, {force: true, recursive: true});
-  }
-}
 
 function runChild(source: string, path: string, args: string[] = []): void {
   const result = spawnSync(
@@ -27,18 +16,45 @@ function runChild(source: string, path: string, args: string[] = []): void {
   expect(result.status, result.stderr).toBe(0);
 }
 
+it("preserves engine diagnostics and stable codes independently across concurrent opens", async () => {
+  await withPath(async (path) => {
+    const paths = [`${path}-first`, `${path}-second`];
+    await Promise.all(
+      paths.map(async (missing) => {
+        await expect(LevelDb.open(missing, {createIfMissing: false})).rejects.toMatchObject({
+          code: "InvalidArgument",
+          message: expect.stringContaining(missing),
+        });
+      })
+    );
+    const db = await LevelDb.open(path);
+    try {
+      await expect(LevelDb.open(path)).rejects.toMatchObject({
+        code: "IOError",
+        message: expect.stringContaining(path),
+      });
+      await expect(LevelDb.destroy(path)).rejects.toMatchObject({
+        code: "IOError",
+        message: expect.stringContaining(path),
+      });
+    } finally {
+      await db.close();
+    }
+  });
+});
+
 it("cleans up failed opens and can immediately retry after the lock owner closes", async () => {
   await withPath(async (path) => {
     const owner = await LevelDb.open(path);
     try {
       for (let attempt = 0; attempt < 3; attempt++) {
-        await expect(LevelDb.open(path)).rejects.toThrow("IOError");
+        await expect(LevelDb.open(path)).rejects.toMatchObject({code: "IOError"});
       }
       await owner.put(Uint8Array.of(1), Uint8Array.of(2), {sync: true});
     } finally {
       await owner.close();
     }
-    await expect(LevelDb.open(path, {errorIfExists: true})).rejects.toThrow("InvalidArgument");
+    await expect(LevelDb.open(path, {errorIfExists: true})).rejects.toMatchObject({code: "InvalidArgument"});
     const retry = await LevelDb.open(path, {createIfMissing: false});
     try {
       expect(await retry.get(Uint8Array.of(1), {maxValueBytes: 1})).toEqual(Uint8Array.of(2));
@@ -155,7 +171,7 @@ for (let attempt = 0; attempt < 200; attempt++) {
     reopened = await LevelDb.open(path, {createIfMissing: false});
     break;
   } catch (error) {
-    assert.equal(error.message, "IOError");
+    assert.equal(error.code, "IOError");
     await delay(10);
   }
 }

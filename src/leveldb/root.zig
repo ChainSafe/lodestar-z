@@ -8,6 +8,8 @@ const owned = @import("owned.zig");
 const maintenance = @import("maintenance.zig");
 const Allocator = std.mem.Allocator;
 
+pub const Diagnostics = raw.Diagnostics;
+
 pub const max_key_bytes = 4096;
 pub const max_path_bytes = 4096;
 pub const max_value_bytes = 64 * 1024 * 1024;
@@ -46,7 +48,7 @@ pub const Database = struct {
 
     /// The host ensures one owner per physical directory, across path aliases, workers and other storage engines.
     /// POSIX process-scoped engine locks do not enforce this obligation between independent library copies.
-    pub fn open(allocator: Allocator, path: [:0]const u8, options: Options) !Database {
+    pub fn open(allocator: Allocator, path: [:0]const u8, options: Options, diagnostics: ?*Diagnostics) !Database {
         try checkPath(path);
         if (options.cache_bytes > 1024 * 1024 * 1024 or
             options.write_buffer_bytes < 64 * 1024 or options.write_buffer_bytes > 1024 * 1024 * 1024 or
@@ -63,7 +65,7 @@ pub const Database = struct {
         raw_options.setParanoidChecks(true);
         raw_options.setWriteBufferSize(options.write_buffer_bytes);
         raw_options.setMaxOpenFiles(@intCast(options.max_open_files));
-        const db = try raw.DB.open(&raw_options, path);
+        const db = try raw.DB.open(&raw_options, path, diagnostics);
         return .{
             .allocator = allocator,
             .inner = db,
@@ -81,7 +83,7 @@ pub const Database = struct {
     }
 
     /// Copies only after exact-key lookup and length validation. Oversize and missing values leave destination alone.
-    pub fn getInto(self: *Database, key: []const u8, destination: []u8) !?[]u8 {
+    pub fn getInto(self: *Database, key: []const u8, destination: []u8, diagnostics: ?*Diagnostics) !?[]u8 {
         try checkKey(key);
         if (destination.len > max_value_bytes) return error.InvalidReadLimit;
         const db = try self.handle();
@@ -90,12 +92,12 @@ pub const Database = struct {
         var iterator = try db.createIterator(&options);
         defer iterator.destroy();
 
-        return lookupInto(&iterator, key, destination, destination.len);
+        return lookupInto(&iterator, key, destination, destination.len, diagnostics);
     }
 
     /// Reuses one iterator and its consistent view for the whole batch. Keys and result metadata must not alias
     /// destination. On error, disregard all results.
-    pub fn getManyInto(self: *Database, keys: []const []const u8, destination: []u8, results: []?[]const u8, value_limit: usize) !void {
+    pub fn getManyInto(self: *Database, keys: []const []const u8, destination: []u8, results: []?[]const u8, value_limit: usize, diagnostics: ?*Diagnostics) !void {
         if (keys.len > max_batch_entries or results.len != keys.len) return error.BatchTooLarge;
         if (destination.len > max_batch_bytes or value_limit > max_value_bytes) return error.InvalidReadLimit;
         for (keys) |key| try checkKey(key);
@@ -108,7 +110,7 @@ pub const Database = struct {
         var offset: usize = 0;
         for (keys, results) |key, *result| {
             const available = @min(value_limit, destination.len - offset);
-            result.* = try lookupInto(&iterator, key, destination[offset..][0..available], value_limit);
+            result.* = try lookupInto(&iterator, key, destination[offset..][0..available], value_limit, diagnostics);
             if (result.*) |value| offset += value.len;
         }
         std.debug.assert(offset <= destination.len);
@@ -123,6 +125,7 @@ pub const Database = struct {
         value_limit: usize,
         total_limit: usize,
         fill_cache: bool,
+        diagnostics: ?*Diagnostics,
     ) !void {
         if (results.len > max_bulk_entries) return error.BatchTooLarge;
         @memset(results, null);
@@ -133,24 +136,24 @@ pub const Database = struct {
             .max_value_bytes = value_limit,
             .max_total_bytes = total_limit,
             .fill_cache = fill_cache,
-        }, max_key_bytes);
+        }, max_key_bytes, diagnostics);
     }
 
-    pub fn put(self: *Database, key: []const u8, value: []const u8, sync: bool) !void {
-        try self.write(&.{.{ .key = key, .value = value }}, sync);
+    pub fn put(self: *Database, key: []const u8, value: []const u8, sync: bool, diagnostics: ?*Diagnostics) !void {
+        try self.write(&.{.{ .key = key, .value = value }}, sync, diagnostics);
     }
 
-    pub fn delete(self: *Database, key: []const u8, sync: bool) !void {
-        try self.write(&.{.{ .key = key, .value = null }}, sync);
+    pub fn delete(self: *Database, key: []const u8, sync: bool, diagnostics: ?*Diagnostics) !void {
+        try self.write(&.{.{ .key = key, .value = null }}, sync, diagnostics);
     }
 
     /// Validates the complete batch before creating its C backing or changing the database.
-    pub fn write(self: *Database, operations: []const Operation, sync: bool) !void {
+    pub fn write(self: *Database, operations: []const Operation, sync: bool, diagnostics: ?*Diagnostics) !void {
         return self.writeWithLimits(operations, sync, .{
             .max_value_bytes = max_value_bytes,
             .max_total_bytes = max_batch_bytes,
             .max_entries = max_batch_entries,
-        });
+        }, diagnostics);
     }
 
     /// The complete operation remains one atomic LevelDB batch, regardless of its configured limits.
@@ -159,6 +162,7 @@ pub const Database = struct {
         operations: []const Operation,
         sync: bool,
         limits: WriteLimits,
+        diagnostics: ?*Diagnostics,
     ) !void {
         const db = try self.handle();
         if (limits.max_entries > max_bulk_entries or operations.len > limits.max_entries)
@@ -187,12 +191,12 @@ pub const Database = struct {
         for (operations) |operation| {
             if (operation.value) |value| batch.put(operation.key, value) else batch.delete(operation.key);
         }
-        try db.write(&options, &batch);
+        try db.write(&options, &batch, diagnostics);
     }
 
     /// Rejects the total entry bound before mutation. Engine errors may leave earlier chunks deleted.
-    pub fn clear(self: *Database) !void {
-        try maintenance.clear(try self.handle(), self.clear_max_entries, max_key_bytes);
+    pub fn clear(self: *Database, diagnostics: ?*Diagnostics) !void {
+        try maintenance.clear(try self.handle(), self.clear_max_entries, max_key_bytes, diagnostics);
     }
 
     /// Estimates persisted bytes in [start, end); recent writes may not be included.
@@ -219,34 +223,8 @@ pub const Database = struct {
     }
 
     /// Takes a snapshot now. The cursor must close before the database; its address need not be stable.
-    pub fn cursor(self: *Database, range: RangeOptions) !Cursor {
-        const db = try self.handle();
-        const previous = self.cursors.fetchAdd(1, .monotonic);
-        if (previous >= max_cursors) {
-            _ = self.cursors.fetchSub(1, .monotonic);
-            return error.CursorCapacity;
-        }
-        errdefer _ = self.cursors.fetchSub(1, .monotonic);
-        var bounds = try ranges.Range.init(self.allocator, &range, max_key_bytes);
-        errdefer bounds.deinit(self.allocator);
-        var snapshot = try db.createSnapshot();
-        errdefer db.releaseSnapshot(&snapshot);
-        var options = try readOptions(range.fill_cache);
-        defer options.destroy();
-        options.setSnapshot(&snapshot);
-        var iterator = try db.createIterator(&options);
-        errdefer iterator.destroy();
-
-        if (range.limit != 0) try bounds.seek(&iterator);
-        return .{
-            .db = self,
-            .iterator = iterator,
-            .snapshot = snapshot,
-            .bounds = bounds,
-            .remaining = range.limit,
-            .keys = range.keys,
-            .values = range.values,
-        };
+    pub fn cursor(self: *Database, range: RangeOptions, diagnostics: ?*Diagnostics) !Cursor {
+        return Cursor.init(self, range, diagnostics);
     }
 
     fn handle(self: *Database) !*raw.DB {
@@ -254,149 +232,14 @@ pub const Database = struct {
     }
 };
 
-pub const Cursor = struct {
-    db: *Database,
-    iterator: raw.Iterator,
-    snapshot: raw.Snapshot,
-    bounds: ranges.Range,
-    keys: bool,
-    values: bool,
-    remaining: u32,
-    closed: bool = false,
-    positioned: bool = true,
-
-    pub fn close(self: *Cursor) void {
-        if (self.closed) return;
-        self.closed = true;
-        self.iterator.destroy();
-        self.db.inner.?.releaseSnapshot(&self.snapshot);
-        self.bounds.deinit(self.db.allocator);
-        const previous = self.db.cursors.fetchSub(1, .monotonic);
-        std.debug.assert(previous > 0);
-    }
-
-    /// Repositions within the original snapshot and bounds without resetting the consumed row limit.
-    pub fn seek(self: *Cursor, target: []const u8) !void {
-        if (self.closed) return error.CursorClosed;
-        errdefer self.close();
-        try checkKey(target);
-        self.positioned = try self.bounds.seekTarget(&self.iterator, target);
-    }
-
-    /// Keys and values share the byte budget. A row deferred for lack of remaining room is not consumed. Any error
-    /// closes the cursor; earlier rows copied during a failing call are not returned as a successful page.
-    pub fn readInto(self: *Cursor, destination: []u8, entries: []Entry, value_limit: usize) !Page {
-        if (self.closed) return error.CursorClosed;
-        errdefer self.close();
-        if (destination.len == 0 or destination.len > max_batch_bytes or
-            entries.len == 0 or entries.len > max_batch_entries or
-            value_limit == 0 or value_limit > max_value_bytes) return error.InvalidReadLimit;
-        var page: Page = .{ .count = 0, .bytes = 0, .done = false };
-        for (0..entries.len) |_| {
-            if (!try self.hasNext()) {
-                page.done = true;
-                break;
-            }
-            try checkKey(self.iterator.key());
-            const key = if (self.keys) self.iterator.key() else "";
-            const value = if (self.values) self.iterator.value() else "";
-            if (value.len > value_limit) return error.ValueTooLarge;
-            const bytes = key.len + value.len;
-            if (bytes > destination.len - page.bytes) {
-                if (page.count == 0) return error.BatchTooLarge;
-                break;
-            }
-            const key_copy = destination[page.bytes..][0..key.len];
-            @memcpy(key_copy, key);
-            const value_copy = destination[page.bytes + key.len ..][0..value.len];
-            @memcpy(value_copy, value);
-            entries[page.count] = .{ .key = key_copy, .value = value_copy };
-            page.count += 1;
-            page.bytes += bytes;
-            self.remaining -= 1;
-            if (self.remaining > 0) try self.bounds.advance(&self.iterator);
-        }
-        if (!page.done) page.done = !try self.hasNext();
-        if (page.done) self.close();
-        return page;
-    }
-
-    /// Caller frees each selected slice in entries[0..page.count] with Database.allocator.
-    /// Entries must contain no live allocations. Errors free partial entries and close the cursor.
-    pub fn readOwned(
-        self: *Cursor,
-        entries: []Entry,
-        value_limit: usize,
-        total_limit: usize,
-    ) !Page {
-        if (entries.len > max_batch_entries) {
-            self.close();
-            return error.InvalidReadLimit;
-        }
-        return self.readOwnedPage(entries, value_limit, total_limit, null);
-    }
-
-    /// A soft watermark ends a batch AFTER the row that exceeds it. Hard limits still refuse oversized rows.
-    /// Unlike readOwned, natural exhaustion retains the snapshot for seek; callers must close it explicitly.
-    pub fn readOwnedBatch(self: *Cursor, entries: []Entry, value_limit: usize, total_limit: usize, high_water_mark_bytes: u32) !Page {
-        return self.readOwnedPage(entries, value_limit, total_limit, high_water_mark_bytes);
-    }
-
-    fn readOwnedPage(self: *Cursor, entries: []Entry, value_limit: usize, total_limit: usize, high_water_mark_bytes: ?u32) !Page {
-        if (entries.len > max_bulk_entries) {
-            self.close();
-            return error.InvalidReadLimit;
-        }
-        @memset(entries, .{ .key = "", .value = "" });
-        if (self.closed) return error.CursorClosed;
-        errdefer self.close();
-        if (entries.len == 0 or value_limit > max_owned_value_bytes or
-            total_limit > max_owned_batch_bytes) return error.InvalidReadLimit;
-        var page: Page = .{ .count = 0, .bytes = 0, .done = false };
-        errdefer {
-            for (entries[0..page.count]) |*entry| owned.freeEntry(self.db.allocator, entry);
-            @memset(entries[0..page.count], .{ .key = "", .value = "" });
-        }
-        for (entries) |*entry| {
-            if (!try self.hasNext()) {
-                page.done = true;
-                break;
-            }
-            try checkKey(self.iterator.key());
-            const key = if (self.keys) self.iterator.key() else "";
-            const value = if (self.values) self.iterator.value() else "";
-            if (value.len > value_limit) return error.ValueTooLarge;
-            const bytes = std.math.add(usize, key.len, value.len) catch
-                return error.BatchTooLarge;
-            if (bytes > total_limit - page.bytes) {
-                if (page.count == 0) return error.BatchTooLarge;
-                break;
-            }
-            entry.* = try owned.copyEntry(self.db.allocator, key, value);
-            page.count += 1;
-            page.bytes += bytes;
-            self.remaining -= 1;
-            if (self.remaining > 0) try self.bounds.advance(&self.iterator);
-            if (high_water_mark_bytes) |watermark| if (page.bytes > watermark) break;
-        }
-        if (!page.done) page.done = !try self.hasNext();
-        if (page.done and high_water_mark_bytes == null) self.close();
-        return page;
-    }
-
-    fn hasNext(self: *Cursor) !bool {
-        try self.iterator.getError();
-        if (!self.positioned or self.remaining == 0 or !self.iterator.valid()) return false;
-        return self.bounds.contains(self.iterator.key());
-    }
-};
+pub const Cursor = @import("Cursor.zig");
 
 /// All controllers for this physical directory must be closed, including other engine copies.
-pub fn destroy(path: [:0]const u8) !void {
+pub fn destroy(path: [:0]const u8, diagnostics: ?*Diagnostics) !void {
     try checkPath(path);
     var options = try raw.Options.create();
     defer options.destroy();
-    try raw.destroyDB(&options, path);
+    try raw.destroyDB(&options, path, diagnostics);
 }
 
 fn checkPath(path: [:0]const u8) !void {
@@ -408,9 +251,9 @@ fn checkKey(key: []const u8) !void {
     if (key.len > max_key_bytes) return error.KeyTooLarge;
 }
 
-fn lookupInto(iterator: *raw.Iterator, key: []const u8, destination: []u8, value_limit: usize) !?[]u8 {
+fn lookupInto(iterator: *raw.Iterator, key: []const u8, destination: []u8, value_limit: usize, diagnostics: ?*Diagnostics) !?[]u8 {
     iterator.seek(key);
-    try iterator.getError();
+    try iterator.getError(diagnostics);
     if (!iterator.valid() or !std.mem.eql(u8, iterator.key(), key)) return null;
     const value = iterator.value();
     if (value.len > value_limit) return error.ValueTooLarge;

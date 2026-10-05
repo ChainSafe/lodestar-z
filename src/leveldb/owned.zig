@@ -26,7 +26,7 @@ pub fn copyEntry(allocator: Allocator, key: []const u8, value: []const u8) !Entr
     return .{ .key = key_copy, .value = value_copy };
 }
 
-/// Both passes use one iterator's consistent view. No borrowed bytes survive an iterator move.
+/// One iterator keeps a consistent view. Copy each value before moving it.
 pub fn getMany(
     db: *raw.DB,
     allocator: Allocator,
@@ -34,14 +34,12 @@ pub fn getMany(
     results: []?[]const u8,
     options: *const ReadOptions,
     key_limit: usize,
+    diagnostics: ?*raw.Diagnostics,
 ) !void {
     if (results.len > max_entries) return error.BatchTooLarge;
     @memset(results, null);
     if (keys.len > max_entries or keys.len != results.len) return error.BatchTooLarge;
     for (keys) |key| if (key.len > key_limit) return error.KeyTooLarge;
-
-    const lengths = try allocator.alloc(?usize, keys.len);
-    defer allocator.free(lengths);
 
     var read_options = try raw.ReadOptions.create();
     defer read_options.destroy();
@@ -51,38 +49,25 @@ pub fn getMany(
     var iterator = try db.createIterator(&read_options);
     defer iterator.destroy();
 
-    var total: usize = 0;
-    for (keys, lengths) |key, *length| {
-        const value = try lookup(&iterator, key);
-        length.* = if (value) |bytes| bytes.len else null;
-        if (value) |bytes| {
-            if (bytes.len > options.max_value_bytes) return error.ValueTooLarge;
-            if (bytes.len > options.max_total_bytes - total) return error.BatchTooLarge;
-            total += bytes.len;
-        }
-    }
-
     errdefer {
         for (results) |value| if (value) |bytes| allocator.free(bytes);
         @memset(results, null);
     }
 
-    for (keys, lengths, results) |key, length, *output| {
-        if (length) |expected| {
-            const value = (try lookup(&iterator, key)) orelse return error.InconsistentRead;
-            if (value.len != expected) return error.InconsistentRead;
+    var total: usize = 0;
+    for (keys, results) |key, *output| {
+        if (try lookup(&iterator, key, diagnostics)) |value| {
+            if (value.len > options.max_value_bytes) return error.ValueTooLarge;
+            if (value.len > options.max_total_bytes - total) return error.BatchTooLarge;
             output.* = try allocator.dupe(u8, value);
+            total += value.len;
         }
     }
 }
 
-fn lookup(iterator: *raw.Iterator, key: []const u8) !?[]const u8 {
+fn lookup(iterator: *raw.Iterator, key: []const u8, diagnostics: ?*raw.Diagnostics) !?[]const u8 {
     iterator.seek(key);
-    try iterator.getError();
+    try iterator.getError(diagnostics);
     if (!iterator.valid() or !std.mem.eql(u8, iterator.key(), key)) return null;
     return iterator.value();
-}
-
-test {
-    _ = @import("owned_test.zig");
 }

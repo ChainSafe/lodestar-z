@@ -93,6 +93,7 @@ export interface LevelDbIterator<T = LevelDbEntry> extends AsyncIterableIterator
  * These bounds do not bound engine scratch memory, process RSS, or returned data retained by the caller.
  * Close iterators when abandoning them. Inputs must be attached Uint8Arrays backed by ordinary ArrayBuffers;
  * shared backing storage is rejected.
+ * Errors use a stable string code; engine errors include their diagnostic detail in the message.
  */
 export declare class LevelDb {
   private constructor();

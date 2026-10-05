@@ -55,13 +55,15 @@ pub fn optionalBoolean(options: Value, name: [:0]const u8, default: bool) !bool 
 
 pub fn parseOptions(value: Value) !leveldb.Options {
     if (try value.typeof() != .object or try value.isArray()) return error.InvalidOptions;
-    return .{
+    const options: leveldb.Options = .{
         .create_if_missing = try optionalBoolean(value, "createIfMissing", true),
         .error_if_exists = try optionalBoolean(value, "errorIfExists", false),
         .cache_bytes = try optionalInteger(value, "cacheBytes", 8 * 1024 * 1024, 256 * 1024 * 1024),
         .write_buffer_bytes = try optionalInteger(value, "writeBufferBytes", 4 * 1024 * 1024, 64 * 1024 * 1024),
         .max_open_files = @intCast(try optionalInteger(value, "maxOpenFiles", 64, 4096)),
     };
+    if (options.write_buffer_bytes < 64 * 1024 or options.max_open_files < 20) return error.InvalidOptions;
+    return options;
 }
 
 pub fn path(value: Value, buffer: *[path_bytes_max + 1]u8) ![:0]const u8 {
@@ -74,9 +76,10 @@ pub fn path(value: Value, buffer: *[path_bytes_max + 1]u8) ![:0]const u8 {
     return buffer[0..size :0];
 }
 
-pub fn errorValue(env: napi.Env, err: anyerror) !Value {
+pub fn errorValue(env: napi.Env, err: anyerror, detail: ?[]const u8) !Value {
     const name = try env.createStringUtf8(@errorName(err));
-    return env.createError(name, name);
+    const message = if (detail) |text| try env.createStringUtf8(text) else name;
+    return env.createError(name, message);
 }
 
 pub fn completionFailure(env: napi.Env) !Value {
@@ -99,9 +102,9 @@ pub fn notify(env: napi.Env, reference: napi.Ref, reason: ?Value, result: Value)
     });
 }
 
-pub fn failureReason(env: napi.Env, fallback: napi.Ref, err: anyerror) !Value {
+pub fn failureReason(env: napi.Env, fallback: napi.Ref, err: anyerror, detail: ?[]const u8) !Value {
     if (try env.isExceptionPending()) return env.getAndClearLastException();
-    return errorValue(env, err) catch {
+    return errorValue(env, err, detail) catch {
         if (try env.isExceptionPending()) return env.getAndClearLastException();
         return fallback.getValue();
     };
