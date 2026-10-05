@@ -1,57 +1,12 @@
-import {mkdtemp, rm} from "node:fs/promises";
-import {tmpdir} from "node:os";
-import {join} from "node:path";
 import {expect, it} from "vitest";
-import {
-  LevelDb,
-  type LevelDbEntry,
-  type LevelDbIterator,
-  type LevelDbOperation,
-  type LevelDbOptions,
-} from "../src/leveldb.js";
+import {LevelDb, type LevelDbIterator, type LevelDbOperation} from "../src/leveldb.js";
+import {bytes, collect, withDatabase} from "./utils/leveldb.js";
 
 const MAX_BYTES = 1024 * 1024 * 1024;
 const MAX_BATCH_ENTRIES = 16_777_216;
 const READ = {maxValueBytes: 64};
 const READ_MANY = {maxTotalBytes: 64, maxValueBytes: 64};
 const PAGE = {maxEntries: 1, maxTotalBytes: 64, maxValueBytes: 64};
-
-function bytes(...values: number[]): Uint8Array {
-  return Uint8Array.from(values);
-}
-
-async function withDatabase(
-  run: (database: LevelDb, path: string) => Promise<void>,
-  options?: LevelDbOptions
-): Promise<void> {
-  const directory = await mkdtemp(join(tmpdir(), "lodestar-leveldb-"));
-  let database: LevelDb | undefined;
-  try {
-    const path = join(directory, "db");
-    database = await LevelDb.open(path, options);
-    await run(database, path);
-  } finally {
-    try {
-      await database?.close();
-    } finally {
-      await rm(directory, {force: true, recursive: true});
-    }
-  }
-}
-
-async function collect(iterator: LevelDbIterator): Promise<LevelDbEntry[]> {
-  const entries: LevelDbEntry[] = [];
-  try {
-    for (let count = 0; count < 16; count++) {
-      const next = await iterator.next();
-      if (next.done) return entries;
-      entries.push(next.value);
-    }
-    throw new Error("Test iterator exceeded 16 entries");
-  } finally {
-    await iterator.close();
-  }
-}
 
 it("persists binary keys, empty values, ordered batches, and deletions across reopen", async () => {
   await withDatabase(async (db, path) => {

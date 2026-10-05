@@ -4,8 +4,7 @@ const js = zapi.js;
 const napi = zapi.napi;
 const leveldb = @import("leveldb");
 const Runtime = @import("leveldb_runtime.zig").Runtime;
-const jobs = @import("leveldb_job.zig");
-const Job = jobs.Job;
+const Job = @import("leveldb_job.zig").Job;
 const v = @import("leveldb_values.zig");
 
 pub const js_meta = js.class(.{});
@@ -46,11 +45,9 @@ pub fn open(self: *@This(), path_value: js.Value, options_value: js.Value, callb
 
     const runtime = try Runtime.create(js.env(), operation_limit, byte_limit);
     errdefer runtime.destroyPrepared();
-    const job = try Job.create(runtime, .open, path.len + 1, 0, 0, callback.val);
+    const job = try Job.create(runtime, &.{ .open = .{ .options = options, .multithreading = multithreading } }, path.len + 1, 0, callback.val);
     errdefer job.destroy();
     @memcpy(job.input, path[0 .. path.len + 1]);
-    job.options = options;
-    job.multithreading = multithreading;
     try runtime.enqueue(job);
     self.runtime = runtime;
 }
@@ -94,20 +91,25 @@ fn measure(inputs: []Input) !usize {
 
 fn copyInputs(job: *Job, inputs: []const Input) !void {
     var offset: usize = 0;
-    for (inputs, job.operations) |input, *operation| {
+    for (inputs, 0..) |input, index| {
         const key = try v.bytes(input.key, leveldb.max_key_bytes, error.KeyTooLarge);
         if (key.len != input.key_length) return error.InvalidBytes;
         const key_copy = job.input[offset..][0..key.len];
         @memcpy(key_copy, key);
         offset += key.len;
-        operation.* = .{ .key = key_copy, .value = null };
+        var value_copy: ?[]const u8 = null;
         if (input.value) |value| {
             const data = try v.bytes(value, leveldb.max_owned_value_bytes, error.ValueTooLarge);
             if (data.len != input.value_length) return error.InvalidBytes;
             const copy = job.input[offset..][0..data.len];
             @memcpy(copy, data);
             offset += data.len;
-            operation.value = copy;
+            value_copy = copy;
+        }
+        switch (job.operation) {
+            .get_many => |read| read.keys[index] = key_copy,
+            .write => |batch| batch.operations[index] = .{ .key = key_copy, .value = value_copy },
+            else => unreachable,
         }
     }
     std.debug.assert(offset == job.input.len);
@@ -123,10 +125,8 @@ pub fn getMany(self: *@This(), keys: js.Value, max_value: js.Value, max_total: j
     const inputs = try collect(runtime, keys.val, null);
     defer std.heap.c_allocator.free(inputs);
     const input_size = try measure(inputs);
-    const job = try Job.create(runtime, .get_many, input_size, total_limit, inputs.len, callback.val);
+    const job = try Job.create(runtime, &.{ .get_many = .{ .value_limit = value_limit, .total_limit = total_limit, .fill_cache = cache } }, input_size, inputs.len, callback.val);
     errdefer job.destroy();
-    job.value_limit = value_limit;
-    job.fill_cache = cache;
     try copyInputs(job, inputs);
     try runtime.enqueue(job);
 }
@@ -139,9 +139,8 @@ pub fn write(self: *@This(), keys: js.Value, values: js.Value, sync: js.Value, c
     const inputs = try collect(runtime, keys.val, values.val);
     defer std.heap.c_allocator.free(inputs);
     const size = try measure(inputs);
-    const job = try Job.create(runtime, .write, size, 0, inputs.len, callback.val);
+    const job = try Job.create(runtime, &.{ .write = .{ .sync = sync_value } }, size, inputs.len, callback.val);
     errdefer job.destroy();
-    job.sync = sync_value;
     try copyInputs(job, inputs);
     try runtime.enqueue(job);
 }
@@ -166,7 +165,7 @@ pub fn cursor(self: *@This(), options: js.Value, callback: js.Value) !void {
         slice.* = try v.bytes(bound, leveldb.max_key_bytes, error.KeyTooLarge);
         total += slice.*.?.len;
     }
-    const job = try Job.create(runtime, .cursor, total, 0, 0, callback.val);
+    const job = try Job.create(runtime, &.{ .cursor = .{} }, total, 0, callback.val);
     errdefer job.destroy();
     var offset: usize = 0;
     for (&slices) |*slice| {
@@ -177,7 +176,7 @@ pub fn cursor(self: *@This(), options: js.Value, callback: js.Value) !void {
             offset += key.len;
         }
     }
-    job.range = .{
+    job.operation.cursor.range = .{
         .gt = slices[0],
         .gte = slices[1],
         .lt = slices[2],
@@ -191,22 +190,7 @@ pub fn cursor(self: *@This(), options: js.Value, callback: js.Value) !void {
     try runtime.enqueue(job);
 }
 
-pub fn readCursor(self: *@This(), id: js.Value, max_value: js.Value, max_total: js.Value, max_entries: js.Value, callback: js.Value) !void {
-    try self.enter();
-    defer self.entered = false;
-    const runtime = try self.owner();
-    const cursor_id = try v.positive(id.val, std.math.maxInt(u32));
-    const value_limit = try v.positive(max_value.val, leveldb.max_owned_value_bytes);
-    const total_limit = try v.positive(max_total.val, leveldb.max_owned_batch_bytes);
-    const count = try v.positive(max_entries.val, leveldb.max_batch_entries);
-    const job = try Job.create(runtime, .read_cursor, 0, total_limit, count, callback.val);
-    errdefer job.destroy();
-    job.cursor_id = @intCast(cursor_id);
-    job.value_limit = value_limit;
-    try runtime.enqueue(job);
-}
-
-pub fn readCursorBatch(self: *@This(), id: js.Value, max_value: js.Value, max_total: js.Value, max_entries: js.Value, high_water_mark: js.Value, callback: js.Value) !void {
+pub fn readCursor(self: *@This(), id: js.Value, max_value: js.Value, max_total: js.Value, max_entries: js.Value, high_water_mark: js.Value, callback: js.Value) !void {
     try self.enter();
     defer self.entered = false;
     const runtime = try self.owner();
@@ -215,11 +199,13 @@ pub fn readCursorBatch(self: *@This(), id: js.Value, max_value: js.Value, max_to
     const total_limit = try v.positive(max_total.val, leveldb.max_owned_batch_bytes);
     const count = try v.positive(max_entries.val, leveldb.max_bulk_entries);
     const watermark = try v.integer(high_water_mark.val, std.math.maxInt(u32));
-    const job = try Job.create(runtime, .read_cursor, 0, total_limit, count, callback.val);
+    const job = try Job.create(runtime, &.{ .read_cursor = .{
+        .id = @intCast(cursor_id),
+        .value_limit = value_limit,
+        .total_limit = total_limit,
+        .high_water_mark_bytes = @intCast(watermark),
+    } }, 0, count, callback.val);
     errdefer job.destroy();
-    job.cursor_id = @intCast(cursor_id);
-    job.value_limit = value_limit;
-    job.high_water_mark_bytes = @intCast(watermark);
     try runtime.enqueue(job);
 }
 
@@ -229,10 +215,9 @@ pub fn seekCursor(self: *@This(), id: js.Value, target: js.Value, callback: js.V
     const runtime = try self.owner();
     const cursor_id = try v.positive(id.val, std.math.maxInt(u32));
     const key = try v.bytes(target.val, leveldb.max_key_bytes, error.KeyTooLarge);
-    const job = try Job.create(runtime, .seek_cursor, key.len, 0, 0, callback.val);
+    const job = try Job.create(runtime, &.{ .seek_cursor = @intCast(cursor_id) }, key.len, 0, callback.val);
     errdefer job.destroy();
     @memcpy(job.input, key);
-    job.cursor_id = @intCast(cursor_id);
     try runtime.enqueue(job);
 }
 
@@ -248,9 +233,8 @@ pub fn closeCursor(self: *@This(), id: js.Value, callback: js.Value) !void {
         return v.notify(js.env(), reference, null, try js.env().getUndefined());
     };
     if (known.closing) return error.CursorClosing;
-    const job = try Job.create(runtime, .close_cursor, 0, 0, 0, callback.val);
+    const job = try Job.create(runtime, &.{ .close_cursor = @intCast(cursor_id) }, 0, 0, callback.val);
     errdefer job.destroy();
-    job.cursor_id = @intCast(cursor_id);
     try runtime.enqueue(job);
     known.closing = true;
 }
@@ -268,7 +252,7 @@ pub fn clear(self: *@This(), callback: js.Value) !void {
     try self.enter();
     defer self.entered = false;
     const runtime = try self.owner();
-    const job = try Job.create(runtime, .clear, 0, 0, 0, callback.val);
+    const job = try Job.create(runtime, &.clear, 0, 0, callback.val);
     errdefer job.destroy();
     try runtime.enqueue(job);
 }
@@ -281,18 +265,28 @@ pub fn compactRange(self: *@This(), start: js.Value, end: js.Value, callback: js
     try self.maintenance(.compact_range, start.val, end.val, callback.val);
 }
 
-fn maintenance(self: *@This(), kind: jobs.Kind, start: napi.Value, end: napi.Value, callback: napi.Value) !void {
+fn maintenance(self: *@This(), kind: Job.Kind, start: napi.Value, end: napi.Value, callback: napi.Value) !void {
     try self.enter();
     defer self.entered = false;
     const runtime = try self.owner();
     const lower = try v.bytes(start, leveldb.max_key_bytes, error.KeyTooLarge);
     const upper = try v.bytes(end, leveldb.max_key_bytes, error.KeyTooLarge);
-    const job = try Job.create(runtime, kind, lower.len + upper.len, 0, 0, callback);
+    const bounds: Job.Bounds = .{ .start = lower, .end = upper };
+    const operation: Job.Operation = switch (kind) {
+        .approximate_size => .{ .approximate_size = .{ .bounds = bounds } },
+        .compact_range => .{ .compact_range = bounds },
+        else => unreachable,
+    };
+    const job = try Job.create(runtime, &operation, lower.len + upper.len, 0, callback);
     errdefer job.destroy();
     @memcpy(job.input[0..lower.len], lower);
     @memcpy(job.input[lower.len..], upper);
-    job.range.gte = job.input[0..lower.len];
-    job.range.lt = job.input[lower.len..];
+    const copied: Job.Bounds = .{ .start = job.input[0..lower.len], .end = job.input[lower.len..] };
+    switch (job.operation) {
+        .approximate_size => |*estimate| estimate.bounds = copied,
+        .compact_range => |*range| range.* = copied,
+        else => unreachable,
+    }
     try runtime.enqueue(job);
 }
 
@@ -302,7 +296,7 @@ pub fn property(self: *@This(), name: js.Value, callback: js.Value) !void {
     const runtime = try self.owner();
     var buffer: [v.path_bytes_max + 1]u8 = undefined;
     const text = try v.path(name.val, &buffer);
-    const job = try Job.create(runtime, .property, text.len + 1, 0, 0, callback.val);
+    const job = try Job.create(runtime, &.{ .property = null }, text.len + 1, 0, callback.val);
     errdefer job.destroy();
     @memcpy(job.input, text[0 .. text.len + 1]);
     try runtime.enqueue(job);
@@ -316,7 +310,7 @@ pub fn destroy(self: *@This(), path_value: js.Value, callback: js.Value) !void {
     const path = try v.path(path_value.val, &buffer);
     const runtime = try Runtime.create(js.env(), 1, 2 * 1024 * 1024 * 1024);
     errdefer runtime.destroyPrepared();
-    const job = try Job.create(runtime, .destroy, path.len + 1, 0, 0, callback.val);
+    const job = try Job.create(runtime, &.destroy, path.len + 1, 0, callback.val);
     errdefer job.destroy();
     @memcpy(job.input, path[0 .. path.len + 1]);
     try runtime.enqueue(job);

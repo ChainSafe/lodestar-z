@@ -48,11 +48,11 @@ pub const Range = struct {
         self.* = undefined;
     }
 
-    pub fn seek(self: *const Range, iterator: *raw.Iterator) !void {
+    pub fn seek(self: *const Range, iterator: *raw.Iterator, diagnostics: ?*raw.Diagnostics) !void {
         if (self.reverse) {
             if (self.upper) |upper| {
                 iterator.seek(upper);
-                try iterator.getError();
+                try iterator.getError(diagnostics);
                 if (!iterator.valid()) {
                     iterator.seekToLast();
                 } else {
@@ -63,24 +63,24 @@ pub const Range = struct {
         } else {
             if (self.lower) |lower| {
                 iterator.seek(lower);
-                try iterator.getError();
+                try iterator.getError(diagnostics);
                 if (iterator.valid() and !self.lower_inclusive and
                     std.mem.eql(u8, iterator.key(), lower)) iterator.next();
             } else iterator.seekToFirst();
         }
-        try iterator.getError();
+        try iterator.getError(diagnostics);
     }
 
-    pub fn seekTarget(self: *const Range, iterator: *raw.Iterator, target: []const u8) !bool {
+    pub fn seekTarget(self: *const Range, iterator: *raw.Iterator, target: []const u8, diagnostics: ?*raw.Diagnostics) !bool {
         if (!self.contains(target)) return false;
         iterator.seek(target);
-        try iterator.getError();
+        try iterator.getError(diagnostics);
         if (self.reverse) {
             if (!iterator.valid()) {
                 iterator.seekToLast();
             } else if (std.mem.order(u8, iterator.key(), target) == .gt) iterator.prev();
         }
-        try iterator.getError();
+        try iterator.getError(diagnostics);
         return true;
     }
 
@@ -96,13 +96,9 @@ pub const Range = struct {
         return true;
     }
 
-    pub fn advance(self: *const Range, iterator: *raw.Iterator) !void {
+    pub fn advance(self: *const Range, iterator: *raw.Iterator, diagnostics: ?*raw.Diagnostics) !void {
         std.debug.assert(iterator.valid());
         if (self.reverse) iterator.prev() else iterator.next();
-        try iterator.getError();
+        try iterator.getError(diagnostics);
     }
 };
-
-test {
-    _ = @import("range_test.zig");
-}

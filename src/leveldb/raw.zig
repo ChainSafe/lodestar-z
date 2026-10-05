@@ -15,10 +15,29 @@ pub const Error = error{
     OutOfMemory,
 };
 
-fn handleError(errptr: ?[*:0]u8) Error!void {
+/// Owns the most recently captured engine error. Keep one per operation and call deinit after consuming it.
+pub const Diagnostics = struct {
+    message: ?[:0]const u8 = null,
+
+    pub fn deinit(self: *Diagnostics) void {
+        if (self.message) |message| free(message.ptr);
+        self.message = null;
+    }
+
+    pub fn format(self: *Diagnostics, comptime fmt: []const u8, args: anytype) void {
+        self.deinit();
+        self.message = std.fmt.allocPrintSentinel(std.heap.c_allocator, fmt, args, 0) catch null;
+    }
+};
+
+fn handleError(errptr: ?[*:0]u8, diagnostics: ?*Diagnostics) Error!void {
     if (errptr) |state| {
-        defer leveldb.leveldb_free(state);
         const msg = std.mem.span(state);
+        if (diagnostics) |output| {
+            output.deinit();
+            output.message = msg;
+        }
+        defer if (diagnostics == null) leveldb.leveldb_free(state);
         if (std.mem.startsWith(u8, msg, "Corruption")) {
             return error.Corruption;
         } else if (std.mem.startsWith(u8, msg, "Not implemented")) {
@@ -36,14 +55,14 @@ fn handleError(errptr: ?[*:0]u8) Error!void {
 pub const DB = struct {
     inner: *leveldb.leveldb_t,
 
-    pub fn open(options: *Options, name: [:0]const u8) Error!DB {
+    pub fn open(options: *Options, name: [:0]const u8, diagnostics: ?*Diagnostics) Error!DB {
         var errptr: ?[*:0]u8 = null;
         const db = leveldb.leveldb_open(
             options.inner,
             name.ptr,
             @ptrCast(&errptr),
         );
-        try handleError(errptr);
+        try handleError(errptr, diagnostics);
         return DB{ .inner = db orelse return error.OutOfMemory };
     }
 
@@ -52,7 +71,7 @@ pub const DB = struct {
         leveldb.leveldb_close(db.inner);
     }
 
-    pub fn put(db: *DB, options: *WriteOptions, key: []const u8, val: []const u8) Error!void {
+    pub fn put(db: *DB, options: *WriteOptions, key: []const u8, val: []const u8, diagnostics: ?*Diagnostics) Error!void {
         var errptr: ?[*:0]u8 = null;
         leveldb.leveldb_put(
             db.inner,
@@ -63,10 +82,10 @@ pub const DB = struct {
             val.len,
             @ptrCast(&errptr),
         );
-        try handleError(errptr);
+        try handleError(errptr, diagnostics);
     }
 
-    pub fn delete(db: *DB, options: *WriteOptions, key: []const u8) Error!void {
+    pub fn delete(db: *DB, options: *WriteOptions, key: []const u8, diagnostics: ?*Diagnostics) Error!void {
         var errptr: ?[*:0]u8 = null;
         leveldb.leveldb_delete(
             db.inner,
@@ -75,10 +94,10 @@ pub const DB = struct {
             key.len,
             @ptrCast(&errptr),
         );
-        try handleError(errptr);
+        try handleError(errptr, diagnostics);
     }
 
-    pub fn write(db: *DB, options: *WriteOptions, batch: *WriteBatch) Error!void {
+    pub fn write(db: *DB, options: *WriteOptions, batch: *WriteBatch, diagnostics: ?*Diagnostics) Error!void {
         var errptr: ?[*:0]u8 = null;
         leveldb.leveldb_write(
             db.inner,
@@ -86,12 +105,12 @@ pub const DB = struct {
             batch.inner,
             @ptrCast(&errptr),
         );
-        try handleError(errptr);
+        try handleError(errptr, diagnostics);
     }
 
     /// Returns C-owned bytes. Free them with `free(value.ptr)`, including empty values.
     /// This call allocates the full value; bounded callers should use an iterator.
-    pub fn get(db: *DB, options: *ReadOptions, key: []const u8) Error!?[]const u8 {
+    pub fn get(db: *DB, options: *ReadOptions, key: []const u8, diagnostics: ?*Diagnostics) Error!?[]const u8 {
         var vallen: usize = undefined;
         var errptr: ?[*:0]u8 = null;
         const val = leveldb.leveldb_get(
@@ -103,7 +122,7 @@ pub const DB = struct {
             @ptrCast(&errptr),
         );
         errdefer if (val != null) leveldb.leveldb_free(val);
-        try handleError(errptr);
+        try handleError(errptr, diagnostics);
         if (val == null) return null;
         return val[0..vallen];
     }
@@ -240,10 +259,10 @@ pub const Iterator = extern struct {
         return val_ptr[0..vlen];
     }
 
-    pub fn getError(iter: *const Iterator) Error!void {
+    pub fn getError(iter: *const Iterator, diagnostics: ?*Diagnostics) Error!void {
         var errptr: ?[*:0]u8 = null;
         leveldb.leveldb_iter_get_error(iter.inner, @ptrCast(&errptr));
-        try handleError(errptr);
+        try handleError(errptr, diagnostics);
     }
 };
 
@@ -386,10 +405,10 @@ pub const WriteOptions = extern struct {
     }
 };
 
-pub fn destroyDB(options: *Options, name: [:0]const u8) Error!void {
+pub fn destroyDB(options: *Options, name: [:0]const u8, diagnostics: ?*Diagnostics) Error!void {
     var errptr: ?[*:0]u8 = null;
     leveldb.leveldb_destroy_db(options.inner, name.ptr, @ptrCast(&errptr));
-    try handleError(errptr);
+    try handleError(errptr, diagnostics);
 }
 
 pub fn free(ptr: [*]const u8) void {

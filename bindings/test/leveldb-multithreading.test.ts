@@ -1,21 +1,31 @@
 import {spawnSync} from "node:child_process";
-import {mkdtemp, rm, symlink} from "node:fs/promises";
-import {tmpdir} from "node:os";
-import {join} from "node:path";
+import {symlink} from "node:fs/promises";
 import {expect, it} from "vitest";
 import {LevelDb} from "../src/leveldb.js";
+import {bytes, withPath} from "./utils/leveldb.js";
 
 const moduleUrl = new URL("../src/leveldb.js", import.meta.url).href;
-const bytes = (...values: number[]): Uint8Array => Uint8Array.from(values);
 
-async function withPath(run: (path: string) => Promise<void>): Promise<void> {
-  const directory = await mkdtemp(join(tmpdir(), "lodestar-leveldb-shared-"));
-  try {
-    await run(join(directory, "db"));
-  } finally {
-    await rm(directory, {force: true, recursive: true});
-  }
-}
+it("validates engine option ranges even when joining an existing database", async () => {
+  await withPath(async (path) => {
+    const first = await LevelDb.open(path, {multithreading: true});
+    try {
+      for (const options of [{maxOpenFiles: 19}, {writeBufferBytes: 65535}]) {
+        await expect(LevelDb.open(path, {...options, multithreading: true})).rejects.toMatchObject({
+          code: "InvalidOptions",
+        });
+      }
+      const second = await LevelDb.open(path, {
+        maxOpenFiles: 20,
+        multithreading: true,
+        writeBufferBytes: 65536,
+      });
+      await second.close();
+    } finally {
+      await first.close();
+    }
+  });
+});
 
 function runChild(source: string, path: string): void {
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", source, moduleUrl, path, workerSource], {
@@ -54,7 +64,7 @@ it("shares the first engine's options while keeping admission and snapshots loca
       await first.close();
       await second.put(bytes(6), bytes(60));
       expect(await second.get(bytes(6))).toEqual(bytes(60));
-      await expect(LevelDb.destroy(path)).rejects.toThrow("IOError");
+      await expect(LevelDb.destroy(path)).rejects.toMatchObject({code: "IOError"});
     } finally {
       await Promise.all([first.close(), second?.close()]);
     }
@@ -71,15 +81,15 @@ it("requires opt-in on every handle and resolves directory aliases before sharin
     const alias = `${path}-alias`;
     try {
       await symlink(path, alias, "dir");
-      await expect(LevelDb.open(alias, {multithreading: true})).rejects.toThrow("IOError");
-      await expect(LevelDb.open(alias)).rejects.toThrow("IOError");
-      await expect(LevelDb.destroy(alias)).rejects.toThrow("IOError");
+      await expect(LevelDb.open(alias, {multithreading: true})).rejects.toMatchObject({code: "IOError"});
+      await expect(LevelDb.open(alias)).rejects.toMatchObject({code: "IOError"});
+      await expect(LevelDb.destroy(alias)).rejects.toMatchObject({code: "IOError"});
     } finally {
       await exclusive.close();
     }
     const shared = await LevelDb.open(path, {multithreading: true});
     try {
-      await expect(LevelDb.open(alias)).rejects.toThrow("IOError");
+      await expect(LevelDb.open(alias)).rejects.toMatchObject({code: "IOError"});
       const other = await LevelDb.open(alias, {multithreading: true});
       try {
         await shared.put(bytes(1), bytes(2));
@@ -220,7 +230,7 @@ try {
   await worker.terminate();
   assert.deepEqual(await db.get(bytes(1)), bytes(10));
   await db.put(bytes(3), bytes(30));
-  await assert.rejects(LevelDb.destroy(path), {message: "IOError"});
+  await assert.rejects(LevelDb.destroy(path), {code: "IOError"});
 } finally {
   await Promise.all(workers.map((worker) => worker.terminate()));
   await db.close();

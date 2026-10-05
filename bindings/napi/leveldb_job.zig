@@ -6,83 +6,123 @@ const runtime = @import("leveldb_runtime.zig");
 const values = @import("leveldb_values.zig");
 const allocator = std.heap.c_allocator;
 
-pub const Kind = enum { open, destroy, get_many, write, cursor, read_cursor, seek_cursor, close_cursor, clear, approximate_size, compact_range, property };
-
 pub const Job = struct {
     owner: *runtime.Runtime,
-    kind: Kind,
+    operation: Operation,
     work: napi.AsyncWork(Job),
     callback: napi.Ref,
     retire_work: ?napi.AsyncWork(Job) = null,
     publication_error: ?napi.Ref = null,
     cursor_retired: bool = false,
     input: []u8,
-    output: []u8,
-    operations: []leveldb.Operation,
-    results: []?[]const u8,
-    entries: []leveldb.Entry,
     reservation: usize,
-    output_limit: usize,
-    fill_cache: bool = true,
-    number_result: u64 = 0,
-    property_found: bool = false,
-    options: leveldb.Options = .{},
-    multithreading: bool = false,
-    range: leveldb.RangeOptions = .{},
-    sync: bool = false,
-    cursor_id: u32 = 0,
-    value_limit: usize = 0,
-    high_water_mark_bytes: ?u32 = null,
-    page: leveldb.Page = .{ .count = 0, .bytes = 0, .done = false },
     failure: ?anyerror = null,
+    diagnostics: leveldb.Diagnostics = .{},
 
-    pub fn create(owner: *runtime.Runtime, kind: Kind, input_bytes: usize, output_bytes: usize, count: usize, callback_value: napi.Value) !*Job {
+    pub const Bounds = struct { start: []const u8, end: []const u8 };
+    pub const Operation = union(enum) {
+        open: struct { options: leveldb.Options, multithreading: bool },
+        destroy,
+        get_many: ReadMany,
+        write: struct { operations: []leveldb.Operation = &.{}, sync: bool },
+        cursor: struct { range: leveldb.RangeOptions = .{}, id: u32 = 0 },
+        read_cursor: ReadCursor,
+        seek_cursor: u32,
+        close_cursor: u32,
+        clear,
+        approximate_size: struct { bounds: Bounds, bytes: u64 = 0 },
+        compact_range: Bounds,
+        property: ?[]u8,
+    };
+    pub const Kind = std.meta.Tag(Operation);
+
+    const ReadMany = struct {
+        keys: [][]const u8 = &.{},
+        results: []?[]const u8 = &.{},
+        value_limit: usize,
+        total_limit: usize,
+        fill_cache: bool,
+    };
+    const ReadCursor = struct {
+        id: u32,
+        entries: []leveldb.Entry = &.{},
+        value_limit: usize,
+        total_limit: usize,
+        high_water_mark_bytes: u32,
+        page: leveldb.Page = .{ .count = 0, .bytes = 0, .done = false },
+    };
+
+    pub fn create(owner: *runtime.Runtime, operation: *const Operation, input_bytes: usize, count: usize, callback_value: napi.Value) !*Job {
         std.debug.assert(count <= leveldb.max_bulk_entries);
-        const operation_count = if (kind == .write or kind == .get_many) count else 0;
-        const result_count = if (kind == .get_many) count else 0;
-        const entry_count = if (kind == .read_cursor) count else 0;
-        const reservation = input_bytes + operation_count * @sizeOf(leveldb.Operation) +
-            result_count * (@sizeOf(?[]const u8) + @sizeOf([]const u8) + @sizeOf(?usize)) + entry_count * @sizeOf(leveldb.Entry);
-        try owner.reserve(reservation, kind == .close_cursor);
-        errdefer owner.release(reservation, kind == .close_cursor);
+        const metadata_bytes = count * switch (operation.*) {
+            .get_many => @as(usize, @sizeOf([]const u8) + @sizeOf(?[]const u8)),
+            .write => @sizeOf(leveldb.Operation),
+            .read_cursor => @sizeOf(leveldb.Entry),
+            else => blk: {
+                std.debug.assert(count == 0);
+                break :blk 0;
+            },
+        };
+        const reservation = input_bytes + metadata_bytes;
+        try owner.reserve(reservation, operation.* == .close_cursor);
+        errdefer owner.release(reservation, operation.* == .close_cursor);
 
         const self = try allocator.create(Job);
         errdefer allocator.destroy(self);
-        const input = try allocator.alloc(u8, input_bytes);
-        errdefer allocator.free(input);
-        const output = try allocator.alloc(u8, 0);
-        errdefer allocator.free(output);
-        const operations = try allocator.alloc(leveldb.Operation, operation_count);
-        errdefer allocator.free(operations);
-        const results = try allocator.alloc(?[]const u8, result_count);
-        errdefer allocator.free(results);
-        @memset(results, null);
-        const entries = try allocator.alloc(leveldb.Entry, entry_count);
-        errdefer allocator.free(entries);
-
-        const callback = try values.callback(callback_value);
-        errdefer callback.delete() catch {};
-
         self.* = .{
             .owner = owner,
-            .kind = kind,
+            .operation = operation.*,
             .work = undefined,
-            .callback = callback,
-            .input = input,
-            .output = output,
-            .operations = operations,
-            .results = results,
-            .entries = entries,
+            .callback = undefined,
+            .input = try allocator.alloc(u8, input_bytes),
             .reservation = reservation,
-            .output_limit = output_bytes,
         };
+        errdefer allocator.free(self.input);
+        errdefer self.deinitOperation();
+        try self.allocateMetadata(count);
+
+        self.callback = try values.callback(callback_value);
+        errdefer self.callback.delete() catch {};
         const name = try owner.env.createStringUtf8("LevelDb");
         self.work = try napi.AsyncWork(Job).create(owner.env, null, name, execute, complete, self);
         errdefer self.work.delete() catch {};
-        if (kind == .cursor or kind == .read_cursor or kind == .seek_cursor) {
+        if (self.operation == .cursor or self.operation == .read_cursor or self.operation == .seek_cursor) {
             self.retire_work = try napi.AsyncWork(Job).create(owner.env, null, name, retireExecute, retireComplete, self);
         }
         return self;
+    }
+
+    fn allocateMetadata(self: *Job, count: usize) !void {
+        switch (self.operation) {
+            .get_many => |*read| {
+                read.keys = try allocator.alloc([]const u8, count);
+                read.results = try allocator.alloc(?[]const u8, count);
+                @memset(read.results, null);
+            },
+            .write => |*write| write.operations = try allocator.alloc(leveldb.Operation, count),
+            .read_cursor => |*read| read.entries = try allocator.alloc(leveldb.Entry, count),
+            else => {},
+        }
+    }
+
+    fn deinitOperation(self: *Job) void {
+        switch (self.operation) {
+            .get_many => |read| {
+                for (read.results) |result| if (result) |bytes| allocator.free(bytes);
+                allocator.free(read.results);
+                allocator.free(read.keys);
+            },
+            .write => |write| allocator.free(write.operations),
+            .read_cursor => |read| {
+                for (read.entries[0..read.page.count]) |entry| {
+                    allocator.free(entry.key);
+                    allocator.free(entry.value);
+                }
+                allocator.free(read.entries);
+            },
+            .property => |result| if (result) |bytes| allocator.free(bytes),
+            else => {},
+        }
     }
 
     pub fn destroy(self: *Job) void {
@@ -90,18 +130,20 @@ pub const Job = struct {
         self.callback.delete() catch {};
         if (self.retire_work) |work| work.delete() catch {};
         if (self.publication_error) |reference| reference.delete() catch {};
-        self.owner.release(self.reservation, self.kind == .close_cursor);
-        for (self.entries[0..self.page.count]) |entry| {
-            allocator.free(entry.key);
-            allocator.free(entry.value);
-        }
-        for (self.results) |result| if (result) |bytes| allocator.free(bytes);
-        allocator.free(self.entries);
-        allocator.free(self.results);
-        allocator.free(self.operations);
-        allocator.free(self.output);
+        self.owner.release(self.reservation, self.operation == .close_cursor);
+        self.deinitOperation();
+        self.diagnostics.deinit();
         allocator.free(self.input);
         allocator.destroy(self);
+    }
+
+    pub fn cursorId(self: *const Job) u32 {
+        return switch (self.operation) {
+            .cursor => |cursor| cursor.id,
+            .read_cursor => |read| read.id,
+            .seek_cursor, .close_cursor => |id| id,
+            else => unreachable,
+        };
     }
 
     fn execute(_: napi.Env, self: *Job) void {
@@ -112,96 +154,76 @@ pub const Job = struct {
 
     fn run(self: *Job) !void {
         const owner = self.owner;
-        if (self.kind == .open) {
-            std.debug.assert(owner.database == null);
-            owner.database = try shared.Database.open(self.input[0 .. self.input.len - 1 :0], self.options, self.multithreading);
-            return;
-        }
-        if (self.kind == .destroy) {
-            try shared.destroy(self.input[0 .. self.input.len - 1 :0]);
-            return;
+        switch (self.operation) {
+            .open => |open| {
+                std.debug.assert(owner.database == null);
+                owner.database = try shared.Database.open(self.input[0 .. self.input.len - 1 :0], open.options, open.multithreading, &self.diagnostics);
+                return;
+            },
+            .destroy => return shared.destroy(self.input[0 .. self.input.len - 1 :0], &self.diagnostics),
+            else => {},
         }
         const database = if (owner.database) |db| &db.database else return error.DatabaseClosed;
-        switch (self.kind) {
+        switch (self.operation) {
             .open, .destroy => unreachable,
-            .clear => try database.clear(),
-            .approximate_size => self.number_result = try database.approximateSize(self.range.gte.?, self.range.lt.?),
-            .compact_range => try database.compactRange(self.range.gte.?, self.range.lt.?),
-            .property => {
-                if (try database.propertyValue(self.input[0 .. self.input.len - 1 :0])) |text| {
-                    allocator.free(self.output);
-                    self.output = text;
-                    self.property_found = true;
-                }
-            },
-            .get_many => try self.readMany(database),
-            .write => try database.writeWithLimits(self.operations, self.sync, .{ .max_value_bytes = leveldb.max_owned_value_bytes, .max_total_bytes = leveldb.max_owned_batch_bytes, .max_entries = leveldb.max_bulk_entries }),
-            .cursor => try self.openCursor(database),
-            .read_cursor => try self.readCursor(),
+            .clear => try database.clear(&self.diagnostics),
+            .approximate_size => |*estimate| estimate.bytes = try database.approximateSize(estimate.bounds.start, estimate.bounds.end),
+            .compact_range => |bounds| try database.compactRange(bounds.start, bounds.end),
+            .property => |*result| result.* = try database.propertyValue(self.input[0 .. self.input.len - 1 :0]),
+            .get_many => |read| try database.getManyOwned(read.keys, read.results, read.value_limit, read.total_limit, read.fill_cache, &self.diagnostics),
+            .write => |write| try database.writeWithLimits(write.operations, write.sync, .{
+                .max_value_bytes = leveldb.max_owned_value_bytes,
+                .max_total_bytes = leveldb.max_owned_batch_bytes,
+                .max_entries = leveldb.max_bulk_entries,
+            }, &self.diagnostics),
+            .cursor => |*cursor| try self.openCursor(database, &cursor.id, &cursor.range),
+            .read_cursor => |*read| try self.readCursor(read),
             .seek_cursor => try self.seekCursor(),
-            .close_cursor => {
-                self.cursor_retired = true;
-                if (owner.findCursor(self.cursor_id)) |slot| {
-                    slot.cursor.?.close();
-                    slot.cursor = null;
-                }
-            },
+            .close_cursor => self.retireCursor(),
         }
     }
 
-    fn readMany(self: *Job, database: *leveldb.Database) !void {
-        const keys = try allocator.alloc([]const u8, self.operations.len);
-        defer allocator.free(keys);
-        for (self.operations, keys) |operation, *key| key.* = operation.key;
-        try database.getManyOwned(keys, self.results, self.value_limit, self.output_limit, self.fill_cache);
-    }
-
-    fn openCursor(self: *Job, database: *leveldb.Database) !void {
+    fn openCursor(self: *Job, database: *leveldb.Database, id: *u32, range: *const leveldb.RangeOptions) !void {
         if (self.owner.next_cursor_id == std.math.maxInt(u32)) return error.CursorCapacity;
         for (&self.owner.cursors) |*slot| {
             if (slot.cursor != null) continue;
-            slot.cursor = try database.cursor(self.range);
+            slot.cursor = try database.cursor(range.*, &self.diagnostics);
             self.owner.next_cursor_id += 1;
             slot.id = self.owner.next_cursor_id;
-            self.cursor_id = slot.id;
+            id.* = slot.id;
             return;
         }
         return error.CursorCapacity;
     }
 
     fn seekCursor(self: *Job) !void {
-        const slot = self.owner.findCursor(self.cursor_id) orelse {
+        const slot = self.owner.findCursor(self.cursorId()) orelse {
             self.cursor_retired = true;
             return error.CursorClosed;
         };
-        slot.cursor.?.seek(self.input) catch |err| {
-            slot.cursor.?.close();
-            slot.cursor = null;
-            self.cursor_retired = true;
+        slot.cursor.?.seek(self.input, &self.diagnostics) catch |err| {
+            self.retireCursor();
             return err;
         };
     }
 
-    fn readCursor(self: *Job) !void {
-        const slot = self.owner.findCursor(self.cursor_id) orelse {
+    fn readCursor(self: *Job, read: *ReadCursor) !void {
+        const slot = self.owner.findCursor(read.id) orelse {
             self.cursor_retired = true;
             return error.CursorClosed;
         };
-        const page = if (self.high_water_mark_bytes) |watermark|
-            slot.cursor.?.readOwnedBatch(self.entries, self.value_limit, self.output_limit, watermark)
-        else
-            slot.cursor.?.readOwned(self.entries, self.value_limit, self.output_limit);
-        self.page = page catch |err| {
-            slot.cursor.?.close();
-            slot.cursor = null;
-            self.cursor_retired = true;
+        read.page = slot.cursor.?.readOwned(read.entries, read.value_limit, read.total_limit, read.high_water_mark_bytes, &self.diagnostics) catch |err| {
+            self.retireCursor();
             return err;
         };
-        if (self.page.done and self.high_water_mark_bytes == null) {
-            self.cursor_retired = true;
+    }
+
+    fn retireCursor(self: *Job) void {
+        if (self.owner.findCursor(self.cursorId())) |slot| {
             slot.cursor.?.close();
             slot.cursor = null;
         }
+        self.cursor_retired = true;
     }
 
     fn complete(env: napi.Env, status: napi.status.Status, self: *Job) void {
@@ -224,7 +246,7 @@ pub const Job = struct {
             return true;
         }
         const result = self.buildResult(env) catch |err| {
-            if ((self.kind == .cursor or self.kind == .read_cursor or self.kind == .seek_cursor) and !self.cursor_retired) {
+            if ((self.operation == .cursor or self.operation == .read_cursor or self.operation == .seek_cursor) and !self.cursor_retired) {
                 return self.retireUnpublished(env, err);
             }
             try self.reject(env, err);
@@ -235,7 +257,7 @@ pub const Job = struct {
     }
 
     fn retireUnpublished(self: *Job, env: napi.Env, err: anyerror) !bool {
-        const reason = try values.failureReason(env, self.owner.fallback_error.?, err);
+        const reason = try values.failureReason(env, self.owner.fallback_error.?, err, null);
         self.publication_error = env.createReference(reason, 1) catch blk: {
             if (try env.isExceptionPending()) _ = try env.getAndClearLastException();
             break :blk null;
@@ -252,11 +274,7 @@ pub const Job = struct {
     }
 
     fn retireExecute(_: napi.Env, self: *Job) void {
-        if (self.owner.findCursor(self.cursor_id)) |slot| {
-            slot.cursor.?.close();
-            slot.cursor = null;
-        }
-        self.cursor_retired = true;
+        self.retireCursor();
     }
 
     fn retireComplete(env: napi.Env, status: napi.status.Status, self: *Job) void {
@@ -277,39 +295,39 @@ pub const Job = struct {
     }
 
     fn reject(self: *Job, env: napi.Env, err: anyerror) !void {
-        const reason = try values.failureReason(env, self.owner.fallback_error.?, err);
+        const reason = try values.failureReason(env, self.owner.fallback_error.?, err, self.diagnostics.message);
         try values.notify(env, self.callback, reason, try env.getUndefined());
     }
 
     fn buildResult(self: *const Job, env: napi.Env) !napi.Value {
-        return switch (self.kind) {
+        return switch (self.operation) {
             .open, .destroy, .write, .seek_cursor, .close_cursor, .clear, .compact_range => env.getUndefined(),
-            .approximate_size => env.createDouble(@floatFromInt(self.number_result)),
-            .property => if (self.property_found) env.createStringUtf8(self.output) else env.getNull(),
-            .cursor => env.createUint32(self.cursor_id),
-            .get_many => blk: {
-                const result = try env.createArrayWithLength(self.results.len);
-                for (self.results, 0..) |item, index| {
+            .approximate_size => |estimate| env.createDouble(@floatFromInt(estimate.bytes)),
+            .property => |result| if (result) |text| env.createStringUtf8(text) else env.getNull(),
+            .cursor => |cursor| env.createUint32(cursor.id),
+            .get_many => |read| blk: {
+                const result = try env.createArrayWithLength(read.results.len);
+                for (read.results, 0..) |item, index| {
                     const value = if (item) |data| try copyBytes(env, data) else try env.getNull();
                     try result.setElement(@intCast(index), value);
                 }
                 break :blk result;
             },
-            .read_cursor => self.pageResult(env),
+            .read_cursor => |*read| pageResult(env, read),
         };
     }
 
-    fn pageResult(self: *const Job, env: napi.Env) !napi.Value {
+    fn pageResult(env: napi.Env, read: *const ReadCursor) !napi.Value {
         const result = try env.createObject();
-        const entries = try env.createArrayWithLength(self.page.count);
-        for (self.entries[0..self.page.count], 0..) |entry, index| {
+        const entries = try env.createArrayWithLength(read.page.count);
+        for (read.entries[0..read.page.count], 0..) |entry, index| {
             const item = try env.createObject();
             try item.setNamedProperty("key", try copyBytes(env, entry.key));
             try item.setNamedProperty("value", try copyBytes(env, entry.value));
             try entries.setElement(@intCast(index), item);
         }
         try result.setNamedProperty("entries", entries);
-        try result.setNamedProperty("done", try env.getBoolean(self.page.done));
+        try result.setNamedProperty("done", try env.getBoolean(read.page.done));
         return result;
     }
 };

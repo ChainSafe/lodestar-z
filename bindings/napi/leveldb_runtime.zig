@@ -229,7 +229,7 @@ pub const Runtime = struct {
     }
 
     fn notifyClose(self: *Runtime, reference: napi.Ref) !void {
-        const reason = if (self.close_failure) |err| try values.failureReason(self.env, self.fallback_error.?, err) else null;
+        const reason = if (self.close_failure) |err| try values.failureReason(self.env, self.fallback_error.?, err, null) else null;
         try values.notify(self.env, reference, reason, try self.env.getUndefined());
     }
 
@@ -255,20 +255,20 @@ pub const Runtime = struct {
     }
 
     pub fn syncCursor(self: *Runtime, job: *const Job) void {
-        if (job.kind == .close_cursor and job.failure != null and !job.cursor_retired) {
-            if (self.knownCursor(job.cursor_id)) |cursor| cursor.closing = false;
+        if (job.operation == .close_cursor and job.failure != null and !job.cursor_retired) {
+            if (self.knownCursor(job.cursorId())) |cursor| cursor.closing = false;
         }
-        if (job.kind == .cursor and job.failure == null and !job.cursor_retired) {
+        if (job.operation == .cursor and job.failure == null and !job.cursor_retired) {
             for (&self.known_cursors) |*cursor| {
                 if (cursor.id != 0) continue;
-                cursor.* = .{ .id = job.cursor_id };
+                cursor.* = .{ .id = job.cursorId() };
                 return;
             }
             unreachable;
         }
         if (!job.cursor_retired) return;
-        if (self.knownCursor(job.cursor_id)) |cursor| cursor.* = .{};
-        self.settleRetiredCloses(job.cursor_id);
+        if (self.knownCursor(job.cursorId())) |cursor| cursor.* = .{};
+        self.settleRetiredCloses(job.cursorId());
     }
 
     fn settleRetiredCloses(self: *Runtime, id: u32) void {
@@ -276,7 +276,7 @@ pub const Runtime = struct {
         for (0..queue_capacity) |_| {
             if (index >= self.queue_length) return;
             const job = self.queued(index);
-            if (job.kind != .close_cursor or job.cursor_id != id) {
+            if (job.operation != .close_cursor or job.cursorId() != id) {
                 index += 1;
                 continue;
             }

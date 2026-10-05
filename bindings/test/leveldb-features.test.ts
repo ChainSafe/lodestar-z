@@ -1,41 +1,7 @@
 import {createHash} from "node:crypto";
-import {mkdtemp, rm} from "node:fs/promises";
-import {tmpdir} from "node:os";
-import {join} from "node:path";
 import {expect, it} from "vitest";
-import {LevelDb, type LevelDbIterator, type LevelDbOperation} from "../src/leveldb.js";
-
-const bytes = (...values: number[]): Uint8Array => Uint8Array.from(values);
-
-async function withDatabase(run: (db: LevelDb, path: string) => Promise<void>): Promise<void> {
-  const directory = await mkdtemp(join(tmpdir(), "lodestar-leveldb-features-"));
-  let database: LevelDb | undefined;
-  try {
-    const path = join(directory, "db");
-    database = await LevelDb.open(path);
-    await run(database, path);
-  } finally {
-    try {
-      await database?.close();
-    } finally {
-      await rm(directory, {force: true, recursive: true});
-    }
-  }
-}
-
-async function collect<T>(cursor: LevelDbIterator<T>): Promise<T[]> {
-  const output: T[] = [];
-  try {
-    for (let count = 0; count < 16; count++) {
-      const result = await cursor.next();
-      if (result.done) return output;
-      output.push(result.value);
-    }
-    throw new Error("Test cursor exceeded 16 rows");
-  } finally {
-    await cursor.close();
-  }
-}
+import {LevelDb, type LevelDbOperation} from "../src/leveldb.js";
+import {bytes, collect, withDatabase} from "./utils/leveldb.js";
 
 it("uses optional read limits with cache options and allocates only actual outputs", async () => {
   await withDatabase(async (db, path) => {
@@ -141,7 +107,7 @@ it("keeps reverse snapshots and copied bounds stable while clear and later write
   });
 });
 
-it("handles bulk reads and atomic batches beyond the old 1024-entry limit", async () => {
+it("handles bulk reads and atomic batches above 1024 entries", async () => {
   await withDatabase(async (db) => {
     const operations: LevelDbOperation[] = Array.from({length: 4097}, (_, index) => ({
       key: bytes(index >>> 8, index & 255),
@@ -185,7 +151,7 @@ it("runs diagnostic, size, compaction, and destruction operations with reusable 
     await expect(LevelDb.destroy("")).rejects.toThrow("InvalidPath");
     await LevelDb.destroy(path);
     await LevelDb.destroy(path);
-    await expect(LevelDb.open(path, {createIfMissing: false})).rejects.toThrow("InvalidArgument");
+    await expect(LevelDb.open(path, {createIfMissing: false})).rejects.toMatchObject({code: "InvalidArgument"});
     const recreated = await LevelDb.open(path);
     try {
       expect(await recreated.get(bytes(1))).toBeNull();
