@@ -86,13 +86,14 @@ pub const ValidatorFlatCache = struct {
         }
         errdefer self.invalidate();
 
+        const old_len = self.len();
         try self.entries.resize(self.allocator, new_len);
 
         try self.pool.ref(root);
         errdefer self.pool.unref(root);
 
         if (self.synced_root) |old| {
-            try self.diffAndPatch(old, root, new_len);
+            try self.diffAndPatch(old, root, old_len, new_len);
         } else {
             var it = Node.DepthIterator.init(self.pool, root, @intCast(validators_depth), 0);
             for (0..new_len) |i| try self.patch(i, try it.next());
@@ -116,6 +117,7 @@ pub const ValidatorFlatCache = struct {
         self: *ValidatorFlatCache,
         old_root: Node.Id,
         new_root: Node.Id,
+        old_len: usize,
         new_len: usize,
     ) !void {
         const Frame = struct {
@@ -133,11 +135,16 @@ pub const ValidatorFlatCache = struct {
         stack.push(.{ .old = old_root, .new = new_root, .depth = validators_depth, .base = 0 });
 
         while (stack.pop()) |f| {
+            // Subtrees starting at new_len or later contain no live validators
+            if (f.base >= new_len) continue;
+
+            // index just past the last validator this subtree covers
+            const end = f.base + (@as(usize, 1) << @intCast(f.depth));
             if (
-            // Nodes are unchanged
-            f.old == f.new or
-                // Subtrees starting at new_len or later contain no live validators
-                f.base >= new_len) continue;
+            // old tree and new tree shares same node
+            f.old == f.new and
+                // every index before under old_len was already cached
+                end <= old_len) continue;
 
             if (f.depth == 0) {
                 // At a leaf, base is the validator index to patch

@@ -99,3 +99,29 @@ test "ValidatorFlatCache follows writes, appends, truncation and forks" {
     try testing.expectEqual(@as(usize, 50), cache.len());
     try expectInSync(&cache, view);
 }
+
+test "ValidatorFlatCache patches grown cells even where the trees match" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    var list: Validators.Type = .empty;
+    defer list.deinit(allocator);
+    for (0..140) |i| try list.append(allocator, testValidator(i));
+
+    const root = try Validators.tree.fromValue(&pool, &list);
+    var view = try Validators.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    var cache = ValidatorFlatCache.init(allocator, &pool);
+    defer cache.deinit();
+
+    // Sync a prefix only, so the synced tree has real nodes past the cached length.
+    try view.commit();
+    try cache.sync(view.getRoot(), 50);
+
+    var v = try view.get(3);
+    try v.set("exit_epoch", 1234);
+    try expectInSync(&cache, view);
+    try testing.expectEqual(@as(usize, 91), cache.last_patched);
+}
