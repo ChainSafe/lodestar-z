@@ -10,7 +10,7 @@ const ValidatorFlatCache = flat.ValidatorFlatCache;
 const ValidatorFields = flat.ValidatorFields;
 
 /// Number of validators whose cached fields differ from the tree.
-pub fn countMismatches(cache: *const ValidatorFlatCache, root: Node.Id, list_len: usize) !usize {
+fn countMismatches(cache: *const ValidatorFlatCache, root: Node.Id, list_len: usize) !usize {
     if (cache.len() != list_len) return std.math.maxInt(usize);
     var mismatches: usize = 0;
     const fields = cache.fields.slice();
