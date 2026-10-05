@@ -11,7 +11,7 @@ pub fn candidate(tag: u8, sync: u8) !enr.Candidate {
     secret[31] = tag;
     const key = try KeyPair.fromSecretKey(&secret);
     const peer = t.PeerId.fromPublicKey(&key.publicKey());
-    return .{ .peer = peer, .node_id = try custody.nodeId(&peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = sync, .custody_group_count = null };
+    return .{ .peer = peer, .node_id = try custody.nodeId(&peer), .addresses = .{ address, .unspecified }, .address_count = 1, .hints = .{ .sequence = 1, .record_hash = @splat(0), .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = sync, .custody_group_count = null } };
 }
 pub fn admit(c: *Catalog, peer: *const t.PeerId, index: u16, direction: t.Direction, now_ms: u64) Catalog.Admission {
     return c.admit(peer, &local, .{ .index = index, .generation = 1 }, &.{ .direction = direction, .endpoint = address, .now_ms = now_ms });

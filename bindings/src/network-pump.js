@@ -1,11 +1,11 @@
 // @ts-check
 import assert from "node:assert/strict";
+import {ActionQueue} from "./network-action-queue.js";
 import {LogDelivery} from "./network-log-delivery.js";
 import {CONTROL, FAILURES_MAX, SETTLE_CELLS, escalate} from "./network-turn-scheduler.js";
 
 /**
  * @typedef {import("./network-turn-scheduler.js").Continuation} Continuation
- * @typedef {import("./network-runtime.js").NativeAction} Action
  * @typedef {import("./network-runtime.js").NativeGossipHandle} Handle
  * @typedef {import("./network-runtime.js").NativeIncomingRequest} Incoming
  * @typedef {import("./network-runtime.js").NativeExchange} Exchange
@@ -20,7 +20,7 @@ import {CONTROL, FAILURES_MAX, SETTLE_CELLS, escalate} from "./network-turn-sche
  * @typedef {import("./network-runtime.js").NativeGossipBatch} NativeGossipBatch
  * @typedef {import("./network-runtime.js").NativeGossipDependencyCheck} NativeGossipDependencyCheck
  * @typedef {import("./network-turn-scheduler.js").TurnScheduler} TurnScheduler
- * @typedef {Extract<Action, {type: "block" | "reportPeer" | "dropQueued" | "recheck"}>} CoalescedAction
+ * @typedef {import("./network-action-queue.js").CoalescedAction} CoalescedAction
  * @typedef {{failure: Error | null}} Terminal
  * @typedef {{resolve(): void, reject(error: unknown): void, remaining: number, weak: WeakRef<Settler> | null}} Settler
  * @typedef {{adopted: boolean, handles: Handle[], job: GossipJob | null, urgent: boolean}} Job
@@ -33,13 +33,6 @@ import {CONTROL, FAILURES_MAX, SETTLE_CELLS, escalate} from "./network-turn-sche
  * }} Runtime
  */
 
-/** Actions one exchange applies; native refuses a longer batch. */
-export const ACTION_MAX = 256;
-/** Imported roots coalesced between exchanges; more become one recheck of every waiting message. */
-const BLOCK_MAX = 256;
-/** Coalesced peer penalty entries, each saturating as native does; more are dropped and counted. */
-const REPORT_ENTRY_MAX = 512;
-const REPORT_COUNT_MAX = 100;
 /** One turn's time budget; the rest yields to the next turn. */
 export const BUDGET_MS = 8;
 /** Serving capacity native accepts. */
@@ -71,18 +64,6 @@ function contractError(callback) {
 /** @param {Handle} handle */
 function keyOf(handle) {
   return `${handle.index}:${handle.generation}`;
-}
-
-/** @param {CoalescedAction} action */
-function coalescingKey(action) {
-  switch (action.type) {
-    case "block":
-      return `block:${Buffer.from(action.root).toString("hex")}`;
-    case "reportPeer":
-      return `report:${action.action}:${action.peerId}`;
-    default:
-      return action.type;
-  }
 }
 
 /**
@@ -166,15 +147,7 @@ export class NativePump {
   /** A delivery failure was arbitrated, and the host's `failed` received the first. */
   #arbitrated = false;
   #notified = false;
-  /** @type {Action[]} */
-  #obligations = [];
-  /**
-   * One entry per imported root, per penalized peer and action, and for a recheck or a drop, in arrival order.
-   * @type {Map<string, CoalescedAction>}
-   */
-  #coalesced = new Map();
-  #blocks = 0;
-  #reports = 0;
+  #actions = new ActionQueue();
   /**
    * Delivered ordinary jobs a spent time budget left for the next turn, at most one batch.
    * @type {Job[]}
@@ -201,7 +174,9 @@ export class NativePump {
   /** @type {LogDelivery | null} */
   #logs = null;
   /** Peer penalties dropped because the coalescing table was full. */
-  reportsDropped = 0;
+  get reportsDropped() {
+    return this.#actions.reportsDropped;
+  }
 
   /**
    * @param {Host} host
@@ -333,66 +308,8 @@ export class NativePump {
   /** @param {CoalescedAction} action */
   #coalesce(action) {
     if (this.#stopped) return;
-    this.#add(action);
+    this.#actions.enqueue(action);
     this.#schedule();
-  }
-
-  /**
-   * Queues a coalesced request, merging a penalty into its entry, within the ledger's bounds.
-   * @param {CoalescedAction} action
-   */
-  #add(action) {
-    const key = coalescingKey(action);
-    const queued = this.#coalesced.get(key);
-    if (queued) {
-      if (queued.type === "reportPeer" && action.type === "reportPeer")
-        queued.count = Math.min(REPORT_COUNT_MAX, queued.count + action.count);
-      return;
-    }
-    if (action.type === "block") {
-      if (this.#coalesced.has("recheck")) return;
-      if (this.#blocks === BLOCK_MAX) {
-        for (const [queuedKey, {type}] of this.#coalesced) if (type === "block") this.#coalesced.delete(queuedKey);
-        this.#blocks = 0;
-        this.#coalesced.set("recheck", {type: "recheck"});
-        return;
-      }
-      this.#blocks++;
-    } else if (action.type === "reportPeer") {
-      if (this.#reports === REPORT_ENTRY_MAX) {
-        this.reportsDropped++;
-        return;
-      }
-      this.#reports++;
-    }
-    // A penalty is copied, so an entry in flight never changes.
-    this.#coalesced.set(key, action.type === "reportPeer" ? {...action} : action);
-  }
-
-  /** Moves up to `ACTION_MAX` queued actions into one batch; what arrives meanwhile queues for the next one. */
-  #take() {
-    const batch = this.#obligations.splice(0, ACTION_MAX);
-    for (const [key, action] of this.#coalesced) {
-      if (batch.length === ACTION_MAX) break;
-      this.#coalesced.delete(key);
-      if (action.type === "block") this.#blocks--;
-      else if (action.type === "reportPeer") this.#reports--;
-      batch.push(action);
-    }
-    return batch;
-  }
-
-  /**
-   * Returns a batch native never applied to the ledger.
-   * @param {Action[]} batch
-   */
-  #requeue(batch) {
-    this.#obligations.unshift(...batch.filter(({type}) => type === "verdict" || type === "classify"));
-    for (const action of batch) if (action.type !== "verdict" && action.type !== "classify") this.#add(action);
-  }
-
-  #pending() {
-    return this.#obligations.length > 0 || this.#coalesced.size > 0;
   }
 
   #schedule() {
@@ -428,7 +345,7 @@ export class NativePump {
     try {
       const next = this.#turn(started + BUDGET_MS);
       // Actions queued while the turn ran need one too, unless its exchange failed.
-      return next !== "retry" && this.#pending() ? "now" : next;
+      return next !== "retry" && this.#actions.pending() ? "now" : next;
     } finally {
       // The burst end is queued first, so it covers only this turn.
       setImmediate(NativePump.#burstEnd, this.#weak, started);
@@ -479,7 +396,7 @@ export class NativePump {
       capacityFailed = true;
       this.#error(error);
     }
-    const batch = this.#take();
+    const batch = this.#actions.take();
     let result;
     try {
       result = this.#runtime.exchange(batch, demand ?? CONTROL);
@@ -488,7 +405,7 @@ export class NativePump {
       // broken contract. Anything else left native untouched: the batch requeues and the turn retries.
       const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
       if (typeof code === "string") this.#escalate("generated_batch", code);
-      this.#requeue(batch);
+      this.#actions.restore(batch);
       if (++this.#failures >= FAILURES_MAX) this.#escalate("failed_turns", error);
       this.#error(error);
       return "retry";
@@ -564,7 +481,7 @@ export class NativePump {
     } finally {
       for (const job of jobs) if (!job.adopted) this.#verdicts(job, null);
       for (const start of starts) if (!start.adopted) void start.incoming.cancel().catch(noop);
-      if (!checked) for (const {handle} of checks) this.#obligations.push({available: false, handle, type: "classify"});
+      if (!checked) for (const {handle} of checks) this.#actions.enqueue({available: false, handle, type: "classify"});
     }
   }
 
@@ -703,7 +620,7 @@ export class NativePump {
       this.#error(error);
     }
     for (const [i, {handle}] of checks.entries())
-      this.#obligations.push({available: available?.[i] === true, handle, type: "classify"});
+      this.#actions.enqueue({available: available?.[i] === true, handle, type: "classify"});
   }
 
   /**
@@ -784,7 +701,7 @@ export class NativePump {
       Array.isArray(values) && values.length === count && record.handles.every((_, i) => VERDICTS.has(values[i]));
     if (values !== null && !valid) this.#error(contractError("validate"));
     for (let i = 0; i < count; i++)
-      this.#obligations.push({handle: record.handles[i], type: "verdict", verdict: valid ? values[i] : "ignore"});
+      this.#actions.enqueue({handle: record.handles[i], type: "verdict", verdict: valid ? values[i] : "ignore"});
     this.#schedule();
   }
 

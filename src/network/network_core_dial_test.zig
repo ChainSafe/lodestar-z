@@ -26,7 +26,7 @@ fn dialServer(setup: *Setup) !void {
 
 fn serverStrikes(setup: *Setup, server: *const enr.Candidate) u8 {
     const history = &setup.client.peer_manager.catalog.history;
-    return history.strikesFor(history.endpointKey(&server.peer, support.server_address), server.sequence, setup.pair.now.millis());
+    return history.strikesFor(history.endpointKey(&server.peer, support.server_address), server.hints.sequence, setup.pair.now.millis());
 }
 
 fn discoverServer(setup: *Setup) !enr.Candidate {
@@ -58,7 +58,7 @@ fn discoveredAt(tag: u8, endpoint: t.Address) !enr.Candidate {
     secret[31] = tag;
     const key = try KeyPair.fromSecretKey(&secret);
     const peer = t.PeerId.fromPublicKey(&key.publicKey());
-    return .{ .peer = peer, .node_id = try custody.nodeId(&peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ endpoint, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = 0, .custody_group_count = null };
+    return .{ .peer = peer, .node_id = try custody.nodeId(&peer), .addresses = .{ endpoint, .unspecified }, .address_count = 1, .hints = .{ .sequence = 1, .record_hash = @splat(0), .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = 0, .custody_group_count = null } };
 }
 
 test "core Status and Metadata clear dial failures that QUIC admission keeps" {
@@ -67,7 +67,7 @@ test "core Status and Metadata clear dial failures that QUIC admission keeps" {
     defer setup.deinit();
     const server = try discoverServer(&setup);
     const history = &setup.client.peer_manager.catalog.history;
-    history.recordEndpoint(history.endpointKey(&server.peer, support.server_address), .unanswered, server.sequence, setup.pair.now.millis());
+    history.recordEndpoint(history.endpointKey(&server.peer, support.server_address), .unanswered, server.hints.sequence, setup.pair.now.millis());
     try dialServer(&setup);
     for (0..20) |_| {
         try setup.step(1);
@@ -534,7 +534,7 @@ test "core peer id mismatch releases the discovered endpoint and refuses its red
     try std.testing.expect(setup.client.peer_manager.catalog.find(&stranger.peer) == null);
     try std.testing.expectEqual(@as(u64, 1), setup.client.peer_manager.dialing.outcomes[@intFromEnum(t.DialOutcome.peer_id_mismatch)]);
     var newer = stranger;
-    newer.sequence = 2;
+    newer.hints.sequence = 2;
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.protocols.gossipsub, &.{newer}, setup.pair.now).refused);
     try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     try std.testing.expectEqual(@as(u64, 0), setup.client.peer_manager.dialing.retries[@intFromEnum(t.DialFailure.peer_id_mismatch)]);

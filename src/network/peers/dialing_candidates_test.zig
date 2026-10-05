@@ -16,8 +16,8 @@ test "peer discovery matches rotate without rewarding additional advertised cove
     defer catalog.deinit(a);
     const narrow = try discovered(1, 1);
     var broad = try discovered(2, 15);
-    broad.attnets = @splat(255);
-    broad.custody_group_count = 128;
+    broad.hints.attnets = @splat(255);
+    broad.hints.custody_group_count = 128;
     const wanted: t.Coverage = .{ .syncnets = 15, .attnets = std.math.maxInt(u64) };
     try q.enqueueDiscovered(&catalog, &narrow, &.{}, &wanted, 0);
     try q.enqueueDiscovered(&catalog, &broad, &.{}, &wanted, 0);
@@ -40,7 +40,7 @@ test "peer discovery breadth cannot evict an untried candidate matching current 
     const candidates = catalog.rows[0..q.options.capacity];
     const narrow = try discovered(1, 1);
     var broad = try discovered(2, 15);
-    broad.attnets = @splat(255);
+    broad.hints.attnets = @splat(255);
     const wanted: t.Coverage = .{ .syncnets = 15, .attnets = std.math.maxInt(u64) };
     try q.enqueueDiscovered(&catalog, &narrow, &.{}, &wanted, 0);
     try std.testing.expectError(error.Capacity, q.enqueueDiscovered(&catalog, &broad, &.{}, &wanted, 1));
@@ -60,21 +60,21 @@ test "peer dial discovered refresh replaces addresses preserves lease history an
     const token = out[0].token;
     try std.testing.expect(q.dialFailed(&catalog, token, 1));
     const due = support.refreshAndWakeup(&q, &catalog, 1, 1).?;
-    candidate.sequence = 2;
+    candidate.hints.sequence = 2;
     candidate.addresses[0] = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 2222 } };
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 2);
     try std.testing.expectEqual(due, support.refreshAndWakeup(&q, &catalog, 2, 1).?);
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, due, &out));
     try std.testing.expectEqual(@as(u16, 2222), out[0].address.port());
     const live = out[0].token;
-    candidate.sequence = 3;
+    candidate.hints.sequence = 3;
     candidate.addresses[0] = address;
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, due);
     try std.testing.expect(q.dialStarted(live, .{ .index = 1, .generation = 44 }));
-    candidate.sequence = 2;
+    candidate.hints.sequence = 2;
     try std.testing.expectError(error.StaleRecord, q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, due));
-    candidate.sequence = 4;
-    candidate.syncnets = 16;
+    candidate.hints.sequence = 4;
+    candidate.hints.syncnets = 16;
     try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, due));
     try std.testing.expect(q.dialClosed(&catalog, .{ .index = 1, .generation = 44 }, .handshake_timeout, due));
     const peer = (try discovered(2, 0)).peer;
@@ -151,7 +151,7 @@ test "peer dial confirmed equal ENR refresh renews provisional hint freshness wi
     try std.testing.expectEqual(@as(?u64, 300_000), support.refreshAndWakeup(&q, &catalog, 300_000, 1));
     try std.testing.expectEqual(@as(u64, 600_000), candidates[0].dial.history_until_ms);
     var conflicting = candidate;
-    conflicting.syncnets = 2;
+    conflicting.hints.syncnets = 2;
     try std.testing.expectError(error.StaleRecord, q.enqueueDiscovered(&catalog, &conflicting, &.{}, &wanted, 300_001));
 }
 

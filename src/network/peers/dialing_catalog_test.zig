@@ -115,7 +115,7 @@ test "peer fold connected custody makes progress independently of candidate work
     const context: t.ForkContext = .{ .fork = .fulu, .custody_groups = groups, .minimum_sampling_groups = groups };
     for (0..8) |i| {
         var hint = try candidate(@intCast(i + 1), 1);
-        hint.custody_group_count = groups - 1;
+        hint.hints.custody_group_count = groups - 1;
         try d.enqueueDiscovered(&c, &hint, &context, &.{}, 0);
         if (i >= 2) continue;
         const peer = admit(&c, &hint.peer, @intCast(i), .outbound, 0).admitted.peer;
@@ -165,13 +165,13 @@ test "peer fold inbound health close leaves the discovered endpoint history unto
     const hint = try candidate(1, 0);
     try d.enqueueDiscovered(&c, &hint, &.{}, &.{}, 0);
     const key = c.history.endpointKey(&hint.peer, address);
-    c.history.recordEndpoint(key, .health, hint.sequence, 0);
+    c.history.recordEndpoint(key, .health, hint.hints.sequence, 0);
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
     const peer = admit(&c, &hint.peer, 0, .inbound, 0).admitted.peer;
     c.clearHealthStrikes(peer, conn);
-    try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, hint.sequence, 1));
+    try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, hint.hints.sequence, 1));
     try std.testing.expect(c.disconnect(peer, conn, .health_timeout, 1));
-    try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, hint.sequence, 1));
+    try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, hint.hints.sequence, 1));
     try std.testing.expectEqual(@as(u8, 1), c.rowFor(peer).?.dial.failures);
 }
 
@@ -219,7 +219,7 @@ test "peer fold zombie endpoint is blocked after two health closes across redisc
     try d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, 0);
     var now: u64 = 0;
     _ = try zombieRound(&c, &d, &zombie.peer, .{ .index = 0, .generation = 1 }, &now);
-    try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, zombie.sequence, now));
+    try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, zombie.hints.sequence, now));
     // Once the cooldown lapses, a fresh admission reclaims the row and its backoff with it.
     now += 60_000;
     const first: t.PeerId = .{ .bytes = @splat(9) };
@@ -228,21 +228,21 @@ test "peer fold zombie endpoint is blocked after two health closes across redisc
     try std.testing.expect(c.disconnect(c.find(&first).?, .{ .index = 4, .generation = 1 }, .host, now));
     var events: [1]t.Event = undefined;
     _ = c.pollEvents(&events);
-    zombie.sequence = 2;
+    zombie.hints.sequence = 2;
     try d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, now);
     try std.testing.expectEqual(@as(u8, 1), c.rowFor(c.find(&zombie.peer).?).?.dial.failures);
     const peer = try zombieRound(&c, &d, &zombie.peer, .{ .index = 1, .generation = 1 }, &now);
     try std.testing.expectEqual(@as(u64, 1), d.retries[@intFromEnum(t.DialFailure.health)]);
-    try std.testing.expect(c.history.blocked(key, zombie.sequence, now));
+    try std.testing.expect(c.history.blocked(key, zombie.hints.sequence, now));
     try std.testing.expect(!c.intents.isSet(peer.index));
     try std.testing.expectEqual(@as(?u64, null), dialing_test_support.refreshAndWakeup(&d, &c, now, 1));
-    zombie.sequence = 3;
+    zombie.hints.sequence = 3;
     try std.testing.expectError(error.RecentlyFailed, d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, now));
     now += 60_000;
     const second: t.PeerId = .{ .bytes = @splat(10) };
     _ = admit(&c, &second, 5, .inbound, now).admitted;
     try std.testing.expect(c.find(&zombie.peer) == null);
-    zombie.sequence = 4;
+    zombie.hints.sequence = 4;
     try std.testing.expectError(error.RecentlyFailed, d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, now));
     try d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, now - 60_000 + history.endpoint_memory_ms);
 }
@@ -280,7 +280,7 @@ test "peer fold a full peer waits 5, 15 then 60 minutes across row reclamation a
             }
             try std.testing.expect(c.find(&full.peer) == null);
         }
-        full.sequence += 1;
+        full.hints.sequence += 1;
         const until = now + minutes * 60_000;
         try std.testing.expectError(error.RecentlyRejected, d.enqueueDiscovered(&c, &full, &.{}, &.{}, until - 1));
         now = until;
@@ -300,7 +300,7 @@ test "peer fold early closes escalate while manual and inbound connections bypas
         now = block_end;
         try d.enqueueDiscovered(&c, &gated, &.{}, &.{}, now);
         try rejectedRound(&c, &d, &gated.peer, @intCast(round), .early_close, now);
-        gated.sequence += 1;
+        gated.hints.sequence += 1;
         block_end = now + minutes * 60_000;
         try std.testing.expectError(error.RecentlyRejected, d.enqueueDiscovered(&c, &gated, &.{}, &.{}, block_end - 1));
     }

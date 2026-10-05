@@ -84,7 +84,7 @@ fn sendRequest(owner: *ReqResp, engine: *Engine, slot: *Client, index: u16, now:
             request.io.writing = false;
             request.io.outbox = .{};
             std.log.scoped(.network_reqresp).debug("request_write_stopped request={d}:{d} connection={d}:{d} method={s} detail={s} response_fin={any} awaiting_response=true", .{ index, request.generation, request.conn.index, request.conn.generation, @tagName(request.protocol), @errorName(err), request.io.fin_seen });
-            break :stopped RequestIO.Flush{ .done = true };
+            break :stopped .done;
         }
         request.failure_detail = @errorName(err);
         slot.fail(owner, index, switch (err) {
@@ -93,8 +93,8 @@ fn sendRequest(owner: *ReqResp, engine: *Engine, slot: *Client, index: u16, now:
         }, now);
         return;
     };
-    if (!flushed.done) {
-        if (flushed.runnable) owner.markReady(.outbound, index);
+    if (flushed != .done) {
+        if (flushed == .yielded) owner.markReady(.outbound, index);
         return;
     }
     request.io.payload = &.{};

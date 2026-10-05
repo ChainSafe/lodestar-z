@@ -262,7 +262,7 @@ fn handleEvent(
         .ping, .find_node => {},
     }
     try self.engine.prepareStandardResponse(&request, &self.response);
-    while (result.progress.standard_responses < types.findnode_response_packets_max) {
+    for (0..types.findnode_response_packets_max) |_| {
         var entropy = try startEntropy(io);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
         const packet_length = try self.engine.encodeNextStandardResponse(

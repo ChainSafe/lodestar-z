@@ -10,7 +10,7 @@ pub const Row = struct {
 };
 pub const Dependencies = struct {
     rows: []Row,
-    index: keys.Index(32),
+    index: keys.Index([32]u8),
     free: lists.List = .{},
     promoting: lists.List = .{},
     notification: u64 = 0,
@@ -23,7 +23,7 @@ pub const Dependencies = struct {
         const rows = try allocator.alloc(Row, capacity);
         errdefer allocator.free(rows);
         @memset(rows, .{});
-        const index = try keys.Index(32).init(allocator, capacity);
+        const index = try keys.Index([32]u8).init(allocator, capacity);
         var result: Dependencies = .{ .rows = rows, .index = index };
         for (0..capacity) |i| result.free.append(rows, "link", @intCast(i));
         return result;

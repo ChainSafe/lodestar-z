@@ -1,12 +1,14 @@
 const std = @import("std");
 const lists = @import("../index_list.zig");
+const topic = @import("../gossipsub/topic.zig");
 const keys = @import("key_index.zig");
 const none = lists.none;
 const assert = std.debug.assert;
 pub const minimum = 32;
 pub const delay_ms = 50;
+const Key = struct { attestation_data: [128]u8, fork_digest: topic.ForkDigest };
 pub const Row = struct {
-    key: [142]u8 = undefined,
+    key: Key = undefined,
     members: lists.List = .{},
     link: lists.Link = .{},
     due: u64 = 0,
@@ -15,7 +17,7 @@ pub const Row = struct {
 };
 pub const Groups = struct {
     rows: []Row,
-    index: keys.Index(142),
+    index: keys.Index(Key),
     timers: []u32,
     timer_count: usize = 0,
     free: lists.List = .{},
@@ -25,7 +27,7 @@ pub const Groups = struct {
         const rows = try allocator.alloc(Row, capacity);
         errdefer allocator.free(rows);
         @memset(rows, .{});
-        var index = try keys.Index(142).init(allocator, capacity);
+        var index = try keys.Index(Key).init(allocator, capacity);
         errdefer index.deinit(allocator);
         const timers = try allocator.alloc(u32, capacity);
         var result: Groups = .{ .rows = rows, .index = index, .timers = timers };
@@ -42,9 +44,7 @@ pub const Groups = struct {
     }
     pub fn join(self: *Groups, cells: anytype, cell_index: u32, now: u64) void {
         const cell = &cells[cell_index];
-        var key: [142]u8 = undefined;
-        @memcpy(key[0..128], &cell.metadata.group.?);
-        @memcpy(key[128..], cell.topic[0..14]);
+        const key: Key = .{ .attestation_data = cell.metadata.group.?, .fork_digest = cell.fork_digest };
         const index = self.index.find(self.rows, &key) orelse blk: {
             const index = self.free.pop(self.rows, "link").?;
             self.rows[index] = .{ .key = key, .due = cell.admitted_ms +| delay_ms };

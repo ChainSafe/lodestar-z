@@ -126,8 +126,26 @@ pub fn graylistThreshold(self: *const Gossipsub) f64 {
     return self.options.score_params.graylist_threshold;
 }
 
-pub fn coverageRevision(self: *const Gossipsub) [4]u64 {
-    return .{ self.overlay.subscription_revision, if (self.overlay.namespace) |*ns| ns.revision else 0, self.peers.scores.revision, self.cycle.epoch };
+pub const CoverageRevision = struct {
+    subscriptions: u64,
+    namespace: u64,
+    scores: u64,
+    heartbeat: u64,
+
+    pub fn cacheable(self: *const CoverageRevision) bool {
+        const exhausted = std.math.maxInt(u64);
+        return self.subscriptions != exhausted and self.namespace != exhausted and
+            self.scores != exhausted and self.heartbeat != exhausted;
+    }
+};
+
+pub fn coverageRevision(self: *const Gossipsub) CoverageRevision {
+    return .{
+        .subscriptions = self.overlay.subscription_revision,
+        .namespace = if (self.overlay.namespace) |*ns| ns.revision else 0,
+        .scores = self.peers.scores.revision,
+        .heartbeat = self.cycle.epoch,
+    };
 }
 
 pub fn coverageSubscriptions(self: *Gossipsub, conn: Handle, digest: [4]u8, local: *const topic_policy.Subnets, now: Now) topic_policy.Subnets {

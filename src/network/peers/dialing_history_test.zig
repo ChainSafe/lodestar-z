@@ -242,7 +242,7 @@ test "peer dial peer id mismatch blocks the endpoint even for a newer record" {
     try std.testing.expect(q.dialClosed(&catalog, conn, .peer_id_mismatch, 100));
     try std.testing.expect(catalog.find(&candidate.peer) == null);
     try std.testing.expectEqual(@as(u64, 1), q.outcomes[@intFromEnum(t.DialOutcome.peer_id_mismatch)]);
-    candidate.sequence = 2;
+    candidate.hints.sequence = 2;
     try std.testing.expectError(error.RecentlyFailed, q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 100));
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 100 + dial_history.mismatch_memory_ms);
 }
@@ -264,7 +264,7 @@ test "peer dial local transport closes leave no endpoint strike" {
     }
     try std.testing.expect(catalog.find(&candidate.peer) != null);
     try std.testing.expectEqual(@as(u64, 3), q.outcomes[@intFromEnum(t.DialOutcome.refused)]);
-    try std.testing.expectEqual(@as(u8, 0), catalog.history.strikesFor(catalog.history.endpointKey(&candidate.peer, candidate.addresses[0]), candidate.sequence, now));
+    try std.testing.expectEqual(@as(u8, 0), catalog.history.strikesFor(catalog.history.endpointKey(&candidate.peer, candidate.addresses[0]), candidate.hints.sequence, now));
 }
 
 test "peer dial never returns to the mismatched endpoint of a two-address candidate" {
@@ -301,12 +301,12 @@ test "peer dial mismatch after a mid-dial refresh blocks the dialed endpoint, no
     try std.testing.expect(out[0].address.eql(address));
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
     try std.testing.expect(q.dialStarted(out[0].token, conn));
-    candidate.sequence = 2;
+    candidate.hints.sequence = 2;
     candidate.addresses[0] = moved;
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 50);
     try std.testing.expect(q.dialClosed(&catalog, conn, .peer_id_mismatch, 100));
     try std.testing.expect(catalog.history.blocked(catalog.history.endpointKey(&candidate.peer, address), 99, 100));
-    candidate.sequence = 3;
+    candidate.hints.sequence = 3;
     candidate.addresses[0] = address;
     try std.testing.expectError(error.RecentlyFailed, q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 100));
     candidate.addresses[0] = moved;
@@ -361,7 +361,7 @@ test "peer dial landed connections keep dial failures until the application exch
         try std.testing.expect(out[0].address.eql(address));
         const conn: t.Handle = .{ .index = 0, .generation = 1 };
         try std.testing.expect(q.dialStarted(out[0].token, conn));
-        candidate.sequence = 2;
+        candidate.hints.sequence = 2;
         candidate.addresses[0] = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 2222 } };
         try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, due);
         const dialed = catalog.history.endpointKey(&candidate.peer, address);

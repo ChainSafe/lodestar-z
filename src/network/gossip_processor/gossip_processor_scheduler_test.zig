@@ -1,4 +1,5 @@
 const std = @import("std");
+const topic_mod = @import("../gossipsub/topic.zig");
 const t = std.testing;
 const p = @import("root.zig");
 const lists = @import("../index_list.zig");
@@ -12,7 +13,8 @@ fn add(table: *p.GossipProcessor, kind: Kind, now: u64, metadata: p.metadata.Met
     cell.deadline = now + 100;
     cell.admitted_ms = now;
     cell.metadata = metadata;
-    @memset(&cell.topic, 0);
+    const canonical: topic_mod.Canonical = .{ .digest = cell.fork_digest, .name = .{ .kind = kind } };
+    cell.topic_len = @intCast(topic_mod.buildCanonical(canonical, &cell.topic).len);
     table.install(token, "data");
     return token;
 }
@@ -187,9 +189,9 @@ test "gossip scheduler source limits cover unfinished execution and survive peer
         .admitted_ms = 1,
         .deadline = 101,
     };
-    try table.capture(&message, .beacon_block, &.{}, false, 1);
-    try table.capture(&message, .beacon_block, &.{}, false, 1);
-    try t.expectError(error.NetworkGossipFull, table.capture(&message, .beacon_block, &.{}, false, 1));
+    try table.capture(&message, topic_mod.parseCanonical(topic).?, &.{}, false, 1);
+    try table.capture(&message, topic_mod.parseCanonical(topic).?, &.{}, false, 1);
+    try t.expectError(error.NetworkGossipFull, table.capture(&message, topic_mod.parseCanonical(topic).?, &.{}, false, 1));
     try t.expect(table.sourceRoom(.{ .index = 1, .generation = 1 }, .beacon_block, 4));
     const batch = table.claim(1);
     table.finish(&batch, true);
@@ -200,7 +202,7 @@ test "gossip scheduler source limits cover unfinished execution and survive peer
     message.source.?.generation = 2;
     message.admitted_ms = 102;
     message.deadline = 202;
-    try table.capture(&message, .beacon_block, &.{}, false, 102);
+    try table.capture(&message, topic_mod.parseCanonical(topic).?, &.{}, false, 102);
     try t.expect(!table.report(batch.tokens[1], .ignore, 103));
     try t.expectEqual(@as(usize, 1), table.sources[0].items[0]);
     try verify(&table);

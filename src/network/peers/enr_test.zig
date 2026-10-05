@@ -26,10 +26,10 @@ test "peer ENR independent signed Ethereum fields and same-key identity" {
             const candidate = try adapter.decode(&record, &context);
             const expected = try types.PeerId.fromText("16Uiu2HAm3cuhhRL2msUuLF62KRSfneFDx94RsuouyW25Ho42cFMq");
             try std.testing.expect(candidate.peer.eql(&expected));
-            try std.testing.expectEqual(@as(u64, 7), candidate.sequence);
-            try std.testing.expectEqual(@as(?u64, if (index == 5) 0 else 4), candidate.custody_group_count);
-            try std.testing.expectEqual(@as(?u8, 5), candidate.syncnets);
-            try std.testing.expectEqual(@as(u8, 0x80), candidate.attnets.?[7]);
+            try std.testing.expectEqual(@as(u64, 7), candidate.hints.sequence);
+            try std.testing.expectEqual(@as(?u64, if (index == 5) 0 else 4), candidate.hints.custody_group_count);
+            try std.testing.expectEqual(@as(?u8, 5), candidate.hints.syncnets);
+            try std.testing.expectEqual(@as(u8, 0x80), candidate.hints.attnets.?[7]);
             try std.testing.expectEqual(@as(u8, if (index == 2) 0 else if (index == 1) 2 else 1), candidate.address_count);
             if (index != 2) try std.testing.expectEqual(@as(u16, 9001), candidate.addresses[0].port());
             if (index == 1) try std.testing.expectEqual(@as(u16, 9101), candidate.addresses[1].port());
@@ -63,7 +63,7 @@ test "peer ENR mapped IPv6 projection preserves signed content and IPv4 fallback
     const candidate = try adapter.decode(&record, &context);
     try std.testing.expectEqual(@as(u8, 1), candidate.address_count);
     try std.testing.expectEqualDeep(types.Address{ .ip4 = .{ .octets = local.ip4.?, .port = local.quic.? } }, candidate.addresses[0]);
-    try std.testing.expectEqual(try record.contentHash(), candidate.record_hash);
+    try std.testing.expectEqual(try record.contentHash(), candidate.hints.record_hash);
     try std.testing.expectEqualSlices(u8, &mapped, (try record.fieldBytes("ip6")).?);
     const no_fallback = try d.identity.enr.Record.createFields(&key, 7, &(fields[0..2].* ++ fields[3..].*));
     try std.testing.expectEqual(@as(u8, 0), (try adapter.decode(&no_fallback, &context)).address_count);
@@ -110,7 +110,7 @@ test "peer ENR builder matches independent bytes and refuses invalid local prepa
     local.quic = null;
     const absent = try adapter.build(&key, 8, &local, &context);
     const decoded = try adapter.decode(&absent, &context);
-    try std.testing.expect(decoded.attnets == null and decoded.syncnets == null and decoded.custody_group_count == null and decoded.next_fork_digest == null);
+    try std.testing.expect(decoded.hints.attnets == null and decoded.hints.syncnets == null and decoded.hints.custody_group_count == null and decoded.hints.next_fork_digest == null);
     try std.testing.expectEqual(@as(u8, 0), decoded.address_count);
 }
 
@@ -135,7 +135,7 @@ test "peer ENR strict known optional field shapes integer bounds and missing man
     }
     for ([_]u64{ 0, 1, 128 }) |value| {
         const valid = try changedRecord("cgc", .{ .uint = value });
-        try std.testing.expectEqual(@as(?u64, value), (try adapter.decode(&valid, &context)).custody_group_count);
+        try std.testing.expectEqual(@as(?u64, value), (try adapter.decode(&valid, &context)).hints.custody_group_count);
     }
     for ([_]u64{ 0, 1, 65535 }) |port| {
         const valid = try changedRecord("quic", .{ .uint = port });

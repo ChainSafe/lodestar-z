@@ -62,9 +62,9 @@ pub const Discovery = struct {
             return now_ms < self.expires_ms and (self.general or self.custody or self.syncnets != 0 or !std.mem.allEqual(u8, &self.attnets, 0));
         }
         fn matches(self: *const Demand, candidate: *const adapter.Candidate, context: *const types.ForkContext) bool {
-            if (self.general or (self.custody and (candidate.custody_group_count != null or context.custody_requirement > 0))) return true;
-            if (candidate.syncnets) |bits| if (bits & self.syncnets != 0) return true;
-            if (candidate.attnets) |bits| {
+            if (self.general or (self.custody and (candidate.hints.custody_group_count != null or context.custody_requirement > 0))) return true;
+            if (candidate.hints.syncnets) |bits| if (bits & self.syncnets != 0) return true;
+            if (candidate.hints.attnets) |bits| {
                 for (bits, self.attnets) |actual, wanted| if (actual & wanted != 0) return true;
             }
             return false;
@@ -337,14 +337,12 @@ pub const Discovery = struct {
             std.log.scoped(.network_discovery).debug("lookup_started target={x} seeds={d}", .{ target, closest.len });
         }
         if (self.maintenance.nextDeadlineMs(&self.transport.engine)) |deadline| if (now_ms >= deadline) {
-            try self.start(io, now_ms, true, result);
+            _ = try self.start(io, now_ms, true, result);
         };
         if (self.lookup == null or now_ms < self.refill_due_ms) return;
         self.refill_due_ms = now_ms +| self.options.local_retry_ms;
         for (0..d.Lookup.parallelism) |_| {
-            const before = result.started;
-            try self.start(io, now_ms, false, result);
-            if (before == result.started) break;
+            if (!try self.start(io, now_ms, false, result)) break;
         }
     }
 
@@ -357,15 +355,16 @@ pub const Discovery = struct {
         self.lookup = null;
     }
 
-    fn start(self: *Discovery, io: std.Io, now_ms: u64, background: bool, result: *Result) Error!void {
+    fn start(self: *Discovery, io: std.Io, now_ms: u64, background: bool, result: *Result) Error!bool {
         const started = (if (background) self.transport.startMaintenance(io, &self.maintenance, now_ms) else self.transport.startLookup(io, &self.lookup.?, now_ms)) catch |err| switch (err) {
-            error.TableFull, error.PeerBusy => return,
+            error.TableFull, error.PeerBusy => return false,
             else => return err,
         };
         if (started.started) result.started += 1;
         // Transport released the refused call and reported a local failure to its owner, so the
         // refusal fails only its destination and the step goes on.
         if (started.failure) |err| if (err != error.DestinationUnreachable) return err;
+        return started.started;
     }
 
     fn consumeEvent(self: *Discovery, progress: *const d.Transport.AdvanceResult, out: []adapter.Candidate, result: *Result) void {

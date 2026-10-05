@@ -43,7 +43,7 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
                 table.retire(token);
             }
             candidate.commit();
-            table.capture(message, kind, &metadata, deneb, received_at) catch unreachable;
+            table.capture(message, topic, &metadata, deneb, received_at) catch unreachable;
             return true;
         }
         if (count == tokens.len or !processor.limits.newestFirst(kind)) break;

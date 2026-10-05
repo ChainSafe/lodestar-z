@@ -29,15 +29,15 @@ test "peer discovery uses the configured custody minimum only for an absent ENR 
     var out: [1]mod.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
     try std.testing.expectEqual(@as(u64, 1), q.selected_attempts[@intFromEnum(mod.Dialing.Source.discovery)]);
-    candidate.sequence += 1;
-    candidate.custody_group_count = 0;
+    candidate.hints.sequence += 1;
+    candidate.hints.custody_group_count = 0;
     try q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, 0);
     try std.testing.expectEqual(@as(?u64, 0), candidates[0].dial.hints.?.custody_group_count);
     try std.testing.expect(candidates[0].custody_work == null);
-    candidate.custody_group_count = context.custody_groups + 1;
+    candidate.hints.custody_group_count = context.custody_groups + 1;
     try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, 0));
-    candidate.sequence += 1;
-    candidate.custody_group_count = 1;
+    candidate.hints.sequence += 1;
+    candidate.hints.custody_group_count = 1;
     try q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, 0);
     try std.testing.expectEqual(@as(u64, 1), candidates[0].custody_work.?.custody_count);
 }
@@ -54,7 +54,7 @@ test "peer dial custody diagnostics count unfinished derivations without mutatin
     wanted.groups.setRangeValue(.{ .start = 0, .end = 128 }, true);
     for ([_]u16{ 2, 1, 128, 2 }, 0..) |count, index| {
         var candidate = try discovered(@intCast(index + 1), 0);
-        candidate.custody_group_count = count;
+        candidate.hints.custody_group_count = count;
         try q.enqueueDiscovered(&catalog, &candidate, &.{}, &wanted, 0);
     }
     try std.testing.expect((try candidates[1].custody_work.?.step(1)) != null);
@@ -100,7 +100,7 @@ test "peer dial custody work retains expired unfinished work without claiming el
     defer catalog.deinit(a);
     const candidates = catalog.rows[0..q.options.capacity];
     var candidate = try discovered(1, 0);
-    candidate.custody_group_count = 1;
+    candidate.hints.custody_group_count = 1;
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 0);
     const work = candidates[0].custody_work.?;
     var budget: u16 = 64;
@@ -122,8 +122,8 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     defer catalog.deinit(a);
     const candidates = catalog.rows[0..q.options.capacity];
     var candidate = try discovered(1, 1);
-    candidate.attnets = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
-    candidate.custody_group_count = 128;
+    candidate.hints.attnets = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
+    candidate.hints.custody_group_count = 128;
     var wanted: t.Coverage = .{ .attnets = 1, .syncnets = 1 };
     wanted.groups.set(0);
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &wanted, 0);
@@ -148,8 +148,8 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     try std.testing.expectEqual(horizon, candidates[0].dial.history_until_ms);
     try std.testing.expectEqual(failures, candidates[0].dial.failures);
     try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, eligible));
-    candidate.sequence = 2;
-    candidate.custody_group_count = 64;
+    candidate.hints.sequence = 2;
+    candidate.hints.custody_group_count = 64;
     try q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, eligible);
     q.configureSelection(&catalog, &wanted, false, &context, eligible);
     try std.testing.expectEqual(@as(u16, 2), candidates[0].dial.priority);
@@ -184,8 +184,8 @@ test "peer dial review pressure utility excludes every invalid cached hint" {
     defer catalog.deinit(a);
     const candidates = catalog.rows[0..q.options.capacity];
     var old = try discovered(1, 1);
-    old.attnets = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
-    old.custody_group_count = 128;
+    old.hints.attnets = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
+    old.hints.custody_group_count = 128;
     const wanted: t.Coverage = .{ .attnets = 1, .syncnets = 1 };
     try q.enqueueDiscovered(&catalog, &old, &.{}, &wanted, 0);
     const replacement_candidate = try discovered(2, 1);
@@ -201,7 +201,7 @@ test "peer dial review custody-only full table recovers at fixed horizon with bo
     const first_candidate = try discovered(1, 0);
     const second_candidate = try discovered(2, 0);
     var scarce = try discovered(3, 0);
-    scarce.custody_group_count = 127;
+    scarce.hints.custody_group_count = 127;
     var wanted: t.Coverage = .{};
     wanted.groups.setRangeValue(.{ .start = 0, .end = 128 }, true);
     try q.enqueueDiscovered(&catalog, &first_candidate, &.{}, &wanted, 0);
@@ -244,7 +244,7 @@ test "peer dial actual custody gives no utility for connected sampling only grou
     defer catalog.deinit(a);
     const candidates = catalog.rows[0..q.options.capacity];
     var candidate = try discovered(1, 0);
-    candidate.custody_group_count = 4;
+    candidate.hints.custody_group_count = 4;
     const context: t.ForkContext = .{ .fork = .fulu, .minimum_sampling_groups = 8 };
     var pair = try custody_mod.SamplingDerivation.init(&candidate.node_id, .{ .groups = 128, .columns = 128 }, 4, 8);
     const derived = (try pair.step(64)).?;

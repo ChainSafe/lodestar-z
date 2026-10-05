@@ -195,3 +195,24 @@ test "dial history marks a redial per endpoint without adding evidence" {
     h.markRetry(key, .unanswered, history.endpoint_memory_ms - 1);
     try std.testing.expectEqual(@as(?t.DialFailure, null), h.takeRetry(key, history.endpoint_memory_ms));
 }
+
+test "dial history isolates failures retries and clearing across IPv6 interfaces" {
+    var storage: [64]history.Entry = undefined;
+    var h = fixture(&storage);
+    const scoped: t.Address = .{ .ip6 = .{ .octets = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = 9001, .interface = 1 } };
+    var alternate = scoped;
+    alternate.ip6.interface = 2;
+    const key = h.endpointKey(&peer, scoped);
+    const alternate_key = h.endpointKey(&peer, alternate);
+    h.recordEndpoint(key, .peer_id_mismatch, 1, 0);
+    h.markRetry(key, .peer_id_mismatch, 0);
+    try std.testing.expect(!h.blocked(alternate_key, 1, 1));
+    try std.testing.expectEqual(@as(?t.DialFailure, null), h.takeRetry(alternate_key, 1));
+    h.clearFailures(alternate_key);
+    try std.testing.expect(h.blocked(key, 1, 1));
+    try std.testing.expectEqual(@as(?t.DialFailure, .peer_id_mismatch), h.takeRetry(key, 1));
+    h.recordEndpoint(alternate_key, .refused, 1, 1);
+    h.clearFailures(key);
+    try std.testing.expect(!h.blocked(key, 1, 2));
+    try std.testing.expectEqual(@as(u8, 1), h.strikesFor(alternate_key, 1, 2));
+}

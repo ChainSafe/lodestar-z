@@ -224,11 +224,7 @@ fn selectServing(runtime: *Runtime, demand: *const Demand, selection: *Selection
     const limit = @min(demand.serving, runtime.capacity.serving);
     for (0..incoming.capacity_max) |_| {
         if (selection.serving_count == limit) break;
-        const token = table.oldest() orelse break;
-        const cell = table.get(token).?;
-        cell.copying = true;
-        cell.state = .copying;
-        table.refresh(cell);
+        const token = table.pinStart() orelse break;
         selection.serving[selection.serving_count] = token;
         selection.serving_count += 1;
     }
@@ -244,17 +240,7 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
     }
     if (selection.serving_count > 0) {
         const table = &runtime.incoming.?;
-        for (selection.serving[0..selection.serving_count]) |token| {
-            const cell = table.get(token).?;
-            cell.closed_awaited = true;
-            cell.copying = false;
-            cell.exposed = true;
-            table.diag.requestsTaken +|= 1;
-            table.releaseInput(cell);
-            cell.state = if (cell.native) .serving else .terminal;
-            table.releasePayload(cell);
-            table.refresh(cell);
-        }
+        for (selection.serving[0..selection.serving_count]) |token| table.commitStart(token);
         runtime.bridge.deliver(.serving_start, selection.serving_count);
         runtime.capacity.serving -|= @intCast(selection.serving_count);
         selection.wake = true;
@@ -308,20 +294,7 @@ fn restoreLocked(runtime: *Runtime, selection: *const Selection) void {
     for (selection.incoming[0..selection.incoming_count]) |completion| runtime.incoming.?.restore(completion);
     if (selection.serving_count > 0) {
         const table = &runtime.incoming.?;
-        for (selection.serving[0..selection.serving_count]) |token| {
-            const cell = table.get(token).?;
-            cell.copying = false;
-            if (cell.native) {
-                cell.state = .queued;
-                table.refresh(cell);
-                continue;
-            }
-            // The stream ended while pinned; finish the retirement its end left to the pin.
-            cell.state = .terminal;
-            table.releasePayload(cell);
-            table.refresh(cell);
-            if (cell.serving != null) cell.release_requested = true else table.retire(token);
-        }
+        for (selection.serving[0..selection.serving_count]) |token| table.restoreStart(token);
     }
     if (selection.checks.len > 0) runtime.gossip.?.retryChecks(&selection.checks);
     if (selection.gossip) |*batch| runtime.gossip.?.finish(batch, false);
