@@ -124,7 +124,7 @@ pub const Dialing = struct {
     pub fn enqueueDiscovered(self: *Dialing, catalog: *Catalog, candidate: *const enr.Candidate, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) !void {
         try context.validate();
         if (candidate.address_count == 0 or candidate.address_count > 2) return error.InvalidCandidate;
-        const hints: enr.Hints = .{ .sequence = candidate.sequence, .record_hash = candidate.record_hash, .fork = candidate.fork, .next_fork_digest = candidate.next_fork_digest, .attnets = candidate.attnets, .syncnets = candidate.syncnets, .custody_group_count = candidate.custody_group_count };
+        const hints = candidate.hints;
         if (!hints.validFor(context)) return error.InvalidCandidate;
         for (candidate.addresses[0..candidate.address_count]) |address| if (address.port() == 0) return error.InvalidCandidate;
         var incoming: Row = .{ .identity = candidate.peer, .node_id = candidate.node_id, .dial = .{ .automatic = true, .eligible_at_ms = now_ms, .history_until_ms = now_ms +| history_retention_ms, .hints = hints, .hints_at_ms = now_ms } };
@@ -132,8 +132,8 @@ pub const Dialing = struct {
             const row = catalog.rowForMut(ref).?;
             if (row.node_id) |id| if (!std.mem.eql(u8, &id, &candidate.node_id)) return error.InvalidCandidate;
             if (row.dial.hints) |previous| {
-                if (candidate.sequence < previous.sequence) return error.StaleRecord;
-                if (candidate.sequence == previous.sequence) {
+                if (candidate.hints.sequence < previous.sequence) return error.StaleRecord;
+                if (candidate.hints.sequence == previous.sequence) {
                     if (!std.meta.eql(previous, hints)) return error.StaleRecord;
                     if (row.dial.automatic) try mergeAddresses(&row.dial, candidate);
                     row.dial.hints_at_ms = now_ms;
@@ -143,7 +143,7 @@ pub const Dialing = struct {
                 }
             }
             const retained = catalog.intents.isSet(ref.index);
-            const admitted = admittedAddresses(catalog, &candidate.peer, candidate.addresses[0..candidate.address_count], candidate.sequence, now_ms);
+            const admitted = admittedAddresses(catalog, &candidate.peer, candidate.addresses[0..candidate.address_count], candidate.hints.sequence, now_ms);
             if ((!retained or row.dial.automatic) and admitted.count == 0) return self.refuse(&admitted);
             if (!retained) {
                 applyAddresses(&incoming.dial, &admitted);
@@ -160,7 +160,7 @@ pub const Dialing = struct {
             catalog.markDial(ref.index);
             return;
         }
-        const admitted = admittedAddresses(catalog, &candidate.peer, candidate.addresses[0..candidate.address_count], candidate.sequence, now_ms);
+        const admitted = admittedAddresses(catalog, &candidate.peer, candidate.addresses[0..candidate.address_count], candidate.hints.sequence, now_ms);
         if (admitted.count == 0) return self.refuse(&admitted);
         applyAddresses(&incoming.dial, &admitted);
         Catalog.prepareCandidateCustody(&incoming, context);

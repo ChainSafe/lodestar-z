@@ -237,6 +237,41 @@ pub const Table = struct {
         self.releasePayload(cell);
         self.refresh(cell);
     }
+    pub fn pinStart(self: *Table) ?Token {
+        const token = self.oldest() orelse return null;
+        const cell = self.get(token).?;
+        cell.copying = true;
+        cell.state = .copying;
+        self.refresh(cell);
+        return token;
+    }
+    pub fn commitStart(self: *Table, token: Token) void {
+        const cell = self.get(token).?;
+        std.debug.assert(cell.copying and !cell.exposed);
+        cell.closed_awaited = true;
+        cell.copying = false;
+        cell.exposed = true;
+        self.diag.requestsTaken +|= 1;
+        self.releaseInput(cell);
+        cell.state = if (cell.native) .serving else .terminal;
+        self.releasePayload(cell);
+        self.refresh(cell);
+    }
+    pub fn restoreStart(self: *Table, token: Token) void {
+        const cell = self.get(token).?;
+        std.debug.assert(cell.copying and !cell.exposed);
+        cell.copying = false;
+        if (cell.native) {
+            cell.state = .queued;
+            self.refresh(cell);
+            return;
+        }
+        // The stream ended while pinned; finish the retirement its end left to the pin.
+        cell.state = .terminal;
+        self.releasePayload(cell);
+        self.refresh(cell);
+        if (cell.serving != null) cell.release_requested = true else self.retire(token);
+    }
     pub fn oldest(self: *Table) ?Token {
         var selected: ?Token = null;
         var sequence: u64 = std.math.maxInt(u64);

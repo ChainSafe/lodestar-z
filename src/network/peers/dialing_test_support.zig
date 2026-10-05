@@ -14,7 +14,7 @@ pub fn discovered(tag: u8, sync: u8) !enr.Candidate {
     const pair = try KeyPair.fromSecretKey(&secret);
     const key = pair.publicKey();
     const peer = t.PeerId.fromPublicKey(&key);
-    return .{ .peer = peer, .node_id = try custody.nodeId(&peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = sync, .custody_group_count = null };
+    return .{ .peer = peer, .node_id = try custody.nodeId(&peer), .addresses = .{ address, .unspecified }, .address_count = 1, .hints = .{ .sequence = 1, .record_hash = @splat(0), .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = sync, .custody_group_count = null } };
 }
 
 pub fn initCatalog(allocator: std.mem.Allocator, options: mod.Dialing.Options) !Catalog {

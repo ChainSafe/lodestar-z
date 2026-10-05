@@ -29,9 +29,9 @@ test "peer ENR canonical fingerprint rejects equal sequence changes outside dial
     }) |change| {
         const changed = try changedRecord(change.name, change.value);
         const conflicting = try adapter.decode(&changed, &context);
-        try std.testing.expectEqual(candidate.sequence, conflicting.sequence);
+        try std.testing.expectEqual(candidate.hints.sequence, conflicting.hints.sequence);
         try std.testing.expectEqualDeep(candidate.addresses, conflicting.addresses);
-        try std.testing.expect(!std.mem.eql(u8, &candidate.record_hash, &conflicting.record_hash));
+        try std.testing.expect(!std.mem.eql(u8, &candidate.hints.record_hash, &conflicting.hints.record_hash));
         try std.testing.expectError(error.StaleRecord, queue.enqueueDiscovered(&catalog, &conflicting, &context, &.{}, 100));
         try std.testing.expectEqualDeep(before, catalog.rows[0]);
     }

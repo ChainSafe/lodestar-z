@@ -1,4 +1,5 @@
 const std = @import("std");
+const topic_mod = @import("../gossipsub/topic.zig");
 const p = @import("root.zig");
 const t = std.testing;
 const index_list = @import("../index_list.zig");
@@ -36,13 +37,20 @@ test "gossip processor preserves derived defaults above explicit execution ceili
 
 test "gossip processor backing bytes match allocations at page boundaries" {
     const page = @import("../gossipsub/message_store.zig").page_bytes;
-    for ([_]u32{ 2, 64 }) |items| {
+    const capacities = [_]struct { items: u32, attestations: u32 }{
+        .{ .items = 2, .attestations = 2 },
+        .{ .items = 64, .attestations = 64 },
+        .{ .items = 64, .attestations = 2 },
+    };
+    for (capacities) |capacity| {
         for ([_]u32{ page, 2 * page }) |kind_bytes| {
-            const limits: p.limits.Limits = @splat(.{ .items = items, .bytes = kind_bytes });
+            var limits: p.limits.Limits = @splat(.{ .items = capacity.items, .bytes = kind_bytes });
+            limits[@intFromEnum(p.limits.Kind.beacon_attestation)].items = capacity.attestations;
             var measured = t.FailingAllocator.init(t.allocator, .{});
             {
                 var table = try p.GossipProcessor.init(measured.allocator(), .{ .limits = limits });
                 defer table.deinit();
+                try t.expectEqual(@as(usize, capacity.attestations), table.groups.rows.len);
                 try t.expectEqual(measured.allocated_bytes, p.GossipProcessor.backingBytes(&.{ .limits = limits }));
             }
             try t.expectEqual(measured.allocated_bytes, measured.freed_bytes);
@@ -168,7 +176,7 @@ test "gossip processor batches identical attestation data with a bounded wait" {
     for ([_]p.GossipProcessor.Token{ first, second }) |token| {
         const cell = table.get(token).?;
         cell.metadata.group = @splat(3);
-        @memset(&cell.topic, 0);
+        cell.topic_len = @intCast(topic_mod.buildCanonical(.{ .digest = cell.fork_digest, .name = .{ .kind = .beacon_attestation } }, &cell.topic).len);
         cell.admitted_ms = 1;
         cell.deadline = 100;
         table.install(token, "x");
@@ -212,7 +220,7 @@ test "gossip processor new attestation groups cannot postpone a mature group" {
     for ([_]p.GossipProcessor.Token{ older, newer }, 0..) |token, i| {
         const cell = table.get(token).?;
         cell.metadata.group = @splat(@intCast(i));
-        @memset(&cell.topic, 0);
+        cell.topic_len = @intCast(topic_mod.buildCanonical(.{ .digest = cell.fork_digest, .name = .{ .kind = .beacon_attestation } }, &cell.topic).len);
         cell.admitted_ms = if (i == 0) 1 else 50;
         cell.deadline = 100 + cell.admitted_ms;
         table.install(token, "x");
@@ -463,4 +471,44 @@ test "gossip processor retains expired verdicts until acknowledgement and reject
     table.install(replacement, "y");
     try std.testing.expect(!table.report(handles[0], .accept, 101));
     table.close();
+}
+
+test "gossip processor groups attestation data across subnets only within the same fork" {
+    const limits: p.limits.Limits = @splat(.{ .items = 8, .bytes = 4096 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
+    defer table.deinit();
+    defer table.close();
+    const topics = [_]topic_mod.Canonical{
+        .{ .digest = .{ 1, 2, 3, 4 }, .name = .{ .kind = .beacon_attestation, .subnet = 0 } },
+        .{ .digest = .{ 1, 2, 3, 4 }, .name = .{ .kind = .beacon_attestation, .subnet = 1 } },
+        .{ .digest = .{ 5, 6, 7, 8 }, .name = .{ .kind = .beacon_attestation, .subnet = 0 } },
+    };
+    for (topics, 0..) |canonical, i| {
+        var wire: [topic_mod.topic_max_len]u8 = undefined;
+        try table.capture(&.{
+            .handle = .{ .index = @intCast(i), .generation = 1 },
+            .id = @splat(@intCast(i)),
+            .peer = .{ .index = 0, .generation = 1 },
+            .identity = .{ .bytes = @splat(1) },
+            .topic = topic_mod.buildCanonical(canonical, &wire),
+            .bytes = "x",
+            .admitted_ms = 1,
+            .deadline = 100,
+        }, canonical, &.{ .group = @splat(3) }, true, 1);
+    }
+    table.maintain(51, 0);
+    const batch = table.claim(51);
+    defer table.finish(&batch, true);
+    try t.expectEqual(@as(usize, 3), batch.len);
+    try t.expectEqual(@as(usize, 2), batch.job_count);
+    try t.expectEqual(@as(usize, 1), batch.jobs[0].len);
+    try t.expectEqual(@as(usize, 2), batch.jobs[1].len);
+    for (batch.jobs[0..batch.job_count]) |job| {
+        try t.expect(job.grouped);
+        for (batch.tokens[job.start..][0..job.len]) |token| {
+            const cell = table.get(token).?;
+            const canonical = topic_mod.parseCanonical(cell.topic[0..cell.topic_len]).?;
+            try t.expectEqual(if (job.len == 2) topics[0].digest else topics[2].digest, canonical.digest);
+        }
+    }
 }

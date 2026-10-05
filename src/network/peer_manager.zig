@@ -39,11 +39,10 @@ pub const DiscoveryNeed = struct {
 const SelectionRevision = struct {
     catalog: u64,
     delivery: u64,
-    gossip: [4]u64,
+    gossip: gossip.Gossipsub.CoverageRevision,
 
     fn cacheable(self: *const SelectionRevision) bool {
-        for (self.gossip) |revision| if (revision == std.math.maxInt(u64)) return false;
-        return self.catalog != std.math.maxInt(u64) and self.delivery != std.math.maxInt(u64);
+        return self.catalog != std.math.maxInt(u64) and self.delivery != std.math.maxInt(u64) and self.gossip.cacheable();
     }
 };
 

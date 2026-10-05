@@ -29,7 +29,6 @@ const Server = @This();
 
 request: RequestState = .{ .direction = .inbound },
 progress_ms: u64 = 0,
-pending_context: ?[constants.context_bytes_length]u8 = null,
 pending_result: u8 = constants.result_success,
 close_after_write: bool = false,
 state: State = .receiving_request,
@@ -267,22 +266,10 @@ fn queueChunk(
     const request = &slot.request;
     assert(slot.state == .serving);
     assert(request.io.outbox.idle());
-    request.io.payload = ssz;
-    slot.pending_context = context;
     slot.pending_result = result;
     slot.close_after_write = close_after;
     slot.progress_ms = now.millis();
-    Server.beginWrite(slot);
-}
-
-/// The caller marks the slot ready.
-fn beginWrite(slot: *Server) void {
-    const request = &slot.request;
-    request.io.writer = codec.ChunkWriter.initChunk(
-        slot.pending_result,
-        slot.pending_context,
-        request.io.payload,
-    );
+    request.io.writer = codec.ChunkWriter.initChunk(result, context, ssz);
     request.io.writing = true;
     slot.state = .writing_chunk;
 }
@@ -293,14 +280,13 @@ fn writeChunk(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: 
         slot.failIo(owner, index, err, now);
         return;
     };
-    if (!flushed.done) {
-        if (flushed.runnable) owner.markReady(.inbound, index);
+    if (flushed != .done) {
+        if (flushed == .yielded) owner.markReady(.inbound, index);
         return;
     }
     if (slot.pending_result == constants.result_success) {
         request.chunks += 1;
     }
-    request.io.payload = &.{};
     request.io.writer = undefined;
     if (slot.close_after_write) {
         request.io.outbox.queue("", true);

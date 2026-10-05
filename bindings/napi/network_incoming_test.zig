@@ -1,5 +1,7 @@
 const std = @import("std");
-const rr = @import("network").reqresp;
+const n = @import("network");
+const rr = n.reqresp;
+const Runtime = @import("network_runtime.zig").Runtime;
 const incoming = @import("network_incoming.zig");
 const Budget = @import("network_budget.zig").Budget;
 const Table = incoming.Table;
@@ -115,4 +117,54 @@ test "queued requests reserve only input and response credits follow a chunk lif
     table.releaseResponse(second);
     for (tokens) |token| table.retire(token);
     try std.testing.expectEqual(@as(usize, 0), budget.used);
+}
+
+test "incoming serving start rollback and commit preserve a close while pinned" {
+    for ([_]bool{ false, true }) |commit| {
+        for ([_]bool{ false, true }) |retained| {
+            var runtime: Runtime = .{ .env = undefined };
+            runtime.payload_budget.limit = 64;
+            runtime.incoming = try Table.init(std.testing.allocator, 1, &runtime.payload_budget);
+            const table = &runtime.incoming.?;
+            defer table.deinit();
+            const token = try table.reserve(.blocks_by_root_v2, 32);
+            try table.allocate(token, &(@as([32]u8, @splat(7))));
+            const cell = table.get(token).?;
+            cell.native = true;
+            cell.handle = .{ .direction = .inbound, .index = 0, .generation = 1 };
+            cell.serving = if (retained) .{ .index = 0, .generation = 1 } else null;
+            try std.testing.expectEqual(token, table.pinStart().?);
+            try std.testing.expect(table.pinStart() == null);
+            table.restoreStart(token);
+            try std.testing.expectEqual(incoming.State.queued, cell.state);
+            try std.testing.expectEqual(@as(usize, 32), cell.input.len);
+            try std.testing.expectEqual(token, table.pinStart().?);
+            {
+                runtime.lock();
+                defer runtime.unlock();
+                try incoming.captureLocked(&runtime, .{ .served = .{ .request = cell.handle, .chunks = 0 } }, n.Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
+            }
+            try std.testing.expectEqual(@as(usize, 32), cell.input.len);
+            try std.testing.expect(!table.anyDue());
+            if (commit) {
+                table.commitStart(token);
+                try std.testing.expectEqual(@as(u64, 1), table.diag.requestsTaken);
+                try std.testing.expect(cell.exposed and cell.closed_awaited and table.anyDue());
+                const completion = table.pin(token.index);
+                try std.testing.expect(completion.closed);
+                _ = table.commit(completion);
+            } else {
+                table.restoreStart(token);
+                try std.testing.expectEqual(@as(u64, 0), table.diag.requestsTaken);
+                if (retained) try std.testing.expect(incoming.releasable(cell));
+            }
+            try std.testing.expectEqual(@as(usize, 0), runtime.payload_budget.used);
+            if (retained) {
+                try std.testing.expect(table.get(token) != null);
+                cell.serving = null;
+                table.retire(token);
+            }
+            try std.testing.expect(table.get(token) == null);
+        }
+    }
 }

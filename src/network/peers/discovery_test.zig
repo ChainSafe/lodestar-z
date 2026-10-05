@@ -190,7 +190,7 @@ fn referralCase(rejection: ?discovery.Discovery.Rejection, custody_only: bool) !
         return;
     }
     try std.testing.expect(found != null);
-    if (custody_only) try std.testing.expect(found.?.custody_group_count == null);
+    if (custody_only) try std.testing.expect(found.?.hints.custody_group_count == null);
     _ = try d.driver.step(a.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, now) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
     try adapter.requireIdentity(c.transport.engine.localRecord(), &found.?.peer);
     try std.testing.expectEqual(@as(u16, 9003), found.?.addresses[0].port());

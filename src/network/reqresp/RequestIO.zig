@@ -25,14 +25,12 @@ writer: codec.ChunkWriter = undefined,
 writing: bool = false,
 outbox: stream_io.Outbox = .{},
 
-pub const Flush = struct { done: bool, runnable: bool = false };
-
 pub fn flush(
     self: *RequestIO,
     engine: *Engine,
     stream: Engine.StreamHandle,
     fin: bool,
-) !Flush {
+) !stream_io.Outbox.Progress {
     if (self.writing and self.outbox.idle()) {
         const piece = try self.writer.next(self.scratch);
         const last = self.writer.done();
@@ -40,9 +38,8 @@ pub fn flush(
         if (last) self.writing = false;
     }
     const flushed = try self.outbox.pump(engine, stream);
-    const done = flushed == .done and !self.writing;
     if (flushed == .done) self.outbox = .{};
-    return .{ .done = done, .runnable = flushed == .yielded or (flushed == .done and self.writing) };
+    return if (flushed == .done and self.writing) .yielded else flushed;
 }
 
 pub const Input = struct { bytes: []const u8, fin: bool, progressed: bool, reset: bool };

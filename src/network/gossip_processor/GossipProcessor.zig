@@ -81,6 +81,7 @@ pub const Cell = struct {
     id: native.Gossipsub.MessageId = undefined,
     topic: [topic_max]u8 = undefined,
     topic_len: u16 = 0,
+    fork_digest: native.topic.ForkDigest = @splat(0),
     deadline: u64 = 0,
     received_at: u64 = 0,
     admitted_ms: u64 = 0,
@@ -179,7 +180,7 @@ pub fn init(backing: std.mem.Allocator, options: Options) !GossipProcessor {
     const cells = try backing.alloc(Cell, capacity);
     errdefer backing.free(cells);
     @memset(cells, .{});
-    var groups = try Groups.init(backing, capacity);
+    var groups = try Groups.init(backing, limits[@intFromEnum(Kind.beacon_attestation)].items);
     errdefer groups.deinit(backing);
     var dependencies = try Dependencies.init(backing, capacity);
     errdefer dependencies.deinit(backing);
@@ -203,7 +204,7 @@ pub fn init(backing: std.mem.Allocator, options: Options) !GossipProcessor {
 pub fn backingBytes(options: *const Options) usize {
     const capacity = limits_mod.items(&options.limits);
     const bytes = limits_mod.bytes(&options.limits);
-    return capacity * @sizeOf(Cell) + Groups.backingBytes(capacity) + Dependencies.backingBytes(capacity) + storage.Store.metadataBytes(capacity, bytes) + bytes / storage.page_bytes * storage.page_bytes;
+    return capacity * @sizeOf(Cell) + Groups.backingBytes(options.limits[@intFromEnum(Kind.beacon_attestation)].items) + Dependencies.backingBytes(capacity) + storage.Store.metadataBytes(capacity, bytes) + bytes / storage.page_bytes * storage.page_bytes;
 }
 pub fn deinit(self: *GossipProcessor) void {
     assert(self.diag.occupied == 0 and self.diag.reservedBytes == 0);
@@ -275,11 +276,13 @@ pub fn occupancy(self: *const GossipProcessor, kind: Kind) [occupancy_count]u64 
         self.executing_items[@intFromEnum(kind)],
     };
 }
-pub fn capture(self: *GossipProcessor, message: *const native.Gossipsub.MessageEvent, kind: Kind, metadata: *const metadata_mod.Metadata, deneb: bool, received_at: u64) !void {
+pub fn capture(self: *GossipProcessor, message: *const native.Gossipsub.MessageEvent, canonical: native.topic.Canonical, metadata: *const metadata_mod.Metadata, deneb: bool, received_at: u64) !void {
+    const kind = canonical.name.kind;
     if (!self.sourceRoom(message.source, kind, message.bytes.len)) return error.NetworkGossipFull;
     const handle = try self.reserve(kind, message.bytes.len);
     const cell = self.get(handle).?;
     cell.metadata = metadata.*;
+    cell.fork_digest = canonical.digest;
     cell.deneb = deneb;
     cell.handle = message.handle;
     cell.identity = message.identity;

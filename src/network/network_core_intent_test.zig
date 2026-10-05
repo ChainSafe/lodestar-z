@@ -192,8 +192,8 @@ test "core local transaction sequences no-op schedule and rollback" {
     local.metadata.custody_group_count = 1;
     try std.testing.expect(try updateLocal(&node, &local, scheduled, now));
     const candidate = try enr.decode(node.localRecord().?, &local.fork);
-    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, candidate.next_fork_digest.?);
-    try std.testing.expectEqual(@as(u64, 1), candidate.custody_group_count.?);
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, candidate.hints.next_fork_digest.?);
+    try std.testing.expectEqual(@as(u64, 1), candidate.hints.custody_group_count.?);
     const invalid: control_values.ForkSchedule = .{ .fulu_scheduled = true, .next_digest = .{ 1, 2, 3, 4 } };
     try std.testing.expectError(error.InvalidSchedule, updateLocal(&node, &local, invalid, now));
 }
@@ -329,7 +329,7 @@ test "core BPO same-fork digest transition updates status and advertisement" {
     try std.testing.expectEqual(second.fork, node.protocols.reqresp.request_fork);
     try std.testing.expectEqual(initial + 1, node.localRecord().?.sequence);
     const candidate = try enr.decode(node.localRecord().?, &local.fork);
-    try std.testing.expectEqual(second.digest, candidate.fork.digest);
+    try std.testing.expectEqual(second.digest, candidate.hints.fork.digest);
     for ([_]ForkEntry{
         .{ .digest = .{ 9, 9, 9, 9 }, .fork = .fulu },
         .{ .digest = second.digest, .fork = .gloas },

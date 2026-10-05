@@ -6,7 +6,7 @@ pub fn capacity(rows: usize) usize {
 }
 
 /// Keys live in stable rows. Remove membership before overwriting the key.
-pub fn Index(comptime length: usize) type {
+pub fn Index(comptime Key: type) type {
     return struct {
         slots: []u32,
         seed: u64 = 0,
@@ -22,16 +22,18 @@ pub fn Index(comptime length: usize) type {
             allocator.free(self.slots);
         }
 
-        fn position(self: *const Self, key: *const [length]u8) usize {
-            return @as(usize, @truncate(std.hash.Wyhash.hash(self.seed, key))) & (self.slots.len - 1);
+        fn position(self: *const Self, key: *const Key) usize {
+            var hasher = std.hash.Wyhash.init(self.seed);
+            std.hash.autoHash(&hasher, key.*);
+            return @as(usize, @truncate(hasher.final())) & (self.slots.len - 1);
         }
 
-        pub fn find(self: *const Self, rows: anytype, key: *const [length]u8) ?u32 {
+        pub fn find(self: *const Self, rows: anytype, key: *const Key) ?u32 {
             var pos = self.position(key);
             for (0..self.slots.len) |_| {
                 const index = self.slots[pos];
                 if (index == none) return null;
-                if (std.mem.eql(u8, &rows[index].key, key)) return index;
+                if (std.meta.eql(rows[index].key, key.*)) return index;
                 pos = (pos + 1) & (self.slots.len - 1);
             }
             unreachable;
@@ -50,13 +52,13 @@ pub fn Index(comptime length: usize) type {
             unreachable;
         }
 
-        pub fn remove(self: *Self, rows: anytype, key: *const [length]u8) void {
+        pub fn remove(self: *Self, rows: anytype, key: *const Key) void {
             const mask = self.slots.len - 1;
             var pos = self.position(key);
             for (0..self.slots.len) |_| {
                 const index = self.slots[pos];
                 if (index == none) return;
-                if (std.mem.eql(u8, &rows[index].key, key)) break;
+                if (std.meta.eql(rows[index].key, key.*)) break;
                 pos = (pos + 1) & mask;
             } else unreachable;
             var hole = pos;
@@ -82,7 +84,7 @@ pub fn Index(comptime length: usize) type {
 test "fixed key index preserves colliding keys through deletion and reuse" {
     const t = std.testing;
     var rows: [64]struct { key: [32]u8 } = undefined;
-    var index = try Index(32).init(t.allocator, rows.len);
+    var index = try Index([32]u8).init(t.allocator, rows.len);
     defer index.deinit(t.allocator);
     for (&rows, 0..) |*row, i| {
         row.key = @splat(@intCast(i));

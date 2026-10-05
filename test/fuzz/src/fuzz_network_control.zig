@@ -50,7 +50,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
 fn decodeRecord(record: *const d.identity.enr.Record) void {
     const candidate = peers.enr.decode(record, &context) catch return;
     std.debug.assert(candidate.address_count <= 2);
-    std.debug.assert(candidate.custody_group_count == null or candidate.custody_group_count.? <= context.custody_groups);
+    std.debug.assert(candidate.hints.custody_group_count == null or candidate.hints.custody_group_count.? <= context.custody_groups);
 }
 
 fn signedFields(bytes: []const u8) void {

@@ -29,15 +29,9 @@ pub const Hints = struct {
 pub const Candidate = struct {
     peer: types.PeerId,
     node_id: d.types.NodeId,
-    sequence: u64,
-    record_hash: [32]u8,
     addresses: [2]types.Address = @splat(.unspecified),
     address_count: u8 = 0,
-    fork: ForkId,
-    next_fork_digest: ?[4]u8,
-    attnets: ?[8]u8,
-    syncnets: ?u8,
-    custody_group_count: ?u64,
+    hints: Hints,
 };
 
 /// Borrows an immutable authenticated Record; application claims still require validation.
@@ -53,13 +47,15 @@ pub fn decode(record: *const Record, context: *const types.ForkContext) Error!Ca
     var result = Candidate{
         .peer = types.PeerId.fromPublicKey(&public_key),
         .node_id = record.node_id,
-        .sequence = record.sequence,
-        .record_hash = try record.contentHash(),
-        .fork = .{ .digest = eth2[0..4].*, .next_version = eth2[4..8].*, .next_epoch = std.mem.readInt(u64, eth2[8..16], .little) },
-        .next_fork_digest = try fixed(record, "nfd", 4),
-        .attnets = try fixed(record, "attnets", 8),
-        .syncnets = if (syncnets) |bits| bits[0] else null,
-        .custody_group_count = custody,
+        .hints = .{
+            .sequence = record.sequence,
+            .record_hash = try record.contentHash(),
+            .fork = .{ .digest = eth2[0..4].*, .next_version = eth2[4..8].*, .next_epoch = std.mem.readInt(u64, eth2[8..16], .little) },
+            .next_fork_digest = try fixed(record, "nfd", 4),
+            .attnets = try fixed(record, "attnets", 8),
+            .syncnets = if (syncnets) |bits| bits[0] else null,
+            .custody_group_count = custody,
+        },
     };
     const quic = try integer(record, "quic", 2);
     const quic6 = try integer(record, "quic6", 2);

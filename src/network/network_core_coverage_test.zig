@@ -173,7 +173,7 @@ fn subscribeServer(setup: *Setup, name: []const u8) !void {
 }
 
 fn candidateFor(peer: *const t.PeerId, count: ?u64) !enr.Candidate {
-    return .{ .peer = peer.*, .node_id = try custody.nodeId(peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ support.server_address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = null, .custody_group_count = count };
+    return .{ .peer = peer.*, .node_id = try custody.nodeId(peer), .addresses = .{ support.server_address, .unspecified }, .address_count = 1, .hints = .{ .sequence = 1, .record_hash = @splat(0), .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = null, .custody_group_count = count } };
 }
 
 fn waitSampling(setup: *Setup) !t.Snapshot {
@@ -310,7 +310,7 @@ test "core coverage automatic retention renews only at authenticated Status succ
     setup.pair.advance(1000);
     for (0..10) |_| try setup.step(0);
     try std.testing.expectEqual(horizon, setup.client.peer_manager.catalog.rows[0].dial.history_until_ms);
-    candidate.sequence = 2;
+    candidate.hints.sequence = 2;
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.protocols.gossipsub, &.{candidate}, setup.pair.now).accepted);
     setup.pair.advance(21_000);
     for (0..50) |_| try setup.step(0);
@@ -392,7 +392,7 @@ test "core coverage review same-digest group update disables cached automatic ca
     try setup.initOwners(&local);
     defer setup.deinit();
     var candidate = try candidateFor(&setup.server.peerId(), 128);
-    candidate.syncnets = 1;
+    candidate.hints.syncnets = 1;
     try updateDemand(&setup.client, &.{ .syncnets = 1 }, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.protocols.gossipsub, &.{candidate}, setup.pair.now).accepted);
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
@@ -403,8 +403,8 @@ test "core coverage review same-digest group update disables cached automatic ca
     try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &out));
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.catalog.rows[0].dial.priority);
     try std.testing.expectEqual(@as(u64, 1), setup.client.peer_manager.catalog.rows[0].dial.hints.?.sequence);
-    candidate.sequence = 2;
-    candidate.custody_group_count = 64;
+    candidate.hints.sequence = 2;
+    candidate.hints.custody_group_count = 64;
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.protocols.gossipsub, &.{candidate}, setup.pair.now).accepted);
     try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &out));
     try std.testing.expect(out[0].peer.eql(&candidate.peer));

@@ -72,6 +72,9 @@ pub const History = struct {
             .ip6 => |value| {
                 hasher.update(&[_]u8{6});
                 hasher.update(&value.octets);
+                var interface: [4]u8 = undefined;
+                std.mem.writeInt(u32, &interface, value.interface, .little);
+                hasher.update(&interface);
                 std.mem.writeInt(u16, &port, value.port, .little);
             },
         }

@@ -261,8 +261,8 @@ test "core signed bootstrap reaches relevant peer with zero and one outputs" {
     try std.testing.expect(hint_now.millis() < accepted.dial.hints_at_ms +| catalog.Catalog.hint_freshness_ms);
     const hints = accepted.dial.hints.?;
     const candidate = try enr.decode(b.localRecord().?, &a.localState().fork);
-    try std.testing.expectEqualDeep(candidate.fork, hints.fork);
-    try std.testing.expectEqualDeep(candidate.next_fork_digest, hints.next_fork_digest);
+    try std.testing.expectEqualDeep(candidate.hints.fork, hints.fork);
+    try std.testing.expectEqualDeep(candidate.hints.next_fork_digest, hints.next_fork_digest);
     const local = a.localState();
     _ = try updateLocal(&a, &local, .{ .next_version = .{ 1, 1, 1, 1 }, .next_epoch = 123, .next_digest = .{ 1, 2, 3, 4 } }, hint_now);
     try std.testing.expectEqual(@as(u16, 1), a.peerCounts().relevant);

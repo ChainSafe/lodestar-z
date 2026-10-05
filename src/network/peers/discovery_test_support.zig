@@ -68,7 +68,7 @@ pub fn handoff(candidate: *const adapter.Candidate) !void {
     var core = try PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, opts.peerManager(), protocols.router.capabilities().receive, pair.client.limits.connections_max);
     defer core.deinit();
     try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &.{candidate.*}, pair.now).accepted);
-    try std.testing.expectEqual(candidate.sequence, core.catalog.rows[0].dial.hints.?.sequence);
+    try std.testing.expectEqual(candidate.hints.sequence, core.catalog.rows[0].dial.hints.?.sequence);
     var intents: [2]dial.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), core.selectDials(gossipsub, &pair.client, pair.now, &intents));
     try std.testing.expect(intents[0].peer.eql(&candidate.peer));
@@ -110,7 +110,7 @@ pub fn admitBatch(candidates: []const adapter.Candidate) !void {
     for (candidates) |*candidate| {
         const ref = manager.catalog.find(&candidate.peer).?;
         const row = manager.catalog.rowFor(ref).?;
-        try std.testing.expectEqual(candidate.sequence, row.dial.hints.?.sequence);
+        try std.testing.expectEqual(candidate.hints.sequence, row.dial.hints.?.sequence);
         try std.testing.expectEqualSlices(types.Address, candidate.addresses[0..candidate.address_count], row.dial.addresses[0..row.dial.address_count]);
     }
 }

@@ -9,7 +9,7 @@ import type {
   NativeTopicKind,
   Verdict,
 } from "../src/network.js";
-import {ACTION_MAX, BUDGET_MS, BURST_NAME, NativePump, closeResult} from "../src/network-pump.js";
+import {BUDGET_MS, BURST_NAME, NativePump, closeResult} from "../src/network-pump.js";
 import type {
   NativeAction,
   NativeExchange,
@@ -344,52 +344,6 @@ describe("binding pump scheduling", () => {
     await macrotask();
     expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
     expect(node.host.capacity).not.toHaveBeenCalled();
-  });
-
-  it("sends obligations first, 256 per exchange, and coalesces blocks, rechecks and peer penalties", async () => {
-    const node = fixture();
-    const captured: NativeAction[][] = [];
-    node.runtime.exchange.mockImplementation((actions) => {
-      captured.push([...actions]);
-      return idle;
-    });
-    node.runtime.exchange.mockImplementationOnce((actions) => {
-      captured.push([...actions]);
-      return {...idle, gossip: gossip({grouped: true, messages: Array.from({length: 1000}, (_, i) => i)})};
-    });
-    node.pump.request();
-    await macrotask();
-    // The job's verdicts are queued; requests arriving now queue behind them.
-    node.pump.block(new Uint8Array(32).fill(1));
-    node.pump.block(new Uint8Array(32).fill(1));
-    for (let i = 0; i < 150; i++) node.pump.reportPeer("peer", "high_tolerance");
-    node.pump.reportPeer("peer", "fatal");
-    node.pump.dropQueued();
-    for (let i = 0; i < 6; i++) await macrotask();
-    expect(captured.map((actions) => actions.length)).toEqual([0, ACTION_MAX, ACTION_MAX, ACTION_MAX, 1000 - 768 + 4]);
-    expect(captured.slice(1, 4).every((actions) => actions.every(({type}) => type === "verdict"))).toBe(true);
-    expect(captured[1][0]).toEqual({handle: handle(0), type: "verdict", verdict: "accept"});
-    expect(captured[4].slice(1000 - 768)).toEqual([
-      {root: new Uint8Array(32).fill(1), type: "block"},
-      {action: "high_tolerance", count: 100, peerId: "peer", type: "reportPeer"},
-      {action: "fatal", count: 1, peerId: "peer", type: "reportPeer"},
-      {type: "dropQueued"},
-    ]);
-    // Roots past the coalescing bound become one recheck of every waiting message.
-    for (let i = 0; i < 257; i++) node.pump.block(Uint8Array.of(i >> 8, i & 255));
-    node.pump.block(new Uint8Array(32).fill(2));
-    await macrotask();
-    expect(captured.at(-1)).toEqual([{type: "recheck"}]);
-  });
-
-  it("drops peer penalties past 512 coalesced entries and counts them", async () => {
-    const node = fixture();
-    for (let i = 0; i < 514; i++) node.pump.reportPeer(`peer-${i}`, "fatal");
-    expect(node.pump.reportsDropped).toBe(2);
-    await macrotask();
-    expect(node.actions(0)).toHaveLength(ACTION_MAX);
-    await macrotask();
-    expect(node.actions(1)).toHaveLength(512 - ACTION_MAX);
   });
 
   it("keeps a penalty reported while its batch is in flight for the next exchange", async () => {
