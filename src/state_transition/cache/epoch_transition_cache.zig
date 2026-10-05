@@ -208,7 +208,7 @@ const ReusedEpochTransitionCache = struct {
 };
 
 threadlocal var _reused_cache: ?*ReusedEpochTransitionCache = null;
- 
+
 fn getReusedEpochTransitionCache(
     allocator: Allocator,
     pool: *Node.Pool,
