@@ -1,7 +1,6 @@
 const std = @import("std");
 const native = @import("../gossipsub/root.zig");
 const storage = @import("../gossipsub/message_store.zig");
-const policy = @import("policy.zig");
 const peer_book = @import("../gossipsub/peer_book.zig");
 const ForkEntry = @import("../types.zig").ForkEntry;
 const PeerId = @import("../wire/peer_id.zig").PeerId;
@@ -236,9 +235,6 @@ pub fn get(self: *GossipProcessor, handle: Token) ?*Cell {
 fn indexOf(self: *const GossipProcessor, cell: *const Cell) u32 {
     return @intCast((@intFromPtr(cell) - @intFromPtr(self.cells.ptr)) / @sizeOf(Cell));
 }
-pub fn reserve(self: *GossipProcessor, len: usize) !Token {
-    return self.reserveKind(.beacon_block, len);
-}
 pub fn hasCapacity(self: *const GossipProcessor, kind: Kind, len: usize) bool {
     assert(len <= payload_max);
     if (self.closed or self.order == std.math.maxInt(u64)) return false;
@@ -248,8 +244,9 @@ pub fn hasCapacity(self: *const GossipProcessor, kind: Kind, len: usize) bool {
     return self.queueValue(kind, .free).len > 0 and pages <= self.store.free_pages - self.staging_pages and self.store.used_entries + self.store.retired_entries + self.staging_items < self.store.entries.len;
 }
 /// Cheap possibility check before decoding. Only admission can jointly reserve
-/// processor and protocol resources; replaceable work does not promise room.
-pub fn admissible(self: *GossipProcessor, kind: Kind, len: usize) bool {
+/// processor and protocol resources; replaceable work does not promise room. Counts a capacity
+/// refusal when neither free capacity nor replaceable work is available.
+pub fn checkAdmissionCapacity(self: *GossipProcessor, kind: Kind, len: usize) bool {
     if (self.closed or self.order == std.math.maxInt(u64)) return false;
     if (self.hasCapacity(kind, len)) return true;
     if (limits_mod.newestFirst(kind)) {
@@ -280,7 +277,7 @@ pub fn occupancy(self: *const GossipProcessor, kind: Kind) [occupancy_count]u64 
 }
 pub fn capture(self: *GossipProcessor, message: *const native.Gossipsub.MessageEvent, kind: Kind, metadata: *const metadata_mod.Metadata, deneb: bool, received_at: u64) !void {
     if (!self.sourceRoom(message.source, kind, message.bytes.len)) return error.NetworkGossipFull;
-    const handle = try self.reserveKind(kind, message.bytes.len);
+    const handle = try self.reserve(kind, message.bytes.len);
     const cell = self.get(handle).?;
     cell.metadata = metadata.*;
     cell.deneb = deneb;
@@ -317,7 +314,7 @@ pub fn sourceRoom(self: *const GossipProcessor, source: ?Source, kind: Kind, len
     const maximum = chargedBytes(@min(self.source_maximum[k], limits[k].bytes));
     return items < limits_mod.sourceItems(limits[k]) and chargedBytes(len) <= limits_mod.sourceBytes(limits[k], maximum, storage.inline_bytes) -| bytes;
 }
-pub fn reserveKind(self: *GossipProcessor, kind: Kind, len: usize) !Token {
+pub fn reserve(self: *GossipProcessor, kind: Kind, len: usize) !Token {
     assert(len <= payload_max);
     if (self.closed) return error.NetworkGossipFull;
     const k = @intFromEnum(kind);

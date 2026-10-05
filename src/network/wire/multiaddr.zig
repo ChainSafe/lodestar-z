@@ -19,8 +19,12 @@ pub const Multiaddr = struct {
     address: Address,
     peer: ?peer_id.PeerId = null,
 
-    pub fn encode(self: *const Multiaddr, out: []u8) Error![]u8 {
+    fn validateEncodableAddress(self: *const Multiaddr) error{InvalidMultiaddr}!void {
         if (self.address == .ip6 and (self.address.ip6.interface != 0 or Address.isIp4Mapped(self.address.ip6.octets))) return error.InvalidMultiaddr;
+    }
+
+    pub fn encode(self: *const Multiaddr, out: []u8) Error![]u8 {
+        try self.validateEncodableAddress();
         var cursor: usize = 0;
         switch (self.address) {
             .ip4 => |ip| {
@@ -73,7 +77,7 @@ pub const Multiaddr = struct {
     }
 
     pub fn toText(self: *const Multiaddr, out: *[text_length_max]u8) Error![]const u8 {
-        if (self.address == .ip6 and (self.address.ip6.interface != 0 or Address.isIp4Mapped(self.address.ip6.octets))) return error.InvalidMultiaddr;
+        try self.validateEncodableAddress();
         var cursor: usize = 0;
         switch (self.address) {
             .ip4 => |ip| {

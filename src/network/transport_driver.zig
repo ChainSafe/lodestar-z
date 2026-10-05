@@ -12,14 +12,14 @@ pub const Result = struct { progress: Transport.Progress, cancelled: bool = fals
 /// Standalone driver for a transport without NetworkCore. Requires OS sockets and the OS clock,
 /// like the network driver. The caller consumes event borrows before another turn or teardown.
 pub fn step(transport: *Transport, io: std.Io, events: []Engine.Event, options: Options) Result {
-    const before = Transport.currentTime(io) catch |err| return .{
+    const before = Now.read(io) catch |err| return .{
         .progress = .{ .now = Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 }) },
         .failure = err,
     };
     const timeout = transport.schedule(events.len).timeout(before.monotonic, options.wait_max);
     const ready = wait.poll(io, .{ .quic = transport.sockets.handles() }, timeout);
     var failure: ?Error = ready.failure;
-    const read = Transport.currentTime(io) catch |err| blk: {
+    const read = Now.read(io) catch |err| blk: {
         failure = failure orelse err;
         break :blk before;
     };

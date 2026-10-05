@@ -44,6 +44,16 @@ pub const Router = struct {
         inbound_per_connection_max: u16 = 16,
         inbound_connections: u16 = 0,
         meshsub_versions: []const Version = &.{ .v1_2, .v1_1, .v1_0 },
+
+        fn negotiation(options: Options) Negotiator.Options {
+            return .{
+                .negotiations_max = options.negotiations_max,
+                .outbound_control_reserved = options.outbound_control_reserved,
+                .outbound_reserved = options.outbound_reserved,
+                .inbound_per_connection_max = options.inbound_per_connection_max,
+                .inbound_connections = options.inbound_connections,
+            };
+        }
     };
 
     pub fn validateOptions(options: Options) Error!void {
@@ -56,24 +66,12 @@ pub const Router = struct {
             }
         }
         if (options.capabilities) |active| try validateSet(availableFor(options), active);
-        try Negotiator.validateOptions(.{
-            .negotiations_max = options.negotiations_max,
-            .outbound_control_reserved = options.outbound_control_reserved,
-            .outbound_reserved = options.outbound_reserved,
-            .inbound_per_connection_max = options.inbound_per_connection_max,
-            .inbound_connections = options.inbound_connections,
-        });
+        try Negotiator.validateOptions(options.negotiation());
     }
 
     pub fn init(allocator: std.mem.Allocator, options: Options) Error!Router {
         try validateOptions(options);
-        var negotiator = try Negotiator.init(allocator, .{
-            .negotiations_max = options.negotiations_max,
-            .outbound_control_reserved = options.outbound_control_reserved,
-            .outbound_reserved = options.outbound_reserved,
-            .inbound_per_connection_max = options.inbound_per_connection_max,
-            .inbound_connections = options.inbound_connections,
-        });
+        var negotiator = try Negotiator.init(allocator, options.negotiation());
         errdefer negotiator.deinit();
         var router: Router = .{
             .negotiator = negotiator,

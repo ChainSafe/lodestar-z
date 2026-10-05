@@ -1,18 +1,17 @@
 const std = @import("std");
 const time = @import("../time.zig");
 const session_io = @import("session_io.zig");
+const rpc_handler = @import("rpc_handler.zig");
 const Router = @import("../router.zig").Router;
 const index_list = @import("../index_list.zig");
 const snappy = @import("snappy");
 const constants = @import("constants.zig");
-const protobuf = @import("protobuf.zig");
 const topic_policy = @import("topic_policy.zig");
 const local_intent = @import("local_intent.zig");
 const topic_mod = @import("topic.zig");
 const storage = @import("message_store.zig");
 const validation_mod = @import("validation.zig");
 const Recovery = @import("recovery.zig").Recovery;
-const score_mod = @import("score.zig");
 const overlay_mod = @import("overlay.zig");
 const peers_mod = @import("peer_book.zig");
 const sessions_mod = @import("sessions.zig");
@@ -69,11 +68,8 @@ pub const ReportOutcome = validation_mod.Outcome;
 pub const MessageAdmission = @import("message_admission.zig").Admission;
 pub const MessageEvent = @import("messages.zig").MessageEvent;
 pub const MessageSink = @import("messages.zig").MessageSink;
-const IwantOutcome = @import("metrics.zig").IwantOutcome;
 
 const Turn = @import("turn.zig").Turn;
-const Credits = @import("turn.zig").Credits;
-const Progress = @import("turn.zig").Progress;
 const Layout = @import("layout.zig").Layout;
 pub const MemoryPlan = @import("layout.zig").Plan;
 
@@ -269,7 +265,7 @@ pub fn addPeer(self: *Gossipsub, conn: Handle, metadata: *const peers_mod.Metada
     return .{ .admitted = handle };
 }
 
-fn logical(self: *const Gossipsub, index: u16) peers_mod.Ref {
+pub fn logical(self: *const Gossipsub, index: u16) peers_mod.Ref {
     assert(self.sessions.rows[index].active);
     return self.sessions.rows[index].logical;
 }
@@ -335,7 +331,7 @@ pub fn publishWithOptions(self: *Gossipsub, topic_str: []const u8, ssz: []const 
     return result;
 }
 
-fn messageContext(self: *Gossipsub) messages_mod.Context {
+pub fn messageContext(self: *Gossipsub) messages_mod.Context {
     return .{ .overlay = self.overlay, .peers = &self.peers, .options = &self.options, .epoch = self.cycle.epoch };
 }
 
@@ -416,36 +412,7 @@ pub fn tick(self: *Gossipsub, now: Now) void {
     }
 }
 
-pub fn receiveItem(self: *Gossipsub, session: sessions_mod.SessionRef, item: protobuf.Item, turn: *Turn, peer: *Credits) Progress {
-    if (!self.sessions.matches(session)) return .done;
-    const now = turn.now;
-    const index = session.index;
-    if (self.sessions.rows[index].outbound == .closing) return .done;
-    switch (item) {
-        .subscription => |sub| self.onSubscription(index, sub),
-        .message => |msg| {
-            const result = self.onMessage(index, msg, turn, peer);
-            if (result != .done) return result;
-        },
-        else => {
-            if (self.sessions.rows[index].outStream() != null) {
-                switch (item) {
-                    .ihave => |ihave| {
-                        const workspace = turn.workspace(peer);
-                        if (!workspace.chargeWork(&self.options, self.ihaveWork(ihave.body.len))) return .credits;
-                        self.onIhave(index, ihave, now);
-                    },
-                    .iwant => |iwant| self.onIwant(index, iwant),
-                    .graft => |name| self.onGraft(index, name, now),
-                    .prune => |prune| self.onPrune(index, prune, now),
-                    .idontwant => |ids| self.onIdontwant(index, ids),
-                    else => unreachable,
-                }
-            }
-        },
-    }
-    return .done;
-}
+pub const receiveItem = rpc_handler.receiveItem;
 
 pub fn acceptsRpc(self: *Gossipsub, index: u16, now: Now) bool {
     return self.peers.rows[self.logical(index).index].direct or
@@ -566,7 +533,7 @@ pub fn writeCompleted(self: *Gossipsub, session: sessions_mod.SessionRef, comple
     }
 }
 
-fn deliveryLimits(self: *const Gossipsub) delivery.Limits {
+pub fn deliveryLimits(self: *const Gossipsub) delivery.Limits {
     return .{ .bytes = self.options.tx_peer_bytes, .local_bytes = self.options.tx_local_bytes };
 }
 
@@ -581,10 +548,6 @@ pub fn expirePromises(self: *Gossipsub, now_ms: u64) void {
 fn peerScore(self: *Gossipsub, index: u16, now_ms: u64) f64 {
     const ref = self.logical(index);
     return self.peers.score(ref, now_ms);
-}
-
-fn belowGossip(self: *Gossipsub, index: u16, now_ms: u64) bool {
-    return self.peerScore(index, now_ms) < self.options.score_params.gossip_threshold;
 }
 
 pub fn scoreSnapshot(self: *Gossipsub, conn: Handle, now: Now) ?f64 {
@@ -606,196 +569,6 @@ pub fn markDirect(self: *Gossipsub, conn: Handle) void {
         if (topic.mesh.isSet(index)) self.overlay.prune(&context, @intCast(t), index, constants.prune_backoff_ms, .direct_peer);
         topic.fanout.unset(index);
     }
-}
-
-fn onMessage(self: *Gossipsub, index: u16, msg: protobuf.Message, turn: *Turn, peer: *Credits) Progress {
-    const now = turn.now;
-    const context = self.messageContext();
-    const workspace = turn.workspace(peer);
-    const source: messages_mod.Source = .{ .peer = self.logical(index), .session = self.sessions.ref(index), .connection = self.sessions.rows[index].conn };
-    const result = self.messages.receive(&context, &workspace, &source, msg, now.millis());
-    // The turn offers a message refused for work again, so only its final outcome counts.
-    if (result == .deferred) return .credits;
-    const counts = self.topic_metrics.get(msg.topic);
-    counts.received +|= 1;
-    switch (result) {
-        .ignored => return .done,
-        .invalid => |reason| {
-            const conn = self.sessions.rows[index].conn;
-            std.log.scoped(.network_gossip).debug("invalid_message connection={d}:{d} topic={s} reason={s} compressed_bytes={d}", .{ conn.index, conn.generation, msg.topic, @tagName(reason), msg.data.len });
-            return .done;
-        },
-        .duplicate => |id| {
-            counts.duplicate +|= 1;
-            self.resolvePromises(turn, peer, id);
-            return .done;
-        },
-        .deferred => unreachable,
-        .refused => |refusal| {
-            switch (refusal) {
-                .identified => |id| self.resolvePromises(turn, peer, id),
-                .unidentified => {
-                    const work = self.cancelPromises(index, true);
-                    turn.budget.work -|= work;
-                    peer.work -|= work;
-                },
-            }
-            return .done;
-        },
-        .admitted => |admitted_message| {
-            self.resolvePromises(turn, peer, admitted_message.id);
-            if (msg.data.len >= self.options.idontwant_min_data_size) self.broadcastIdontwant(admitted_message.topic_index, admitted_message.id, index);
-            return .done;
-        },
-    }
-}
-
-fn resolvePromises(self: *Gossipsub, turn: *Turn, peer: *Credits, id: MessageId) void {
-    const work = self.recovery.resolve(&self.peers, id);
-    turn.budget.work -|= work;
-    peer.work -|= work;
-}
-
-pub fn ihaveWork(self: *const Gossipsub, body_len: usize) usize {
-    return ihaveWorkBound(body_len, self.overlay.rows.len, self.messages.seen.index.probe_limit + self.messages.validation.index.probe_limit, self.recovery.batch_len, self.recovery.len);
-}
-
-pub fn ihaveWorkBound(body_len: usize, topics: usize, probes: usize, batches: usize, requests: usize) usize {
-    const ids: usize = @min(constants.max_ihave_ids_per_heartbeat, body_len / (constants.message_id_length + 2));
-    const selected: usize = @min(ids, constants.gossip_ids_max);
-    const fields: usize = @min(body_len / 2 + 1, 8193);
-    const header_work = topics * (topic_mod.topic_max_len + @sizeOf(score_mod.TopicParams) + @sizeOf(score_mod.TopicCounters) + @sizeOf(score_mod.TopicWeights)) +
-        @as(usize, peers_mod.capacity) * @sizeOf(peers_mod.Row) + @sizeOf(peers_mod.PeerBook);
-    // Each protobuf field consumes at least two bytes and at most two
-    // ten-byte varints. Include a score refresh, IP population and topic
-    // lookup; ID lookups include a slot read and key comparison. Selected
-    // IDs include one bounded sampling swap, promise admission and encoding.
-    return header_work + 20 * fields +
-        Recovery.selectionWork(ids, batches, requests) + ids * probes * (@sizeOf(MessageId) + @sizeOf(u32)) +
-        selected * 384;
-}
-
-fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
-    if (self.belowGossip(index, now.millis())) return;
-    const io = &self.sessions.rows[index].io;
-    if (io.ihave_recv >= constants.max_ihave_per_heartbeat) return;
-    io.ihave_recv += 1;
-    const topic = self.overlay.findTopic(ihave.topic);
-    if (topic == null or !self.overlay.subscribed(topic.?)) return;
-    const id_budget = constants.max_ihave_ids_per_heartbeat -| @as(usize, io.iwant_ids_sent);
-    if (id_budget == 0 or self.recovery.available() == 0) return;
-    comptime assert(constants.max_ihave_ids_per_heartbeat * @sizeOf(MessageId) <= constants.GOSSIP_MAX_SIZE);
-    const candidates = std.mem.bytesAsSlice(MessageId, self.msg_scratch[0 .. constants.max_ihave_ids_per_heartbeat * @sizeOf(MessageId)]);
-    var count: usize = 0;
-    var it = ihave.ids();
-    for (0..constants.max_ihave_ids_per_heartbeat) |_| {
-        const id_bytes = (it.next() catch return) orelse break;
-        if (id_bytes.len != constants.message_id_length) continue;
-        candidates[count] = id_bytes[0..constants.message_id_length].*;
-        count += 1;
-    }
-    const selected = self.recovery.filterPending(self.logical(index), candidates[0..count]) catch return;
-    const limit = @min(constants.gossip_ids_max, id_budget, selected.capacity);
-    count = 0;
-    for (candidates[0..selected.count]) |id| {
-        if (!self.messages.wants(id, now.millis())) continue;
-        candidates[count] = id;
-        count += 1;
-    }
-    if (count == 0) return;
-    const requested = @min(count, limit);
-    for (0..requested) |i| {
-        const chosen = i + @as(usize, @intCast(self.overlay.rng.random().uintLessThanBiased(u64, @intCast(count - i))));
-        std.mem.swap(MessageId, &candidates[i], &candidates[chosen]);
-    }
-    self.recovery.requestBatch(&self.peers, &io.tx, &self.sessions.control_scratch, candidates[0..requested], self.logical(index), self.sessions.rows[index].conn, self.overlay.rng.random(), self.options.iwant_followup_ms, now.millis()) catch return;
-    io.iwant_ids_sent += @intCast(requested);
-    self.settle(index);
-}
-
-fn onIwant(self: *Gossipsub, index: u16, iwant: protobuf.IdList) void {
-    if (self.belowGossip(index, self.last_now_ms)) return;
-    defer self.settle(index);
-    var examined: usize = 0;
-    var it = iwant.ids();
-    while (it.next() catch return) |id_bytes| {
-        if (examined >= constants.max_iwant_ids_per_rpc) break;
-        examined += 1;
-        if (id_bytes.len != constants.message_id_length) continue;
-        const id: MessageId = id_bytes[0..constants.message_id_length].*;
-        if (!self.messages.hasPayload(id)) {
-            self.iwant_outcomes[@intFromEnum(IwantOutcome.miss)] +|= 1;
-            continue;
-        }
-        if (self.sessions.suppresses(index, id, self.last_now_ms)) {
-            self.iwant_outcomes[@intFromEnum(IwantOutcome.suppressed)] +|= 1;
-            continue;
-        }
-        const outcome: IwantOutcome = switch (self.messages.serve(&self.sessions.rows[index].io.tx, self.logical(index), id, self.deliveryLimits(), self.last_now_ms)) {
-            .unknown => .miss,
-            .known => |known| blk: {
-                switch (known) {
-                    .queued => self.delivery_metrics.recipient(.iwant, .queued),
-                    .pressured => self.delivery_metrics.recipient(.iwant, .pressured),
-                    .limited => {},
-                }
-                break :blk switch (known) {
-                    .queued => .queued,
-                    .pressured => .refused,
-                    .limited => .limited,
-                };
-            },
-        };
-        self.iwant_outcomes[@intFromEnum(outcome)] +|= 1;
-    }
-}
-
-/// v1.2: on the first copy of a large message, tell mesh peers not to send
-/// their duplicate. Sent before validation, only to peers on 1.2.0.
-fn broadcastIdontwant(self: *Gossipsub, topic: u16, id: MessageId, source: u16) void {
-    var it = self.overlay.mesh(topic).iterator(.{});
-    while (it.next()) |peer| {
-        const peer_index: u16 = @intCast(peer);
-        if (peer_index == source) continue;
-        const outbound = self.sessions.rows[peer_index].outbound;
-        if (outbound != .live or outbound.live.version != .v1_2) continue;
-        if (self.sessions.rows[peer_index].io.tx.submit(&.{ .idontwant = &.{id} }, &self.sessions.control_scratch, self.last_now_ms) != null) self.settle(peer_index);
-    }
-}
-
-fn onIdontwant(self: *Gossipsub, index: u16, idontwant: protobuf.IdList) void {
-    const io = &self.sessions.rows[index].io;
-    if (io.idontwant_recv >= constants.max_idontwant_per_heartbeat) return;
-    io.idontwant_recv += 1;
-    var examined: usize = 0;
-    var it = idontwant.ids();
-    while (it.next() catch return) |id_bytes| {
-        if (examined >= constants.dont_send_cap) break;
-        examined += 1;
-        if (id_bytes.len != constants.message_id_length) continue;
-        self.sessions.suppress(index, id_bytes[0..constants.message_id_length].*, self.last_now_ms, constants.mcache_len * self.options.heartbeat_interval_ms);
-    }
-}
-
-fn onGraft(self: *Gossipsub, index: u16, topic_str: []const u8, now: Now) void {
-    const topic = self.overlay.findTopic(topic_str) orelse return;
-    const context = self.overlayContext(now.millis());
-    self.overlay.onGraft(&context, topic, index);
-}
-
-fn onPrune(self: *Gossipsub, index: u16, prune: protobuf.Prune, now: Now) void {
-    const topic = self.overlay.findTopic(prune.topic) orelse return;
-    const context = self.overlayContext(now.millis());
-    self.overlay.onPrune(&context, topic, index, if (prune.backoff == 0) constants.prune_backoff_ms else prune.backoff *| 1000);
-}
-
-fn onSubscription(
-    self: *Gossipsub,
-    index: u16,
-    sub: protobuf.SubOpts,
-) void {
-    const context = self.overlayContext(self.last_now_ms);
-    _ = self.overlay.peerSubscription(&context, index, sub.topic, sub.subscribe) orelse return;
 }
 
 /// Closes current sessions. Configuration, message state and future admission remain owned here.

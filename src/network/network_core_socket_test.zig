@@ -1,3 +1,4 @@
+const Now = @import("types.zig").Now;
 const schedule_test_support = @import("schedule_test_support.zig");
 const driver = @import("driver.zig");
 const transport_test = @import("transport_test_support.zig");
@@ -135,7 +136,7 @@ test "core native wait honors engine timers and pending lifecycle work" {
     const remote = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer remote.close(std.testing.io);
     const destination = udp.Address.fromNetwork(remote.address);
-    const now = try transport.Transport.currentTime(std.testing.io);
+    const now = try Now.read(std.testing.io);
     _ = try node.transport.engine.dial(&destination, node.peerId(), now);
     try std.testing.expect(node.transport.engine.backlog());
     const first = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 100)));
@@ -170,7 +171,7 @@ test "core flushes a protocol reply in the turn that wrote it" {
     var spoke: transport.Transport = .{};
     try spoke.init(std.testing.allocator, std.testing.io, .{ .host = &spoke_key, .bind = .{ .ip4 = .loopback(0) } });
     defer spoke.deinit(std.testing.io);
-    const conn = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId(), try transport.Transport.currentTime(std.testing.io));
+    const conn = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId(), try Now.read(std.testing.io));
     var events: [32]Engine.Event = undefined;
     var connected = false;
     for (0..400) |_| {
@@ -224,7 +225,7 @@ test "core beacon idle scans do not manufacture immediate deadlines" {
         .slot = 100,
     });
     defer node.deinit(std.testing.io);
-    const now = try transport.Transport.currentTime(std.testing.io);
+    const now = try Now.read(std.testing.io);
     const calls = backing_node.allocations;
     for (0..8) |_| {
         const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
@@ -247,7 +248,7 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
     var spoke: transport.Transport = .{};
     try spoke.init(std.testing.allocator, std.testing.io, .{ .host = &spoke_key, .bind = .{ .ip4 = .loopback(0) } });
     defer spoke.deinit(std.testing.io);
-    _ = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId(), try transport.Transport.currentTime(std.testing.io));
+    _ = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId(), try Now.read(std.testing.io));
     var events: [32]Engine.Event = undefined;
     for (0..40) |_| {
         _ = try transport_test.step(&spoke, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(1) });
@@ -258,7 +259,7 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
     const due = node.due_now_turns;
     const visits = .{ node.protocols.reqresp.visits, node.protocols.router.negotiator.visits };
     for (0..64) |_| {
-        const now = try transport.Transport.currentTime(std.testing.io);
+        const now = try Now.read(std.testing.io);
         if (schedule_test_support.wakeupMilliseconds(node.protocols.reqresp.schedule(.{ .application = 1, .control = 1 }), now.millis())) |wakeup| try std.testing.expect(wakeup > now.millis());
         try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.protocols.router.schedule(1), now.millis()).? > now.millis());
         try std.testing.expect(driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis()))).failure == null);

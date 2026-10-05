@@ -154,8 +154,7 @@ pub const Sockets = struct {
     /// an error. Returns the families whose sockets the kernel granted less than the request; an
     /// unknown size does not count. Sockets of other I/O providers and platforms keep their sizes
     /// and record nothing.
-    pub fn requestBuffers(self: *Sockets, io: std.Io, request: Buffers) [2]bool {
-        _ = io;
+    pub fn requestBuffers(self: *Sockets, request: Buffers) [2]bool {
         assert(request.valid());
         var short: [2]bool = .{ false, false };
         if (native_sockets) {

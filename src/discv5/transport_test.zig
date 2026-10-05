@@ -142,7 +142,7 @@ test "transport cancels a discovery call dropped by local pressure without recor
     try std.testing.expectEqual(@as(u64, 1), pair.transport_a.send_drops.datagrams[pressure]);
     try std.testing.expect(pair.transport_a.send_drops.bytes[pressure] > 0);
     var expired: [4]CallTable.Expired = undefined;
-    try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.tick(2_000, &expired).calls);
+    try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.expire(2_000, &expired).calls);
 }
 
 test "transport advance expires at supplied time without reading the host clock" {

@@ -246,6 +246,42 @@ test.each([
   }
 }, 15000);
 
+test("gossip delivery and verdict acknowledgement progress with a full command table", async () => {
+  const pair = await gossipPair();
+  let commands: Promise<PromiseSettledResult<unknown>[]> | undefined;
+  try {
+    holdSettling(pair.right, true);
+    pair.right.holdOperations(true);
+    commands = Promise.allSettled(Array.from({length: 32}, () => pair.right.getIdentity()));
+    expect(() => pair.right.getIdentity()).toThrow("NetworkCommandFull");
+
+    await pair.left.publishGossip(TOPIC, blockPayload(4000, 4), {allowZeroPeers: false});
+    const message = await nextGossip(pair.right);
+    expect(() => pair.right.getIdentity()).toThrow("NetworkCommandFull");
+    const acknowledged = [
+      ...exchange(pair.right, settleOnly, [{handle: message.handle, type: "verdict", verdict: "accept"}]).acknowledged,
+    ];
+    await vi.waitFor(
+      () => {
+        acknowledged.push(...exchange(pair.right, settleOnly).acknowledged);
+        expect(acknowledged).toEqual([message.handle]);
+      },
+      {timeout: 5000}
+    );
+    expect(() => pair.right.getIdentity()).toThrow("NetworkCommandFull");
+    expect(exchange(pair.right, settleOnly).acknowledged).toEqual([]);
+
+    pair.right.holdOperations(false);
+    holdSettling(pair.right, false);
+    expect((await commands).map((outcome) => outcome.status)).toEqual(Array(32).fill("fulfilled"));
+  } finally {
+    pair.right.holdOperations(false);
+    holdSettling(pair.right, false);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
+    await commands;
+  }
+}, 15000);
+
 test("an acknowledgement follows only the owner's disposition of a delivered message", async () => {
   const pair = await gossipPair();
   try {

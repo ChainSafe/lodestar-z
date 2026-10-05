@@ -1,3 +1,4 @@
+const Now = @import("types.zig").Now;
 const std = @import("std");
 const Transport = @import("transport.zig").Transport;
 const Engine = @import("quic/Engine.zig");
@@ -29,7 +30,7 @@ test "transport progress early clock failure does not begin or publish a turn" {
     var node: Node = .{};
     try node.init(39);
     defer node.deinit();
-    const now = try Transport.currentTime(std.testing.io);
+    const now = try Now.read(std.testing.io);
     const failed = try node.transport.engine.dial(&quic_test.server_address, node.transport.peerId(), now);
     try std.testing.expect(node.transport.engine.failSend(failed));
     var faults: FaultIo = .{ .clock = .{} };
@@ -75,7 +76,7 @@ test "transport schedule waits for event capacity but always retires delivered e
     var node: Node = .{};
     try node.init(41);
     defer node.deinit();
-    const now = try Transport.currentTime(std.testing.io);
+    const now = try Now.read(std.testing.io);
     const handle = try node.transport.engine.dial(&quic_test.server_address, node.transport.peerId(), now);
     try std.testing.expect(node.transport.engine.failSend(handle));
     const before = node.transport.engine.resourceSnapshot();

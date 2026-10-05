@@ -39,7 +39,7 @@ test "maintenance probes a quiet partial table on its explicit timer and retries
     try std.testing.expectEqual(peer, first.peer);
     try std.testing.expectEqual(@as(usize, 1), core.calls.count());
     var expired: [4]CallTable.Expired = undefined;
-    const tick = core.tick(110, &expired);
+    const tick = core.expire(110, &expired);
     try std.testing.expectEqual(@as(usize, 1), tick.calls);
     try std.testing.expect(controller.onFailure(&core, expired[0].handle, 110, .expired));
     try std.testing.expectEqual(@as(?u64, 115), controller.nextDeadlineMs(&core));
@@ -50,7 +50,7 @@ test "maintenance probes a quiet partial table on its explicit timer and retries
         115,
         &sealEntropy(2),
     )).?;
-    _ = core.tick(215, &expired);
+    _ = core.expire(215, &expired);
     try std.testing.expect(controller.onFailure(&core, retry.call.handle, 215, .expired));
     try std.testing.expectEqual(@as(usize, 1), core.peerCount());
     try std.testing.expect(core.peerRecord(&peer.node_id).?.last_verified_ms == null);
@@ -672,7 +672,7 @@ test "maintenance replaces an expired incumbent but preserves later authenticate
         const started = (try controller.startNext(&pair.transport_a.engine, &out, try .init(&.{1}), 0, &test_support.sealEntropy(10))).?;
         if (authenticated_later) _ = try pair.transport_a.engine.confirmPeer(&started.peer, &pair.record_b, std.math.maxInt(u64));
         var expired: [4]CallTable.Expired = undefined;
-        const result = pair.transport_a.engine.tick(1, &expired);
+        const result = pair.transport_a.engine.expire(1, &expired);
         try std.testing.expectEqual(@as(usize, 1), result.calls);
         try std.testing.expect(controller.onFailure(&pair.transport_a.engine, expired[0].handle, 1, .expired));
         try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.routing.pendingCount());

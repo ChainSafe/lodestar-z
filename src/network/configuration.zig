@@ -163,7 +163,7 @@ pub fn resolve(options: Options) !Resolved {
 }
 
 pub fn validate(limits: Engine.Limits, options: Core) !void {
-    _ = try limits.validate();
+    try limits.validate();
     try peer_manager.PeerManager.validateOptions(options.peerManager());
     try Protocols.validateOptions(options.protocols);
     if (options.peers.max_peers > limits.connections_max or
@@ -224,8 +224,8 @@ pub const SocketBuffers = struct {
 };
 
 /// Requests `request` on every socket and logs one warning per socket the kernel caps below it.
-pub fn requestBuffers(sockets: *udp.Sockets, io: std.Io, request: udp.Sockets.Buffers, comptime scope: @EnumLiteral()) void {
-    const short = sockets.requestBuffers(io, request);
+pub fn requestBuffers(sockets: *udp.Sockets, request: udp.Sockets.Buffers, comptime scope: @EnumLiteral()) void {
+    const short = sockets.requestBuffers(request);
     for (short, sockets.buffers, [_][]const u8{ "ip4", "ip6" }) |below, reported, family| {
         if (!below) continue;
         std.log.scoped(scope).warn("socket_buffers_below_request family={s} receive_bytes={?d} receive_requested={d} send_bytes={?d} send_requested={d}", .{ family, reported.?.receive, request.receive, reported.?.send, request.send });

@@ -119,13 +119,13 @@ pub const Transport = struct {
         var seed_bytes: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
         defer std.crypto.secureZero(u8, &seed_bytes);
         try std.Io.randomSecure(io, &seed_bytes);
-        const now = try currentTime(io);
+        const now = try Engine.Now.read(io);
         var context = try tls.Context.init(options.host, now.unixSeconds(), serial);
         var context_owned = true;
         errdefer if (context_owned) context.deinit();
         target.sockets = try Sockets.bind(io, options.bind);
         errdefer target.sockets.close(io);
-        if (options.socket_buffers) |request| configuration.requestBuffers(&target.sockets, io, request, .network_quic);
+        if (options.socket_buffers) |request| configuration.requestBuffers(&target.sockets, request, .network_quic);
         target.engine = try Engine.init(allocator, .{
             .tls = context,
             .limits = options.limits,
@@ -433,12 +433,8 @@ pub const Transport = struct {
     /// quiche 0.28 under CUBIC releases every datagram at its send time. A controller that paces
     /// would need held datagrams, which this transport does not keep.
     fn assertReleased(io: std.Io, release_times: []const u64) void {
-        const now = currentTime(io) catch return;
+        const now = Engine.Now.read(io) catch return;
         for (release_times) |release_time| assert(release_time <= now.nanos());
-    }
-
-    pub fn currentTime(io: std.Io) error{ClockOutOfRange}!Engine.Now {
-        return Engine.Now.read(io);
     }
 
     comptime {

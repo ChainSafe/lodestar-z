@@ -1,3 +1,4 @@
+const Now = @import("types.zig").Now;
 const driver = @import("driver.zig");
 const std = @import("std");
 const d = @import("discv5");
@@ -41,7 +42,7 @@ const Peers = struct {
             var expired: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
             var completed = false;
             for (0..100) |_| {
-                const now = try transport.Transport.currentTime(std.testing.io);
+                const now = try Now.read(std.testing.io);
                 const response = try d.driver.step(remote, std.testing.io, &expired, .{ .deadline = now.monotonic, .wait_max = .fromMilliseconds(10) });
                 if (response.failure) |failure| return failure.cause;
                 const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));

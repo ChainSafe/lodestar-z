@@ -1,6 +1,5 @@
 const std = @import("std");
 const NetworkCore = @import("network_core.zig").NetworkCore;
-const Transport = @import("transport.zig").Transport;
 const Now = @import("types.zig").Now;
 const wait = @import("wait.zig");
 
@@ -10,7 +9,7 @@ pub fn step(core: *NetworkCore, io: std.Io, now: Now, outputs: NetworkCore.Outpu
     const plan = core.waitPlan(now, outputs, host);
     const readiness = wait.poll(io, plan.sources, plan.timeout);
     var clock_failure: ?error{ClockOutOfRange} = null;
-    const read = Transport.currentTime(io) catch |err| blk: {
+    const read = Now.read(io) catch |err| blk: {
         clock_failure = err;
         break :blk plan.now;
     };

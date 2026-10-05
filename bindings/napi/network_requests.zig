@@ -321,7 +321,7 @@ pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
     table.refresh(cell);
     runtime.recomputeLocked(.completions);
 }
-pub fn flags(runtime: *Runtime, now: n.Now) void {
+pub fn applyPending(runtime: *Runtime, now: n.Now) void {
     runtime.lock();
     defer runtime.unlock();
     if (runtime.requests) |*table| for (table.cells) |*cell| {

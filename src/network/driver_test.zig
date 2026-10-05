@@ -20,7 +20,7 @@ const udp = @import("udp");
 const PeerId = @import("wire/peer_id.zig").PeerId;
 
 fn currentTime() !Now {
-    return transport.Transport.currentTime(std.testing.io);
+    return Now.read(std.testing.io);
 }
 
 /// A scripted host: a nonblocking wake pipe, and an apply that drains it and then runs the
@@ -363,7 +363,7 @@ test "owner zero-wait turns count under every due source until the owner settles
     defer std.testing.allocator.destroy(node);
     try initOwner(node);
     defer node.deinit(std.testing.io);
-    const now = try transport.Transport.currentTime(std.testing.io);
+    const now = try Now.read(std.testing.io);
     for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis()))).failure == null);
     const host = @intFromEnum(Source.host);
     try std.testing.expectEqual(@as(u64, 8), node.due_now_turns[host]);
@@ -378,7 +378,7 @@ test "owner zero-wait turn counts once under each of its two due sources" {
     defer std.testing.allocator.destroy(node);
     try initOwner(node);
     defer node.deinit(std.testing.io);
-    const now = try transport.Transport.currentTime(std.testing.io);
+    const now = try Now.read(std.testing.io);
     for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis()))).failure == null);
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(now, .{}).schedule(), now.millis()).? > now.millis());
     const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{95}));

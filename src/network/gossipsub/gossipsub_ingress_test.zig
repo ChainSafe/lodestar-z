@@ -38,7 +38,7 @@ const Consumer = struct {
 
     fn hasCapacity(context: *anyopaque, kind: processor.limits.Kind, len: usize) bool {
         const self: *Consumer = @ptrCast(@alignCast(context));
-        return self.table.admissible(kind, len);
+        return self.table.checkAdmissionCapacity(kind, len);
     }
 
     fn admit(context: *anyopaque, candidate: *Gossipsub.MessageAdmission) bool {

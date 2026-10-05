@@ -11,7 +11,6 @@ const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
 const wake_sources = @import("wake_sources.zig");
-const control_wire = @import("control_wire.zig");
 const control_values = @import("control_values.zig");
 const ControlProtocol = @import("control_protocol.zig").ControlProtocol;
 const advertisement = @import("advertisement.zig");
@@ -162,7 +161,7 @@ pub const NetworkCore = struct {
         self.current_slot = startup.slot;
         self.host_runnable = false;
         self.discovery = null;
-        self.last_now = try Transport.currentTime(io);
+        self.last_now = try Now.read(io);
         try self.transport.init(allocator, io, .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .socket_buffers = resolved.socket_buffers.quic });
         errdefer self.transport.deinit(io);
         if (startup.discovery) |discovery_options| {
@@ -200,7 +199,7 @@ pub const NetworkCore = struct {
     /// Immediately destroys the owner, ending all borrows and discarding undelivered results.
     pub fn deinit(self: *NetworkCore, io: std.Io) void {
         if (!self.initialized) return;
-        const read = Transport.currentTime(io) catch self.last_now;
+        const read = Now.read(io) catch self.last_now;
         self.shutdown(read.floor(self.last_now));
         self.host_wake = null;
         if (self.discovery) |owned| {

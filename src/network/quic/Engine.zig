@@ -64,7 +64,7 @@ pub const Limits = struct {
     unanswered_dial_timeout_ms: u64 = bounds.unanswered_dial_timeout_ms,
     keep_alive_ms: u64 = bounds.keep_alive_ms,
 
-    pub fn validate(wanted: *const Limits) error{InvalidLimits}!u16 {
+    pub fn validate(wanted: *const Limits) error{InvalidLimits}!void {
         if (wanted.connections_max == 0) return error.InvalidLimits;
         if (wanted.connections_max > bounds.connections_max_ceiling) return error.InvalidLimits;
         if (wanted.handshaking_max == 0 or wanted.handshaking_max > wanted.connections_max) {
@@ -80,11 +80,12 @@ pub const Limits = struct {
         if (wanted.keep_alive_ms == 0) return error.InvalidLimits;
         if (wanted.dialing_max == 0 or wanted.outbound_reserved > wanted.dialing_max or
             wanted.outbound_reserved > wanted.connections_max) return error.InvalidLimits;
-        const outbound_max = wanted.outbound_max orelse
-            @max(1, wanted.connections_max - wanted.connections_max / 4);
+        const outbound_max = wanted.outboundLimit();
         if (outbound_max == 0 or outbound_max > wanted.connections_max) return error.InvalidLimits;
+    }
 
-        return outbound_max;
+    pub fn outboundLimit(self: *const Limits) u16 {
+        return self.outbound_max orelse @max(1, self.connections_max - self.connections_max / 4);
     }
 };
 
@@ -179,7 +180,7 @@ pub fn init(allocator: std.mem.Allocator, options: Options) Error!Engine {
     if (options.local[0]) |address| std.debug.assert(address == .ip4);
     if (options.local[1]) |address| std.debug.assert(address == .ip6);
     const wanted = options.limits;
-    const outbound_max = try wanted.validate();
+    try wanted.validate();
 
     const connection_window = @min(
         wanted.receive_budget_bytes / wanted.connections_max,
@@ -214,7 +215,7 @@ pub fn init(allocator: std.mem.Allocator, options: Options) Error!Engine {
         .registry = registry,
         .connection_window = connection_window,
         .stream_window = stream_window,
-        .outbound_max = outbound_max,
+        .outbound_max = wanted.outboundLimit(),
         .csprng = csprng,
         .retry_key = retry_key,
     };
