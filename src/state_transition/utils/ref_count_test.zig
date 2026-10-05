@@ -3,6 +3,19 @@
 const std = @import("std");
 const RefCount = @import("ref_count.zig").RefCount;
 
+test "memory_safety: RefCount.init retains caller ownership on allocation failure" {
+    const allocator = std.testing.allocator;
+    var list: std.ArrayList(u32) = .empty;
+    defer list.deinit(allocator);
+    try list.append(allocator, 42);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, RefCount(std.ArrayList(u32)).init(failing.allocator(), list));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqualSlices(u32, &.{42}, list.items);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
 test "RefCount - *std.ArrayList(u32)" {
     const allocator = std.testing.allocator;
     const WrappedArrayList = RefCount(*std.ArrayList(u32));

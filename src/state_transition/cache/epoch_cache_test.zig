@@ -11,6 +11,49 @@ const EffectiveBalanceIncrementsRc = @import("effective_balance_increments.zig")
 const effectiveBalanceIncrementsInit = @import("effective_balance_increments.zig").effectiveBalanceIncrementsInit;
 const SLOTS_PER_EPOCH = @import("preset").preset.SLOTS_PER_EPOCH;
 
+test "memory_safety: createFromState releases shuffling inputs on every allocation failure" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+    const state = test_state.cached_state.state;
+    const immutable_data = @import("epoch_cache.zig").EpochCacheImmutableData{
+        .config = test_state.config,
+        .pubkey_cache = test_state.pubkey_cache,
+    };
+    const options = @import("epoch_cache.zig").EpochCacheOpts{
+        .skip_sync_committee_cache = true,
+        .skip_sync_pubkeys = true,
+    };
+
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    const cache = try EpochCache.createFromState(counting.allocator(), std.testing.io, state, immutable_data, options);
+    cache.deinit();
+    const allocation_count = counting.alloc_index;
+    try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+
+    var oom_count: usize = 0;
+    var success_count: usize = 0;
+    for (0..allocation_count + 1) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        const created = EpochCache.createFromState(failing.allocator(), std.testing.io, state, immutable_data, options) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            oom_count += 1;
+            continue;
+        };
+        created.deinit();
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        success_count += 1;
+    }
+    try std.testing.expectEqual(allocation_count, oom_count);
+    try std.testing.expectEqual(1, success_count);
+}
+
 test "memory_safety: setSyncCommitteesIndexed should release each cache once on allocation failure" {
     const allocator = std.testing.allocator;
     const ValidatorIndex = ct.primitive.ValidatorIndex.Type;

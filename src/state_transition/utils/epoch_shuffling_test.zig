@@ -4,7 +4,32 @@ const std = @import("std");
 const ct = @import("consensus_types");
 const preset = @import("preset").preset;
 const EpochShuffling = @import("epoch_shuffling.zig").EpochShuffling;
+const computeEpochShuffling = @import("epoch_shuffling.zig").computeEpochShuffling;
+const Node = @import("persistent_merkle_tree").Node;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const innerShuffleList = @import("swap_or_not_shuffle").innerShuffleList;
+
+test "memory_safety: computeEpochShuffling retains caller ownership on allocation failure" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    const input = try failing.allocator().dupe(u64, &.{ 1, 7, 42 });
+    failing.fail_index = failing.alloc_index;
+
+    const result = computeEpochShuffling(failing.allocator(), test_state.cached_state.state, input, test_state.cached_state.epoch_cache.epoch);
+    const input_retained = failing.freed_bytes == 0;
+    defer if (input_retained) failing.allocator().free(input);
+
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(input_retained);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 7, 42 }, input);
+}
 
 test "EpochShuffling matches u64 shuffling for wide validator indices" {
     const allocator = std.testing.allocator;
