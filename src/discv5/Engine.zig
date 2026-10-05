@@ -44,7 +44,7 @@ pub const OutboundCall = struct {
     peer: types.Endpoint,
 };
 
-pub const TickResult = struct {
+pub const ExpiryCounts = struct {
     calls: usize,
     challenges: usize,
     sessions: usize,
@@ -280,7 +280,7 @@ pub fn prepareStandardResponse(
     };
 }
 
-pub fn sendNextStandardResponse(
+pub fn encodeNextStandardResponse(
     self: *Engine,
     out: []u8,
     response: *PendingResponse,
@@ -296,7 +296,7 @@ pub fn sendNextStandardResponse(
         now_ms,
         entropy,
     );
-    response.markSent();
+    response.advance();
     return packet_length;
 }
 
@@ -370,11 +370,11 @@ fn process(
 }
 
 /// Expires calls, challenges, and sessions. Every call expiry is returned to its host owner.
-pub fn tick(
+pub fn expire(
     self: *Engine,
     now_ms: u64,
     expired_calls: []CallTable.Expired,
-) TickResult {
+) ExpiryCounts {
     const expired_count = self.calls.expire(now_ms, expired_calls);
     const expired = self.channel.expire(now_ms);
     return .{

@@ -84,7 +84,7 @@ pub fn initialize(self: *Runtime) !void {
     self.heavy.?.core_live = true;
     try self.heavy.?.core.setHostWake(self.wake.?.read_fd);
 
-    try publishMetrics(self, try now(io));
+    try publishMetrics(self, try Now.read(io));
     std.log.scoped(.network_runtime).info("owner_initialized target_peers={d} max_peers={d}", .{ self.heavy.?.resolved.core.peers.target_peers, self.heavy.?.resolved.core.peers.max_peers });
 }
 pub fn run(self: *Runtime) void {
@@ -120,7 +120,7 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
     const graceful = self.graceful and self.reason == .requested;
     self.unlock();
     if (stop and !graceful) return null;
-    const timestamp = try now(io);
+    const timestamp = try Now.read(io);
     if (stop) {
         if (self.closing_deadline == null) {
             std.log.scoped(.network_runtime).info("owner_stopping mode=graceful peers={d}", .{self.heavy.?.core.peerCounts().connected});
@@ -183,7 +183,7 @@ const Host = struct {
 
 /// Drains the wake pipe before reading any queue, so a submission that lands after the drain
 /// wakes the next poll. Then applies reports, commands, publications and requests in admission
-/// order, gossip verdicts and processor maintenance, and request and response flags.
+/// order, gossip verdicts and processor maintenance, and pending request and response actions.
 fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.NetworkCore.HostProgress {
     self.lock();
     self.wake.?.drain() catch self.failLocked(error.NetworkWakeFailed);
@@ -197,9 +197,9 @@ fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.NetworkCore.HostProgres
         more = applyReports(self, tick) or more;
         more = try executeWork(self, io, tick) or more;
     }
-    more = try gossip_mod.flags(self, io, tick) or more;
-    requests_mod.flags(self, tick);
-    more = try incoming_mod.flags(self, tick) or more;
+    more = try gossip_mod.maintain(self, io, tick) or more;
+    requests_mod.applyPending(self, tick);
+    more = try incoming_mod.applyPending(self, tick) or more;
     return .{ .runnable = more };
 }
 
@@ -270,7 +270,7 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
                 return err;
             };
             self.unlock();
-            publications.execute(self, publication.?, tick, (try now(io)).millis());
+            publications.execute(self, publication.?, tick, (try Now.read(io)).millis());
             publishes += 1;
             bytes += len;
         } else {
@@ -315,9 +315,6 @@ fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n
     }
     self.owner_turns +|= 1;
     self.unlock();
-}
-pub fn now(io: std.Io) error{ClockOutOfRange}!n.Now {
-    return n.Now.read(io);
 }
 
 fn publishMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!void {
@@ -441,7 +438,7 @@ test "queued request and disconnect share the protocol turn clock while latency 
     try remote.init(testing, std.testing.io, .{ .host = &remote_key, .bind = .{ .ip4 = .loopback(0) } });
     defer remote.deinit(std.testing.io);
     const remote_id = remote.peerId();
-    _ = try owner.core.transport.dialPeer(std.testing.io, remote.localAddress(), remote_id, try n.Transport.currentTime(std.testing.io));
+    _ = try owner.core.transport.dialPeer(std.testing.io, remote.localAddress(), remote_id, try n.Now.read(std.testing.io));
     for (0..64) |_| {
         var events: [32]n.Engine.Event = undefined;
         const progress = n.transport_driver.step(&owner.core.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
@@ -455,7 +452,7 @@ test "queued request and disconnect share the protocol turn clock while latency 
         if (reply.failure) |err| return err;
     }
     try std.testing.expect(owner.core.isConnected(&remote_id));
-    const tick = try n.Transport.currentTime(std.testing.io);
+    const tick = try n.Now.read(std.testing.io);
     const Clock = struct {
         var time: n.Now = undefined;
         fn read(_: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {

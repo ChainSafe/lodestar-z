@@ -315,7 +315,7 @@ fn ownerWork(cell: *const Cell) bool {
 }
 /// Applies releases, cancels, response permissions, queued responses and terminal actions.
 /// Returns whether the per-turn response cap left queued responses for the next turn.
-pub fn flags(runtime: *Runtime, now: n.Now) !bool {
+pub fn applyPending(runtime: *Runtime, now: n.Now) !bool {
     runtime.lock();
     defer runtime.unlock();
     const table = if (runtime.incoming) |*table| table else return false;

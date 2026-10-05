@@ -36,7 +36,7 @@ pub fn projectWall(admitted: u64, clock: n.Now) !u64 {
 /// Runs processor maintenance and applies queued verdicts, unless the host holds them. Each message the host was
 /// handed then awaits acknowledgement of its disposition. Returns whether bounded carry-over work remains for the
 /// next turn.
-pub fn flags(runtime: *Runtime, io: std.Io, tick: n.Now) !bool {
+pub fn maintain(runtime: *Runtime, io: std.Io, tick: n.Now) !bool {
     runtime.lock();
     defer runtime.unlock();
     const table = if (runtime.gossip) |*table| table else return false;
@@ -75,7 +75,7 @@ pub const Ingress = struct {
         defer runtime.unlock();
         if (runtime.stop) return false;
         const table = if (runtime.gossip) |*table| table else return false;
-        return table.admissible(kind, len);
+        return table.checkAdmissionCapacity(kind, len);
     }
 
     fn admit(context: *anyopaque, candidate: *native.Gossipsub.MessageAdmission) bool {

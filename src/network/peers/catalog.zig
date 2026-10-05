@@ -395,14 +395,19 @@ pub const Catalog = struct {
         return if (row.occupied and std.meta.eql(row.connection, conn)) .{ .index = index, .generation = row.generation } else null;
     }
 
-    pub fn rowFor(self: *const Catalog, ref: t.PeerRef) ?*Row {
+    pub fn rowFor(self: *const Catalog, ref: t.PeerRef) ?*const Row {
         if (ref.index >= self.rows.len) return null;
         const row = &self.rows[ref.index];
         return if (row.occupied and row.generation == ref.generation) row else null;
     }
 
+    pub fn rowForMut(self: *Catalog, ref: t.PeerRef) ?*Row {
+        if (self.rowFor(ref) == null) return null;
+        return &self.rows[ref.index];
+    }
+
     fn connectedRow(self: *Catalog, ref: t.PeerRef, conn: t.Handle) ?*Row {
-        const row = self.rowFor(ref) orelse return null;
+        const row = self.rowForMut(ref) orelse return null;
         const current = row.connection orelse return null;
         return if (std.meta.eql(current, conn)) row else null;
     }
@@ -460,7 +465,7 @@ pub const Catalog = struct {
         std.debug.assert(conn.index < self.by_connection.len);
         if (identity.eql(local)) return .duplicate;
         if (self.find(identity)) |ref| {
-            const row = self.rowFor(ref).?;
+            const row = self.rowForMut(ref).?;
             var current_reputation = row.reputation;
             current_reputation.decay(options.now_ms);
             if (current_reputation.banned(options.now_ms)) return .banned;
@@ -496,7 +501,7 @@ pub const Catalog = struct {
         if (self.established[slot]) |victim| self.forget(self.reference(victim));
         const ref = self.allocate(identity) orelse return .capacity;
         self.established[slot] = ref.index;
-        const row = self.rowFor(ref).?;
+        const row = self.rowForMut(ref).?;
         row.established_slot = @intCast(slot);
         connect(row, conn, options);
         self.connected_count += 1;
@@ -543,7 +548,7 @@ pub const Catalog = struct {
     }
 
     pub fn releaseIntent(self: *Catalog, peer: t.PeerRef) void {
-        const row = self.rowFor(peer) orelse return;
+        const row = self.rowForMut(peer) orelse return;
         std.debug.assert(!row.direct and row.attempt == null);
         if (self.intents.isSet(peer.index)) {
             self.intents.unset(peer.index);
@@ -563,7 +568,7 @@ pub const Catalog = struct {
     }
 
     fn forget(self: *Catalog, peer: t.PeerRef) void {
-        const row = self.rowFor(peer).?;
+        const row = self.rowForMut(peer).?;
         std.debug.assert(row.connection == null and row.attempt == null and !row.direct and row.pending_close == null and !row.pending_update);
         self.by_identity.remove(self.rows, &row.identity);
         if (row.established_slot) |slot| {
@@ -917,7 +922,7 @@ pub const Catalog = struct {
     }
 
     pub fn setDirect(self: *Catalog, ref: t.PeerRef, direct: bool) bool {
-        const row = self.rowFor(ref) orelse return false;
+        const row = self.rowForMut(ref) orelse return false;
         if (row.direct != direct) {
             self.revision +|= 1;
             if (direct) self.direct_count += 1 else self.direct_count -= 1;
@@ -933,7 +938,7 @@ pub const Catalog = struct {
         action: t.PeerAction,
         now_ms: u64,
     ) ?t.ReputationDecision {
-        const row = self.rowFor(ref) orelse return null;
+        const row = self.rowForMut(ref) orelse return null;
         if (row.established_slot == null) return null;
         self.revision +|= 1;
         defer {
@@ -947,7 +952,7 @@ pub const Catalog = struct {
     }
 
     pub fn nonCompletion(self: *Catalog, ref: t.PeerRef, now_ms: u64) bool {
-        const row = self.rowFor(ref) orelse return false;
+        const row = self.rowForMut(ref) orelse return false;
         if (row.established_slot == null) return false;
         const before = row.reputation.score;
         row.reputation.nonCompletion(now_ms);

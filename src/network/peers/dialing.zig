@@ -106,7 +106,7 @@ pub const Dialing = struct {
             count += 1;
         }
         const ref = try catalog.retainIntent(peer);
-        const row = catalog.rowFor(ref).?;
+        const row = catalog.rowForMut(ref).?;
         row.dial.addresses = prepared;
         row.dial.address_count = count;
         if (row.dial.automatic) row.dial.address_index = 0;
@@ -120,7 +120,7 @@ pub const Dialing = struct {
         if (row.connection) |conn| self.accepted(catalog, ref, conn, now_ms);
     }
 
-    /// Requires Discovery.step output with authenticated source scope and a verified ENR.
+    /// Requires Discovery.advance output with authenticated source scope and a verified ENR.
     pub fn enqueueDiscovered(self: *Dialing, catalog: *Catalog, candidate: *const enr.Candidate, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) !void {
         try context.validate();
         if (candidate.address_count == 0 or candidate.address_count > 2) return error.InvalidCandidate;
@@ -129,7 +129,7 @@ pub const Dialing = struct {
         for (candidate.addresses[0..candidate.address_count]) |address| if (address.port() == 0) return error.InvalidCandidate;
         var incoming: Row = .{ .identity = candidate.peer, .node_id = candidate.node_id, .dial = .{ .automatic = true, .eligible_at_ms = now_ms, .history_until_ms = now_ms +| history_retention_ms, .hints = hints, .hints_at_ms = now_ms } };
         if (catalog.find(&candidate.peer)) |ref| {
-            const row = catalog.rowFor(ref).?;
+            const row = catalog.rowForMut(ref).?;
             if (row.node_id) |id| if (!std.mem.eql(u8, &id, &candidate.node_id)) return error.InvalidCandidate;
             if (row.dial.hints) |previous| {
                 if (candidate.sequence < previous.sequence) return error.StaleRecord;
@@ -165,7 +165,7 @@ pub const Dialing = struct {
         applyAddresses(&incoming.dial, &admitted);
         Catalog.prepareCandidateCustody(&incoming, context);
         const ref = try retainCandidate(catalog, &incoming, context, wanted, now_ms);
-        const row = catalog.rowFor(ref).?;
+        const row = catalog.rowForMut(ref).?;
         row.node_id = incoming.node_id;
         row.dial = incoming.dial;
         row.custody_work = incoming.custody_work;
@@ -217,7 +217,7 @@ pub const Dialing = struct {
         if (admitted.count == 0) return .failed;
         const incoming: Row = .{ .identity = record.peer, .dial = .{ .automatic = true, .replay = .untried } };
         const ref = retainCandidate(catalog, &incoming, context, wanted, now_ms) catch return .capacity;
-        const row = catalog.rowFor(ref).?;
+        const row = catalog.rowForMut(ref).?;
         row.dial.automatic = true;
         row.dial.replay = .untried;
         row.dial.deferUntil(now_ms);
@@ -360,7 +360,7 @@ pub const Dialing = struct {
         for (self.active, 0..) |attempt, index| {
             const peer = attempt.peer orelse continue;
             if (!std.meta.eql(attempt.connection, conn)) continue;
-            const row = catalog.rowFor(peer).?;
+            const row = catalog.rowForMut(peer).?;
             self.retire(catalog, @intCast(index), .admission_refused, now_ms);
             row.dial.deferUntil(now_ms +| 1_000);
             catalog.markDial(peer.index);
@@ -370,7 +370,7 @@ pub const Dialing = struct {
         return false;
     }
     pub fn accepted(self: *Dialing, catalog: *Catalog, peer: t.PeerRef, conn: t.Handle, now_ms: u64) void {
-        const row = catalog.rowFor(peer).?;
+        const row = catalog.rowForMut(peer).?;
         std.debug.assert(std.meta.eql(row.connection, conn));
         catalog.markDial(peer.index);
         // Any connection to a remembered candidate ends its turn for a paced first attempt.
@@ -396,7 +396,7 @@ pub const Dialing = struct {
     }
     pub fn cancelConnect(self: *Dialing, catalog: *Catalog, peer: *const t.PeerId, now_ms: u64) ?t.Handle {
         const ref = catalog.find(peer) orelse return null;
-        const row = catalog.rowFor(ref).?;
+        const row = catalog.rowForMut(ref).?;
         var close: ?t.Handle = null;
         row.dial.manual_until_ms = 0;
         self.version +|= 1;
@@ -440,7 +440,7 @@ pub const Dialing = struct {
         const attempt = self.attemptFor(token) orelse return false;
         if (attempt.connection != null) return false;
         const peer = attempt.peer.?;
-        const row = catalog.rowFor(peer).?;
+        const row = catalog.rowForMut(peer).?;
         self.retire(catalog, @intCast(token.index), .deferred, now_ms);
         row.dial.deferUntil(now_ms +| 1_000);
         releaseUnused(catalog, peer);
@@ -449,7 +449,7 @@ pub const Dialing = struct {
     fn retire(self: *Dialing, catalog: *Catalog, index: u8, outcome: t.DialOutcome, now_ms: u64) void {
         const attempt = &self.active[index];
         const peer = attempt.peer.?;
-        const row = catalog.rowFor(peer).?;
+        const row = catalog.rowForMut(peer).?;
         std.debug.assert(row.attempt == index);
         row.attempt = null;
         self.held.total -= 1;
@@ -463,7 +463,7 @@ pub const Dialing = struct {
     fn failed(self: *Dialing, catalog: *Catalog, index: u8, now_ms: u64, failure: t.DialFailure, evidence: bool) void {
         const attempt = self.active[index];
         const peer = attempt.peer.?;
-        const row = catalog.rowFor(peer).?;
+        const row = catalog.rowForMut(peer).?;
         // Another connection to the peer already won, so this attempt is redundant, not failed.
         const redundant = row.connection != null;
         self.retire(catalog, index, if (redundant) .cancelled else failureOutcome(failure), now_ms);

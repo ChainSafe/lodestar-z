@@ -6,6 +6,7 @@ const Gossipsub = @import("Gossipsub.zig");
 const Engine = @import("../quic/Engine.zig");
 const MessageId = Gossipsub.MessageId;
 const constants = @import("constants.zig");
+const rpc_handler = @import("rpc_handler.zig");
 const protobuf = @import("protobuf.zig");
 const StreamHandle = Engine.StreamHandle;
 const Credits = @import("turn.zig").Credits;
@@ -105,7 +106,7 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
         try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
         try std.testing.expect(!turn.large_used);
     }
-    const cost = g.ihaveWork(io.rpc.?.item.?.bytes.len);
+    const cost = rpc_handler.ihaveWork(&g, io.rpc.?.item.?.bytes.len);
     try std.testing.expect(cost > writer.len);
     turn.budget.work = cost;
     peer.work = cost - 1;

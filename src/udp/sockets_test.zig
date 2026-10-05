@@ -199,7 +199,7 @@ test "UDP records the kernel's socket buffer sizes and receive drops after a req
     var sockets = try Sockets.bind(std.testing.io, loopbacks);
     defer sockets.close(std.testing.io);
     const largest: Sockets.Buffers = .{ .receive = Sockets.Buffers.bytes_max, .send = Sockets.Buffers.bytes_max };
-    const short = sockets.requestBuffers(std.testing.io, largest);
+    const short = sockets.requestBuffers(largest);
     const full: u64 = if (os == .linux) 2 * @as(u64, Sockets.Buffers.bytes_max) else Sockets.Buffers.bytes_max;
     for (sockets.values, sockets.buffers, short) |socket, reported, below| {
         try std.testing.expectEqual(try kernelSize(socket.?.handle, std.posix.SO.RCVBUF), reported.?.receive.?);
@@ -210,7 +210,7 @@ test "UDP records the kernel's socket buffer sizes and receive drops after a req
     // A supported observation must work equally before and after requesting buffers.
     try std.testing.expectEqual(sockets.drops(), plain.drops());
     const smallest: Sockets.Buffers = .{ .receive = Sockets.Buffers.bytes_min, .send = Sockets.Buffers.bytes_min };
-    try std.testing.expectEqual([2]bool{ false, false }, sockets.requestBuffers(std.testing.io, smallest));
+    try std.testing.expectEqual([2]bool{ false, false }, sockets.requestBuffers(smallest));
     if (os != .linux) return;
     // Kernels without SO_MEMINFO report no drop count, and production exports none.
     const initial = sockets.drops();
@@ -256,7 +256,7 @@ test "UDP records a failed size readback as unknown and not below the request" {
     // getsockopt fails on a descriptor that is not open.
     var sockets: Sockets = .{ .native = .{ true, false }, .values = .{ .{ .handle = -1, .address = .{ .ip4 = .loopback(0) } }, null } };
     const largest: Sockets.Buffers = .{ .receive = Sockets.Buffers.bytes_max, .send = Sockets.Buffers.bytes_max };
-    try std.testing.expectEqual([2]bool{ false, false }, sockets.requestBuffers(std.testing.io, largest));
+    try std.testing.expectEqual([2]bool{ false, false }, sockets.requestBuffers(largest));
     try std.testing.expectEqual([2]?Sockets.Buffers.Reported{ .{ .receive = null, .send = null }, null }, sockets.buffers);
     try std.testing.expectEqual([2]?u64{ null, null }, sockets.drops());
 }

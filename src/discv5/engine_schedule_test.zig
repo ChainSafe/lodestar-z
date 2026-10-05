@@ -59,7 +59,7 @@ const Network = struct {
             .request => |request| {
                 var response: PendingResponse = .{};
                 try self.nodes[recipient].prepareStandardResponse(&request, &response);
-                out.length = (try self.nodes[recipient].sendNextStandardResponse(&out.bytes, &response, now_ms, &support.sealEntropy(60))).?;
+                out.length = (try self.nodes[recipient].encodeNextStandardResponse(&out.bytes, &response, now_ms, &support.sealEntropy(60))).?;
                 try std.testing.expect(response.complete());
             },
             .response => |response| {
@@ -100,10 +100,10 @@ test "bounded dropped duplicated and delayed packets deliver one terminal outcom
             }
             try std.testing.expectEqual(@as(u8, if (drop_at == 4) 1 else 0), network.completions);
             var expired: [4]CallTable.Expired = undefined;
-            const terminal = network.nodes[0].tick(200, &expired);
+            const terminal = network.nodes[0].expire(200, &expired);
             try std.testing.expectEqual(@as(usize, 1), terminal.calls + network.completions);
             if (terminal.calls == 1) try std.testing.expectEqual(network.handle, expired[0].handle);
-            _ = network.nodes[1].tick(200, &expired);
+            _ = network.nodes[1].expire(200, &expired);
             if (held) |packet| {
                 current = packet;
                 for (0..4) |stage| {
@@ -112,7 +112,7 @@ test "bounded dropped duplicated and delayed packets deliver one terminal outcom
                     current = next;
                 }
             }
-            try std.testing.expectEqual(@as(usize, 0), network.nodes[0].tick(400, &expired).calls);
+            try std.testing.expectEqual(@as(usize, 0), network.nodes[0].expire(400, &expired).calls);
             try std.testing.expectEqual(@as(usize, 0), network.nodes[0].calls.count());
             try std.testing.expectEqual(@as(u8, if (drop_at == 4) 1 else 0), network.completions);
         }

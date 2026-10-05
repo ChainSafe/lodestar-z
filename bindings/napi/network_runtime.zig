@@ -7,7 +7,6 @@ const network_storage = @import("network_storage.zig");
 const network_peer_reports = @import("network_peer_reports.zig");
 const network_budget = @import("network_budget.zig");
 const network_exchange_js = @import("network_exchange_js.zig");
-const network_owner = @import("network_owner.zig");
 pub const gossip_mod = @import("network_gossip.zig");
 pub const incoming_mod = @import("network_incoming.zig");
 pub const requests_mod = @import("network_requests.zig");
@@ -156,10 +155,10 @@ pub const Runtime = struct {
     fn destroyOwner(self: *Runtime) void {
         if (self.heavy) |heavy| {
             if (heavy.core_live) {
-                heavy.core.shutdown((network_owner.now(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now));
+                heavy.core.shutdown((n.Now.read(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now));
                 if (self.metrics.allocatedBytes() > 0) {
                     self.captureBridgeLocked(&heavy.bridge);
-                    var context = n.metrics.Context.init(&heavy.core, (network_owner.now(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now), false);
+                    var context = n.metrics.Context.init(&heavy.core, (n.Now.read(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now), false);
                     context.bridge = &heavy.bridge;
                     if (self.metrics.render(&context)) |index| {
                         self.metrics.published = index;

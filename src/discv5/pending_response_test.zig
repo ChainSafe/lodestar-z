@@ -26,7 +26,7 @@ test "empty NODES response is one packet" {
     const next = response.next(&raw).?;
     try std.testing.expectEqual(@as(u64, 1), next.nodes.total);
     try std.testing.expectEqual(@as(usize, 0), next.nodes.enrs.len);
-    response.markSent();
+    response.advance();
     try std.testing.expect(response.complete());
     try std.testing.expect(response.next(&raw) == null);
 }
@@ -53,7 +53,7 @@ test "maximum ENRs are fragmented by encoded size" {
         try std.testing.expect(next.nodes.enrs.len > 0);
         packet_count += 1;
         record_count += next.nodes.enrs.len;
-        response.markSent();
+        response.advance();
     }
     try std.testing.expect(response.complete());
     try std.testing.expectEqual(response.records.len, record_count);
@@ -79,7 +79,7 @@ test "PONG reports the authenticated source address" {
     try std.testing.expectEqual(@as(u64, 7), next.pong.enr_sequence);
     try std.testing.expectEqual(@as(u16, 9_001), next.pong.recipient_port);
     try std.testing.expectEqual([_]u8{0x22} ** 16, next.pong.recipient_ip.ip6);
-    response.markSent();
+    response.advance();
     try std.testing.expect(response.complete());
 }
 

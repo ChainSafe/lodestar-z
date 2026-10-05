@@ -21,7 +21,7 @@ pub const RawRecords = [types.findnode_result_max][]const u8;
 peer: types.Endpoint = undefined,
 records: [types.findnode_result_max]enr.Record = undefined,
 boundaries: [types.findnode_response_packets_max + 1]u8 = undefined,
-sent: u8 = 0,
+encoded: u8 = 0,
 body: union(enum) {
     none,
     pong: message.Pong,
@@ -32,12 +32,12 @@ body: union(enum) {
 pub fn next(self: *const PendingResponse, raw: *RawRecords) ?message.Message {
     return switch (self.body) {
         .none => null,
-        .pong => |value| if (self.sent == 0) .{ .pong = value } else null,
+        .pong => |value| if (self.encoded == 0) .{ .pong = value } else null,
         .nodes => |value| blk: {
-            if (self.sent == value.packet_count) break :blk null;
-            std.debug.assert(self.sent < value.packet_count);
-            const start = self.boundaries[self.sent];
-            const end = self.boundaries[self.sent + 1];
+            if (self.encoded == value.packet_count) break :blk null;
+            std.debug.assert(self.encoded < value.packet_count);
+            const start = self.boundaries[self.encoded];
+            const end = self.boundaries[self.encoded + 1];
             std.debug.assert(start <= end);
             std.debug.assert(end <= self.records.len);
             break :blk .{ .nodes = .{
@@ -49,16 +49,16 @@ pub fn next(self: *const PendingResponse, raw: *RawRecords) ?message.Message {
     };
 }
 
-pub fn markSent(self: *PendingResponse) void {
+pub fn advance(self: *PendingResponse) void {
     std.debug.assert(!self.complete());
-    self.sent += 1;
+    self.encoded += 1;
 }
 
 pub fn complete(self: *const PendingResponse) bool {
     return switch (self.body) {
         .none => true,
-        .pong => self.sent == 1,
-        .nodes => |value| self.sent == value.packet_count,
+        .pong => self.encoded == 1,
+        .nodes => |value| self.encoded == value.packet_count,
     };
 }
 
@@ -69,7 +69,7 @@ pub fn preparePong(
     local_enr_sequence: u64,
 ) void {
     response.peer = peer;
-    response.sent = 0;
+    response.encoded = 0;
     response.body = .{ .pong = switch (peer.address) {
         .ip4 => |address| .{
             .request_id = request_id,
@@ -95,7 +95,7 @@ pub fn prepareNodes(
 ) Error!void {
     if (record_count > types.findnode_result_max) return Error.InvalidMessage;
     response.peer = peer;
-    response.sent = 0;
+    response.encoded = 0;
     if (record_count == 0) {
         response.boundaries[0] = 0;
         response.boundaries[1] = 0;

@@ -177,7 +177,7 @@ pub fn receive(self: *Transport, io: std.Io, ready: *[2]bool) Input {
 pub fn advance(self: *Transport, io: std.Io, now_ms: u64, expired_calls: []CallTable.Expired, input: Input) Error!AdvanceResult {
     if (expired_calls.len == 0) return error.MissingExpiryStorage;
     var result: AdvanceResult = .{ .now_ms = now_ms };
-    const expired = self.engine.tick(now_ms, expired_calls);
+    const expired = self.engine.expire(now_ms, expired_calls);
     result.calls_expired = expired.calls;
     result.progress.challenges_expired = expired.challenges;
     result.progress.sessions_expired = expired.sessions;
@@ -265,7 +265,7 @@ fn handleEvent(
     while (result.progress.standard_responses < types.findnode_response_packets_max) {
         var entropy = try startEntropy(io);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
-        const packet_length = try self.engine.sendNextStandardResponse(
+        const packet_length = try self.engine.encodeNextStandardResponse(
             &self.output,
             &self.response,
             result.now_ms,

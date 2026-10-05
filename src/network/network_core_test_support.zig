@@ -463,7 +463,7 @@ pub fn clientWakeup(setup: *Setup) ?u64 {
 }
 
 pub fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
-    const now = try Transport.currentTime(std.testing.io);
+    const now = try Now.read(std.testing.io);
     return driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| wait_ms)));
 }
 

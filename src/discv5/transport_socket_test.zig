@@ -194,7 +194,7 @@ test "transport fails a call whose handshake is not sent so maintenance keeps th
         try std.testing.expect(retry_ms > unsent.now_ms);
         const retry = (try controller.startNext(&pair.transport_a.engine, &out, try .init(&.{2}), retry_ms, &test_support.sealEntropy(11))).?;
         try std.testing.expectEqual(started.peer, retry.peer);
-        const later = pair.transport_a.engine.tick(retry_ms + 2_000, &expired);
+        const later = pair.transport_a.engine.expire(retry_ms + 2_000, &expired);
         try std.testing.expectEqual(@as(usize, 1), later.calls);
         try std.testing.expectEqual(retry.call.handle, expired[0].handle);
     }

@@ -485,10 +485,3 @@ test "resident score and bitset dimensions cover the validated namespace maximum
         try std.testing.expectEqual(bits_measured.allocated_bytes, bits_measured.freed_bytes);
     }
 }
-
-test "resident namespace lookup and score scans are included in IWANT work estimates" {
-    const score = @import("score.zig");
-    const low = Gossipsub.ihaveWorkBound(128, 512, 4, 1, 1);
-    const high = Gossipsub.ihaveWorkBound(128, 615, 4, 1, 1);
-    try std.testing.expectEqual(@as(usize, 103) * (topic.topic_max_len + @sizeOf(score.TopicParams) + @sizeOf(score.TopicCounters) + @sizeOf(score.TopicWeights)), high - low);
-}

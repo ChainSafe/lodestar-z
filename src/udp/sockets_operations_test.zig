@@ -366,7 +366,7 @@ test "UDP provider lifetime clears descriptors and telemetry without probing fab
     const io: std.Io = .{ .userdata = &provider, .vtable = &vtable };
     var sockets = try Sockets.bind(io, .{ .ip4 = .loopback(0) });
     try std.testing.expectEqual([2]bool{ false, false }, sockets.native);
-    _ = sockets.requestBuffers(std.testing.io, .{ .receive = Sockets.Buffers.bytes_min, .send = Sockets.Buffers.bytes_min });
+    _ = sockets.requestBuffers(.{ .receive = Sockets.Buffers.bytes_min, .send = Sockets.Buffers.bytes_min });
     try std.testing.expectEqual([2]?Sockets.Buffers.Reported{ null, null }, sockets.buffers);
     try std.testing.expectEqual([2]?u64{ null, null }, sockets.drops());
     try std.testing.expectError(error.IncompatibleProvider, sockets.sendTo(std.testing.io, sockets.localAddress(), "fake", 4));

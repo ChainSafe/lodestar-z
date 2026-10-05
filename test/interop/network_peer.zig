@@ -209,7 +209,7 @@ pub const Peer = struct {
                 .ip4 => |a| if (!std.mem.eql(u8, &a.octets, &.{ 127, 0, 0, 1 })) return error.NotLoopback,
                 else => return error.NotLoopback,
             }
-            self.conn = try self.transport.dial(self.io, &target, try network.Transport.currentTime(self.io));
+            self.conn = try self.transport.dial(self.io, &target, try network.Now.read(self.io));
         } else if (std.mem.eql(u8, c.op, "identifyMode") or std.mem.eql(u8, c.op, "enableGossipRequest")) {
             var active = network.capabilities.withIdentify(try network.capabilities.forFork(.fulu, true, &.{ .v1_2, .v1_1 }));
             if (std.mem.eql(u8, c.op, "identifyMode")) {

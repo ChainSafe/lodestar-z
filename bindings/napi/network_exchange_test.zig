@@ -105,7 +105,7 @@ const control: exchange.Demand = .{ .settle = 32, .peers = 0, .checks = 0, .serv
 
 fn admit(runtime: *Runtime, kind: Kind, root: ?[32]u8, payload: []const u8) !g.Token {
     const table = &runtime.gossip.?;
-    const token = try table.reserveKind(kind, payload.len);
+    const token = try table.reserve(kind, payload.len);
     const cell = table.get(token).?;
     cell.id = @splat(1);
     cell.deadline = 100;

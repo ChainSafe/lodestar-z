@@ -100,7 +100,7 @@ test "paired engines return the local record for FINDNODE distance zero" {
         &received.accepted.event.request,
         &response,
     );
-    const response_length = (try pair.node_a.sendNextStandardResponse(
+    const response_length = (try pair.node_a.encodeNextStandardResponse(
         &pair.a_to_b,
         &response,
         10,
@@ -235,7 +235,7 @@ test "paired engines expire an unanswered call over an established session" {
     try std.testing.expect(received.accepted.event == .request);
     try std.testing.expect(received.accepted.event.request.record == null);
     var expired: [1]CallTable.Expired = undefined;
-    const tick = pair.node_a.tick(116, &expired);
+    const tick = pair.node_a.expire(116, &expired);
     try std.testing.expectEqual(@as(usize, 1), tick.calls);
     try std.testing.expectEqual(started.handle, expired[0].handle);
 }
@@ -497,7 +497,7 @@ const Pair = struct {
         var too_small: [1]u8 = undefined;
         try std.testing.expectError(
             packet.Error.BufferTooSmall,
-            self.node_b.sendNextStandardResponse(
+            self.node_b.encodeNextStandardResponse(
                 &too_small,
                 &response,
                 6,
@@ -505,7 +505,7 @@ const Pair = struct {
             ),
         );
         try std.testing.expect(!response.complete());
-        const length = (try self.node_b.sendNextStandardResponse(
+        const length = (try self.node_b.encodeNextStandardResponse(
             &self.b_to_a,
             &response,
             6,
@@ -522,7 +522,7 @@ const Pair = struct {
             response_packet.static_header.nonce[0..4],
         );
         try std.testing.expect(response.complete());
-        try std.testing.expect((try self.node_b.sendNextStandardResponse(
+        try std.testing.expect((try self.node_b.encodeNextStandardResponse(
             &self.b_to_a,
             &response,
             6,
@@ -682,7 +682,7 @@ test "stale session recovery delivers the failed call handle" {
     try std.testing.expectEqual(started.handle, result.accepted.event.failed.handle);
     try std.testing.expectEqual(error.RequestTooLargeForHandshake, result.accepted.event.failed.reason);
     var expired: [4]CallTable.Expired = undefined;
-    try std.testing.expectEqual(@as(usize, 0), pair.node_a.tick(200, &expired).calls);
+    try std.testing.expectEqual(@as(usize, 0), pair.node_a.expire(200, &expired).calls);
     try std.testing.expect(!pair.node_a.cancelCall(started.handle));
 }
 

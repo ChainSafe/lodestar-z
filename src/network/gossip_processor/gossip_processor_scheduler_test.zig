@@ -6,7 +6,7 @@ const Kind = p.limits.Kind;
 const Gossipsub = @import("../gossipsub/root.zig").Gossipsub;
 
 fn add(table: *p.GossipProcessor, kind: Kind, now: u64, metadata: p.metadata.Metadata) !p.GossipProcessor.Token {
-    const token = try table.reserveKind(kind, 4);
+    const token = try table.reserve(kind, 4);
     const cell = table.get(token).?;
     cell.id = @splat(1);
     cell.deadline = now + 100;
@@ -213,7 +213,7 @@ test "gossip scheduler prefilter permits replacement only for eligible queued ki
     defer table.close();
     const oldest = try add(&table, .beacon_attestation, 1, .{});
     const newest = try add(&table, .beacon_attestation, 2, .{});
-    try t.expect(table.admissible(.beacon_attestation, 1));
+    try t.expect(table.checkAdmissionCapacity(.beacon_attestation, 1));
     const batch = table.claimDemand(2, .{ .items = 1 });
     try t.expectEqual(newest, batch.tokens[0]);
     table.finish(&batch, true);
@@ -221,12 +221,12 @@ test "gossip scheduler prefilter permits replacement only for eligible queued ki
     table.execution[@intFromEnum(Kind.beacon_attestation)].items = 2;
     const copying = table.claimDemand(2, .{ .items = 1 });
     try t.expectEqual(oldest, copying.tokens[0]);
-    try t.expect(!table.admissible(.beacon_attestation, 1));
+    try t.expect(!table.checkAdmissionCapacity(.beacon_attestation, 1));
     table.finish(&copying, false);
-    try t.expect(table.admissible(.beacon_attestation, 1));
+    try t.expect(table.checkAdmissionCapacity(.beacon_attestation, 1));
     _ = try add(&table, .beacon_block, 3, .{});
     _ = try add(&table, .beacon_block, 4, .{});
-    try t.expect(!table.admissible(.beacon_block, 1));
+    try t.expect(!table.checkAdmissionCapacity(.beacon_block, 1));
     try verify(&table);
 }
 
