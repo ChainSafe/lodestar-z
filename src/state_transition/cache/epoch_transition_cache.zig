@@ -344,7 +344,7 @@ pub const EpochTransitionCache = struct {
         const flat_entries = validator_flat_cache.entries.slice();
         for (0..validator_count) |i| {
             const validator = flat_entries.get(i);
-            const effective_balance = @as(u64, effective_balances_by_increments[i]) * preset.EFFECTIVE_BALANCE_INCREMENT;
+            const effective_balance = @as(u64, validator.effective_balance_increment) * preset.EFFECTIVE_BALANCE_INCREMENT;
             var flag: u8 = 0;
 
             if (validator.bits.slashed) {
