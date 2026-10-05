@@ -257,7 +257,7 @@ fn measure(
     for (0..rounds) |_| {
         {
             const t = time.start(io);
-            var cache = try EpochTransitionCache.init(allocator, io, beacon_config, head.epoch_cache, head.state);
+            var cache = try EpochTransitionCache.init(allocator, beacon_config, head.epoch_cache, head.state);
             const elapsed = ms(io, t);
             cache.deinit();
             m.init_ms = @min(m.init_ms, elapsed);
@@ -427,7 +427,7 @@ pub fn main(init: std.process.Init) !void {
         .skip_sync_pubkeys = false,
     });
     std.debug.print("cached state ready in {d:.0} ms\n", .{ms(io, t_cache)});
-    defer state_transition.deinitReusedEpochTransitionCache(io);
+    defer state_transition.deinitReusedEpochTransitionCache();
 
     var ring: [MAX_RING]?*CachedBeaconState = @splat(null);
     var ring_pos: usize = 0;

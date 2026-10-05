@@ -57,7 +57,7 @@ fn runInit(
     head: *CachedBeaconState,
 ) !f64 {
     const t = time.start(io);
-    var cache = try EpochTransitionCache.init(allocator, io, beacon_config, head.epoch_cache, head.state);
+    var cache = try EpochTransitionCache.init(allocator, beacon_config, head.epoch_cache, head.state);
     const elapsed = ms(io, t);
     cache.deinit();
     return elapsed;
@@ -144,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
         .config = &beacon_config,
         .pubkey_cache = &pubkey_cache,
     }, .{ .skip_sync_committee_cache = false, .skip_sync_pubkeys = false });
-    defer state_transition.deinitReusedEpochTransitionCache(io);
+    defer state_transition.deinitReusedEpochTransitionCache();
 
     var flat_cache = ValidatorFlatCache.init(allocator, &pool);
     defer flat_cache.deinit();
