@@ -235,22 +235,6 @@ pub const TestCachedBeaconState = struct {
         };
     }
 
-    /// Updates the validator and its cached effective-balance increment together.
-    pub fn setValidatorEffectiveBalance(
-        self: *TestCachedBeaconState,
-        validator_index: usize,
-        effective_balance: u64,
-    ) !void {
-        try self.cached_state.epoch_cache.beforeEpochTransition();
-
-        var validators = try self.cached_state.state.validators();
-        var validator = try validators.get(validator_index);
-        try validator.set("effective_balance", effective_balance);
-
-        const increments = self.cached_state.epoch_cache.getEffectiveBalanceIncrements();
-        increments.items[validator_index] = @intCast(@divFloor(effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
-    }
-
     pub fn deinit(self: *TestCachedBeaconState) void {
         self.cached_state.deinit();
         self.allocator.destroy(self.cached_state);
