@@ -55,7 +55,7 @@ pub const ValidatorFlatCache = struct {
     allocator: Allocator,
     pool: *Node.Pool,
     synced_root: ?Node.Id = null,
-    entries: std.MultiArrayList(ValidatorFields) = .empty,
+    fields: std.MultiArrayList(ValidatorFields) = .empty,
     /// Leaves rewritten by the last `sync`.
     last_patched: usize = 0,
 
@@ -65,12 +65,12 @@ pub const ValidatorFlatCache = struct {
 
     pub fn deinit(self: *ValidatorFlatCache) void {
         self.invalidate();
-        self.entries.deinit(self.allocator);
+        self.fields.deinit(self.allocator);
         self.* = undefined;
     }
 
     pub fn len(self: *const ValidatorFlatCache) usize {
-        return self.entries.len;
+        return self.fields.len;
     }
 
     pub fn byteSize(self: *const ValidatorFlatCache) usize {
@@ -87,7 +87,7 @@ pub const ValidatorFlatCache = struct {
         errdefer self.invalidate();
 
         const old_len = self.len();
-        try self.entries.resize(self.allocator, new_len);
+        try self.fields.resize(self.allocator, new_len);
 
         try self.pool.ref(root);
         errdefer self.pool.unref(root);
@@ -106,7 +106,7 @@ pub const ValidatorFlatCache = struct {
     pub fn invalidate(self: *ValidatorFlatCache) void {
         if (self.synced_root) |old| self.pool.unref(old);
         self.synced_root = null;
-        self.entries.clearRetainingCapacity();
+        self.fields.clearRetainingCapacity();
     }
 
     /// Compares `new` and `old` validator trees, patching only validators inside changed subtrees.
@@ -174,7 +174,7 @@ pub const ValidatorFlatCache = struct {
     /// Patches the cache at index `i` with validator values from the tree at `leaf`.
     fn patch(self: *ValidatorFlatCache, i: usize, leaf: Node.Id) !void {
         const v = try Validator.tree.getValuePtr(leaf, self.pool);
-        self.entries.set(i, .fromValidator(v));
+        self.fields.set(i, .fromValidator(v));
         self.last_patched += 1;
     }
 };
