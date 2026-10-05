@@ -6,8 +6,7 @@
     "bindings/src/",
     "docs/leveldb.md",
     "src/leveldb/LICENSE",
-    "zig-out/lib/",
-    "THIRD_PARTY_NOTICES.txt"
+    "zig-out/lib/"
   ],
   "type": "module",
   "exports": {

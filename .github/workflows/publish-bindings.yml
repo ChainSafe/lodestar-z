@@ -96,6 +96,5 @@ jobs:
         run: |
           scripts/zig-cross.sh pnpm zapi build-artifacts --optimize ReleaseSafe
           pnpm zapi prepublish
-          node scripts/package_notices.mjs
           rm -rf zig-out/lib
           pnpm zapi publish --access public -- --ignore-scripts --provenance ${{ steps.detect_dist_tag.outputs.tag_flag }}
