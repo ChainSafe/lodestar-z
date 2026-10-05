@@ -12,7 +12,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BoundedArray = @import("bounded_array").BoundedArray;
 const types = @import("consensus_types");
-const preset = @import("preset").preset;
 const Node = @import("persistent_merkle_tree").Node;
 const max_depth = @import("persistent_merkle_tree").max_depth;
 const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCompoundingWithdrawalCredential;
@@ -25,7 +24,7 @@ pub const ValidatorFields = struct {
     activation_epoch: u64,
     exit_epoch: u64,
     withdrawable_epoch: u64,
-    effective_balance_increment: u16,
+    effective_balance: u64,
     bits: Bits,
 
     pub const Bits = packed struct(u8) {
@@ -40,7 +39,7 @@ pub const ValidatorFields = struct {
             .activation_epoch = v.activation_epoch,
             .exit_epoch = v.exit_epoch,
             .withdrawable_epoch = v.withdrawable_epoch,
-            .effective_balance_increment = @intCast(@divFloor(v.effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT)),
+            .effective_balance = v.effective_balance,
             .bits = .{
                 .slashed = v.slashed,
                 .compounding = hasCompoundingWithdrawalCredential(&v.withdrawal_credentials),
@@ -72,7 +71,7 @@ pub const ValidatorFlatCache = struct {
     }
 
     pub fn byteSize(self: *const ValidatorFlatCache) usize {
-        return self.len() * (4 * @sizeOf(u64) + @sizeOf(u16) + @sizeOf(ValidatorFields.Bits));
+        return self.len() * (5 * @sizeOf(u64) + @sizeOf(ValidatorFields.Bits));
     }
 
     /// Bring the cache in line with the validators list rooted at `root`, whose elements sit

@@ -344,7 +344,6 @@ pub const EpochTransitionCache = struct {
         const flat_entries = validator_flat_cache.entries.slice();
         for (0..validator_count) |i| {
             const validator = flat_entries.get(i);
-            const effective_balance = @as(u64, validator.effective_balance_increment) * preset.EFFECTIVE_BALANCE_INCREMENT;
             var flag: u8 = 0;
 
             if (validator.bits.slashed) {
@@ -393,7 +392,7 @@ pub const EpochTransitionCache = struct {
             //     and validator.effective_balance >= MAX_EFFECTIVE_BALANCE # [Modified in Electra]
             //   )
             // ```
-            if (validator.activation_eligibility_epoch == FAR_FUTURE_EPOCH and effective_balance >= MIN_ACTIVATION_BALANCE) {
+            if (validator.activation_eligibility_epoch == FAR_FUTURE_EPOCH and validator.effective_balance >= MIN_ACTIVATION_BALANCE) {
                 try indices_eligible_for_activation_queue.append(allocator, i);
             }
 
@@ -424,7 +423,7 @@ pub const EpochTransitionCache = struct {
             // Adding extra condition `exitEpoch === FAR_FUTURE_EPOCH` to keep the array as small as possible. initiateValidatorExit() will ignore them anyway
             //
             // Use `else` since indicesEligibleForActivationQueue + indicesEligibleForActivation + indicesToEject are mutually exclusive
-            else if (is_active_curr and validator.exit_epoch == FAR_FUTURE_EPOCH and effective_balance <= config.chain.EJECTION_BALANCE) {
+            else if (is_active_curr and validator.exit_epoch == FAR_FUTURE_EPOCH and validator.effective_balance <= config.chain.EJECTION_BALANCE) {
                 try indices_to_eject.append(allocator, i);
             }
 
