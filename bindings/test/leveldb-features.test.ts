@@ -180,13 +180,12 @@ it("closes projected iterators before first pull and rejects malformed cache opt
   });
 });
 
-it("accepts a 600-operation archive burst with ordered read and write completion", async () => {
+it("accepts a 600-operation archive burst with reads after awaited writes", async () => {
   await withDatabase(async (db) => {
     const keys = Array.from({length: 600}, (_, index) => bytes(index >>> 8, index & 255));
     const writes = keys.map((key) => db.put(key, key));
-    const reads = keys.map((key) => db.get(key));
     await Promise.all(writes);
-    expect(await Promise.all(reads)).toEqual(keys);
+    expect(await Promise.all(keys.map((key) => db.get(key)))).toEqual(keys);
   });
 });
 
@@ -221,3 +220,49 @@ it("persists and reads an archived-state-sized value above 64 MiB", async () => 
     }
   });
 }, 30_000);
+
+it("keeps concurrent multi-gets consistent while atomic batches replace their keys", async () => {
+  await withDatabase(async (db) => {
+    const keys = Array.from({length: 32}, (_, index) => bytes(index));
+    await db.batch(keys.map((key) => ({key, type: "put", value: bytes(0)})));
+    const writes = Array.from({length: 32}, (_, index) =>
+      db.batch(keys.map((key) => ({key, type: "put", value: bytes(index + 1)})))
+    );
+    const reads = Array.from({length: 32}, () => db.getMany(keys, {maxTotalBytes: 32, maxValueBytes: 1}));
+    const results = await Promise.all(reads);
+    for (const [index, values] of results.entries()) {
+      expect(values[0], `read ${index} has a committed value`).not.toBeNull();
+      expect(values, `read ${index} observes one atomic batch`).toEqual(keys.map(() => values[0]));
+    }
+    await Promise.all(writes);
+    expect(await db.getMany(keys)).toEqual(keys.map(() => bytes(32)));
+  });
+});
+
+it("drains concurrent reads and serialized writes before close", async () => {
+  await withDatabase(async (db, path) => {
+    const value = new Uint8Array(1024 * 1024).fill(7);
+    await db.put(bytes(1), value);
+    const rejected = expect(db.get(bytes(1), {maxValueBytes: value.length - 1})).rejects.toThrow("ValueTooLarge");
+    const reads = Array.from({length: 16}, () => db.get(bytes(1), {maxValueBytes: value.length}));
+    const writes = Array.from({length: 16}, (_, index) => db.put(bytes(2), bytes(index)));
+    const closing = db.close();
+    const results = await Promise.all(reads);
+    for (const [index, result] of results.entries()) {
+      expect(result?.length, `read ${index} length`).toBe(value.length);
+      expect(
+        result?.every((byte) => byte === 7),
+        `read ${index} contents`
+      ).toBe(true);
+    }
+    await rejected;
+    await Promise.all(writes);
+    await closing;
+    const reopened = await LevelDb.open(path);
+    try {
+      expect(await reopened.get(bytes(2))).toEqual(bytes(15));
+    } finally {
+      await reopened.close();
+    }
+  });
+});

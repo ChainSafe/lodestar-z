@@ -83,13 +83,16 @@ export interface LevelDbIterator<T = LevelDbEntry> extends AsyncIterableIterator
 }
 
 /**
- * Ordered, asynchronous LevelDB access with bounded native admission and copied inputs and outputs.
- * Each handle has its own operation queue and admission limits. Shared handles may execute concurrently.
+ * Asynchronous LevelDB access with bounded native admission and copied inputs and outputs.
+ * Each handle runs up to two get/getMany operations concurrently with its serialized writes, cursors and maintenance.
+ * Await writes before issuing reads that must observe them. Read completions may arrive out of order.
+ * Shared handles have independent queues and admission limits.
  * Keys are at most 4096 bytes, values at most 1 GiB, and atomic batch key/value totals at most 4 GiB.
  * Batches and getMany accept at most 16,777,216 entries. These are operating limits, not protocol maxima.
  * Admission rejects with PendingOperationsExceeded or PendingBytesExceeded instead of waiting for room.
  * Pending-byte admission counts copied inputs and job metadata. Read results are allocated to their actual size;
- * the single active worker has a separate output bound given by maxTotalBytes, or maxValueBytes for get.
+ * each active read has a separate output bound given by maxTotalBytes, or maxValueBytes for get.
+ * Up to two read results and one cursor/maintenance result can remain native-owned until JS delivery.
  * These bounds do not bound engine scratch memory, process RSS, or returned data retained by the caller.
  * Close iterators when abandoning them. Inputs must be attached Uint8Arrays backed by ordinary ArrayBuffers;
  * shared backing storage is rejected.
@@ -114,7 +117,7 @@ export declare class LevelDb {
   /** Validates the entire batch before applying it atomically, in order. Never splits a batch into writes. */
   batch(operations: readonly LevelDbOperation[], options?: LevelDbWriteOptions): Promise<void>;
   /**
-   * Takes a snapshot at this call's position in the native operation queue, before later writes.
+   * Takes a snapshot at this call's position among writes and cursor operations, before later writes.
    * Visits keys in byte order, descending when reverse is true. At most 64 cursors may be live per shared database.
    * Manual next()/nextv() retain the snapshot after exhaustion so seek() can reuse it; close when finished.
    * for-await iteration, return(), close(), read errors and database close release it. Invalid options may throw synchronously.

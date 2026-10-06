@@ -67,13 +67,19 @@ These are finite operating limits, not consensus maxima. A request must fit its
 payload and metadata budget; batches are never split into separate commits.
 Queue saturation rejects before copying payloads. Read results allocate their
 actual sizes on the worker after checking the requested bounds, rather than
-allocating each read's maximum in advance. Only one worker result is active per
-handle. Each handle's output bound is separate from its queued input admission. Engine memory,
+allocating each read's maximum in advance. Each handle can retain two point/multi-get
+results and one cursor/maintenance result until JavaScript delivery. Each result has
+its own output bound, separate from queued input admission. Engine memory,
 write-batch backing and JavaScript results retained by callers are outside this
 accounting. An archive state therefore uses one ordinary value without a special
 controller-side encoding or chunking scheme.
 
-Each handle runs one storage job at a time on Node's worker pool. Handles opened
+Each handle runs up to two `get`/`getMany` jobs concurrently on Node's worker pool,
+alongside one serialized queue for writes, cursors and maintenance. Await writes
+before issuing reads that must observe them. Reads can complete out of order;
+each multi-get still observes one consistent view. Iterator creation remains
+ordered with writes, so its snapshot includes preceding writes and excludes later
+ones on that handle. Handles opened
 with `multithreading: true` share the engine and cache while retaining independent
 queues and admission limits; their jobs may execute concurrently. Closing stops
 that handle's admissions, drains its accepted operations and retires its cursors.
@@ -121,7 +127,7 @@ Lodestar's database controller and peer datastore use this binding instead of
 `classic-level` and `datastore-level`. The controller preserves missing-value,
 range, cache, batch, metrics and lifecycle behavior. The binding supplies
 `clear`, `approximateSize`, `compactRange`, `getProperty` and `destroy` directly;
-maintenance runs on the calling handle's serialized queue alongside reads and writes.
+maintenance runs on the calling handle's serialized queue alongside writes and cursors.
 `clear` uses bounded deletion chunks and is not atomic across those chunks.
 
 The controller opts into `multithreading`, preserving same-directory access from

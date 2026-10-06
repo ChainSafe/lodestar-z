@@ -8,6 +8,7 @@ const allocator = std.heap.c_allocator;
 
 pub const Job = struct {
     owner: *runtime.Runtime,
+    next_read: ?*Job = null,
     operation: Operation,
     work: napi.AsyncWork(Job),
     callback: napi.Ref,

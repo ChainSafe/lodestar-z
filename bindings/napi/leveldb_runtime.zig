@@ -6,11 +6,12 @@ const values = @import("leveldb_values.zig");
 const Job = @import("leveldb_job.zig").Job;
 const allocator = std.heap.c_allocator;
 const queue_capacity = values.pending_operations_max + leveldb.max_cursors;
+const read_concurrency = 2;
 
 pub const CursorSlot = struct { id: u32 = 0, cursor: ?leveldb.Cursor = null };
 pub const KnownCursor = struct { id: u32 = 0, closing: bool = false };
 
-/// The JS thread owns admission and lifetime fields. Each runtime serializes its own work and cursors.
+/// The JS thread owns admission and lifetime fields. Reads overlap the serialized write/cursor queue.
 pub const Runtime = struct {
     env: napi.Env,
     database: ?*shared.Database = null,
@@ -26,6 +27,9 @@ pub const Runtime = struct {
     operation_limit: usize,
     byte_limit: usize,
     active: bool = false,
+    active_reads: usize = 0,
+    reads_head: ?*Job = null,
+    reads_tail: ?*Job = null,
     closing: bool = false,
     cleanup_started: bool = false,
     cleanup_finished: bool = false,
@@ -53,7 +57,7 @@ pub const Runtime = struct {
     }
 
     pub fn destroyPrepared(self: *Runtime) void {
-        std.debug.assert(self.queue_length == 0 and self.pending_operations == 0);
+        std.debug.assert(self.queue_length == 0 and self.pending_operations == 0 and self.active_reads == 0);
         std.debug.assert(self.database == null);
         if (self.cleanup_hook) |hook| self.env.removeAsyncCleanupHook(hook) catch {};
         self.cleanup_work.delete() catch {};
@@ -87,6 +91,18 @@ pub const Runtime = struct {
     }
 
     pub fn enqueue(self: *Runtime, job: *Job) !void {
+        if (job.operation == .get_many) {
+            if (self.active_reads < read_concurrency and self.reads_head == null and
+                !(self.active and self.queued(0).operation == .open))
+            {
+                try job.work.queue();
+                self.active_reads += 1;
+            } else {
+                if (self.reads_tail) |tail| tail.next_read = job else self.reads_head = job;
+                self.reads_tail = job;
+            }
+            return;
+        }
         std.debug.assert(self.queue_length < self.queue.len);
         if (self.queue_length == 0) {
             try job.work.queue();
@@ -102,10 +118,47 @@ pub const Runtime = struct {
     }
 
     pub fn finish(self: *Runtime, job: *Job) void {
+        if (job.operation == .get_many) {
+            std.debug.assert(self.active_reads > 0);
+            self.active_reads -= 1;
+            job.destroy();
+            self.pumpReads();
+            if (!self.active) self.pump();
+            return;
+        }
         std.debug.assert(self.active and self.queue_length > 0 and self.queued(0) == job);
         self.removeFirst();
         self.active = false;
+        self.pumpReads();
         self.pump();
+    }
+
+    fn popRead(self: *Runtime) ?*Job {
+        const job = self.reads_head orelse return null;
+        self.reads_head = job.next_read;
+        if (self.reads_head == null) self.reads_tail = null;
+        job.next_read = null;
+        return job;
+    }
+
+    fn pumpReads(self: *Runtime) void {
+        for (0..queue_capacity) |_| {
+            if (self.active_reads == read_concurrency) return;
+            const job = self.popRead() orelse return;
+            self.active_reads += 1;
+            job.work.queue() catch |err| {
+                job.failure = err;
+                if (self.env_alive) {
+                    _ = job.settle(self.env) catch |failure| blk: {
+                        self.deliveryFailure(failure);
+                        break :blk true;
+                    };
+                }
+                self.active_reads -= 1;
+                job.destroy();
+            };
+        }
+        std.debug.assert(self.reads_head == null);
     }
 
     fn removeFirst(self: *Runtime) void {
@@ -138,7 +191,7 @@ pub const Runtime = struct {
             return;
         }
         std.debug.assert(self.queue_length == 0);
-        if (self.closing and !self.cleanup_started) self.startCleanup();
+        if (self.closing and self.active_reads == 0 and !self.cleanup_started) self.startCleanup();
     }
 
     pub fn close(self: *Runtime, callback_value: napi.Value) !void {
@@ -171,11 +224,17 @@ pub const Runtime = struct {
         const keep: usize = if (self.active) 1 else 0;
         for (keep..self.queue_length) |index| self.queued(index).destroy();
         self.queue_length = keep;
-        if (!self.active and !self.cleanup_started) self.startCleanup();
+        for (0..queue_capacity) |_| {
+            const job = self.popRead() orelse break;
+            job.destroy();
+        }
+        std.debug.assert(self.reads_head == null);
+        if (!self.active and self.active_reads == 0 and !self.cleanup_started) self.startCleanup();
     }
 
     fn startCleanup(self: *Runtime) void {
-        std.debug.assert(self.closing and !self.active and self.queue_length == 0);
+        std.debug.assert(self.closing and !self.active and self.active_reads == 0);
+        std.debug.assert(self.queue_length == 0 and self.reads_head == null);
         self.cleanup_started = true;
         self.cleanup_work.queue() catch {
             // If Node refuses further work during shutdown, retain ownership until a fallback worker joins.
@@ -237,7 +296,8 @@ pub const Runtime = struct {
 
     fn destroy(self: *Runtime) void {
         std.debug.assert(self.cleanup_finished and !self.wrapper_alive);
-        std.debug.assert(self.queue_length == 0 and self.pending_bytes == 0);
+        std.debug.assert(self.queue_length == 0 and self.reads_head == null and self.active_reads == 0);
+        std.debug.assert(self.pending_bytes == 0);
         std.debug.assert(self.close_callback_count == 0 and self.fallback_error == null);
         allocator.destroy(self);
     }
