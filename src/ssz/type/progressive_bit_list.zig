@@ -1,4 +1,6 @@
 const std = @import("std");
+const BitList = @import("bit_array").BitList;
+const unlimited = @import("bit_array").unlimited;
 const expectEqualRootsAlloc = @import("test_utils.zig").expectEqualRootsAlloc;
 const expectEqualSerializedAlloc = @import("test_utils.zig").expectEqualSerializedAlloc;
 const TypeKind = @import("type_kind.zig").TypeKind;
@@ -11,101 +13,6 @@ const mixInLength = @import("hashing").mixInLength;
 const Node = @import("persistent_merkle_tree").Node;
 const progressive = @import("progressive.zig");
 
-pub const ProgressiveBitList = struct {
-    data: std.ArrayList(u8),
-    bit_len: usize,
-
-    pub const empty: @This() = .{
-        .data = std.ArrayList(u8).empty,
-        .bit_len = 0,
-    };
-
-    pub fn equals(self: *const @This(), other: *const @This()) bool {
-        return self.bit_len == other.bit_len and std.mem.eql(u8, self.data.items, other.data.items);
-    }
-
-    pub fn fromBitLen(allocator: std.mem.Allocator, bit_len: usize) !@This() {
-        const byte_len = std.math.divCeil(usize, bit_len, 8) catch unreachable;
-
-        var data = try std.ArrayList(u8).initCapacity(allocator, byte_len);
-        data.expandToCapacity();
-        @memset(data.items, 0);
-        return @This(){
-            .data = data,
-            .bit_len = bit_len,
-        };
-    }
-
-    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-        self.data.deinit(allocator);
-    }
-
-    pub fn get(self: *const @This(), bit_index: usize) !bool {
-        if (bit_index >= self.bit_len) {
-            return error.OutOfRange;
-        }
-
-        const byte_idx = bit_index / 8;
-        const offset_in_byte: u3 = @intCast(bit_index % 8);
-        const mask = @as(u8, 1) << offset_in_byte;
-        return (self.data.items[byte_idx] & mask) == mask;
-    }
-
-    pub fn set(self: *@This(), allocator: std.mem.Allocator, bit_index: usize, bit: bool) !void {
-        if (bit_index + 1 > self.bit_len) {
-            try self.resize(allocator, bit_index + 1);
-        }
-        try self.setAssumeCapacity(bit_index, bit);
-    }
-
-    pub fn resize(self: *@This(), allocator: std.mem.Allocator, bit_len: usize) !void {
-        const old_bit_len = self.bit_len;
-        const old_byte_len = std.math.divCeil(usize, old_bit_len, 8) catch unreachable;
-        const byte_len = std.math.divCeil(usize, bit_len, 8) catch unreachable;
-        try self.data.resize(allocator, byte_len);
-        self.bit_len = bit_len;
-        // zero out additionally allocated bytes
-        if (old_byte_len < byte_len) {
-            @memset(self.data.items[old_byte_len..], 0);
-        } else if (bit_len < old_bit_len and bit_len % 8 != 0) {
-            const retained_bits: u3 = @intCast(bit_len % 8);
-            const retained_mask = (@as(u8, 1) << retained_bits) - 1;
-            self.data.items[byte_len - 1] &= retained_mask;
-        }
-    }
-
-    /// Set bit value at index `bit_index`
-    pub fn setAssumeCapacity(self: *@This(), bit_index: usize, bit: bool) !void {
-        if (bit_index >= self.bit_len) {
-            return error.OutOfRange;
-        }
-
-        const byte_index = bit_index / 8;
-        const offset_in_byte: u3 = @intCast(bit_index % 8);
-        const mask = @as(u8, 1) << offset_in_byte;
-        var byte = self.data.items[byte_index];
-        if (bit) {
-            // For bit in byte, 1,0 OR 1 = 1
-            // byte 100110
-            // mask 010000
-            // res  110110
-            byte |= mask;
-            self.data.items[byte_index] = byte;
-        } else {
-            // For bit in byte, 1,0 OR 1 = 0
-            if ((byte & mask) == mask) {
-                // byte 110110
-                // mask 010000
-                // res  100110
-                byte ^= mask;
-                self.data.items[byte_index] = byte;
-            } else {
-                // Ok, bit is already 0
-            }
-        }
-    }
-};
-
 pub fn isProgressiveBitListType(ST: type) bool {
     return ST.kind == .progressive_bit_list;
 }
@@ -115,7 +22,7 @@ pub fn ProgressiveBitListType() type {
         const Self = @This();
         pub const kind = TypeKind.progressive_bit_list;
         pub const Element: type = BoolType();
-        pub const Type: type = ProgressiveBitList;
+        pub const Type: type = BitList(.{ .limit = unlimited });
         pub const min_size: usize = 1;
         pub const max_size: usize = std.math.maxInt(usize);
 
@@ -133,14 +40,17 @@ pub fn ProgressiveBitListType() type {
             return (value.bit_len + 255) / 256;
         }
 
-        pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            const chunks = try allocator.alloc([32]u8, chunkCount(value));
-            defer allocator.free(chunks);
-
-            @memset(chunks, [_]u8{0} ** 32);
-            @memcpy(@as([]u8, @ptrCast(chunks))[0..value.data.items.len], value.data.items);
-
-            try progressive.merkleizeChunks(allocator, chunks, out);
+        pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
+            var accumulator = try progressive.MerkleAccumulator.init(chunkCount(value));
+            var offset: usize = 0;
+            while (offset < value.data.items.len) {
+                var chunk: [32]u8 = @splat(0);
+                const count = @min(32, value.data.items.len - offset);
+                @memcpy(chunk[0..count], value.data.items[offset..][0..count]);
+                try accumulator.append(&chunk);
+                offset += count;
+            }
+            try accumulator.finish(out);
             mixInLength(value.bit_len, out);
         }
 
@@ -238,34 +148,22 @@ pub fn ProgressiveBitListType() type {
                 return bit_len;
             }
 
-            pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
-                if (data.len == 0) {
-                    return error.InvalidSize;
+            pub fn hashTreeRoot(_: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
+                const bit_len = try length(data);
+                const byte_len = bit_len / 8 + @intFromBool(bit_len % 8 != 0);
+                var accumulator = try progressive.MerkleAccumulator.init(bit_len / 256 + @intFromBool(bit_len % 256 != 0));
+                var offset: usize = 0;
+                while (offset < byte_len) {
+                    var chunk: [32]u8 = @splat(0);
+                    const count = @min(32, byte_len - offset);
+                    @memcpy(chunk[0..count], data[offset..][0..count]);
+                    if (offset + count == byte_len and bit_len % 8 != 0) {
+                        chunk[count - 1] ^= @as(u8, 1) << @intCast(bit_len % 8);
+                    }
+                    try accumulator.append(&chunk);
+                    offset += count;
                 }
-
-                // ensure padding bit and trailing zeros in last byte
-                const last_byte = data[data.len - 1];
-
-                const last_byte_clz = @clz(last_byte);
-                if (last_byte_clz == 8) {
-                    return error.noPaddingBit;
-                }
-                const last_1_index: u3 = @intCast(7 - last_byte_clz);
-                const bit_len = (data.len - 1) * 8 + last_1_index;
-                const chunk_count = (bit_len + 255) / 256;
-                const chunks = try allocator.alloc([32]u8, chunk_count);
-                defer allocator.free(chunks);
-
-                @memset(chunks, [_]u8{0} ** 32);
-                if (bit_len % 8 == 0) {
-                    @memcpy(@as([]u8, @ptrCast(chunks))[0 .. data.len - 1], data[0 .. data.len - 1]);
-                } else {
-                    @memcpy(@as([]u8, @ptrCast(chunks))[0..data.len], data);
-                    // remove padding bit
-                    @as([]u8, @ptrCast(chunks))[data.len - 1] ^= @as(u8, 1) << last_1_index;
-                }
-
-                try progressive.merkleizeChunks(allocator, chunks, out);
+                try accumulator.finish(out);
                 mixInLength(bit_len, out);
             }
         };

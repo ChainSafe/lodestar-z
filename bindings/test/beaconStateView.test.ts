@@ -9,7 +9,22 @@ import {getFirstEraFilePath} from "./eraFiles.ts";
 const MAINNET_PUBKEY_CACHE_LIMIT = 2_000_000;
 const SYNTHETIC_VALIDATOR_COUNT = 16;
 
+function expectSyncCommitteeCache(cache: {
+  validatorIndices: Uint32Array;
+  validatorIndexMap: Map<number, number[]>;
+}): void {
+  expect(cache.validatorIndices).toBeInstanceOf(Uint32Array);
+  expect(cache.validatorIndices.length).toBeGreaterThan(0);
+  expect(cache.validatorIndexMap).toBeInstanceOf(Map);
+
+  const firstValidatorIndex = cache.validatorIndices[0];
+  const firstValidatorPositions = cache.validatorIndexMap.get(firstValidatorIndex);
+  expect(Array.isArray(firstValidatorPositions)).toBe(true);
+  expect(firstValidatorPositions).toContain(0);
+}
+
 describe("BeaconStateView", () => {
+  let nativeConfig: InstanceType<typeof bindings.BeaconConfig>;
   let state: InstanceType<typeof bindings.BeaconStateView>;
   let stateBytes: Uint8Array;
   let syntheticValidators: phase0.Validator[];
@@ -19,7 +34,7 @@ describe("BeaconStateView", () => {
     genesisValidatorsRoot: Uint8Array;
     validatorCount: number;
     fork: {previousVersion: Uint8Array; currentVersion: Uint8Array; epoch: number};
-    eth1Data: {depositRoot: Uint8Array; depositCount: number; blockHash: Uint8Array};
+    eth1Data: {depositRoot: Uint8Array; depositCount: bigint; blockHash: Uint8Array};
     latestBlockHeader: {
       slot: number;
       proposerIndex: number;
@@ -94,7 +109,7 @@ describe("BeaconStateView", () => {
         },
         eth1Data: {
           blockHash: Uint8Array.from(lodestarState.eth1Data.blockHash),
-          depositCount: lodestarState.eth1Data.depositCount,
+          depositCount: BigInt(lodestarState.eth1Data.depositCount),
           depositRoot: Uint8Array.from(lodestarState.eth1Data.depositRoot),
         },
         finalizedCheckpoint: {
@@ -146,7 +161,8 @@ describe("BeaconStateView", () => {
       // Rebuild incompatible or corrupt snapshots from the serialized state.
       bindings.pubkeys.ensureCapacity(MAINNET_PUBKEY_CACHE_LIMIT);
     }
-    state = bindings.BeaconStateView.createFromBytes(stateBytes);
+    nativeConfig = new bindings.BeaconConfig(config, expected.genesisValidatorsRoot);
+    state = bindings.BeaconStateView.createFromBytes(stateBytes, nativeConfig);
   }, 120_000); // 2 minute timeout for loading era file
 
   afterAll(() => state?.release());
@@ -307,9 +323,13 @@ describe("BeaconStateView", () => {
       bellatrixState.currentEpochParticipation = Array.from({length: SYNTHETIC_VALIDATOR_COUNT}, () => 0);
 
       phase0View = bindings.BeaconStateView.createFromBytes(
-        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue())
+        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue()),
+        nativeConfig
       );
-      bellatrixView = bindings.BeaconStateView.createFromBytes(ssz.bellatrix.BeaconState.serialize(bellatrixState));
+      bellatrixView = bindings.BeaconStateView.createFromBytes(
+        ssz.bellatrix.BeaconState.serialize(bellatrixState),
+        nativeConfig
+      );
     });
 
     afterAll(() => {
@@ -477,15 +497,16 @@ describe("BeaconStateView", () => {
   });
 
   describe("sync committee cache", () => {
-    it("currentSyncCommitteeIndexed should have validatorIndices", () => {
-      const indexed = state.currentSyncCommitteeIndexed;
-      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
-      expect(indexed.validatorIndices.length).toBeGreaterThan(0);
+    it("currentSyncCommitteeIndexed should return cache", () => {
+      expectSyncCommitteeCache(state.currentSyncCommitteeIndexed);
     });
 
     it("getIndexedSyncCommitteeAtEpoch should return cache", () => {
-      const indexed = state.getIndexedSyncCommitteeAtEpoch(state.epoch);
-      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
+      expectSyncCommitteeCache(state.getIndexedSyncCommitteeAtEpoch(state.epoch));
+    });
+
+    it("getIndexedSyncCommittee should return cache", () => {
+      expectSyncCommitteeCache(state.getIndexedSyncCommittee(state.slot));
     });
 
     it("syncProposerReward should be a non-negative number", () => {
@@ -496,7 +517,8 @@ describe("BeaconStateView", () => {
   describe("serialization", () => {
     it("release should release state and be idempotent", () => {
       const releasable = bindings.BeaconStateView.createFromBytes(
-        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue())
+        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue()),
+        nativeConfig
       );
 
       releasable.release();
@@ -564,12 +586,21 @@ describe("BeaconStateView", () => {
   // });
 
   describe("proofs", () => {
-    it("getSingleProof should return array of 32-byte nodes", () => {
-      // gindex 169 is within the state tree
-      const proof = state.getSingleProof(169);
-      expect(Array.isArray(proof)).toBe(true);
+    it("getSingleProof accepts the SSZ bigint gindex for historical summaries", () => {
+      const {gindex} = ssz.fulu.BeaconState.getPathInfo(["historicalSummaries"]);
+      const proof = state.getSingleProof(gindex);
+      expect(proof.length).toBe(gindex.toString(2).length - 1);
       for (const node of proof) {
+        expect(node).toBeInstanceOf(Uint8Array);
         expect(node.length).toBe(32);
+      }
+      expect(state.getSingleProof(1n)).toEqual([]);
+    });
+
+    it("getSingleProof rejects invalid bigint indices without truncating them", () => {
+      expect(() => state.getSingleProof(0n)).toThrowError(expect.objectContaining({code: "STATE_ERROR"}));
+      for (const gindex of [-1n, (1n << 64n) + 1n]) {
+        expect(() => state.getSingleProof(gindex)).toThrowError(expect.objectContaining({code: "InvalidGindex"}));
       }
     });
 

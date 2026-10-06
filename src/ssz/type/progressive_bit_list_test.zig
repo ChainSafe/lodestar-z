@@ -10,7 +10,7 @@ test "ProgressiveBitListType - sanity" {
     var b: Bits.Type = try Bits.Type.fromBitLen(allocator, 30);
     defer b.deinit(allocator);
 
-    try b.setAssumeCapacity(2, true);
+    b.setAssumeCapacity(2, true);
 
     const b_buf = try allocator.alloc(u8, Bits.serializedSize(&b));
     defer allocator.free(b_buf);
@@ -28,7 +28,7 @@ test "ProgressiveBitListType - shrinking clears truncated bits" {
     var bits = try Bits.Type.fromBitLen(allocator, 8);
     defer bits.deinit(allocator);
 
-    try bits.setAssumeCapacity(7, true);
+    bits.setAssumeCapacity(7, true);
     try bits.resize(allocator, 1);
 
     var serialized: [1]u8 = undefined;
@@ -79,4 +79,31 @@ test "memory_safety: progressive bit list tree.fromValue reclaims unpublished no
     defer value.deinit(std.testing.allocator);
 
     try expectProgressiveFromValuePoolExhaustionReclaimsNodes(Bits, &value, 32);
+}
+
+test "progressive bitlist hashing streams delimiter boundaries without allocation" {
+    const allocator = std.testing.allocator;
+    const Bits = ProgressiveBitListType();
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 8192 });
+    defer pool.deinit();
+    for ([_]usize{ 0, 1, 7, 8, 255, 256, 257, 1279, 1280, 1281, 5376, 5377, 21760, 21761 }) |len| {
+        var value = try Bits.Type.fromBitLen(allocator, len);
+        defer value.deinit(allocator);
+        for (0..len) |i| value.setAssumeCapacity(i, i % 3 == 0);
+        const bytes = try allocator.alloc(u8, Bits.serializedSize(&value));
+        defer allocator.free(bytes);
+        _ = Bits.serializeIntoBytes(&value, bytes);
+        const root = try Bits.tree.fromValue(&pool, &value);
+        defer pool.unref(root);
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        var actual: [32]u8 = undefined;
+        try Bits.hashTreeRoot(failing.allocator(), &value, &actual);
+        try std.testing.expectEqualSlices(u8, root.getRoot(&pool), &actual);
+        try Bits.serialized.hashTreeRoot(failing.allocator(), bytes, &actual);
+        try std.testing.expectEqualSlices(u8, root.getRoot(&pool), &actual);
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+    var actual: [32]u8 = undefined;
+    try std.testing.expectError(error.InvalidSize, Bits.serialized.hashTreeRoot(allocator, &.{}, &actual));
+    try std.testing.expectError(error.noPaddingBit, Bits.serialized.hashTreeRoot(allocator, &.{0}, &actual));
 }

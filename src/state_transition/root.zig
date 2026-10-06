@@ -3,9 +3,11 @@ const testing = std.testing;
 
 pub const stateTransition = @import("state_transition.zig").stateTransition;
 pub const processSlots = @import("state_transition.zig").processSlots;
+pub const Diagnostics = @import("diagnostics").Diagnostics;
 pub const TransitionOpts = @import("state_transition.zig").TransitionOpts;
 
 pub const metrics = @import("metrics.zig");
+pub const ValidatorMonitor = @import("ValidatorMonitor.zig");
 
 pub const RefCount = @import("./utils/ref_count.zig").RefCount;
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
@@ -17,6 +19,7 @@ pub const buildSlashingsCacheFromStateIfNeeded = @import("./cache/slashings_cach
 
 pub const EpochCacheImmutableData = @import("./cache/epoch_cache.zig").EpochCacheImmutableData;
 pub const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
+pub const SyncCommitteeCache = @import("./cache/sync_committee_cache.zig").SyncCommitteeCache;
 
 pub const committee_indices = @import("./utils/committee_indices.zig");
 pub const PubkeyCache = @import("./cache/pubkey_cache.zig").PubkeyCache;
@@ -24,6 +27,7 @@ pub const pkix = @import("./cache/pkix.zig");
 pub const signature_set_verifier = @import("./signature_sets/verifier.zig");
 
 pub const EpochTransitionCache = @import("./cache/epoch_transition_cache.zig").EpochTransitionCache;
+pub const validator_flat_cache = @import("./cache/validator_flat_cache.zig");
 pub const processEpoch = @import("./epoch/process_epoch.zig").processEpoch;
 pub const processJustificationAndFinalization = @import("./epoch/process_justification_and_finalization.zig").processJustificationAndFinalization;
 pub const computeUnrealizedCheckpoints = @import("./utils/unrealized_checkpoints.zig").computeUnrealizedCheckpoints;
@@ -33,6 +37,14 @@ pub const processRegistryUpdates = @import("./epoch/process_registry_updates.zig
 pub const processSlashings = @import("./epoch/process_slashings.zig").processSlashings;
 pub const processRewardsAndPenalties = @import("./epoch/process_rewards_and_penalties.zig").processRewardsAndPenalties;
 pub const getRewardsAndPenalties = @import("./epoch/process_rewards_and_penalties.zig").getRewardsAndPenalties;
+pub const ProposerRewards = @import("./cache/state_cache.zig").ProposerRewards;
+pub const computeBlockRewards = @import("./rewards/block_rewards.zig").computeBlockRewards;
+pub const computeBlockRewardsAny = @import("./rewards/block_rewards.zig").computeBlockRewardsAny;
+pub const BlockRewards = @import("./rewards/block_rewards.zig").BlockRewards;
+pub const SyncCommitteeReward = @import("./rewards/sync_committee_rewards.zig").SyncCommitteeReward;
+pub const computeSyncCommitteeRewards = @import("./rewards/sync_committee_rewards.zig").computeSyncCommitteeRewards;
+pub const AttestationsRewards = @import("./rewards/attestations_rewards.zig").AttestationsRewards;
+pub const computeAttestationsRewards = @import("./rewards/attestations_rewards.zig").computeAttestationsRewards;
 pub const processEth1DataReset = @import("./epoch/process_eth1_data_reset.zig").processEth1DataReset;
 pub const processPendingDeposits = @import("./epoch/process_pending_deposits.zig").processPendingDeposits;
 pub const processPendingConsolidations = @import("./epoch/process_pending_consolidations.zig").processPendingConsolidations;
@@ -108,6 +120,7 @@ pub const preset = @import("preset").preset;
 const EpochShuffling = @import("./utils/epoch_shuffling.zig");
 pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;
 pub const processProposerLookahead = @import("./epoch/process_proposer_lookahead.zig").processProposerLookahead;
+pub const startProposerLookaheadShuffling = @import("./epoch/process_proposer_lookahead.zig").startProposerLookaheadShuffling;
 
 const load_state = @import("load_state.zig");
 pub const loadState = load_state.loadState;

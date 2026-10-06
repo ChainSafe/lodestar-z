@@ -351,3 +351,34 @@ test "ByteListType - tree.zeros" {
         try std.testing.expectEqualSlices(u8, &expected_root, tree_node.getRoot(&pool));
     }
 }
+
+test "memory_safety: ByteListType tree reads need only output capacity" {
+    const allocator = std.testing.allocator;
+    const List = ByteListType(1025);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
+    defer pool.deinit();
+    for ([_]usize{ 0, 1, 7, 8, 31, 32, 33, 255, 256, 257, List.limit }) |len| {
+        var value = List.default_value;
+        defer List.deinit(allocator, &value);
+        try value.resize(allocator, len);
+        for (value.items, 0..) |*byte, i| byte.* = @truncate(i);
+        const node = try List.tree.fromValue(&pool, &value);
+        defer pool.unref(node);
+        const before = node.getRoot(&pool).*;
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        var out = List.default_value;
+        defer List.deinit(failing.allocator(), &out);
+        try out.ensureTotalCapacity(failing.allocator(), List.limit);
+        failing.fail_index = failing.alloc_index;
+        failing.resize_fail_index = failing.resize_index;
+        try List.tree.toValue(failing.allocator(), node, &pool, &out);
+        try std.testing.expect(List.equals(&value, &out));
+        try std.testing.expectEqualSlices(u8, &before, node.getRoot(&pool));
+        const zero = try List.tree.zeros(&pool, len);
+        defer pool.unref(zero);
+        try List.tree.toValue(failing.allocator(), zero, &pool, &out);
+        var root: [32]u8 = undefined;
+        try List.hashTreeRoot(allocator, &out, &root);
+        try std.testing.expectEqualSlices(u8, zero.getRoot(&pool), &root);
+    }
+}

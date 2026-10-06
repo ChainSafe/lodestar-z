@@ -1153,3 +1153,32 @@ test "memory_safety: TreeView composite list clone should not double-free cached
     try std.testing.expect(!backing.double_free);
     try std.testing.expectEqual(@as(usize, 0), backing.live.count());
 }
+
+test "memory_safety: list_composite init only allocates the view and preserves caller ownership on OOM" {
+    const allocator = std.testing.allocator;
+    const ListType = FixedListType(Checkpoint, 16, .{});
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
+    defer pool.deinit();
+
+    var value: ListType.Type = .empty;
+    defer value.deinit(allocator);
+    try value.append(allocator, .{ .epoch = 7, .root = [_]u8{7} ** 32 });
+
+    const root = try ListType.tree.fromValue(&pool, &value);
+    try pool.ref(root);
+    defer pool.unref(root);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, ListType.TreeView.init(failing.allocator(), &pool, root));
+    try std.testing.expectEqual(@as(u32, 1), root.getState(&pool).refCount());
+
+    failing.fail_index = 1;
+    {
+        const view = try ListType.TreeView.init(failing.allocator(), &pool, root);
+        defer view.deinit();
+        try std.testing.expectEqual(@as(usize, 1), try view.length());
+        try std.testing.expectEqual(@as(usize, 1), failing.alloc_index);
+        try std.testing.expectEqual(@as(u32, 2), root.getState(&pool).refCount());
+    }
+    try std.testing.expectEqual(@as(u32, 1), root.getState(&pool).refCount());
+}

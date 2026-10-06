@@ -13,7 +13,7 @@ pub const Fork = js.Object(struct {
 
 pub const Eth1Data = js.Object(struct {
     depositRoot: js.Uint8Array,
-    depositCount: js.Number,
+    depositCount: js.BigInt,
     blockHash: js.Uint8Array,
 });
 
@@ -35,11 +35,16 @@ pub const SyncCommittee = js.Object(struct {
     aggregatePubkey: js.Uint8Array,
 });
 
-pub const IndexedSyncCommittee = js.Object(struct {
-    validatorIndices: js.Uint32Array,
+pub const BlockRewards = js.Object(struct {
+    proposerIndex: js.Number,
+    total: js.Number,
+    attestations: js.Number,
+    syncAggregate: js.Number,
+    proposerSlashings: js.Number,
+    attesterSlashings: js.Number,
 });
 
-pub const IndexedSyncCommitteeWithMap = js.Object(struct {
+pub const IndexedSyncCommittee = js.Object(struct {
     validatorIndices: js.Uint32Array,
     validatorIndexMap: js.Value,
 });
@@ -59,6 +64,34 @@ pub const ProposerRewards = js.Object(struct {
     attestations: js.Number,
     syncAggregate: js.Number,
     slashing: js.Number,
+});
+
+pub const SyncCommitteeReward = js.Object(struct {
+    validatorIndex: js.Number,
+    reward: js.Number,
+});
+
+pub const IdealAttestationsReward = js.Object(struct {
+    effectiveBalance: js.Number,
+    head: js.Number,
+    target: js.Number,
+    source: js.Number,
+    inclusionDelay: js.Number,
+    inactivity: js.Number,
+});
+
+pub const TotalAttestationsReward = js.Object(struct {
+    validatorIndex: js.Number,
+    head: js.Number,
+    target: js.Number,
+    source: js.Number,
+    inclusionDelay: js.Number,
+    inactivity: js.Number,
+});
+
+pub const AttestationsRewards = js.Object(struct {
+    idealRewards: js.Array,
+    totalRewards: js.Array,
 });
 
 pub const MultiProof = js.Object(struct {

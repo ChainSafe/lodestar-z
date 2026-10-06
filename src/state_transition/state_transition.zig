@@ -1,4 +1,5 @@
 const std = @import("std");
+const Diagnostics = @import("diagnostics").Diagnostics;
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const metrics = @import("metrics.zig");
@@ -21,14 +22,14 @@ const EpochTransitionCache = @import("cache/epoch_transition_cache.zig").EpochTr
 const processEpoch = @import("epoch/process_epoch.zig").processEpoch;
 const computeEpochAtSlot = @import("utils/epoch.zig").computeEpochAtSlot;
 const processSlot = @import("slot/process_slot.zig").processSlot;
+const ValidatorMonitor = @import("ValidatorMonitor.zig");
+pub const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
 const upgradeStateToAltair = @import("slot/upgrade_state_to_altair.zig").upgradeStateToAltair;
 const upgradeStateToBellatrix = @import("slot/upgrade_state_to_bellatrix.zig").upgradeStateToBellatrix;
 const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgradeStateToCapella;
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
 const upgradeStateToElectra = @import("slot/upgrade_state_to_electra.zig").upgradeStateToElectra;
 const upgradeStateToFulu = @import("slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
-
-pub const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
 
 pub const ExecutionPayloadStatus = enum(u8) {
     invalid,
@@ -51,6 +52,7 @@ pub fn processSlots(
     io: std.Io,
     cached_state: *CachedBeaconState,
     slot: Slot,
+    validator_monitor: ?*ValidatorMonitor,
 ) !void {
     const config = cached_state.config;
     const epoch_cache = cached_state.epoch_cache;
@@ -68,12 +70,11 @@ pub fn processSlots(
             var timer = time.start(io);
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
-                io,
                 config,
                 epoch_cache,
                 state,
             );
-            defer epoch_transition_cache.deinit(allocator);
+            defer epoch_transition_cache.deinit();
             try observeEpochTransitionStep(.{ .step = .before_process_epoch }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
             switch (state.forkSeq()) {
@@ -89,7 +90,13 @@ pub fn processSlots(
                     );
                 },
             }
-            // TODO(bing): registerValidatorStatuses
+            if (validator_monitor) |monitor| {
+                monitor.registerValidatorStatuses(
+                    epoch_transition_cache.current_epoch,
+                    epoch_transition_cache.flags,
+                    if (epoch_transition_cache.balances) |balances| balances.items else null,
+                );
+            }
 
             try state.setSlot(next_slot);
 
@@ -146,6 +153,7 @@ pub fn processSlots(
 }
 
 pub const TransitionOpts = struct {
+    diagnostics: ?*Diagnostics = null,
     verify_state_root: bool = true,
     verify_proposer: bool = true,
     /// NOTE: verifying BLS signatures is expensive - make sure to turn this off for tests.
@@ -170,6 +178,7 @@ pub fn stateTransition(
     cached_state: *CachedBeaconState,
     signed_block: AnySignedBeaconBlock,
     opts: TransitionOpts,
+    validator_monitor: ?*ValidatorMonitor,
 ) !*CachedBeaconState {
     const block = signed_block.beaconBlock();
     const block_slot = block.slot();
@@ -190,6 +199,7 @@ pub fn stateTransition(
         io,
         post_cached_state,
         block_slot,
+        validator_monitor,
     );
 
     const config = post_cached_state.config;
@@ -219,7 +229,9 @@ pub fn stateTransition(
                     if (comptime (bt == .blinded and f.lt(.bellatrix)) or (bt == .blinded and f.gte(.gloas))) {
                         return error.InvalidBlockTypeForFork;
                     } else {
-                        try processBlock(
+                        var block_diagnostics: Diagnostics = .{};
+                        const diagnostics = opts.diagnostics orelse &block_diagnostics;
+                        processBlock(
                             f,
                             allocator,
                             io,
@@ -231,8 +243,13 @@ pub fn stateTransition(
                             bt,
                             block.castToFork(bt, f),
                             opts.block_external_data,
-                            .{ .verify_signature = opts.verify_signatures },
-                        );
+                            .{ .verify_signature = opts.verify_signatures, .diagnostics = diagnostics },
+                        ) catch |err| {
+                            if (diagnostics.detail) |*detail| {
+                                std.log.warn("Block processing failed at slot {d}: {f}", .{ block_slot, detail });
+                            }
+                            return err;
+                        };
                     }
                 },
             }
@@ -240,11 +257,14 @@ pub fn stateTransition(
     }
     metrics.state_transition.process_block.observe(time.durationSeconds(time.since(io, timer)));
 
+    const proposer_rewards = post_cached_state.proposer_rewards;
+    try metrics.state_transition.proposer_rewards.set(.{ .type = .attestation }, proposer_rewards.attestations);
+    try metrics.state_transition.proposer_rewards.set(.{ .type = .sync_aggregate }, proposer_rewards.sync_aggregate);
+    try metrics.state_transition.proposer_rewards.set(.{ .type = .slashing }, proposer_rewards.slashing);
+
     timer = time.start(io);
     try post_state.commit();
     metrics.state_transition.process_block_commit.observe(time.durationSeconds(time.since(io, timer)));
-
-    try metrics.state_transition.onPostState(post_cached_state);
 
     // Verify state root
     if (opts.verify_state_root) {

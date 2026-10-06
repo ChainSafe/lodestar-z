@@ -16,8 +16,8 @@ const Self = @This();
 ///
 /// Returns a `BlstError` if verification fails.
 pub fn validate(self: *const Self) BlstError!void {
-    if (c.blst_p1_affine_is_inf(&self.point)) return BlstError.PkIsInfinity;
-    if (!c.blst_p1_affine_in_g1(&self.point)) return BlstError.PointNotInGroup;
+    if (c.blst_p1_affine_is_inf(&self.point)) return error.PkIsInfinity;
+    if (!c.blst_p1_affine_in_g1(&self.point)) return error.PointNotInGroup;
 }
 
 /// Validate a serialized public key.
@@ -66,7 +66,7 @@ pub fn uncompress(pk_comp: []const u8) BlstError!Self {
         try errorFromInt(c.blst_p1_uncompress(&pk.point, pk_comp.ptr));
         return pk;
     }
-    return BlstError.BadEncoding;
+    return error.BadEncoding;
 }
 
 /// Deserialize a `PublicKey` (either compressed and uncompressed) from bytes.
@@ -81,7 +81,7 @@ pub fn deserialize(pk_in: []const u8) BlstError!Self {
         return pk;
     }
 
-    return BlstError.BadEncoding;
+    return error.BadEncoding;
 }
 
 /// Check if two public keys are equal.
@@ -113,14 +113,14 @@ test uncompress {
     try std.testing.expect(pk.isEqual(&pk_uncomp));
 
     // Invalid lengths must be rejected, even with the compression bit set.
-    try std.testing.expectError(BlstError.BadEncoding, uncompress(&[_]u8{}));
-    try std.testing.expectError(BlstError.BadEncoding, uncompress(pk_comp[0 .. COMPRESS_SIZE - 1]));
+    try std.testing.expectError(error.BadEncoding, uncompress(&[_]u8{}));
+    try std.testing.expectError(error.BadEncoding, uncompress(pk_comp[0 .. COMPRESS_SIZE - 1]));
     var too_long = [_]u8{0} ** (COMPRESS_SIZE + 1);
     @memcpy(too_long[0..COMPRESS_SIZE], &pk_comp);
-    try std.testing.expectError(BlstError.BadEncoding, uncompress(&too_long));
+    try std.testing.expectError(error.BadEncoding, uncompress(&too_long));
 
     // Correct length without the compression bit must be rejected.
     var no_comp_bit = pk_comp;
     no_comp_bit[0] &= 0x7f;
-    try std.testing.expectError(BlstError.BadEncoding, uncompress(&no_comp_bit));
+    try std.testing.expectError(error.BadEncoding, uncompress(&no_comp_bit));
 }

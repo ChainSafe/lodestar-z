@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
+const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
 const CloneOpts = @import("clone_opts.zig").CloneOpts;
 
 /// Common state for tree views that use runtime gindex-based child caching.
@@ -13,11 +14,11 @@ pub const TreeViewState = struct {
     pool: *Node.Pool,
     root: Node.Id,
 
-    /// cached nodes for faster access of already-visited children
+    /// Nodes borrowed from `root`, or owned rc-zero replacements staged by `setChildNode`.
     children_nodes: std.AutoHashMapUnmanaged(Gindex, Node.Id),
 
     /// whether the corresponding child node/data has changed since the last update of the root
-    changed: std.AutoArrayHashMapUnmanaged(Gindex, void),
+    changed: std.array_hash_map.Auto(Gindex, void),
 
     pub fn init(self: *TreeViewState, allocator: Allocator, pool: *Node.Pool, root: Node.Id) !void {
         try pool.ref(root);
@@ -35,18 +36,6 @@ pub const TreeViewState = struct {
         self.children_nodes.deinit(self.allocator);
         self.changed.deinit(self.allocator);
         self.pool.unref(self.root);
-    }
-
-    /// Cleanup for a partially-built view whose `init` failed after this state
-    /// took its `root` ref. Mirrors `deinit` but drops `root`'s ref WITHOUT
-    /// freeing, restoring `root` to its pre-init refcount: on the failure path
-    /// the caller still owns `root` and releases it itself (`unref` here would
-    /// free a freshly-built rc-0 root and double-free with the caller).
-    pub fn deinitAfterInitFailure(self: *TreeViewState) void {
-        self.clearChildrenNodesCache();
-        self.children_nodes.deinit(self.allocator);
-        self.changed.deinit(self.allocator);
-        self.pool.unrefUnsafe(self.root);
     }
 
     pub fn getChildNode(self: *TreeViewState, gindex: Gindex) !Node.Id {
@@ -77,6 +66,47 @@ pub const TreeViewState = struct {
         }
     }
 
+    /// Stages a packed write for the next commit, copying shared leaves and reusing pending ones.
+    /// `valid_chunks` must preserve or grow the length. `write` must not retain the chunk pointer
+    /// or access the pool.
+    pub fn editChunkedLeaf(
+        self: *TreeViewState,
+        gindex: Gindex,
+        intra_chunk: u16,
+        valid_chunks: u16,
+        comptime T: type,
+        index: usize,
+        value: *const T,
+        comptime write: fn (*[32]u8, usize, *const T) void,
+    ) !void {
+        std.debug.assert(intra_chunk < valid_chunks);
+        std.debug.assert(valid_chunks <= ChunkedLeaf.K);
+        var node = try self.getChildNode(gindex);
+        const state = node.getState(self.pool);
+
+        if (state.kind() == .chunked_leaf and state.refCount() == 0) {
+            std.debug.assert(self.changed.contains(gindex));
+        } else {
+            const replacement = switch (state.kind()) {
+                .zero => blk: {
+                    std.debug.assert(node == @as(Node.Id, @enumFromInt(ChunkedLeaf.k_log2)));
+                    break :blk try self.pool.createChunkedLeafEmpty(valid_chunks);
+                },
+                .chunked_leaf => try self.pool.createChunkedLeaf(
+                    try node.getChunkedLeafChunks(self.pool),
+                    try node.getChunkedLeafLen(self.pool),
+                ),
+                else => return error.InvalidNode,
+            };
+            errdefer self.pool.unref(replacement);
+
+            try self.setChildNode(gindex, replacement);
+            node = replacement;
+        }
+
+        try node.editChunkedLeaf(self.pool, intra_chunk, valid_chunks, T, index, value, write);
+    }
+
     pub fn commitNodes(self: *TreeViewState) !void {
         if (self.changed.count() == 0) {
             return;
@@ -85,19 +115,46 @@ pub const TreeViewState = struct {
         const nodes = try self.allocator.alloc(Node.Id, self.changed.count());
         defer self.allocator.free(nodes);
 
-        const gindices = self.changed.keys();
-        Gindex.sortAsc(gindices);
+        for (self.sortedChangedGindices(), 0..) |gindex, i| {
+            nodes[i] = self.children_nodes.get(gindex) orelse return error.ChildNotFound;
+        }
+        try self.commitStagedNodes(nodes);
+    }
 
-        for (gindices, 0..) |gindex, i| {
-            if (self.children_nodes.get(gindex)) |child_node| {
-                nodes[i] = child_node;
-            } else {
-                return error.ChildNotFound;
+    pub fn sortedChangedGindices(self: *TreeViewState) []const Gindex {
+        const SortContext = struct {
+            keys: []const Gindex,
+
+            pub fn lessThan(context: @This(), a: usize, b: usize) bool {
+                return @intFromEnum(context.keys[a]) < @intFromEnum(context.keys[b]);
             }
+        };
+        self.changed.sortUnstable(SortContext{ .keys = self.changed.keys() });
+        return self.changed.keys();
+    }
+
+    /// `nodes` must match `sortedChangedGindices()`. Publishes the root and cached nodes together;
+    /// on failure, both stay unchanged and the dirty set remains available for retry.
+    pub fn commitStagedNodes(self: *TreeViewState, nodes: []Node.Id) !void {
+        const gindices = self.changed.keys();
+        std.debug.assert(nodes.len == gindices.len);
+        if (nodes.len == 0) return;
+
+        // Failed tree rebuilds can reclaim their inputs. Keep pending nodes alive until
+        // publication, then drop only these temporary references, even when their count reaches zero.
+        var retained: usize = 0;
+        defer for (nodes[0..retained]) |node| self.pool.unrefUnsafe(node);
+
+        for (nodes) |node| {
+            try self.pool.ref(node);
+            retained += 1;
         }
 
         const new_root = try self.root.setNodesGrouped(self.pool, gindices, nodes);
         try self.pool.ref(new_root);
+        for (gindices, nodes) |gindex, node| {
+            if (self.children_nodes.getPtr(gindex)) |cached| cached.* = node;
+        }
         self.pool.unref(self.root);
         self.root = new_root;
 
@@ -109,9 +166,6 @@ pub const TreeViewState = struct {
         while (value_iter.next()) |node_id_ptr| {
             const node_id = node_id_ptr.*;
             const state = node_id.getState(self.pool);
-            // A cached child root can already be freed via children_data — a child
-            // view owns the same node — when a failed commit left it here. Skip it
-            // rather than re-unref (which would hit the .free slot).
             if (state.isFree()) continue;
             if (state.refCount() == 0) {
                 self.pool.unref(node_id);
@@ -146,22 +200,6 @@ pub const TreeViewState = struct {
     }
 };
 
-test "getChildNode does not publish a cache entry when lookup fails" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{
-        .page_allocator = allocator,
-        .allocator = allocator,
-        .pool_size = 1,
-    });
-    defer pool.deinit();
-
-    const root = try pool.createLeaf(&([_]u8{0} ** 32));
-    var state: TreeViewState = undefined;
-    try state.init(allocator, &pool, root);
-    defer state.deinit();
-
-    // Failed leaf child navigation must not publish a cache entry.
-    const child_gindex = Gindex.fromDepth(1, 0);
-    try std.testing.expectError(error.InvalidNode, state.getChildNode(child_gindex));
-    try std.testing.expectEqual(@as(usize, 0), state.children_nodes.count());
+test {
+    _ = @import("tree_view_state_test.zig");
 }

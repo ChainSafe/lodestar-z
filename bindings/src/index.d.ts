@@ -25,7 +25,7 @@ export interface SignedVoluntaryExit {
 
 interface Eth1Data {
   depositRoot: Uint8Array;
-  depositCount: number;
+  depositCount: bigint;
   blockHash: Uint8Array;
 }
 
@@ -45,8 +45,8 @@ interface ExecutionPayloadHeader {
   blockHash: Uint8Array;
   transactionsRoot: Uint8Array;
   withdrawalsRoot?: Uint8Array; // capella+
-  blobGasUsed?: number; // deneb+
-  excessBlobGas?: number; // deneb+
+  blobGasUsed?: bigint; // deneb+
+  excessBlobGas?: bigint; // deneb+
 }
 
 /*
@@ -56,6 +56,7 @@ interface ExecutionPayloadHeader {
  */
 interface BeaconBlockLike {
   body: {
+    randaoReveal: Uint8Array;
     executionPayload?: {
       parentHash: Uint8Array;
       feeRecipient: Uint8Array;
@@ -145,6 +146,15 @@ interface ProposerRewards {
   slashing: number;
 }
 
+interface BlockRewards {
+  proposerIndex: number;
+  total: number;
+  attestations: number;
+  syncAggregate: number;
+  proposerSlashings: number;
+  attesterSlashings: number;
+}
+
 interface SyncCommitteeCache {
   validatorIndices: Uint32Array;
   validatorIndexMap: Map<number, number[]>;
@@ -196,8 +206,13 @@ export type VoluntaryExitValidity =
   | "invalid_signature";
 
 export declare class BeaconStateView {
-  static createFromBytes(bytes: Uint8Array): BeaconStateView;
+  /** Requires state bytes with trusted provenance; SSZ decoding does not authenticate them. */
+  static createFromBytes(bytes: Uint8Array, config: BeaconConfig): BeaconStateView;
 
+  /**
+   * Idempotently release this view. Subsequent state access throws InvalidState.
+   * An already-running native call retains its resources until that call returns.
+   */
   release(): void;
   slot: number;
   fork: Fork;
@@ -260,8 +275,8 @@ export declare class BeaconStateView {
   getPreviousShuffling(): EpochShuffling;
   getCurrentShuffling(): EpochShuffling;
   getNextShuffling(): EpochShuffling;
-  getBeaconCommittee(): number[];
-  getBeaconCommitteeCountPerSlot(): number;
+  getBeaconCommittee(slot: number, index: number): Uint32Array;
+  getBeaconCommitteeCountPerSlot(epoch: number): number;
   previousDecisionRoot: string;
   currentDecisionRoot: string;
   nextDecisionRoot: string;
@@ -304,15 +319,16 @@ export declare class BeaconStateView {
   isExecutionEnabled(block: BeaconBlockLike): boolean;
 
   proposerRewards: ProposerRewards;
-  // biome-ignore lint/suspicious/noExplicitAny: stub
-  // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
-  computeBlockRewards(block: any, proposerRewards?: any): Promise<any>;
-  // biome-ignore lint/suspicious/noExplicitAny: stub
-  // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
-  computeAttestationsRewards(validatorIds?: (number | string)[]): Promise<any>;
-  // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
-  // biome-ignore lint/suspicious/noExplicitAny: stub
-  computeSyncCommitteeRewards(block: any, validatorIds: (number | string)[]): Promise<any>;
+  computeBlockRewards(
+    signedBlockBytes: Uint8Array,
+    isBlinded: boolean,
+    proposerRewards?: ProposerRewards
+  ): BlockRewards;
+  computeAttestationsRewards(validatorIds?: (number | string)[]): AttestationsRewards;
+  computeSyncCommitteeRewards(
+    block: SyncCommitteeRewardsBlock,
+    validatorIds?: (number | string)[]
+  ): SyncCommitteeReward[];
   getLatestWeakSubjectivityCheckpointEpoch(): number;
 
   getVoluntaryExitValidity(signedVoluntaryExit: SignedVoluntaryExit, verifySignature: boolean): VoluntaryExitValidity;
@@ -344,6 +360,7 @@ export declare class BeaconStateView {
     processedValidatorSweepCount: number;
   };
 
+  /** On phase0, serialize this call with other STF operations and cache teardown within this thread. */
   computeUnrealizedCheckpoints(): {
     justifiedCheckpoint: Checkpoint;
     finalizedCheckpoint: Checkpoint;
@@ -378,22 +395,70 @@ export declare class BeaconStateView {
   hashTreeRoot(): Uint8Array;
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
+  /** Serialize this call with other STF operations and cache teardown within this thread. */
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
+  /** Serialize this call with other STF operations and cache teardown within this thread. */
   stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
 }
 
+/**
+ * Owns a copy of the configuration inputs; states retain it for their lifetime.
+ * Numeric u64 fields accept safe unsigned integers or Infinity as the maximum u64 sentinel.
+ */
+export declare class BeaconConfig {
+  private readonly _brand: void;
+  constructor(chainConfig: object, genesisValidatorsRoot: Uint8Array);
+}
+
 declare const bindings: {
-  config: {
-    set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
-  };
   stateTransition: {
+    /** Callers must exclude STF operations in this thread until teardown returns. */
     deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
-    init: () => void;
+    init: (options?: {historical?: boolean}) => void;
     scrapeMetrics: () => string;
+    registerLocalValidator: (index: number) => void;
+    unregisterLocalValidator: (index: number) => void;
   };
   BeaconStateView: typeof BeaconStateView;
+  BeaconConfig: typeof BeaconConfig;
 };
 
 export default bindings;
+
+export interface SyncCommitteeRewardsBlock {
+  slot: number;
+  body: {
+    randaoReveal: Uint8Array;
+    syncAggregate?: {
+      syncCommitteeBits: {uint8Array: Uint8Array; bitLen: number};
+    };
+  };
+}
+
+export interface SyncCommitteeReward {
+  validatorIndex: number;
+  reward: number;
+}
+
+export interface AttestationReward {
+  head: number;
+  target: number;
+  source: number;
+  inclusionDelay: number;
+  inactivity: number;
+}
+
+export interface IdealAttestationsReward extends AttestationReward {
+  effectiveBalance: number;
+}
+
+export interface TotalAttestationsReward extends AttestationReward {
+  validatorIndex: number;
+}
+
+export interface AttestationsRewards {
+  idealRewards: IdealAttestationsReward[];
+  totalRewards: TotalAttestationsReward[];
+}

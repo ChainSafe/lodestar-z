@@ -56,7 +56,6 @@ fn xor(a: *const [32]u8, b: *const [32]u8, out: *[32]u8) void {
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const config = @import("config");
 const AnyBeaconBlock = @import("fork_types").AnyBeaconBlock;
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 
@@ -69,7 +68,7 @@ test "process randao - sanity" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
-    const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
+    const slot = try test_state.cached_state.state.slot();
 
     const proposers = test_state.cached_state.epoch_cache.proposers;
 

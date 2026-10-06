@@ -20,16 +20,18 @@ pub const SyncCommitteeCache = union(enum) {
     phase0: void,
     altair: *SyncCommitteeCacheAltair,
 
-    pub fn getValidatorIndices(self: *const SyncCommitteeCache) []ValidatorIndex {
+    pub const Error = error{SyncCommitteeNotAvailable};
+
+    pub fn getValidatorIndices(self: *const SyncCommitteeCache) Error![]ValidatorIndex {
         return switch (self.*) {
-            .phase0 => @panic("phase0 does not have sync_committee"),
+            .phase0 => error.SyncCommitteeNotAvailable,
             .altair => |sync_committee| sync_committee.validator_indices,
         };
     }
 
-    pub fn getValidatorIndexMap(self: *const SyncCommitteeCache) *const SyncComitteeValidatorIndexMap {
+    pub fn getValidatorIndexMap(self: *const SyncCommitteeCache) Error!*const SyncComitteeValidatorIndexMap {
         return switch (self.*) {
-            .phase0 => @panic("phase0 does not have sync_committee"),
+            .phase0 => error.SyncCommitteeNotAvailable,
             .altair => |sync_committee| sync_committee.validator_index_map,
         };
     }
@@ -45,6 +47,8 @@ pub const SyncCommitteeCache = union(enum) {
 
     pub fn initValidatorIndices(allocator: Allocator, indices: []const ValidatorIndex) !SyncCommitteeCache {
         const cloned_indices = try allocator.alloc(ValidatorIndex, indices.len);
+        errdefer allocator.free(cloned_indices);
+
         std.mem.copyForwards(ValidatorIndex, cloned_indices, indices);
         const cache = try SyncCommitteeCacheAltair.initValidatorIndices(allocator, cloned_indices);
         return SyncCommitteeCache{ .altair = cache };
@@ -131,7 +135,7 @@ test "initSyncCommittee - sanity" {
     try std.testing.expectEqualSlices(
         ValidatorIndex,
         &[_]ValidatorIndex{0} ** preset.SYNC_COMMITTEE_SIZE,
-        cache.getValidatorIndices(),
+        try cache.getValidatorIndices(),
     );
 }
 
@@ -195,4 +199,8 @@ test computeSyncCommitteeIndices {
         &[_]ValidatorIndex{0} ** preset.SYNC_COMMITTEE_SIZE,
         &out,
     );
+}
+
+test {
+    _ = @import("sync_committee_cache_test.zig");
 }

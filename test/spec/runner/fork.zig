@@ -51,7 +51,7 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
             var tc = try Self.init(allocator, &pool, dir);
             defer {
                 tc.deinit();
-                state_transition.deinitReusedEpochTransitionCache(std.testing.io);
+                state_transition.deinitReusedEpochTransitionCache();
             }
 
             try tc.runTest();
@@ -164,9 +164,9 @@ fn loadTargetFork(allocator: Allocator, dir: std.Io.Dir) !ForkSeq {
     defer allocator.free(contents);
 
     const key = "fork: ";
-    if (std.mem.indexOf(u8, contents, key)) |start| {
+    if (std.mem.find(u8, contents, key)) |start| {
         const after_key = contents[start + key.len ..];
-        const end = std.mem.indexOf(u8, after_key, "}") orelse return error.InvalidMetaFile;
+        const end = std.mem.find(u8, after_key, "}") orelse return error.InvalidMetaFile;
         const fork_slice = after_key[0..end];
         if (fork_slice.len == 0) return error.InvalidMetaFile;
         return ForkSeq.fromName(fork_slice);

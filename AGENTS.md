@@ -13,14 +13,13 @@
 - **No `any`:** avoid `any` and `as any`; use proper types or a justified Biome suppression.
 - **Follow existing patterns** before introducing new abstractions.
 - **Security reviews:** first surface candidate security-objective violations, then use
-  `THREAT_MODEL.md` and `docs/security/IMPLEMENTATION_MAP.md` to classify them. The model is not an
-  allowlist. Downgrade a candidate only after verifying the applicable trust assumption against the
-  current or planned call path. If code and documentation conflict, report the code behavior and the
-  documentation gap.
-- **Security-model maintenance:** review both security documents when a change adds or alters a
-  trust boundary, native dependency, persistence path or format, shared mutable cache or pool,
-  externally influenced native input, or supported integration. Update the normative threat model
-  only when the security contract changes; otherwise update the implementation map.
+  `THREAT_MODEL.md` to classify them. The model is not an allowlist. Downgrade a candidate only after
+  verifying the applicable trust assumption against the current or planned call path. If code and
+  documentation conflict, report the code behavior and the documentation gap.
+- **Security documentation:** update `THREAT_MODEL.md` only when a change alters a security
+  objective, trust assumption, trust boundary, or supported caller obligation. Document enduring API
+  preconditions beside the owning declaration or module. Implementation changes that preserve these
+  contracts require no security-documentation update.
 - **Test file layout:** a module holds at most one `test` block. A single inline test is fine;
   a second one means the tests move to a sibling `<module>_test.zig`, wired from the module with
   `test { _ = @import("<module>_test.zig"); }`. Never mark a declaration `pub` only to relocate a
@@ -200,7 +199,22 @@ Important requirements include:
 - Construct large objects in place where practical.
 - Keep allocation and matching cleanup together, separated from surrounding logic by blank lines.
 - Explain why a non-obvious design or safety decision is correct.
+- Name error values `error.Name`, never through their set as `Error.Name` or `MyError.Name`.
+  Declared error sets stay in signatures. `zig build test:tidy` enforces this.
 - Run `zig fmt` on every Zig change.
+
+#### Zig 0.16 standard-library names
+
+Use the current names from the Zig 0.16 standard library. The old aliases below are deprecated:
+
+- `std.ArrayListUnmanaged` and `std.ArrayListAligned*` become `std.ArrayList` or
+  `std.array_list.Aligned`.
+- `std.AutoArrayHashMapUnmanaged`, `std.ArrayHashMapUnmanaged`, and
+  `std.StringArrayHashMapUnmanaged` become `std.array_hash_map.Auto`,
+  `std.array_hash_map.Custom`, and `std.array_hash_map.String`.
+- `std.mem.indexOf*` and `std.mem.lastIndexOf*` become the corresponding `find*` functions.
+- Static bit sets use `.empty` and `.full` instead of `initEmpty()` and `initFull()`.
+
 ### JavaScript and TypeScript
 
 Bindings use ES modules and Biome:

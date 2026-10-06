@@ -1,6 +1,6 @@
 {
   "name": "@chainsafe/lodestar-z",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Lodestar-z NAPI bindings",
   "files": [
     "bindings/src/",
@@ -43,7 +43,7 @@
     "prepare-minimal": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=minimal",
     "lint": "biome check",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts",
-    "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --config .benchrc.yaml --defaultBranch main"
+    "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --isolate --config .benchrc.yaml --defaultBranch main"
   },
   "keywords": [],
   "author": "ChainSafe Systems",
@@ -66,11 +66,11 @@
     ]
   },
   "dependencies": {
-    "@chainsafe/zapi": "4.0.0"
+    "@chainsafe/zapi": "4.1.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.11",
-    "@chainsafe/benchmark": "^2.0.1",
+    "@chainsafe/benchmark": "2.1.0",
     "@chainsafe/biomejs-config": "^1.0.0",
     "@lodestar/config": "^1.39.1",
     "@lodestar/era": "^1.39.1",

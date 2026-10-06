@@ -18,6 +18,7 @@
 //! `left`+`right`+`cache` collapse into one u64 (`payload`). Branch
 //! navigation reads exactly two columns per visit (state + payload).
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const hashOne = @import("hashing").hashOne;
@@ -139,7 +140,7 @@ pub const State = enum(u32) {
     pub inline fn incRefCount(s: *State) Error!u32 {
         std.debug.assert(!s.isFree());
         const rc = s.refCount();
-        if (rc == rc_mask) return Error.RefCountOverflow;
+        if (rc == rc_mask) return error.RefCountOverflow;
         s.* = @enumFromInt(@intFromEnum(s.*) + 1);
         return rc + 1;
     }
@@ -265,8 +266,9 @@ pub const Pool = struct {
     allocator: Allocator,
     nodes: std.MultiArrayList(Node).Slice,
     next_free_node: Id,
+    nodes_in_use: usize,
     // Reused scratch for chunked_leaf root recompute: single-threaded, and chunked_leaf is a leaf
-    // of getRoot's recursion, so at most one computeRoot uses it at a time.
+    // of getRoot's traversal, so at most one computeRoot uses it at a time.
     chunked_leaf_scratch: [ChunkedLeaf.K / 2][32]u8 align(64),
 
     pub const InitOptions = struct {
@@ -290,6 +292,7 @@ pub const Pool = struct {
             .allocator = opts.allocator,
             .nodes = undefined,
             .next_free_node = @enumFromInt(max_depth),
+            .nodes_in_use = max_depth,
             .chunked_leaf_scratch = undefined,
         };
 
@@ -347,12 +350,15 @@ pub const Pool = struct {
     }
 
     /// Returns the number of nodes currently in use (not free).
-    pub fn getNodesInUse(self: *Pool) usize {
-        var count: usize = 0;
-        for (self.nodes.items(.state)) |s| {
-            if (!s.isFree()) count += 1;
+    pub fn getNodesInUse(self: *const Pool) usize {
+        if (builtin.is_test) {
+            var actual: usize = 0;
+            for (self.nodes.items(.state)) |state| {
+                if (!state.isFree()) actual += 1;
+            }
+            std.debug.assert(actual == self.nodes_in_use);
         }
-        return count;
+        return self.nodes_in_use;
     }
 
     /// Pop the next free slot from the free list. Caller must initialise
@@ -364,6 +370,7 @@ pub const Pool = struct {
         const state_col = self.nodes.items(.state);
         std.debug.assert(state_col[idx].isFree());
         self.next_free_node = state_col[idx].nextFree();
+        self.nodes_in_use += 1;
         return n;
     }
 
@@ -502,12 +509,12 @@ pub const Pool = struct {
     }
 
     /// Returns a read-only pointer to the wrapped struct held by a
-    /// `.container_struct` Node. Returns `Error.InvalidNode` if the slot is not
+    /// `.container_struct` Node. Returns `error.InvalidNode` if the slot is not
     /// a branch-struct variant.
     pub fn getStructPtr(self: *Pool, node_id: Id, comptime T: type) Error!*const T {
         const idx = @intFromEnum(node_id);
         if (self.nodes.items(.state)[idx].kind() != .container_struct) {
-            return Error.InvalidNode;
+            return error.InvalidNode;
         }
         const ref_ptr = containerStructRef(self.nodes.items(.payload), idx);
         return @ptrCast(@alignCast(ref_ptr.ptr));
@@ -517,12 +524,12 @@ pub const Pool = struct {
     /// `.container_struct` slot's wrapped struct. The returned Id has refcount
     /// matching the underlying field-tree constructors (typically 0 — caller
     /// is responsible for `unref`'ing it once the temporary tree is no longer
-    /// needed). Returns `Error.InvalidNode` if the slot is not a branch-struct
+    /// needed). Returns `error.InvalidNode` if the slot is not a branch-struct
     /// variant.
     pub fn materializeContainerStruct(self: *Pool, node_id: Id) Error!Id {
         const idx = @intFromEnum(node_id);
         if (self.nodes.items(.state)[idx].kind() != .container_struct) {
-            return Error.InvalidNode;
+            return error.InvalidNode;
         }
         const ref_ptr = containerStructRef(self.nodes.items(.payload), idx);
         return try ref_ptr.to_tree(ref_ptr.ptr, self);
@@ -533,11 +540,11 @@ pub const Pool = struct {
     /// subtree of leaves; this builds it explicitly so that proof traversal
     /// can walk into individual chunks. Trailing zero subtrees fill the chunked_leaf
     /// to full K. The returned Id has refcount=0; caller is responsible for
-    /// `unref`'ing it. Returns `Error.InvalidNode` if the slot is not a chunked_leaf.
+    /// `unref`'ing it. Returns `error.InvalidNode` if the slot is not a chunked_leaf.
     pub fn materializeChunkedLeaf(self: *Pool, node_id: Id) Error!Id {
         const idx = @intFromEnum(node_id);
         if (self.nodes.items(.state)[idx].kind() != .chunked_leaf) {
-            return Error.InvalidNode;
+            return error.InvalidNode;
         }
         const storage = chunkedLeafPtr(self.nodes.items(.payload), idx);
 
@@ -567,6 +574,7 @@ pub const Pool = struct {
                 for (out[0..i]) |node_id| {
                     states[@intFromEnum(node_id)] = State.initFree(self.next_free_node);
                     self.next_free_node = node_id;
+                    self.nodes_in_use -= 1;
                 }
                 return error.PoolExhausted;
             }
@@ -720,6 +728,7 @@ pub const Pool = struct {
             // in `state` (the State.initFree representation).
             states[@intFromEnum(id)] = State.initFree(self.next_free_node);
             self.next_free_node = id;
+            self.nodes_in_use -= 1;
         }
     }
 };
@@ -736,89 +745,146 @@ pub const Id = enum(u32) {
         return noChildKind(node_id, kind);
     }
 
-    /// Returns the root hash, computing any lazy branch nodes on demand.
+    /// Returns the root hash, computing lazy branches with bounded, allocation-free traversal.
+    /// Branch paths must be acyclic and contain at most `max_depth` branches.
+    /// Traversal-bound violations indicate invalid native tree construction and panic.
+    /// Opaque container callbacks retain their own hashing behavior.
     pub fn getRoot(node_id: Id, pool: *Pool) *const [32]u8 {
         const idx = @intFromEnum(node_id);
-        const states = pool.nodes.items(.state);
+        const kind = pool.nodes.items(.state)[idx].kind();
         const roots = pool.nodes.items(.root);
-        const kind = states[idx].kind();
-
         switch (kind) {
             .zero, .leaf => return &roots[idx],
             .free => @panic("getRoot called on .free slot — use-after-free"),
-            .branch => {
-                if (!std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
-                    return &roots[idx];
-                }
-                const c = pool.nodes.items(.payload)[idx];
-                const left_root = unpackLeft(c).getRoot(pool);
-                const right_root = unpackRight(c).getRoot(pool);
-                var hash: [32]u8 = undefined;
-                hashOne(&hash, left_root, right_root);
-                roots[idx] = hash;
-                return &roots[idx];
-            },
-            .chunked_leaf => {
-                if (!std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
-                    return &roots[idx];
-                }
-                const storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
-                var hash: [32]u8 = undefined;
-                storage.computeRoot(&pool.chunked_leaf_scratch, &hash);
-                roots[idx] = hash;
-                return &roots[idx];
-            },
-            .container_struct => {
-                if (!std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
-                    return &roots[idx];
-                }
-                const ref_ptr = containerStructRef(pool.nodes.items(.payload), idx);
-                var hash: [32]u8 = undefined;
-                ref_ptr.get_root(ref_ptr.ptr, &hash);
-                roots[idx] = hash;
-                return &roots[idx];
-            },
+            .branch, .chunked_leaf, .container_struct => {},
         }
+        if (std.mem.eql(u8, &roots[idx], &lazy_sentinel)) computeRoot(node_id, pool);
+        return &roots[idx];
+    }
+
+    fn computeRoot(node_id: Id, pool: *Pool) void {
+        const Frame = struct { node: Id, right_visited: bool };
+        var stack: [max_depth]Frame = undefined;
+        var depth: usize = 0;
+        var current = node_id;
+        const states = pool.nodes.items(.state);
+        const roots = pool.nodes.items(.root);
+        const payloads = pool.nodes.items(.payload);
+
+        // Each uncached branch contributes at most two child visits, including shared subtrees.
+        var remaining_visits = 2 * @as(u64, pool.nodes.len) + 1;
+        while (remaining_visits > 0) : (remaining_visits -= 1) {
+            const idx = @intFromEnum(current);
+            switch (states[idx].kind()) {
+                .zero, .leaf => {},
+                .free => @panic("getRoot called on .free slot — use-after-free"),
+                .branch => {
+                    if (std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
+                        if (depth == max_depth) @panic("getRoot branch path exceeds max_depth");
+                        stack[depth] = .{ .node = current, .right_visited = false };
+                        depth += 1;
+                        current = unpackLeft(payloads[idx]);
+                        continue;
+                    }
+                },
+                .chunked_leaf => {
+                    if (std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
+                        const storage = chunkedLeafPtr(payloads, idx);
+                        var hash: [32]u8 = undefined;
+                        storage.computeRoot(&pool.chunked_leaf_scratch, &hash);
+                        roots[idx] = hash;
+                    }
+                },
+                .container_struct => {
+                    if (std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
+                        const ref_ptr = containerStructRef(payloads, idx);
+                        var hash: [32]u8 = undefined;
+                        ref_ptr.get_root(ref_ptr.ptr, &hash);
+                        roots[idx] = hash;
+                    }
+                },
+            }
+
+            while (depth > 0) {
+                const frame = &stack[depth - 1];
+                const parent_idx = @intFromEnum(frame.node);
+                const children = payloads[parent_idx];
+                if (!frame.right_visited) {
+                    frame.right_visited = true;
+                    current = unpackRight(children);
+                    break;
+                }
+                var hash: [32]u8 = undefined;
+                hashOne(&hash, &roots[@intFromEnum(unpackLeft(children))], &roots[@intFromEnum(unpackRight(children))]);
+                roots[parent_idx] = hash;
+                depth -= 1;
+            }
+            if (depth == 0) return;
+        }
+        @panic("getRoot exceeded the pool traversal bound");
     }
 
     pub fn getLeft(node_id: Id, pool: *Pool) Error!Id {
         const idx = @intFromEnum(node_id);
         const kind = pool.nodes.items(.state)[idx].kind();
-        if (noChildKind(node_id, kind)) return Error.InvalidNode;
+        if (noChildKind(node_id, kind)) return error.InvalidNode;
         return childrenOf(node_id, kind, pool.nodes.items(.payload)).left;
     }
 
     pub fn getRight(node_id: Id, pool: *Pool) Error!Id {
         const idx = @intFromEnum(node_id);
         const kind = pool.nodes.items(.state)[idx].kind();
-        if (noChildKind(node_id, kind)) return Error.InvalidNode;
+        if (noChildKind(node_id, kind)) return error.InvalidNode;
         return childrenOf(node_id, kind, pool.nodes.items(.payload)).right;
     }
 
     pub fn getChunkedLeafChunks(node_id: Id, pool: *Pool) Error!*align(64) const [ChunkedLeaf.K][32]u8 {
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return error.InvalidNode;
         return &chunkedLeafPtr(pool.nodes.items(.payload), idx).chunks;
     }
 
     pub fn getChunkedLeafLen(node_id: Id, pool: *Pool) Error!u16 {
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return error.InvalidNode;
         return chunkedLeafPtr(pool.nodes.items(.payload), idx).len;
     }
 
     pub fn getChunkedLeafPtr(node_id: Id, pool: *Pool) Error!*ChunkedLeaf {
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return error.InvalidNode;
         std.debug.assert(pool.nodes.items(.state)[idx].refCount() == 0);
         return chunkedLeafPtr(pool.nodes.items(.payload), idx);
+    }
+
+    /// Writes one chunk and invalidates the leaf's cached root without allocating.
+    /// Requires reference count zero; `valid_chunks` must preserve or grow the length.
+    /// `write` must not retain the chunk pointer or access the pool.
+    pub fn editChunkedLeaf(
+        node_id: Id,
+        pool: *Pool,
+        intra_chunk: u16,
+        valid_chunks: u16,
+        comptime T: type,
+        index: usize,
+        value: *const T,
+        comptime write: fn (*[32]u8, usize, *const T) void,
+    ) Error!void {
+        std.debug.assert(intra_chunk < valid_chunks);
+        std.debug.assert(valid_chunks <= ChunkedLeaf.K);
+        const storage = try node_id.getChunkedLeafPtr(pool);
+        std.debug.assert(storage.len <= valid_chunks);
+
+        write(&storage.chunks[intra_chunk], index, value);
+        storage.len = valid_chunks;
+        pool.nodes.items(.root)[@intFromEnum(node_id)] = lazy_sentinel;
     }
 
     pub fn setChunkedLeafChunk(node_id: Id, pool: *Pool, intra_index: u16, chunk: *const [32]u8) Error!Id {
         std.debug.assert(intra_index < ChunkedLeaf.K);
 
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return error.InvalidNode;
         const old_storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
 
         const new_storage = try pool.allocator.create(ChunkedLeaf);
@@ -838,7 +904,7 @@ pub const Id = enum(u32) {
 
     /// Returns a new chunked_leaf `Id` with each `intra_indices[i]` chunk replaced by
     /// `new_chunks[i]`. Heap blob cloned once; all updates applied in-place
-    /// in the new blob. Returns `Error.InvalidNode` if the receiver is not
+    /// in the new blob. Returns `error.InvalidNode` if the receiver is not
     /// a chunked_leaf variant. `intra_indices` and `new_chunks` must have equal length.
     pub fn setChunkedLeafChunks(
         node_id: Id,
@@ -849,7 +915,7 @@ pub const Id = enum(u32) {
         std.debug.assert(intra_indices.len == new_chunks.len);
 
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return error.InvalidNode;
         const old_storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
 
         const new_storage = try pool.allocator.create(ChunkedLeaf);
@@ -907,7 +973,7 @@ pub const Id = enum(u32) {
             const idx = @intFromEnum(node_id);
             const k = states[idx].kind();
             if (noChildKind(node_id, k)) {
-                return Error.InvalidNode;
+                return error.InvalidNode;
             }
             const c = childrenOf(node_id, k, payloads);
             if (path.left()) {
@@ -956,7 +1022,7 @@ pub const Id = enum(u32) {
             const idx = @intFromEnum(id);
             const k = states[idx].kind();
             if (noChildKind(id, k)) {
-                return Error.InvalidNode;
+                return error.InvalidNode;
             }
             const c = childrenOf(id, k, payloads);
             if (path.left()) {
@@ -976,7 +1042,7 @@ pub const Id = enum(u32) {
             const idx = @intFromEnum(id);
             const k = states[idx].kind();
             if (noChildKind(id, k)) {
-                return Error.InvalidNode;
+                return error.InvalidNode;
             }
             const c = childrenOf(id, k, payloads);
             if (path.left()) {
@@ -1042,7 +1108,7 @@ pub const Id = enum(u32) {
                 const idx = @intFromEnum(node_id);
                 const k = states[idx].kind();
                 if (noChildKind(node_id, k)) {
-                    return Error.InvalidNode;
+                    return error.InvalidNode;
                 }
                 const c = childrenOf(node_id, k, payloads);
                 parents_buf[bit_i] = node_id;
@@ -1174,7 +1240,7 @@ pub const Id = enum(u32) {
                 const idx = @intFromEnum(node_id);
                 const k = states[idx].kind();
                 if (noChildKind(node_id, k)) {
-                    return Error.InvalidNode;
+                    return error.InvalidNode;
                 }
                 const c = childrenOf(node_id, k, payloads);
 
@@ -1197,7 +1263,7 @@ pub const Id = enum(u32) {
                 const idx = @intFromEnum(node_id);
                 const k = states[idx].kind();
                 if (noChildKind(node_id, k)) {
-                    return Error.InvalidNode;
+                    return error.InvalidNode;
                 }
                 const c = childrenOf(node_id, k, payloads);
                 if (path.left()) {
@@ -1257,7 +1323,7 @@ pub const Id = enum(u32) {
         const max_length = @as(Gindex.Uint, 1) << depth;
         if (index >= max_length - 1) {
             if (index >= max_length) {
-                return Error.InvalidLength;
+                return error.InvalidLength;
             }
             return root_node;
         }
@@ -1284,7 +1350,7 @@ pub const Id = enum(u32) {
             const idx = @intFromEnum(node_id);
             const k = states[idx].kind();
             if (noChildKind(node_id, k)) {
-                return Error.InvalidNode;
+                return error.InvalidNode;
             }
             const c = childrenOf(node_id, k, payloads);
 
@@ -1306,7 +1372,7 @@ pub const Id = enum(u32) {
             const idx = @intFromEnum(node_id);
             const k = states[idx].kind();
             if (noChildKind(node_id, k)) {
-                return Error.InvalidNode;
+                return error.InvalidNode;
             }
             const c = childrenOf(node_id, k, payloads);
 
@@ -1423,7 +1489,7 @@ pub const Id = enum(u32) {
                 const idx = @intFromEnum(node_id);
                 const k = states[idx].kind();
                 if (noChildKind(node_id, k)) {
-                    return Error.InvalidNode;
+                    return error.InvalidNode;
                 }
                 const c = childrenOf(node_id, k, payloads);
 
@@ -1446,7 +1512,7 @@ pub const Id = enum(u32) {
                 const idx = @intFromEnum(node_id);
                 const k = states[idx].kind();
                 if (noChildKind(node_id, k)) {
-                    return Error.InvalidNode;
+                    return error.InvalidNode;
                 }
                 const c = childrenOf(node_id, k, payloads);
                 if (path.left()) {
@@ -1550,6 +1616,7 @@ fn restoreChildrenAndFreeParents(
         // Child refs are restored, so return only the parent slot.
         parent_state.* = State.initFree(pool.next_free_node);
         pool.next_free_node = parent;
+        pool.nodes_in_use -= 1;
     }
 }
 
@@ -1562,7 +1629,7 @@ pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
     }
     const max_length = @as(Gindex.Uint, 1) << depth;
     if (contents.len > max_length) {
-        return Error.InvalidLength;
+        return error.InvalidLength;
     }
 
     var d = depth;
@@ -1627,13 +1694,13 @@ pub const DepthIterator = struct {
         const path_len = self.base_gindex.pathLen();
         // Depth 0: only the root exists; yield once then finish.
         if (@intFromEnum(self.base_gindex) <= 1) {
-            if (self.index != 0) return Error.InvalidLength;
+            if (self.index != 0) return error.InvalidLength;
             self.index = 1;
             return self.node_id;
         }
 
         const max_length: Gindex.Uint = @intFromEnum(self.base_gindex);
-        if (self.index >= max_length) return Error.InvalidLength;
+        if (self.index >= max_length) return error.InvalidLength;
 
         const states = self.pool.nodes.items(.state);
         const payloads = self.pool.nodes.items(.payload);
@@ -1654,7 +1721,7 @@ pub const DepthIterator = struct {
             const idx = @intFromEnum(node_id);
             const k = states[idx].kind();
             if (noChildKind(node_id, k)) {
-                return Error.InvalidNode;
+                return error.InvalidNode;
             }
             const c = childrenOf(node_id, k, payloads);
             self.parents_buf[bit_i] = node_id;
@@ -1730,7 +1797,7 @@ pub const FillWithContentsIterator = struct {
     pub fn append(self: *FillWithContentsIterator, node_id: Id) Error!void {
         // Bounds check
         if (self.lefts[self.depth] != null) {
-            return Error.InvalidLength;
+            return error.InvalidLength;
         }
 
         var carry = node_id;

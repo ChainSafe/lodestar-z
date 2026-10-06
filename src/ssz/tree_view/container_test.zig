@@ -843,25 +843,27 @@ test "memory_safety: ContainerTreeView retry should adopt a child committed befo
 }
 
 test "memory_safety: TreeView container fromValue - view allocation OOM leaves no orphan pool nodes" {
-    const checkpoint: Checkpoint.Type = .{ .epoch = 7, .root = [_]u8{7} ** 32 };
-    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 64 });
-    defer pool.deinit();
+    inline for (.{ Checkpoint, StructContainerType(struct { epoch: UintType(64), root: ByteVectorType(32) }) }) |ST| {
+        const checkpoint: ST.Type = .{ .epoch = 7, .root = [_]u8{7} ** 32 };
+        var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 64 });
+        defer pool.deinit();
 
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
-        fn run(
-            allocator: std.mem.Allocator,
-            input_pool: *Node.Pool,
-            value: *const Checkpoint.Type,
-        ) !void {
-            const baseline = input_pool.getNodesInUse();
-            const view = Checkpoint.TreeView.fromValue(allocator, input_pool, value) catch |err| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+            fn run(
+                allocator: std.mem.Allocator,
+                input_pool: *Node.Pool,
+                value: *const ST.Type,
+            ) !void {
+                const baseline = input_pool.getNodesInUse();
+                const view = ST.TreeView.fromValue(allocator, input_pool, value) catch |err| {
+                    try std.testing.expectEqual(baseline, input_pool.getNodesInUse());
+                    return err;
+                };
+                view.deinit();
                 try std.testing.expectEqual(baseline, input_pool.getNodesInUse());
-                return err;
-            };
-            view.deinit();
-            try std.testing.expectEqual(baseline, input_pool.getNodesInUse());
-        }
-    }.run, .{ &pool, &checkpoint });
+            }
+        }.run, .{ &pool, &checkpoint });
+    }
 }
 
 test "memory_safety: TreeView container getFieldRoot on a dirty basic field leaves no orphan pool nodes" {
@@ -908,4 +910,47 @@ test "memory_safety: TreeView container deserialize - view allocation OOM leaves
             try std.testing.expectEqual(baseline, input_pool.getNodesInUse());
         }
     }.run, .{ &pool, &bytes });
+}
+
+test "memory_safety: TreeView container init preserves caller roots on allocation failure" {
+    const allocator = std.testing.allocator;
+    inline for (.{ Checkpoint, StructContainerType(struct { epoch: UintType(64), root: ByteVectorType(32) }) }) |ST| {
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
+        defer pool.deinit();
+
+        for ([_]u32{ 0, 1 }) |caller_refs| {
+            const value: ST.Type = .{ .epoch = 7, .root = [_]u8{7} ** 32 };
+            const root = try ST.tree.fromValue(&pool, &value);
+            defer pool.unref(root);
+            if (caller_refs == 1) try pool.ref(root);
+
+            const nodes_before = pool.getNodesInUse();
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+            try std.testing.expectError(error.OutOfMemory, ST.TreeView.init(failing.allocator(), &pool, root));
+            try std.testing.expect(!root.getState(&pool).isFree());
+            try std.testing.expectEqual(caller_refs, root.getState(&pool).refCount());
+            try std.testing.expectEqual(nodes_before, pool.getNodesInUse());
+        }
+    }
+}
+
+test "memory_safety: TreeView container init releases the view on reference overflow" {
+    const allocator = std.testing.allocator;
+    inline for (.{ Checkpoint, StructContainerType(struct { epoch: UintType(64), root: ByteVectorType(32) }) }) |ST| {
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
+        defer pool.deinit();
+
+        const value: ST.Type = .{ .epoch = 7, .root = [_]u8{7} ** 32 };
+        const root = try ST.tree.fromValue(&pool, &value);
+        defer pool.unref(root);
+        const state = &pool.nodes.items(.state)[@intFromEnum(root)];
+        const original_state = state.*;
+        defer state.* = original_state;
+        state.* = Node.State.initInUse(original_state.kind(), Node.max_ref_count);
+
+        const nodes_before = pool.getNodesInUse();
+        try std.testing.expectError(error.RefCountOverflow, ST.TreeView.init(allocator, &pool, root));
+        try std.testing.expectEqual(Node.max_ref_count, root.getState(&pool).refCount());
+        try std.testing.expectEqual(nodes_before, pool.getNodesInUse());
+    }
 }

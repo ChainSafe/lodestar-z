@@ -74,6 +74,8 @@ const HashBlock = struct {
     block: *BeaconBlock.Type,
     pub fn run(self: *HashBlock, allocator: std.mem.Allocator) void {
         var scratch = ssz.Hasher(BeaconBlock).init(allocator) catch unreachable;
+        defer scratch.deinit(allocator);
+
         var out: [32]u8 = undefined;
         ssz.Hasher(BeaconBlock).hash(&scratch, self.block, &out) catch unreachable;
     }
@@ -148,6 +150,8 @@ pub fn main(init: std.process.Init) !void {
     try bench.addParam("hash block", &hash_block, .{});
 
     var scratch = ssz.Hasher(BeaconBlock).init(allocator) catch unreachable;
+    defer scratch.deinit(allocator);
+
     var root: [32]u8 = undefined;
     ssz.Hasher(BeaconBlock).hash(&scratch, block, &root) catch unreachable;
 

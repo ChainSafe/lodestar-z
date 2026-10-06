@@ -20,7 +20,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
         const Self = @This();
         pub const kind = TypeKind.progressive_list;
         pub const Element: type = ST;
-        pub const Type: type = std.ArrayListUnmanaged(Element.Type);
+        pub const Type: type = std.ArrayList(Element.Type);
         pub const min_size: usize = 0;
         pub const max_size: usize = std.math.maxInt(usize);
 
@@ -39,26 +39,38 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
         }
 
         pub fn chunkCount(value: *const Type) usize {
-            if (comptime isBasicType(Element)) {
-                return (Element.fixed_size * value.items.len + 31) / 32;
-            } else return value.items.len;
+            return chunkCountForLength(value.items.len);
         }
 
-        pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            const chunks = try allocator.alloc([32]u8, chunkCount(value));
-            defer allocator.free(chunks);
-
-            @memset(chunks, [_]u8{0} ** 32);
-
+        fn chunkCountForLength(len: usize) usize {
             if (comptime isBasicType(Element)) {
-                _ = serializeIntoBytes(value, @ptrCast(chunks));
+                const items_per_chunk = 32 / Element.fixed_size;
+                return len / items_per_chunk + @intFromBool(len % items_per_chunk != 0);
+            } else return len;
+        }
+
+        pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
+            var accumulator = try progressive.MerkleAccumulator.init(chunkCount(value));
+            if (comptime isBasicType(Element)) {
+                const items_per_chunk = 32 / Element.fixed_size;
+                var index: usize = 0;
+                while (index < value.items.len) {
+                    var chunk: [32]u8 = @splat(0);
+                    const count = @min(items_per_chunk, value.items.len - index);
+                    for (value.items[index..][0..count], 0..) |*element, i| {
+                        _ = Element.serializeIntoBytes(element, chunk[i * Element.fixed_size ..][0..Element.fixed_size]);
+                    }
+                    try accumulator.append(&chunk);
+                    index += count;
+                }
             } else {
-                for (value.items, 0..) |element, i| {
-                    try Element.hashTreeRoot(&element, &chunks[i]);
+                for (value.items) |*element| {
+                    var chunk: [32]u8 = undefined;
+                    try Element.hashTreeRoot(element, &chunk);
+                    try accumulator.append(&chunk);
                 }
             }
-
-            try progressive.merkleizeChunks(allocator, chunks, out);
+            try accumulator.finish(out);
             mixInLength(value.items.len, out);
         }
 
@@ -140,30 +152,26 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 return len;
             }
 
-            pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
+            pub fn hashTreeRoot(_: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 const len = try length(data);
-
-                const chunk_count = if (comptime isBasicType(Element))
-                    (Element.fixed_size * len + 31) / 32
-                else
-                    len;
-                const chunks = try allocator.alloc([32]u8, chunk_count);
-                defer allocator.free(chunks);
-
-                @memset(chunks, [_]u8{0} ** 32);
-
+                var accumulator = try progressive.MerkleAccumulator.init(chunkCountForLength(len));
                 if (comptime isBasicType(Element)) {
-                    @memcpy(@as([]u8, @ptrCast(chunks))[0..data.len], data);
+                    var offset: usize = 0;
+                    while (offset < data.len) {
+                        var chunk: [32]u8 = @splat(0);
+                        const count = @min(32, data.len - offset);
+                        @memcpy(chunk[0..count], data[offset..][0..count]);
+                        try accumulator.append(&chunk);
+                        offset += count;
+                    }
                 } else {
                     for (0..len) |i| {
-                        try Element.serialized.hashTreeRoot(
-                            data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
-                            &chunks[i],
-                        );
+                        var chunk: [32]u8 = undefined;
+                        try Element.serialized.hashTreeRoot(data[i * Element.fixed_size ..][0..Element.fixed_size], &chunk);
+                        try accumulator.append(&chunk);
                     }
                 }
-
-                try progressive.merkleizeChunks(allocator, chunks, out);
+                try accumulator.finish(out);
                 mixInLength(len, out);
             }
         };
@@ -232,12 +240,23 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             }
 
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
-                const allocator = pool.allocator;
-                var value = Self.default_value;
-                defer Self.deinit(allocator, &value);
-
-                try toValue(allocator, node, pool, &value);
-                return Self.serializeIntoBytes(&value, out);
+                const len = try length(node, pool);
+                const size = try std.math.mul(usize, len, Element.fixed_size);
+                if (out.len < size) return error.InvalidSize;
+                const chunk_count = chunkCountForLength(len);
+                var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
+                var offset: usize = 0;
+                while (try it.next()) |chunk| {
+                    if (comptime isBasicType(Element)) {
+                        const byte_count = @min(32, size - offset);
+                        @memcpy(out[offset..][0..byte_count], chunk.getRoot(pool)[0..byte_count]);
+                        offset += byte_count;
+                    } else {
+                        offset += try Element.tree.serializeIntoBytes(chunk, pool, out[offset..][0..Element.fixed_size]);
+                    }
+                }
+                std.debug.assert(offset == size);
+                return size;
             }
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
@@ -318,7 +337,7 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
         const Self = @This();
         pub const kind = TypeKind.progressive_list;
         pub const Element: type = ST;
-        pub const Type: type = std.ArrayListUnmanaged(Element.Type);
+        pub const Type: type = std.ArrayList(Element.Type);
         pub const min_size: usize = 0;
         pub const max_size: usize = std.math.maxInt(usize);
 
@@ -344,15 +363,13 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
         }
 
         pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            const chunks = try allocator.alloc([32]u8, chunkCount(value));
-            defer allocator.free(chunks);
-
-            @memset(chunks, [_]u8{0} ** 32);
-
-            for (value.items, 0..) |element, i| {
-                try Element.hashTreeRoot(allocator, &element, &chunks[i]);
+            var accumulator = try progressive.MerkleAccumulator.init(value.items.len);
+            for (value.items) |*element| {
+                var chunk: [32]u8 = undefined;
+                try Element.hashTreeRoot(allocator, element, &chunk);
+                try accumulator.append(&chunk);
             }
-            try progressive.merkleizeChunks(allocator, chunks, out);
+            try accumulator.finish(out);
             mixInLength(value.items.len, out);
         }
 
@@ -411,24 +428,14 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 var elements = try VariableElementIterator(Self).init(data);
-                const len = elements.len;
-
-                const chunks = try allocator.alloc([32]u8, len);
-                defer allocator.free(chunks);
-                @memset(chunks, [_]u8{0} ** 32);
-
-                var i: usize = 0;
-                while (try elements.next()) |element_bytes| : (i += 1) {
-                    try Element.serialized.hashTreeRoot(
-                        allocator,
-                        element_bytes,
-                        &chunks[i],
-                    );
+                var accumulator = try progressive.MerkleAccumulator.init(elements.len);
+                while (try elements.next()) |element_bytes| {
+                    var chunk: [32]u8 = undefined;
+                    try Element.serialized.hashTreeRoot(allocator, element_bytes, &chunk);
+                    try accumulator.append(&chunk);
                 }
-                std.debug.assert(i == len);
-
-                try progressive.merkleizeChunks(allocator, chunks, out);
-                mixInLength(len, out);
+                try accumulator.finish(out);
+                mixInLength(elements.len, out);
             }
         };
 

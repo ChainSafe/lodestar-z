@@ -69,7 +69,7 @@ pub fn getVoluntaryExitValidity(
         return .inactive;
     }
 
-    var validator = try validators.get(@intCast(voluntary_exit.validator_index));
+    var validator = try validators.getReadonly(@intCast(voluntary_exit.validator_index));
     const current_epoch = epoch_cache.epoch;
 
     // verify the validator is active

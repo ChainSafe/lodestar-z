@@ -1,5 +1,3 @@
-const std = @import("std");
-const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const Validator = types.phase0.Validator;
@@ -25,23 +23,6 @@ pub fn isActiveValidatorView(validator: *Validator.TreeView, epoch: Epoch) !bool
 
 pub fn isSlashableValidator(validator: *const Validator.Type, epoch: Epoch) bool {
     return !validator.slashed and validator.activation_epoch <= epoch and epoch < validator.withdrawable_epoch;
-}
-
-pub fn getActiveValidatorIndices(allocator: Allocator, validators: *types.phase0.Validators.TreeView, epoch: Epoch) !std.ArrayList(ValidatorIndex) {
-    var indices: std.ArrayList(ValidatorIndex) = .empty;
-
-    var validators_it = validators.iteratorReadonly();
-    const validators_len = try validators.length();
-    for (0..validators_len) |i| {
-        var validator = try validators_it.next();
-        defer validator.deinit();
-
-        if (try isActiveValidatorView(&validator, epoch)) {
-            try indices.append(allocator, @intCast(i));
-        }
-    }
-
-    return indices;
 }
 
 pub fn getActivationChurnLimit(config: *const BeaconConfig, fork: ForkSeq, active_validator_count: usize) usize {
