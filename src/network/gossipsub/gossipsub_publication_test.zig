@@ -206,7 +206,7 @@ test "publication local IDONTWANT cannot suppress exact bytes over QUIC" {
     try std.testing.expectEqual(@as(usize, 1), received);
 }
 
-test "publication distinguishes topic capacity from unknown wire names" {
+test "publication uses known topics beyond the local subscription limit" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &topic_fixture.churn });
     defer g.deinit();
     for (0..constants.topics_cap) |i| {
@@ -214,8 +214,7 @@ test "publication distinguishes topic capacity from unknown wire names" {
         const name = try topic_fixture.churnTopic(i, &bytes);
         try support.subscribe(&g, name);
     }
-    for (g.overlay.rows[constants.topics_cap..]) |*row| row.generation = std.math.maxInt(u64);
-    try std.testing.expectError(error.ResourceExhausted, g.publish(test_topic, "body", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
+    _ = try g.publish(test_topic, "body", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expectError(error.UnknownTopic, g.publish("invalid", "body", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
 }
 

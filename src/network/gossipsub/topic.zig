@@ -75,8 +75,6 @@ pub fn parseCanonical(wire: []const u8) ?Canonical {
     return .{ .digest = parsed.digest, .name = Name.parse(parsed.name) orelse return null };
 }
 
-pub const Ref = struct { index: u16, generation: u64 };
-
 pub const ForkDigest = [4]u8;
 
 pub const Parsed = struct {

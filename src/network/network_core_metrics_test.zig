@@ -30,7 +30,7 @@ const Fixture = struct {
         errdefer std.testing.allocator.destroy(node);
         const key = try KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{93}));
         var options = core_test.networkOptions(&key);
-        options.resolved.core.protocols.gossipsub.topic_policy = if (boundaries.len > 0) boundaries else null;
+        if (boundaries.len > 0) options.resolved.core.protocols.gossipsub.topic_policy = boundaries;
         options.startup.discovery = discovery;
         try node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup);
         errdefer node.deinit(std.testing.io);
@@ -265,7 +265,7 @@ test "metrics include remote subscriptions without overlay rows and follow local
     var f = try Fixture.init(&.{ boundary(@splat(0), 100), boundary(@splat(1), 200) });
     defer f.deinit();
     const g = f.node.protocols.gossipsub;
-    const ns = &g.overlay.namespace.?;
+    const ns = &g.overlay.namespace;
     const name = "/eth2/00000000/data_column_sidecar_9/ssz_snappy";
     const current = ns.lookup(name).?.ordinal;
     ns.setSubscription(0, current, true);
@@ -473,7 +473,7 @@ test "metrics export stock per-topic gossipsub peer gauges under full topic stri
     var f = try Fixture.init(&.{ boundary(@splat(0), 100), boundary(@splat(1), 200) });
     defer f.deinit();
     const g = f.node.protocols.gossipsub;
-    const ns = &g.overlay.namespace.?;
+    const ns = &g.overlay.namespace;
     const column = "/eth2/00000000/data_column_sidecar_9/ssz_snappy";
     ns.setSubscription(0, ns.lookup(column).?.ordinal, true);
     var output = try f.render(true);

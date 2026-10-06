@@ -13,7 +13,8 @@ const mcache = @import("mcache.zig");
 const delivery = @import("delivery.zig");
 
 pub const Options = struct {
-    topic_policy: ?[]const topic_policy_mod.Boundary = null,
+    /// Required startup namespace. The owner copies it during initialization.
+    topic_policy: []const topic_policy_mod.Boundary = &.{},
     connected_capacity: u16 = constants.peers_cap,
     /// Engine connection slots; a session is found by its connection's index.
     connection_slots: u16 = quic_limits.connections_max_ceiling,
@@ -75,7 +76,7 @@ pub const Options = struct {
     random_seed: ?u64 = null,
 
     pub fn validate(o: *const Options) (error{InvalidLimits} || topic_policy_mod.Error)!void {
-        if (o.topic_policy) |boundaries| _ = try topic_policy_mod.validate(boundaries);
+        _ = try topic_policy_mod.validate(o.topic_policy);
         try score_mod.validateParams(o.score_params);
         if (o.topic_params) |*policies| for (policies) |*policy| {
             try score_mod.validateTopic(policy.params);
@@ -91,9 +92,9 @@ pub const Options = struct {
         try range(o.validation_capacity, 1, 65535);
         if (o.payload_limits) |limits| {
             gossip_limits.validate(&limits) catch return error.InvalidLimits;
-            if (o.topic_policy) |boundaries| for (boundaries) |boundary| {
+            for (o.topic_policy) |boundary| {
                 for (boundary.rules, limits) |rule, limit| if (rule.count > 0 and constants.maxCompressedLen(rule.ssz_max) > limit.bytes) return error.InvalidLimits;
-            };
+            }
             if (o.validation_capacity != gossip_limits.items(&limits) or o.mcache_arena_bytes < 2 * gossip_limits.bytes(&limits)) return error.InvalidLimits;
         }
         try range(o.seen_capacity, 1, 1_048_576);

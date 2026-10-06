@@ -46,7 +46,6 @@ pub fn emit(peer: *Peer, id: u32) !void {
         .gossipDescriptors = gossip.queued_descriptors,
         .gossipQueuedBytes = gossip.queued_bytes,
         .heldFrames = gossip.held_frames,
-        .txRetains = gossip.held_tx_retains,
         .storeEntries = gossip.store_entries,
         .storePages = gossip.store_pages,
         .pendingValidations = gossip.pending_validations,

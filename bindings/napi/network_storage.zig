@@ -63,9 +63,9 @@ pub fn initialize(runtime: *Runtime, app: *const application_cfg.Config) !void {
     const incoming_capacity: usize = limits.serving_max - limits.serving_control_reserved;
     const gossip_options = &resolved.core.protocols.gossipsub;
     const chain = &runtime.heavy.?.config.chain;
-    const processor_options = try n.gossip_processor.GossipProcessor.Options.resolve(runtime.heavy.?.config.processor_limits, runtime.heavy.?.config.execution_limits, gossip_options.topic_policy.?, chain.forks[0..chain.boundary_count], gossip_options.random_seed.?);
+    const processor_options = try n.gossip_processor.GossipProcessor.Options.resolve(runtime.heavy.?.config.processor_limits, runtime.heavy.?.config.execution_limits, gossip_options.topic_policy, chain.forks[0..chain.boundary_count], gossip_options.random_seed.?);
     const gossip_backing = gossip.Table.backingBytes(&processor_options);
-    const resident_topics = try n.gossipsub.topic_policy.validate(gossip_options.topic_policy.?);
+    const resident_topics = try n.gossipsub.topic_policy.validate(gossip_options.topic_policy);
     const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.boundary_count]);
     const publication_capacity: usize = if (runtime.heavy.?.config.profile == .small) 32 else publications.capacity_max;
     const bridge = publication_capacity * @sizeOf(publications.Cell) + 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + Stores.bytesForTopics(runtime.peer_capacity, resident_topics) + @sizeOf(projection.Lane);

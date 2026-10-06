@@ -1,3 +1,4 @@
+const topic_fixture = @import("../gossipsub/topic_fixture.zig");
 const std = @import("std");
 const schedule_test_support = @import("../schedule_test_support.zig");
 const support = @import("../quic/test_support.zig");
@@ -51,6 +52,7 @@ test "identify protocol integration completes both directions with zero applicat
 
 test "identify configured handler controls default and explicit directional capabilities" {
     var opts = try options("");
+    opts.gossipsub.topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })};
     var enabled = try Protocols.init(std.testing.allocator, opts, &try protocols_test_support.fixtureLocal(opts.identify));
     defer enabled.deinit();
     try std.testing.expect(enabled.router.capabilities().receive.contains(.identify));

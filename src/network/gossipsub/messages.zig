@@ -26,7 +26,6 @@ const gossip_limits = @import("../gossip_limits.zig");
 const layout_mod = @import("layout.zig");
 const outbox_mod = @import("outbox.zig");
 const delivery = @import("delivery.zig");
-const TopicSet = @import("local_intent.zig").TopicSet;
 
 /// Topic and payload slices are borrowed for the synchronous admission callback only.
 pub const MessageEvent = struct {
@@ -63,7 +62,7 @@ pub const Applied = struct {
     admitted_ms: u64,
     topic_bytes: [topic_mod.topic_max_len]u8,
     topic_len: u8,
-    forward: ?struct { message: storage.Handle, source: PeerRef, topic: topic_mod.Ref } = null,
+    forward: ?struct { message: storage.Handle, source: PeerRef, topic: u16 } = null,
 
     pub fn topicString(self: *const Applied) []const u8 {
         return self.topic_bytes[0..self.topic_len];
@@ -212,9 +211,10 @@ pub const Messages = struct {
     }
 
     pub fn receive(self: *Messages, context: *const Context, workspace: *const Workspace, source: *const Source, msg: protobuf.Message, now: u64) Received {
-        const canonical = topic_mod.parseCanonical(msg.topic);
-        const rule = if (context.overlay.namespace) |*ns| (ns.lookupCanonical(canonical orelse return .ignored) orelse return .ignored).rule else null;
-        const topic = context.overlay.findTopic(msg.topic) orelse return .ignored;
+        const canonical = topic_mod.parseCanonical(msg.topic) orelse return .ignored;
+        const match = context.overlay.namespace.lookupCanonical(canonical) orelse return .ignored;
+        const rule = match.rule;
+        const topic = match.ordinal;
         if (!context.overlay.subscribed(topic)) return .ignored;
         if (msg.signed) return invalid(context, source, topic, .signed);
         const header = admission.inspect(&msg);
@@ -225,8 +225,8 @@ pub const Messages = struct {
             return invalid(context, source, topic, .snappy);
         }
         const size = header.payload;
-        if (rule) |bounds| if (size < bounds.ssz_min or size > bounds.ssz_max) return invalid(context, source, topic, .ssz_size);
-        const kind = if (canonical) |parsed| parsed.name.kind else .beacon_block;
+        if (size < rule.ssz_min or size > rule.ssz_max) return invalid(context, source, topic, .ssz_size);
+        const kind = canonical.name.kind;
         const refusal: ?StorageRefusal = if (workspace.sink) |sink| (if (!sink.has_capacity(sink.context, kind, size)) .processor_capacity else null) else .processor_capacity;
         const cost = if (refusal != null) msg.data.len else msg.data.len * 2 + size * 2;
         if (!workspace.chargeWork(context.options, cost)) return .deferred;
@@ -256,8 +256,7 @@ pub const Messages = struct {
         const id = decoded.valid.id;
         if (self.duplicateId(context, source, topic, id, now)) return .{ .duplicate = id };
         assert(context.peers.matches(source.peer));
-        const maximum_compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
-        const maximum = if (rule) |bounds| constants.maxCompressedLen(bounds.ssz_max) else @min(if (context.options.payload_limits) |limits| limits[@intFromEnum(kind)].bytes else maximum_compressed, maximum_compressed);
+        const maximum = constants.maxCompressedLen(rule.ssz_max);
         var candidate: Admission = .{
             .messages = self,
             .workspace = workspace,
@@ -312,29 +311,25 @@ pub const Messages = struct {
             .applied => unreachable,
         };
         const entry = self.validation.attribution(handle);
-        assert(context.overlay.matches(entry.topic));
+        assert(context.overlay.rows[entry.topic].active);
         const message = self.validation.entries[handle.index].state.pending.message;
-        const name = context.overlay.topicString(entry.topic.index);
+        const name = context.overlay.topicString(entry.topic);
         var result: Applied = .{ .verdict = verdict, .id = entry.id, .source = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .topic_bytes = undefined, .topic_len = @intCast(name.len) };
         @memcpy(result.topic_bytes[0..name.len], name);
         if (verdict == .accept and self.retain(message)) {
             self.history.put(&self.store, message, context.epoch);
-            if (context.overlay.subscribed(entry.topic.index)) result.forward = .{ .message = message, .source = entry.source, .topic = entry.topic };
+            if (context.overlay.subscribed(entry.topic)) result.forward = .{ .message = message, .source = entry.source, .topic = entry.topic };
         }
         if (verdict != .ignore) {
             assert(context.peers.matches(entry.source));
-            if (verdict == .accept) context.peers.scores.deliverEligible(entry.source.index, entry.topic.index, entry.source_eligible) else context.peers.invalid(entry.source, entry.topic.index);
+            if (verdict == .accept) context.peers.scores.deliverEligible(entry.source.index, entry.topic, entry.source_eligible) else context.peers.invalid(entry.source, entry.topic);
             for (entry.duplicates[0..entry.duplicate_len]) |d| {
                 assert(context.peers.matches(d.peer));
-                if (verdict == .reject) context.peers.invalid(d.peer, entry.topic.index) else if (d.eligible) context.peers.scores.creditMesh(d.peer.index, entry.topic.index);
+                if (verdict == .reject) context.peers.invalid(d.peer, entry.topic) else if (d.eligible) context.peers.scores.creditMesh(d.peer.index, entry.topic);
             }
         }
         self.validation.finish(&self.store, handle, verdict, now);
         return .{ .applied = result };
-    }
-
-    pub fn topicPins(self: *const Messages) TopicSet {
-        return self.validation.topic_pins;
     }
 
     pub fn expire(self: *Messages, peers: *Peers, now: u64) void {

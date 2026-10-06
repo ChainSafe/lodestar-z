@@ -28,10 +28,12 @@ test "gossip maintenance yields between bounded topics and resumes without repea
     g.clock = .{ .userdata = &clock, .vtable = &vtable };
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     support.heartbeat(&g, now);
-    for (1..4) |serviced| {
+    for ([_][]const u8{ "beacon_block", "beacon_aggregate_and_proof", "voluntary_exit" }) |name| {
+        var wire: [topic.topic_max_len]u8 = undefined;
+        const index = g.overlay.namespace.lookup(topic.build(.{ 1, 2, 3, 4 }, name, &wire)).?.ordinal;
         g.maintainTopics(now);
         try std.testing.expect(g.cycle.isActive());
-        try std.testing.expectEqual(serviced, g.cycle.cursor);
+        try std.testing.expectEqual(@as(usize, index) + 1, g.cycle.cursor);
     }
     g.maintainTopics(now);
     try std.testing.expect(!g.cycle.isActive());

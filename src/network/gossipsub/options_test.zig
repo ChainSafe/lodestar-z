@@ -1,3 +1,4 @@
+const topic_fixture = @import("topic_fixture.zig");
 const Options = @import("options.zig").Options;
 const constants = @import("constants.zig");
 const preset = @import("preset");
@@ -5,9 +6,10 @@ const delivery = @import("delivery.zig");
 
 test "gossip policy default epoch timers follow the selected preset and require entropy" {
     const std = @import("std");
-    try std.testing.expectError(error.InvalidLimits, Options.validate(&.{}));
-    const o: Options = .{ .random_seed = 1 };
+    try std.testing.expectError(error.InvalidLimits, Options.validate(&.{ .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }));
+    const o: Options = .{ .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })}, .random_seed = 1 };
     try o.validate();
+    try std.testing.expectError(error.InvalidTopicPolicy, Options.validate(&.{ .random_seed = 1 }));
     const expected: u64 = switch (preset.active_preset) {
         .mainnet => 768_000,
         .minimal => 192_000,
@@ -19,7 +21,7 @@ test "gossip policy default epoch timers follow the selected preset and require 
 
 test "gossip policy wire limits validate inclusive boundaries" {
     const std = @import("std");
-    var o: Options = .{ .random_seed = 1, .iwant_followup_ms = 12_000, .idontwant_min_data_size = 0 };
+    var o: Options = .{ .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })}, .random_seed = 1, .iwant_followup_ms = 12_000, .idontwant_min_data_size = 0 };
     try o.validate();
     o.iwant_followup_ms = 86_400_000;
     o.idontwant_min_data_size = constants.GOSSIP_MAX_SIZE;
@@ -36,7 +38,7 @@ test "gossip policy wire limits validate inclusive boundaries" {
 test "gossip local publication reserve leaves ordinary frames a maximal message and one descriptor" {
     const std = @import("std");
     const compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
-    var o: Options = .{ .random_seed = 1, .tx_local_descriptors = delivery.per_peer_limit - 1 };
+    var o: Options = .{ .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })}, .random_seed = 1, .tx_local_descriptors = delivery.per_peer_limit - 1 };
     o.tx_local_bytes = o.tx_peer_bytes - compressed;
     try o.validate();
     o.tx_local_bytes += 1;

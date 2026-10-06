@@ -1,3 +1,4 @@
+const topic_fixture = @import("gossipsub/topic_fixture.zig");
 const schedule_test_support = @import("schedule_test_support.zig");
 const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
@@ -308,7 +309,7 @@ test "gossipsub protocol stack preserves a remotely half-closed outbound stream 
 }
 
 fn compositionAllocationPrefix(allocator: std.mem.Allocator) !void {
-    const resolved = try configuration.resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
+    const resolved = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     var protocols = try Protocols.init(allocator, .{ .reqresp = resolved.core.protocols.reqresp, .gossipsub = resolved.core.protocols.gossipsub, .router = .{ .negotiations_max = 2 } }, &try protocols_test_support.fixtureLocal(.{}));
     defer protocols.deinit();
     try std.testing.expectEqual(@as(usize, 12), protocols.gossipsub.sessions.rows.len);

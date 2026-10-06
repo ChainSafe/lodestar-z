@@ -5,7 +5,6 @@ const topic_mod = @import("topic.zig");
 const assert = std.debug.assert;
 const lists = @import("../index_list.zig");
 const none = lists.none;
-const local_intent = @import("local_intent.zig");
 const peer_book = @import("peer_book.zig");
 const gossip_limits = @import("../gossip_limits.zig");
 const constants = @import("constants.zig");
@@ -40,7 +39,7 @@ pub const Attribution = struct {
     verdict: Verdict = .ignore,
     id: topic_mod.MessageId = undefined,
     source: PeerRef = undefined,
-    topic: topic_mod.Ref = undefined,
+    topic: u16 = undefined,
     admitted_ms: u64 = 0,
     source_eligible: bool = false,
     pinned: bool = false,
@@ -56,8 +55,7 @@ pub const Validation = struct {
     pending_entries: lists.List = .{},
     free_records: lists.List = .{},
     resolved_records: lists.List = .{},
-    topic_pin_counts: []u32,
-    topic_pins: local_intent.TopicSet,
+    topic_counts: []u32,
 
     timeout_ms: u64,
     tombstone_ms: u64,
@@ -72,11 +70,9 @@ pub const Validation = struct {
 
     pub fn initForTopics(a: std.mem.Allocator, capacity: usize, timeout_ms: u64, tombstone_ms: u64, topics: usize) !Validation {
         if (capacity == 0 or capacity > 65535 or timeout_ms == 0 or tombstone_ms == 0 or topics == 0 or topics > topic_policy.topic_max) return error.InvalidLimits;
-        const topic_pin_counts = try a.alloc(u32, topics);
-        errdefer a.free(topic_pin_counts);
-        @memset(topic_pin_counts, 0);
-        var topic_pins = try local_intent.TopicSet.initEmpty(a, topics);
-        errdefer topic_pins.deinit(a);
+        const topic_counts = try a.alloc(u32, topics);
+        errdefer a.free(topic_counts);
+        @memset(topic_counts, 0);
         const entries = try a.alloc(Entry, capacity);
         errdefer a.free(entries);
         @memset(entries, .{});
@@ -84,7 +80,7 @@ pub const Validation = struct {
         errdefer a.free(recent);
         @memset(recent, .{});
         const index = try mcache.IdIndex(Attribution).init(a, recent);
-        var result: Validation = .{ .topic_pin_counts = topic_pin_counts, .topic_pins = topic_pins, .entries = entries, .recent = recent, .index = index, .timeout_ms = timeout_ms, .tombstone_ms = tombstone_ms };
+        var result: Validation = .{ .topic_counts = topic_counts, .entries = entries, .recent = recent, .index = index, .timeout_ms = timeout_ms, .tombstone_ms = tombstone_ms };
         for (0..entries.len) |i| result.available_entries.append(entries, "available_link", @intCast(i));
         for (0..recent.len) |i| result.free_records.append(recent, "link", @intCast(i));
         return result;
@@ -93,8 +89,7 @@ pub const Validation = struct {
     pub fn deinit(self: *Validation, a: std.mem.Allocator, store: *storage.Store, peers: *Peers) void {
         self.clear(store, peers);
         self.index.deinit(a);
-        self.topic_pins.deinit(a);
-        a.free(self.topic_pin_counts);
+        a.free(self.topic_counts);
         a.free(self.recent);
         a.free(self.entries);
         self.* = undefined;
@@ -125,7 +120,7 @@ pub const Validation = struct {
             self.free_records.append(self.recent, "link", @intCast(i));
         }
         self.index.clear();
-        assert(self.topic_pins.count() == 0);
+        assert(std.mem.allEqual(u32, self.topic_counts, 0));
     }
 
     pub fn backingBytes(capacity: usize) usize {
@@ -133,12 +128,16 @@ pub const Validation = struct {
     }
 
     pub fn backingBytesForTopics(capacity: usize, topics: usize) usize {
-        return topics * @sizeOf(u32) + local_intent.topicSetBytes(topics) + capacity * @sizeOf(Entry) + attributionCapacity(capacity) * @sizeOf(Attribution) +
+        return topics * @sizeOf(u32) + capacity * @sizeOf(Entry) + attributionCapacity(capacity) * @sizeOf(Attribution) +
             mcache.indexCapacity(attributionCapacity(capacity)) * @sizeOf(u32);
     }
 
     pub fn attributionCapacity(capacity: usize) usize {
         return capacity * 4;
+    }
+
+    pub fn retainsTopic(self: *const Validation, topic: u16) bool {
+        return self.topic_counts[topic] != 0;
     }
 
     pub fn available(self: *const Validation) bool {
@@ -159,11 +158,11 @@ pub const Validation = struct {
             self.owner = null;
         }
 
-        pub fn commit(self: *Reservation, store: *storage.Store, peers: *Peers, message: storage.Handle, source: PeerRef, topic: topic_mod.Ref, now: u64) Handle {
+        pub fn commit(self: *Reservation, store: *storage.Store, peers: *Peers, message: storage.Handle, source: PeerRef, topic: u16, now: u64) Handle {
             const owner = self.owner.?;
             const entry = &owner.entries[self.index];
             const record = &owner.recent[self.record];
-            assert(entry.reserved and record.reserved and topic.generation > 0);
+            assert(entry.reserved and record.reserved);
             const id = store.get(message).?.id;
             if (record.state == .free) owner.free_records.remove(owner.recent, "link", self.record) else {
                 owner.resolved_records.remove(owner.recent, "link", self.record);
@@ -177,9 +176,8 @@ pub const Validation = struct {
             owner.pending_per_peer_kind[source.index][@intFromEnum(store.get(message).?.kind)] += 1;
             owner.bytes_per_peer_kind[source.index][@intFromEnum(store.get(message).?.kind)] += chargedBytes(store.get(message).?.len);
             record.* = .{ .handle = handle, .state = .pending, .id = id, .source = source, .topic = topic, .admitted_ms = now, .pinned = true };
-            assert(topic.index < owner.topic_pin_counts.len and owner.topic_pin_counts[topic.index] < owner.recent.len);
-            owner.topic_pin_counts[topic.index] += 1;
-            owner.topic_pins.set(topic.index);
+            assert(topic < owner.topic_counts.len and owner.topic_counts[topic] < owner.recent.len);
+            owner.topic_counts[topic] += 1;
             owner.index.insert(id, self.record);
             entry.* = .{ .generation = handle.generation, .state = .{ .pending = .{ .message = message, .delivery = self.record, .deadline = now +| owner.timeout_ms } } };
             if (owner.pending_entries.tail != none) assert(owner.entries[owner.pending_entries.tail].state.pending.deadline <= entry.state.pending.deadline);
@@ -314,7 +312,7 @@ pub const Validation = struct {
         if (e.state != .pending or now < e.state.pending.deadline) return;
         const pending = e.state.pending;
         const record = &self.recent[pending.delivery];
-        std.log.scoped(.network_gossip).debug("validation_expired message_id={x} topic_index={d} generation={d} elapsed_ms={d}", .{ record.id, record.topic.index, e.generation, now -| record.admitted_ms });
+        std.log.scoped(.network_gossip).debug("validation_expired message_id={x} topic_index={d} generation={d} elapsed_ms={d}", .{ record.id, record.topic, e.generation, now -| record.admitted_ms });
         self.releasePending(store, index);
         self.removeRecord(pending.delivery, peers);
         e.state = .{ .expired = pending.deadline +| self.tombstone_ms };
@@ -328,9 +326,8 @@ pub const Validation = struct {
     }
     fn releaseAttribution(self: *Validation, e: *Attribution, peers: *Peers) void {
         if (!e.pinned) return;
-        assert(self.topic_pin_counts[e.topic.index] > 0 and self.topic_pins.isSet(e.topic.index));
-        self.topic_pin_counts[e.topic.index] -= 1;
-        if (self.topic_pin_counts[e.topic.index] == 0) self.topic_pins.unset(e.topic.index);
+        assert(self.topic_counts[e.topic] > 0);
+        self.topic_counts[e.topic] -= 1;
         peers.release(e.source);
         for (e.duplicates[0..e.duplicate_len]) |d| peers.release(d.peer);
         e.pinned = false;

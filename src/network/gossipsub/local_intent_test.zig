@@ -20,55 +20,11 @@ fn options() Gossipsub.Options {
     return .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8, .topic_policy = &boundaries };
 }
 
-fn unavailableExcept(g: *Gossipsub, count: usize) void {
-    for (g.overlay.rows[count..]) |*row| row.generation = std.math.maxInt(u64);
-}
-
 fn apply(g: *Gossipsub, w: *local.Workspace, desired: []const []const u8) !bool {
     var buffer: [64]local.Boundary = undefined;
     const changed = try g.prepareSubscriptions(try topic_fixture.subscriptionsInto(desired, &buffer), w, now, 0);
     if (changed) g.commitSubscriptions(w);
     return changed;
-}
-
-test "intent and publication prefer unused rows and reclaim only their selected retirement" {
-    for ([_]bool{ false, true }) |subscribe| {
-        var opts = options();
-        opts.retained_score_ms = 1;
-        var g = try Gossipsub.init(std.testing.allocator, opts);
-        defer g.deinit();
-        unavailableExcept(&g, 3);
-        try support.subscribe(&g, name);
-        try support.subscribe(&g, next);
-        var workspace = try local.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-        defer workspace.deinit(std.testing.allocator);
-        try std.testing.expect(!try apply(&g, &workspace, &.{ name, next }));
-        try support.unsubscribe(&g, name);
-        try support.unsubscribe(&g, next);
-        const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-        const logical = g.sessions.rows[peer.index].logical;
-        for (0..2) |index| g.peers.scores.invalid(logical.index, @intCast(index));
-        const generations = [2]u64{ g.overlay.rows[0].generation, g.overlay.rows[1].generation };
-        const third = "/eth2/01020304/beacon_aggregate_and_proof/ssz_snappy";
-        if (subscribe) {
-            try std.testing.expect(try apply(&g, &workspace, &.{third}));
-        } else _ = try g.publish(third, "0123456789", now);
-        try std.testing.expectEqual(@as(?u16, 2), g.overlay.findTopic(third));
-        for (0..2) |index| {
-            try std.testing.expectEqual(generations[index], g.overlay.rows[index].generation);
-            try std.testing.expect(g.peers.scores.retainsTopic(@intCast(index)));
-        }
-        const fourth = "/eth2/05060708/beacon_block/ssz_snappy";
-        if (subscribe) {
-            try std.testing.expect(try apply(&g, &workspace, &.{ third, fourth }));
-        } else _ = try g.publish(fourth, "0123456789", now);
-        try std.testing.expectEqual(@as(?u16, 0), g.overlay.findTopic(fourth));
-        try std.testing.expectEqual(generations[0] + 1, g.overlay.rows[0].generation);
-        try std.testing.expect(!g.peers.scores.retainsTopic(0));
-        try std.testing.expectEqualStrings(next, g.overlay.topicString(1));
-        try std.testing.expectEqual(generations[1], g.overlay.rows[1].generation);
-        try std.testing.expect(g.peers.scores.retainsTopic(1));
-    }
 }
 
 test "local intent exact capacity excess and namespace refusal" {
@@ -78,8 +34,7 @@ test "local intent exact capacity excess and namespace refusal" {
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
-    w.* = try local.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-    defer w.deinit(std.testing.allocator);
+    w.* = .{};
     var names: [513][topic.topic_max_len]u8 = undefined;
     var desired: [513][]const u8 = undefined;
     for (&desired, 0..) |*entry, i| {
@@ -96,102 +51,28 @@ test "local intent exact capacity excess and namespace refusal" {
     try std.testing.expectError(error.InvalidTopic, apply(&g, w, &.{ desired[0], "invalid" }));
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     try std.testing.expectEqual(revision, g.peers.scores.revision);
-    for (0..512) |i| try std.testing.expect(g.overlay.subscribed(@intCast(i)));
+    for (desired[0..512]) |topic_name| try std.testing.expect(g.overlay.subscribed(g.overlay.namespace.lookup(topic_name).?.ordinal));
     try std.testing.expect(try apply(&g, w, &.{}));
-    const deadline = g.overlay.rows[0].retire_after_ms;
+    const first = g.overlay.namespace.lookup(desired[0]).?.ordinal;
+    const deadline = g.overlay.rows[first].retire_after_ms;
     try std.testing.expect(!try g.prepareSubscriptions(&.{}, w, Now.fromMilliseconds(.{ .mono_ms = 200, .unix_s = 0 }), 0));
-    try std.testing.expectEqual(deadline, g.overlay.rows[0].retire_after_ms);
+    try std.testing.expectEqual(deadline, g.overlay.rows[first].retire_after_ms);
     try std.testing.expectEqual(calls, backing.allocations);
-    var generic = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
-    defer generic.deinit();
-    try std.testing.expectError(error.TopicPolicyRequired, apply(&generic, w, &.{desired[0]}));
-    var generic_workspace = try local.Workspace.init(std.testing.allocator, generic.overlay.rows.len);
-    defer generic_workspace.deinit(std.testing.allocator);
-    try std.testing.expect(!try apply(&generic, &generic_workspace, &.{}));
 }
 
-test "local intent reserves reclaimable desired rows and copies alias before replacement" {
+test "local intent history survives topic expiry and real retransmission descriptor" {
     var g = try Gossipsub.init(std.testing.allocator, options());
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
-    w.* = try local.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-    defer w.deinit(std.testing.allocator);
-    unavailableExcept(&g, 2);
-    g.peers.scores.applyValidatedTopic(support.intern(&g, name).?, .{ .weight = 2 });
-    _ = support.intern(&g, next).?;
-    const aliased = g.overlay.topicString(0);
-    const generation = g.overlay.rows[0].generation;
-    const replace = "/eth2/05060708/beacon_block/ssz_snappy";
-    try std.testing.expect(try apply(&g, w, &.{ replace, aliased }));
-    try std.testing.expectEqualStrings(name, g.overlay.topicString(0));
-    try std.testing.expectEqual(generation, g.overlay.rows[0].generation);
-    try std.testing.expectEqualStrings(replace, g.overlay.topicString(1));
-    try std.testing.expectEqual(@as(f64, 1), g.peers.scores.topic_params[0].weight);
-}
-
-test "local intent separate validation control score backoff and generation pins" {
-    var g = try Gossipsub.init(std.testing.allocator, options());
-    defer g.deinit();
-    const w = try std.testing.allocator.create(local.Workspace);
-    defer std.testing.allocator.destroy(w);
-    w.* = try local.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-    defer w.deinit(std.testing.allocator);
-    unavailableExcept(&g, 1);
-    _ = support.intern(&g, name).?;
-    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    const logical = g.sessions.rows[peer.index].logical;
-    const io = &g.sessions.rows[peer.index].io;
-    const desired = [_][]const u8{next};
-    const message = g.messages.store.put([_]u8{1} ** 20, name, "payload").?;
-    var reservation = g.messages.validation.reserve(g.messages.store.get(message).?.id).?;
-    const handle = reservation.commit(&g.messages.store, &g.peers, message, logical, .{ .index = 0, .generation = 1 }, now.millis());
-    g.messages.store.seal(message);
-    try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.messages.validation.finish(&g.messages.store, handle, .ignore, now.millis());
-    try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.messages.validation.expire(&g.messages.store, &g.peers, std.math.maxInt(u64));
-    io.tx.subscription_dirty.set(0);
-    try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    io.tx.subscription_dirty.unset(0);
-    g.overlay.rows[0].mesh.set(peer.index);
-    try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.overlay.rows[0].mesh.unset(peer.index);
-    g.overlay.rows[0].fanout.set(peer.index);
-    try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.overlay.rows[0].fanout.unset(peer.index);
-
-    g.peers.scores.invalid(logical.index, 0);
-    try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.overlay.rows[0].retire_after_ms = now.millis();
-    const generation = g.overlay.rows[0].generation;
-    g.peers.backoffs[logical.index * g.overlay.rows.len] = .{ .topic_generation = generation, .until = now.millis() + 1 };
-    const revision = g.peers.scores.revision;
-    try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    try std.testing.expect(g.peers.scores.retainsTopic(0));
-    try std.testing.expectEqual(revision, g.peers.scores.revision);
-    g.peers.backoffs[logical.index * g.overlay.rows.len].topic_generation += 1;
-    g.overlay.rows[0].generation = std.math.maxInt(u64);
-    try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.overlay.rows[0].generation = generation;
-    try std.testing.expect(try apply(&g, w, &desired));
-    try std.testing.expectEqual(generation + 1, g.overlay.rows[0].generation);
-    try std.testing.expect(!g.peers.scores.retainsTopic(0));
-}
-
-test "local intent history survives former row reuse and real retransmission descriptor" {
-    var g = try Gossipsub.init(std.testing.allocator, options());
-    defer g.deinit();
-    const w = try std.testing.allocator.create(local.Workspace);
-    defer std.testing.allocator.destroy(w);
-    w.* = try local.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-    defer w.deinit(std.testing.allocator);
-    unavailableExcept(&g, 1);
+    w.* = .{};
     _ = try g.publish(name, "history payload", now);
     const id = topic.validMessageId(name, "history payload", .{});
     const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
     try std.testing.expect(try apply(&g, w, &.{next}));
-    try std.testing.expectEqualStrings(next, g.overlay.topicString(0));
+    g.overlay.expireTopic(&g.overlayContext(g.last_now_ms), 0, false);
+    try std.testing.expect(!g.overlay.rows[0].active);
+    try std.testing.expect(g.overlay.findTopic(next) != null);
     const entry = g.messages.store.get(retained).?;
     try std.testing.expectEqualStrings(name, entry.topicString());
     var payload: [64]u8 = undefined;
@@ -207,98 +88,6 @@ test "local intent history survives former row reuse and real retransmission des
     try std.testing.expect((try io.tx.segment(&g.messages.store)).len > 0);
 }
 
-test "local intent copies retired row input before another assignment reuses it" {
-    var g = try Gossipsub.init(std.testing.allocator, options());
-    defer g.deinit();
-    const w = try std.testing.allocator.create(local.Workspace);
-    defer std.testing.allocator.destroy(w);
-    w.* = try local.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-    defer w.deinit(std.testing.allocator);
-    unavailableExcept(&g, 3);
-    _ = support.intern(&g, name).?;
-    _ = support.intern(&g, next).?;
-    _ = support.intern(&g, "/eth2/01020304/proposer_slashing/ssz_snappy").?;
-    const input = g.overlay.topicString(1);
-    _ = support.intern(&g, "/eth2/05060708/beacon_block/ssz_snappy").?;
-    g.overlay.reclaimTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), 1);
-    try std.testing.expect(!g.overlay.rows[1].active);
-    try std.testing.expectEqualStrings(next, input);
-    const replacement = "/eth2/090a0b0c/beacon_block/ssz_snappy";
-    try std.testing.expect(try apply(&g, w, &.{
-        g.overlay.topicString(0),
-        replacement,
-        input,
-    }));
-    try std.testing.expect(g.overlay.findTopic(replacement) != null);
-    try std.testing.expect(g.overlay.findTopic(next) != null);
-    try std.testing.expectEqual(@as(f64, 1), g.peers.scores.topic_params[g.overlay.findTopic(next).?].weight);
-}
-
-test "local intent equal-parameter retirement invalidates primed positive and negative scores" {
-    try cachedRetirement(true);
-}
-
-test "ordinary equal-parameter retirement invalidates primed positive and negative scores" {
-    try cachedRetirement(false);
-}
-
-fn cachedRetirement(complete_intent: bool) !void {
-    for ([_]bool{ false, true }) |negative| {
-        var opts = options();
-        opts.retained_score_ms = 1;
-        var g = try Gossipsub.init(std.testing.allocator, opts);
-        defer g.deinit();
-        const w = try std.testing.allocator.create(local.Workspace);
-        defer std.testing.allocator.destroy(w);
-        w.* = try local.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-        defer w.deinit(std.testing.allocator);
-        unavailableExcept(&g, 1);
-        try support.subscribe(&g, name);
-        try support.unsubscribe(&g, name);
-        const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-        const logical = g.sessions.rows[peer.index].logical.index;
-        if (negative) g.peers.scores.invalid(logical, 0) else g.peers.scores.deliverEligible(logical, 0, false);
-        const expected: f64 = if (negative) -100 else 1;
-        try std.testing.expectEqual(expected, g.peers.score(g.sessions.rows[peer.index].logical, now.millis()));
-        try std.testing.expect(!g.peers.scores.rows[logical].dirty);
-        try std.testing.expectEqual(@as(?u64, null), g.peers.scores.nextChange(logical));
-        const revision = g.peers.scores.revision;
-        const params = g.peers.scores.topic_params[0];
-        const generation = g.overlay.rows[0].generation;
-        try std.testing.expect(now.millis() >= g.overlay.rows[0].retire_after_ms.?);
-        if (complete_intent) {
-            try std.testing.expect(try apply(&g, w, &.{next}));
-        } else {
-            g.last_now_ms = now.millis();
-            _ = try g.publish(next, "0123456789", now);
-        }
-        try std.testing.expectEqualStrings(next, g.overlay.topicString(0));
-        try std.testing.expectEqual(generation + 1, g.overlay.rows[0].generation);
-        try std.testing.expectEqualDeep(params, g.peers.scores.topic_params[0]);
-        try std.testing.expect(!g.peers.scores.retainsTopic(0));
-        try std.testing.expect(g.peers.scores.revision > revision);
-        try std.testing.expect(g.peers.scores.rows[logical].dirty);
-        try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[peer.index].logical, now.millis()));
-        const retired_revision = g.peers.scores.revision;
-        const calculations = g.peers.scores.calculations;
-        const refreshed = now.millis() + g.peers.scores.params.decay_interval_ms;
-        g.peers.scores.refresh(refreshed);
-        try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[peer.index].logical, refreshed));
-        try std.testing.expectEqual(retired_revision, g.peers.scores.revision);
-        try std.testing.expectEqual(calculations, g.peers.scores.calculations);
-        if (complete_intent) {
-            g.peers.scores.invalid(logical, 0);
-            try std.testing.expectEqual(@as(f64, -100), g.peers.score(g.sessions.rows[peer.index].logical, refreshed));
-            const current_revision = g.peers.scores.revision;
-            const counters = g.peers.scores.topics[@as(usize, logical) * g.overlay.rows.len];
-            try std.testing.expect(!try apply(&g, w, &.{next}));
-            try std.testing.expectEqual(current_revision, g.peers.scores.revision);
-            try std.testing.expectEqualDeep(counters, g.peers.scores.topics[@as(usize, logical) * g.overlay.rows.len]);
-            try std.testing.expectEqual(@as(f64, -100), g.peers.score(g.sessions.rows[peer.index].logical, refreshed));
-        }
-    }
-}
-
 test "compact intent validates masks and boundary identities before mutation" {
     var allowed = boundaries;
     allowed[0].rules[@intFromEnum(topic.Kind.data_column_sidecar)] = .{};
@@ -308,8 +97,7 @@ test "compact intent validates masks and boundary identities before mutation" {
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
-    w.* = try local.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-    defer w.deinit(std.testing.allocator);
+    w.* = .{};
     const sets = topic_fixture.subscriptions(&.{name});
     try std.testing.expectError(error.DuplicateBoundary, g.prepareSubscriptions(&.{ sets[0], sets[0] }, w, now, 0));
     var invalid = sets[0];
@@ -325,30 +113,24 @@ test "compact intent validates masks and boundary identities before mutation" {
     try std.testing.expect(g.overlay.findTopic(name) == null);
     try std.testing.expect(try g.prepareSubscriptions(sets, w, now, 0));
     g.commitSubscriptions(w);
-    const generation = g.overlay.rows[0].generation;
     try std.testing.expect(!try g.prepareSubscriptions(sets, w, now, 1));
     g.commitSubscriptions(w);
-    try std.testing.expectEqual(generation, g.overlay.rows[0].generation);
 }
 
-test "compact intent resubscribes a pinned retained row with its score and generation" {
+test "compact intent resubscribes a pinned retained row with its score" {
     var g = try Gossipsub.init(std.testing.allocator, options());
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
-    w.* = try local.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-    defer w.deinit(std.testing.allocator);
-    unavailableExcept(&g, 1);
+    w.* = .{};
     try std.testing.expect(try apply(&g, w, &.{name}));
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const logical = g.sessions.rows[peer.index].logical.index;
     g.peers.scores.invalid(logical, 0);
     try std.testing.expect(try apply(&g, w, &.{}));
-    const generation = g.overlay.rows[0].generation;
     const counters = g.peers.scores.topics[@as(usize, logical) * g.overlay.rows.len];
     g.sessions.rows[peer.index].io.tx.subscription_dirty.set(0);
     try std.testing.expect(try apply(&g, w, &.{name}));
-    try std.testing.expectEqual(generation, g.overlay.rows[0].generation);
     try std.testing.expectEqualDeep(counters, g.peers.scores.topics[@as(usize, logical) * g.overlay.rows.len]);
     try std.testing.expect(g.overlay.rows[0].subscribed);
 }
@@ -360,18 +142,16 @@ test "local intent startup kind scores activate on accepted slots without resett
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
-    w.* = try local.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-    defer w.deinit(std.testing.allocator);
+    w.* = .{};
     const sets = topic_fixture.subscriptions(&.{ name, "/eth2/05060708/beacon_block/ssz_snappy" });
     try std.testing.expect(try g.prepareSubscriptions(sets, w, now, 0));
     g.commitSubscriptions(w);
     try std.testing.expectEqual(@as(f64, 0), g.peers.scores.topic_params[0].mesh_delivery_weight);
-    try std.testing.expectEqualDeep(g.peers.scores.topic_params[0], g.peers.scores.topic_params[1]);
+    try std.testing.expectEqualDeep(g.peers.scores.topic_params[0], g.peers.scores.topic_params[g.overlay.namespace.offsets[1][0]]);
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const logical = g.sessions.rows[peer.index].logical.index;
     g.peers.scores.invalid(logical, 0);
     const counters = g.peers.scores.topics[@as(usize, logical) * g.overlay.rows.len];
-    const generation = g.overlay.rows[0].generation;
     try std.testing.expectError(error.InvalidTopic, g.prepareSubscriptions(&.{.{ .digest = @splat(255) }}, w, now, 3));
     try std.testing.expectEqual(@as(u64, 0), g.overlay.slot);
     try std.testing.expectEqual(@as(f64, 0), g.peers.scores.topic_params[0].mesh_delivery_threshold);
@@ -381,8 +161,7 @@ test "local intent startup kind scores activate on accepted slots without resett
     g.commitSubscriptions(w);
     try std.testing.expectEqual(@as(f64, -1), g.peers.scores.topic_params[0].mesh_delivery_weight);
     try std.testing.expectEqual(@as(f64, 5), g.peers.scores.topic_params[0].mesh_delivery_threshold);
-    try std.testing.expectEqualDeep(g.peers.scores.topic_params[0], g.peers.scores.topic_params[1]);
-    try std.testing.expectEqual(generation, g.overlay.rows[0].generation);
+    try std.testing.expectEqualDeep(g.peers.scores.topic_params[0], g.peers.scores.topic_params[g.overlay.namespace.offsets[1][0]]);
     try std.testing.expectEqualDeep(counters, g.peers.scores.topics[@as(usize, logical) * g.overlay.rows.len]);
     try std.testing.expect(!try g.prepareSubscriptions(sets, w, now, 4));
     opts.topic_params.?[2].params.weight = std.math.nan(f64);
@@ -394,23 +173,24 @@ test "resident topics above the live limit preserve pins scores diagnostics and 
     var g = try Gossipsub.init(a, options());
     defer g.deinit();
     const high: u16 = 614;
-    for (g.overlay.rows[0..high]) |*row| row.generation = std.math.maxInt(u64);
-    try support.subscribe(&g, name);
-    try std.testing.expectEqual(high, g.overlay.findTopic(name).?);
+    var bytes: [topic.topic_max_len]u8 = undefined;
+    const high_name = topic.buildCanonical(g.overlay.namespace.topicAt(high), &bytes);
+    try support.subscribe(&g, high_name);
+    try std.testing.expectEqual(high, g.overlay.findTopic(high_name).?);
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const logical = g.sessions.rows[peer.index].logical;
     const tx = &g.sessions.rows[peer.index].io.tx;
     g.overlay.synchronize(tx, 1);
     try std.testing.expectEqual(@as(?u16, high), tx.nextSubscription());
-    try std.testing.expect(tx.announce(high, name, true, &g.sessions.control_scratch, 1));
+    try std.testing.expect(tx.announce(high, high_name, true, &g.sessions.control_scratch, 1));
     try std.testing.expectEqual(@as(?u16, null), tx.nextSubscription());
-    const message = g.messages.store.put(@splat(99), name, "payload").?;
+    const message = g.messages.store.put(@splat(99), high_name, "payload").?;
     var reservation = g.messages.validation.reserve(@splat(99)).?;
-    const handle = reservation.commit(&g.messages.store, &g.peers, message, logical, g.overlay.ref(high), 1);
+    const handle = reservation.commit(&g.messages.store, &g.peers, message, logical, high, 1);
     g.messages.store.seal(message);
-    try std.testing.expect(g.messages.topicPins().isSet(high));
+    try std.testing.expect(g.messages.validation.retainsTopic(high));
     g.peers.scores.invalid(logical.index, high);
-    g.peers.addBackoff(logical, high, g.overlay.rows[high].generation, 1, 60_000);
+    g.peers.addBackoff(logical, high, 1, 60_000);
     const diag = @import("diagnostics.zig");
     var page = try diag.Page.init(a, g.overlay.rows.len);
     defer page.deinit(a);
@@ -422,7 +202,7 @@ test "resident topics above the live limit preserve pins scores diagnostics and 
     try std.testing.expect(page.peers[0].topics[0].weights.p4 < 0);
     g.messages.validation.finish(&g.messages.store, handle, .ignore, 2);
     g.messages.validation.expire(&g.messages.store, &g.peers, 2 + g.options.validation_tombstone_ms);
-    try std.testing.expect(!g.messages.topicPins().isSet(high));
+    try std.testing.expect(!g.messages.validation.retainsTopic(high));
     const masks = tx.subscription_dirty.masks;
     g.connectionClosed(g.sessions.rows[peer.index].conn);
     try std.testing.expectEqual(@as(usize, 0), tx.subscription_dirty.count());
@@ -450,7 +230,7 @@ test "resident allocation accounting follows namespace dimensions and frees ever
     var opts = options();
     opts.mcache_arena_bytes = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + message_store.page_bytes;
     var g = try Gossipsub.init(measured.allocator(), opts);
-    try std.testing.expectEqual(g.overlay.namespace.?.topic_count, g.overlay.rows.len);
+    try std.testing.expectEqual(g.overlay.namespace.topic_count, g.overlay.rows.len);
     try std.testing.expectEqual(measured.allocated_bytes, g.memoryPlan().total_bytes - @sizeOf(Gossipsub));
     g.deinit();
     try std.testing.expectEqual(measured.allocated_bytes, measured.freed_bytes);
@@ -476,12 +256,112 @@ test "resident score and bitset dimensions cover the validated namespace maximum
         try std.testing.expectEqual(@as(f64, 0), scores.snapshot(1, 1, 1));
         scores.deinit(measured.allocator());
         try std.testing.expectEqual(measured.allocated_bytes, measured.freed_bytes);
-        var bits_measured = std.testing.FailingAllocator.init(a, .{});
-        var workspace = try local.Workspace.init(bits_measured.allocator(), count);
-        workspace.reserved.set(last);
-        try std.testing.expectEqual(@as(usize, 1), workspace.reserved.count());
-        try std.testing.expectEqual(local.topicSetBytes(count), bits_measured.allocated_bytes);
-        workspace.deinit(bits_measured.allocator());
-        try std.testing.expectEqual(bits_measured.allocated_bytes, bits_measured.freed_bytes);
+        var workspace: local.Workspace = .{};
+        workspace.desired.set(last);
+        try std.testing.expectEqual(@as(usize, 1), workspace.desired.count());
+    }
+}
+
+test "local intent keeps namespace identities across subscription order and expiry" {
+    var g = try Gossipsub.init(std.testing.allocator, options());
+    defer g.deinit();
+    var workspace: local.Workspace = .{};
+    const first = g.overlay.namespace.lookup(name).?.ordinal;
+    const second = g.overlay.namespace.lookup(next).?.ordinal;
+    const borrowed = g.overlay.topicString(first);
+    try std.testing.expect(try apply(&g, &workspace, &.{next}));
+    try std.testing.expectEqual(second, g.overlay.findTopic(next).?);
+    try std.testing.expect(try apply(&g, &workspace, &.{ name, next }));
+    try std.testing.expectEqual(first, g.overlay.findTopic(name).?);
+    try std.testing.expect(!try apply(&g, &workspace, &.{ next, name }));
+    try std.testing.expect(try apply(&g, &workspace, &.{}));
+    g.overlay.expireTopic(&g.overlayContext(now.millis()), first, false);
+    g.overlay.expireTopic(&g.overlayContext(now.millis()), second, false);
+    try std.testing.expect(g.overlay.findTopic(name) == null and g.overlay.findTopic(next) == null);
+    try std.testing.expectEqualStrings(name, borrowed);
+    try std.testing.expect(try apply(&g, &workspace, &.{ next, name }));
+    try std.testing.expectEqual(first, g.overlay.findTopic(name).?);
+    try std.testing.expectEqual(second, g.overlay.findTopic(next).?);
+}
+
+test "topic expiry preserves attribution announcements and backoff independently" {
+    var opts = options();
+    opts.retained_score_ms = 10;
+    var g = try Gossipsub.init(std.testing.allocator, opts);
+    defer g.deinit();
+    try support.subscribe(&g, name);
+    const index = g.overlay.findTopic(name).?;
+    const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = g.sessions.rows[session.index].logical;
+    const tx = &g.sessions.rows[session.index].io.tx;
+    const message = g.messages.store.put(@splat(1), name, "payload").?;
+    var reservation = g.messages.validation.reserve(@splat(1)).?;
+    const handle = reservation.commit(&g.messages.store, &g.peers, message, peer, index, 0);
+    g.messages.store.seal(message);
+    g.peers.scores.invalid(peer.index, index);
+    try support.unsubscribe(&g, name);
+    tx.subscription_dirty.set(index);
+    g.peers.addBackoff(peer, index, 0, 60_000);
+    try std.testing.expect(g.peers.score(peer, 11) < 0);
+    g.overlay.expireTopic(&g.overlayContext(11), index, g.messages.validation.retainsTopic(index));
+    try std.testing.expect(g.peers.scores.retainsTopic(index));
+    g.messages.validation.finish(&g.messages.store, handle, .ignore, 11);
+    g.overlay.expireTopic(&g.overlayContext(11), index, g.messages.validation.retainsTopic(index));
+    try std.testing.expect(g.peers.scores.retainsTopic(index));
+    const expired = 11 + g.options.validation_tombstone_ms;
+    g.messages.validation.expire(&g.messages.store, &g.peers, expired);
+    try std.testing.expect(!g.messages.validation.retainsTopic(index));
+    g.overlay.expireTopic(&g.overlayContext(expired), index, false);
+    try std.testing.expect(g.peers.scores.retainsTopic(index));
+    tx.subscription_dirty.unset(index);
+    g.overlay.expireTopic(&g.overlayContext(expired), index, false);
+    try std.testing.expectEqual(@as(f64, 0), g.peers.score(peer, expired));
+    try std.testing.expect(g.peers.backedOff(peer, index, expired));
+    try std.testing.expect(g.overlay.rows[index].active);
+    g.overlay.expireTopic(&g.overlayContext(60_000), index, false);
+    try std.testing.expect(!g.overlay.rows[index].active);
+    try std.testing.expect(!g.peers.backedOff(peer, index, 60_000));
+}
+
+test "known inactive topics ignore remote mesh controls" {
+    var g = try Gossipsub.init(std.testing.allocator, options());
+    defer g.deinit();
+    const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = g.sessions.rows[session.index].logical;
+    const index = g.overlay.namespace.lookup(name).?.ordinal;
+    support.control(&g, session.index, .{ .prune = .{ .topic = name, .backoff = 60 } }, now);
+    support.control(&g, session.index, .{ .graft = name }, now);
+    try std.testing.expect(!g.overlay.rows[index].active);
+    try std.testing.expect(!g.peers.backedOff(peer, index, now.millis()));
+    try support.subscribe(&g, name);
+    try support.unsubscribe(&g, name);
+    g.cancelWrites(session);
+    g.overlay.expireTopic(&g.overlayContext(now.millis()), index, false);
+    try std.testing.expect(!g.overlay.rows[index].active);
+    support.control(&g, session.index, .{ .prune = .{ .topic = name, .backoff = 60 } }, now);
+    try std.testing.expect(!g.peers.backedOff(peer, index, now.millis()));
+}
+
+test "topic expiry invalidates positive and negative cached scores" {
+    for ([_]bool{ false, true }) |negative| {
+        var opts = options();
+        opts.retained_score_ms = 10;
+        var g = try Gossipsub.init(std.testing.allocator, opts);
+        defer g.deinit();
+        try support.subscribe(&g, name);
+        const index = g.overlay.findTopic(name).?;
+        const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+        const peer = g.sessions.rows[session.index].logical;
+        if (negative) g.peers.scores.invalid(peer.index, index) else g.peers.scores.deliverEligible(peer.index, index, false);
+        try support.unsubscribe(&g, name);
+        g.cancelWrites(session);
+        try std.testing.expectEqual(@as(f64, if (negative) -100 else 1), g.peers.score(peer, 10));
+        const revision = g.peers.scores.revision;
+        g.overlay.expireTopic(&g.overlayContext(10), index, false);
+        try std.testing.expect(g.peers.scores.revision > revision);
+        try std.testing.expectEqual(@as(f64, 0), g.peers.score(peer, 10));
+        try support.subscribe(&g, name);
+        try std.testing.expectEqual(index, g.overlay.findTopic(name).?);
+        try std.testing.expectEqual(@as(f64, 0), g.peers.score(peer, 10));
     }
 }

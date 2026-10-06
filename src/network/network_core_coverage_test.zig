@@ -203,7 +203,7 @@ test "core coverage gives initial subscriptions finite grace even after metadata
 
 fn subscribeServer(setup: *Setup, name: []const u8) !void {
     const g = setup.client.protocols.gossipsub;
-    g.peers.scores.applyValidatedTopic(gossip_test.intern(g, name).?, .{ .weight = 0 });
+    g.peers.scores.applyValidatedTopic(gossip_test.activate(g, name).?, .{ .weight = 0 });
     try gossip_test.subscribe(setup.server.protocols.gossipsub, name);
 }
 

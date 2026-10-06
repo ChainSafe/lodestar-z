@@ -1,3 +1,4 @@
+const topic_fixture = @import("gossipsub/topic_fixture.zig");
 const advertisement = @import("advertisement.zig");
 const control_values = @import("control_values.zig");
 const schedule_test_support = @import("schedule_test_support.zig");
@@ -654,7 +655,7 @@ test "core profiles measure reservations and unwind byte exhaustion" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{21}));
     inline for (.{ configuration.Profile.small, .beacon_node }) |profile| {
         var ledger: Reservations = .{ .backing = std.testing.allocator };
-        var request: configuration.Options = .{ .profile = profile, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = policy_fixture.config() };
+        var request: configuration.Options = .{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .profile = profile, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = policy_fixture.config() };
         const startup: NetworkCore.Startup = .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = core_test.localState(.{}) };
         var resolved = try configuration.resolve(request);
         var node: NetworkCore = undefined;
@@ -691,7 +692,7 @@ test "core small profile cleans every failed allocation prefix" {
 
 fn profileAllocationFailures(a: std.mem.Allocator) !void {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
-    const resolved = try configuration.resolve(.{ .profile = .small, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .socket_buffers = core_test.socket_buffers, .admission_policy = policy_fixture.config() });
+    const resolved = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .profile = .small, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .socket_buffers = core_test.socket_buffers, .admission_policy = policy_fixture.config() });
     var node: NetworkCore = undefined;
     try node.init(a, std.testing.io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = core_test.localState(.{}) });
     node.deinit(std.testing.io);

@@ -26,11 +26,9 @@ pub const Context = struct {
 
 pub const Row = struct {
     retire_after_ms: ?u64 = null,
-    generation: u64 = 0,
     active: bool = false,
     subscribed: bool = false,
-    ordinal: ?u16 = null,
-    kind: ?topic_mod.Kind = null,
+    kind: topic_mod.Kind,
     string: [topic_mod.topic_max_len]u8 = undefined,
     string_len: u8 = 0,
     subscribers: PeerSet = PeerSet.empty,
@@ -96,16 +94,15 @@ pub const MeshChanges = struct {
 pub const Overlay = struct {
     rng: std.Random.DefaultPrng,
 
+    /// Indices are immutable namespace ordinals, including while a topic is inactive.
     rows: []Row,
-    outbound_pins: local_intent.TopicSet,
-    namespace: ?topic_policy.Namespace = null,
+    namespace: topic_policy.Namespace,
     subscription_revision: u64 = 0,
     slot: u64 = 0,
     mesh_changes: MeshChanges = .{},
 
     pub fn deinit(self: *Overlay, a: std.mem.Allocator) void {
-        if (self.namespace) |*ns| ns.deinit(a);
-        self.outbound_pins.deinit(a);
+        self.namespace.deinit(a);
         a.free(self.rows);
     }
 
@@ -150,116 +147,51 @@ pub const Overlay = struct {
         }
     }
 
-    pub fn internTopic(self: *Overlay, context: *const Context, validation_pins: *const local_intent.TopicSet, name: []const u8) ?u16 {
-        if (!self.validTopic(name)) return null;
-        if (self.findTopic(name)) |topic| return topic;
-        const pins = self.retirementPins(context, validation_pins);
-        var cursor: usize = 0;
-        const index = self.vacantRow(context, &pins, null, &cursor, context.now) orelse return null;
-        var bytes: [topic_mod.topic_max_len]u8 = undefined;
-        const copied = bytes[0..name.len];
-        @memcpy(copied, name);
-        const row = &self.rows[index];
-        if (row.active) context.peers.scores.resetTopic(index);
-        row.active = false;
-        self.assignTopic(index, copied, row.generation);
-        return self.initializeTopic(context, index);
-    }
-
-    fn validTopic(self: *const Overlay, name: []const u8) bool {
-        if (self.namespace) |*ns| return ns.lookup(name) != null;
-        return name.len <= topic_mod.topic_max_len and topic_mod.parse(name) != null;
-    }
-
-    fn initializeTopic(self: *Overlay, context: *const Context, topic: u16) u16 {
-        context.peers.scores.applyValidatedTopic(topic, self.topicParams(context, self.rows[topic].kind, self.slot));
-        if (self.namespace) |*ns| {
-            const match = ns.lookup(self.topicString(topic)).?;
-            ns.initializeSubscribers(match.ordinal, &self.rows[topic].subscribers);
-        }
-        return topic;
-    }
-
-    fn retirementPins(self: *Overlay, context: *const Context, validation_pins: *const local_intent.TopicSet) local_intent.Pins {
-        assert(validation_pins.bit_length == self.rows.len);
-        self.outbound_pins.setRangeValue(.{ .start = 0, .end = self.rows.len }, false);
-        var pins: local_intent.Pins = .{ .validation = validation_pins.*, .outbound = self.outbound_pins };
-        for (context.sessions.rows) |*peer| {
-            if (peer.active) {
-                pins.outbound.setUnion(peer.io.tx.subscription_dirty);
-            }
-        }
-        return pins;
-    }
-
-    const Retirement = struct { blocked: bool, expired: bool, reusable: bool };
-
-    fn retirement(self: *const Overlay, context: *const Context, topic: u16, pins: *const local_intent.Pins, now_ms: u64) Retirement {
+    pub fn activateTopic(self: *Overlay, context: *const Context, topic: u16) void {
         const row = &self.rows[topic];
-        if (!row.active or row.subscribed or row.mesh.count() > 0 or row.fanout.count() > 0 or
-            pins.validation.isSet(topic) or
-            pins.outbound.isSet(topic)) return .{ .blocked = true, .expired = false, .reusable = false };
-        const expired = if (row.retire_after_ms) |deadline| now_ms >= deadline else false;
-        var backoff = false;
+        if (row.active) return;
+        assert(!row.subscribed and row.mesh.count() == 0 and row.fanout.count() == 0);
+        assert(!context.peers.scores.retainsTopic(topic));
+        row.active = true;
+        row.retire_after_ms = null;
+        context.peers.scores.applyValidatedTopic(topic, self.topicParams(context, row.kind, self.slot));
+        self.namespace.initializeSubscribers(topic, &row.subscribers);
+    }
+
+    pub fn expireTopic(self: *Overlay, context: *const Context, topic: u16, has_attribution: bool) void {
+        const row = &self.rows[topic];
+        if (!row.active or row.subscribed or row.mesh.count() > 0 or row.fanout.count() > 0 or has_attribution) return;
+        for (context.sessions.rows) |*peer| {
+            if (peer.active and peer.io.tx.subscription_dirty.isSet(topic)) return;
+        }
+        if (row.retire_after_ms) |deadline| {
+            if (context.now >= deadline) context.peers.scores.resetTopic(topic);
+        }
+        if (context.peers.scores.retainsTopic(topic)) return;
         for (0..context.peers.rows.len) |peer| {
-            const value = context.peers.backoffs[peer * self.rows.len + topic];
-            if (value.topic_generation == row.generation and now_ms < value.until) {
-                backoff = true;
-                break;
-            }
+            if (context.now < context.peers.backoffs[peer * self.rows.len + topic].until) return;
         }
-        return .{ .blocked = false, .expired = expired, .reusable = (expired or !context.peers.scores.retainsTopic(topic)) and !backoff };
-    }
-
-    fn vacantRow(self: *const Overlay, context: *const Context, pins: *const local_intent.Pins, reserved: ?*const local_intent.TopicSet, cursor: *usize, now_ms: u64) ?u16 {
-        assert(cursor.* <= 2 * self.rows.len);
-        // Exhaust unused rows before reclaiming retained topic state.
-        while (cursor.* < 2 * self.rows.len) {
-            const reclaim = cursor.* >= self.rows.len;
-            const index: u16 = @intCast(cursor.* % self.rows.len);
-            cursor.* += 1;
-            const row = &self.rows[index];
-            if (row.active != reclaim or (if (reserved) |set| set.isSet(index) else false) or row.generation == std.math.maxInt(u64)) continue;
-            if (reclaim and !self.retirement(context, index, pins, now_ms).reusable) continue;
-            return index;
-        }
-        return null;
-    }
-
-    fn reclaimObserved(self: *Overlay, context: *const Context, topic: u16, observed: Retirement) void {
-        if (observed.blocked) return;
-        if (observed.expired) context.peers.scores.resetTopic(topic);
-        if (!observed.reusable) return;
-        self.rows[topic].active = false;
-        self.rows[topic].subscribers = .empty;
+        row.active = false;
+        row.subscribers = .empty;
         context.peers.scores.applyValidatedTopic(topic, context.options.score_params.topic);
     }
 
-    pub fn reclaimTopic(self: *Overlay, context: *const Context, validation_pins: *const local_intent.TopicSet, topic: u16) void {
-        const pins = self.retirementPins(context, validation_pins);
-        self.reclaimObserved(context, topic, self.retirement(context, topic, &pins, context.now));
-    }
-
-    fn topicParams(_: *const Overlay, context: *const Context, kind: ?topic_mod.Kind, slot: u64) score_mod.TopicParams {
-        if (kind) |k| if (context.options.topic_params) |*policies| return policies[@intFromEnum(k)].atSlot(slot);
+    fn topicParams(_: *const Overlay, context: *const Context, kind: topic_mod.Kind, slot: u64) score_mod.TopicParams {
+        if (context.options.topic_params) |*policies| return policies[@intFromEnum(kind)].atSlot(slot);
         return context.options.score_params.topic;
     }
 
     /// Does not mutate protocol state or end event borrows. Commit must immediately follow acceptance.
-    pub fn prepareSubscriptions(self: *Overlay, context: *const Context, validation_pins: *const local_intent.TopicSet, subscriptions: []const local_intent.Boundary, workspace: *local_intent.Workspace, now_ms: u64, slot: u64) local_intent.Error!bool {
+    pub fn prepareSubscriptions(self: *const Overlay, context: *const Context, subscriptions: []const local_intent.Boundary, workspace: *local_intent.Workspace, now_ms: u64, slot: u64) local_intent.Error!bool {
         workspace.prepared = false;
         if (subscriptions.len > topic_policy.boundary_max) return error.TopicCapacity;
-        if (subscriptions.len > 0 and self.namespace == null) return error.TopicPolicyRequired;
-        workspace.len = 0;
         workspace.desired = .empty;
-        assert(workspace.reserved.bit_length == self.rows.len);
-        workspace.reserved.setRangeValue(.{ .start = 0, .end = self.rows.len }, false);
         workspace.now_ms = @max(context.now, now_ms);
         workspace.slot = slot;
         var boundaries = std.StaticBitSet(topic_policy.boundary_max).empty;
         var count: usize = 0;
         for (subscriptions) |*subscription| {
-            const ns = &self.namespace.?;
+            const ns = &self.namespace;
             const boundary_index = for (ns.boundaries, 0..) |*boundary, i| {
                 if (std.mem.eql(u8, &boundary.digest, &subscription.digest)) break i;
             } else return error.InvalidTopic;
@@ -283,31 +215,11 @@ pub const Overlay = struct {
             }
         }
         var changed = false;
-        // Reserve retained matches before selecting any rows for replacement.
-        for (self.rows, 0..) |*row, i| {
-            if (!row.active) continue;
-            if (row.ordinal) |ordinal| if (workspace.desired.isSet(ordinal)) {
-                workspace.entries[workspace.len] = .{ .ordinal = ordinal, .row = @intCast(i), .generation = row.generation, .existing = true };
-                workspace.len += 1;
-                workspace.reserved.set(i);
-                workspace.desired.unset(ordinal);
-                changed = changed or !row.subscribed or !std.meta.eql(context.peers.scores.topic_params[i], self.topicParams(context, row.kind, slot));
-                continue;
-            };
-            if (row.subscribed) changed = true;
+        for (self.rows, 0..) |*row, index| {
+            const desired = workspace.desired.isSet(index);
+            if (row.subscribed != desired) changed = true;
+            if (desired and !std.meta.eql(context.peers.scores.topic_params[index], self.topicParams(context, row.kind, slot))) changed = true;
         }
-        workspace.pins = self.retirementPins(context, validation_pins);
-        var cursor: usize = 0;
-        var desired = workspace.desired.iterator(.{});
-        for (0..self.rows.len) |_| {
-            const ordinal = desired.next() orelse break;
-            changed = true;
-            const index = self.vacantRow(context, &workspace.pins, &workspace.reserved, &cursor, workspace.now_ms) orelse return error.TopicCapacity;
-            workspace.entries[workspace.len] = .{ .ordinal = @intCast(ordinal), .row = @intCast(index), .generation = self.rows[index].generation, .existing = false };
-            workspace.len += 1;
-            workspace.reserved.set(index);
-        }
-        assert(workspace.len == count);
         workspace.prepared = true;
         return changed;
     }
@@ -316,52 +228,19 @@ pub const Overlay = struct {
         assert(workspace.prepared and context.now == workspace.now_ms);
         workspace.prepared = false;
         self.slot = workspace.slot;
-        for (workspace.entries[0..workspace.len]) |*entry| {
-            const index = entry.row;
-            const row = &self.rows[index];
-            assert(row.generation == entry.generation);
-            if (!entry.existing) {
-                context.peers.scores.resetTopic(index);
-                row.active = false;
-                var bytes: [topic_mod.topic_max_len]u8 = undefined;
-                const name = topic_mod.buildCanonical(self.namespace.?.topicAt(entry.ordinal), &bytes);
-                self.assignTopic(index, name, entry.generation);
-                self.namespace.?.initializeSubscribers(entry.ordinal, &row.subscribers);
-            }
-            context.peers.scores.applyValidatedTopic(index, self.topicParams(context, row.kind, self.slot));
-            self.setLocal(context, index, true);
-        }
         for (self.rows, 0..) |*row, index| {
-            if (row.active and row.subscribed and !workspace.reserved.isSet(index)) self.setLocal(context, @intCast(index), false);
+            const desired = workspace.desired.isSet(index);
+            if (desired) {
+                self.activateTopic(context, @intCast(index));
+                context.peers.scores.applyValidatedTopic(@intCast(index), self.topicParams(context, row.kind, self.slot));
+            }
+            if (row.active) self.setLocal(context, @intCast(index), desired);
         }
     }
-    fn assignTopic(self: *Overlay, index: u16, copied: []const u8, generation: u64) void {
-        assert(copied.len <= topic_mod.topic_max_len);
-        const topic = &self.rows[index];
-        assert(topic.generation == generation and generation != std.math.maxInt(u64));
-        assert(!topic.active);
-        topic.* = .{ .active = true, .generation = generation + 1 };
-        @memcpy(topic.string[0..copied.len], copied);
-        topic.string_len = @intCast(copied.len);
-        if (topic_mod.parseCanonical(copied)) |parsed| topic.kind = parsed.name.kind;
-        if (self.namespace) |*ns| topic.ordinal = ns.lookup(copied).?.ordinal;
-    }
 
-    pub fn findTopic(self: *const Overlay, topic_str: []const u8) ?u16 {
-        for (self.rows, 0..) |*topic, index| {
-            if (!topic.active) continue;
-            if (std.mem.eql(u8, topic.topicString(), topic_str)) return @intCast(index);
-        }
-        return null;
-    }
-
-    pub fn ref(self: *const Overlay, index: u16) topic_mod.Ref {
-        assert(self.rows[index].active);
-        return .{ .index = index, .generation = self.rows[index].generation };
-    }
-
-    pub fn matches(self: *const Overlay, topic: topic_mod.Ref) bool {
-        return topic.index < self.rows.len and self.rows[topic.index].active and self.rows[topic.index].generation == topic.generation;
+    pub fn findTopic(self: *const Overlay, name: []const u8) ?u16 {
+        const topic = (self.namespace.lookup(name) orelse return null).ordinal;
+        return if (self.rows[topic].active) topic else null;
     }
 
     pub fn inMesh(self: *const Overlay, topic: u16, session: u16) bool {
@@ -391,14 +270,13 @@ pub const Overlay = struct {
     }
 
     pub fn subnetSubscriptions(self: *const Overlay, peer: ?u16, digest: [4]u8) topic_policy.Subnets {
-        if (peer) |index| if (self.namespace) |*ns| return ns.subnets(index, digest);
+        if (peer) |index| return self.namespace.subnets(index, digest);
         var result: topic_policy.Subnets = .{};
         for (self.rows) |*row| {
             if (!row.active or !(if (peer) |index| row.subscribers.isSet(index) else row.subscribed)) continue;
             const parsed = topic_mod.parseCanonical(row.topicString()) orelse continue;
             if (std.mem.eql(u8, &digest, &parsed.digest)) result.add(parsed.name);
         }
-        if (self.namespace == null) result.column_subnet_count = 128;
         return result;
     }
 
@@ -410,13 +288,16 @@ pub const Overlay = struct {
         return &self.rows[topic].fanout;
     }
 
-    pub fn init(a: std.mem.Allocator, seed: u64, topics: usize) !Overlay {
-        assert(topics > 0 and topics <= topic_policy.topic_max);
-        const rows = try a.alloc(Row, topics);
-        errdefer a.free(rows);
-        @memset(rows, .{});
-        const outbound_pins = try local_intent.TopicSet.initEmpty(a, topics);
-        return .{ .rng = std.Random.DefaultPrng.init(seed), .rows = rows, .outbound_pins = outbound_pins };
+    pub fn init(a: std.mem.Allocator, seed: u64, boundaries: []const topic_policy.Boundary, connected: u16) !Overlay {
+        var namespace = try topic_policy.Namespace.init(a, boundaries, connected);
+        errdefer namespace.deinit(a);
+        const rows = try a.alloc(Row, namespace.topic_count);
+        for (rows, 0..) |*row, index| {
+            const canonical = namespace.topicAt(@intCast(index));
+            row.* = .{ .kind = canonical.name.kind };
+            row.string_len = @intCast(topic_mod.buildCanonical(canonical, &row.string).len);
+        }
+        return .{ .rng = std.Random.DefaultPrng.init(seed), .rows = rows, .namespace = namespace };
     }
 
     fn score(context: *const Context, peer: u16) f64 {
@@ -437,7 +318,7 @@ pub const Overlay = struct {
 
     fn graftEligible(self: *const Overlay, context: *const Context, topic: u16, peer: u16) bool {
         if (!self.eligibleSubscriber(context, topic, peer, 0)) return false;
-        return !context.peers.backedOff(context.sessions.rows[peer].logical, topic, self.rows[topic].generation, context.now -| (c.backoff_slack_heartbeats * context.options.heartbeat_interval_ms));
+        return !context.peers.backedOff(context.sessions.rows[peer].logical, topic, context.now -| (c.backoff_slack_heartbeats * context.options.heartbeat_interval_ms));
     }
 
     fn outbound(context: *const Context, peer: u16) bool {
@@ -525,7 +406,7 @@ pub const Overlay = struct {
         }
         const row = &context.sessions.rows[peer];
         if (!row.active) return;
-        context.peers.addBackoff(row.logical, topic, self.rows[topic].generation, context.now, backoff_ms);
+        context.peers.addBackoff(row.logical, topic, context.now, backoff_ms);
         const stream = row.outStream() orelse return;
         if (row.io.tx.submit(&.{ .prune = .{ .topic = self.topicString(topic), .backoff_s = backoff_ms / 1000 } }, &context.sessions.control_scratch, context.now) == null) {
             context.sessions.setOutbound(peer, .{ .closing = stream });
@@ -537,7 +418,7 @@ pub const Overlay = struct {
         if (!self.subscribed(topic)) return;
         const row = &context.sessions.rows[peer];
         const backoff = context.peers.backoff(row.logical, topic);
-        const blocked = backoff.topic_generation == self.rows[topic].generation and context.now < backoff.until;
+        const blocked = context.now < backoff.until;
         if (blocked) {
             context.peers.scores.penalizeFor(row.logical.index, .graft_backoff);
             if (backoff.until -| context.now > c.prune_backoff_ms - c.graft_flood_threshold_ms) context.peers.scores.penalizeFor(row.logical.index, .graft_flood);
@@ -556,7 +437,7 @@ pub const Overlay = struct {
     pub fn onPrune(self: *Overlay, context: *const Context, topic: u16, peer: u16, backoff_ms: u64) void {
         self.logChange(context, topic, peer, "mesh_prune_received", backoff_ms);
         self.leaveMesh(context, topic, peer, .remote_prune);
-        context.peers.addBackoff(context.sessions.rows[peer].logical, topic, self.rows[topic].generation, context.now, backoff_ms);
+        context.peers.addBackoff(context.sessions.rows[peer].logical, topic, context.now, backoff_ms);
     }
 
     fn trim(self: *Overlay, context: *const Context, topic: u16) void {
@@ -709,14 +590,12 @@ pub const Overlay = struct {
         for (self.rows, 0..) |*row, topic| {
             if (row.active) self.applySubscription(context, @intCast(topic), peer, false, .session_end);
         }
-        if (self.namespace) |*ns| ns.clearPeer(peer);
+        self.namespace.clearPeer(peer);
     }
 
     pub fn peerSubscription(self: *Overlay, context: *const Context, peer: u16, name: []const u8, on: bool) ?u16 {
-        if (self.namespace) |*ns| {
-            const match = ns.lookup(name) orelse return null;
-            ns.setSubscription(peer, match.ordinal, on);
-        }
+        const match = self.namespace.lookup(name) orelse return null;
+        self.namespace.setSubscription(peer, match.ordinal, on);
         const topic = self.findTopic(name) orelse return null;
         self.applySubscription(context, topic, peer, on, .remote_unsubscribe);
         return topic;
@@ -732,7 +611,7 @@ pub const Overlay = struct {
 test "gossip policy review I3 shuffle budget holds at empty singleton and capacity" {
     var members: [c.peers_cap]u16 = undefined;
     for ([_]usize{ 0, 1, 3, c.peers_cap }) |len| {
-        var mesh = try Overlay.init(std.testing.allocator, 17, constants.topics_cap);
+        var mesh = try Overlay.init(std.testing.allocator, 17, &.{.{ .digest = @splat(0), .rules = .{topic_policy.Rule{ .count = 1 }} ++ .{topic_policy.Rule{}} ** (topic_policy.kind_count - 1) }}, 1);
         defer mesh.deinit(std.testing.allocator);
         var expected = mesh.rng;
         for (0..len -| 1) |_| _ = expected.next();
@@ -745,7 +624,7 @@ test "gossip policy review I3 shuffle budget holds at empty singleton and capaci
             seen.set(peer);
         }
     }
-    var mesh = try Overlay.init(std.testing.allocator, 17, constants.topics_cap);
+    var mesh = try Overlay.init(std.testing.allocator, 17, &.{.{ .digest = @splat(0), .rules = .{topic_policy.Rule{ .count = 1 }} ++ .{topic_policy.Rule{}} ** (topic_policy.kind_count - 1) }}, 1);
     defer mesh.deinit(std.testing.allocator);
     var ordered = [_]u16{ 0, 1, 2, 3, 4, 5, 6, 7 };
     mesh.shuffle(&ordered);

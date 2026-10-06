@@ -1,3 +1,4 @@
+const topic_fixture = @import("gossipsub/topic_fixture.zig");
 const std = @import("std");
 const support = @import("quic/test_support.zig");
 const Protocols = @import("protocols.zig").Protocols;
@@ -14,7 +15,9 @@ const PeerId = @import("wire/peer_id.zig").PeerId;
 
 pub fn initProtocols(allocator: std.mem.Allocator, options: Protocols.Options, transport: *const Engine) !Protocols {
     const local = try options.identify.makeLocal(&transport.tls.local_peer_id, &transport.local);
-    return Protocols.init(allocator, options, &local);
+    var configured = options;
+    if (configured.gossipsub.topic_policy.len == 0) configured.gossipsub.topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })};
+    return Protocols.init(allocator, configured, &local);
 }
 
 pub fn fixtureLocal(options: identify_mod.Handler.Options) !identify_mod.Local {

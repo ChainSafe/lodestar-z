@@ -3,7 +3,6 @@ const gossip_test = @import("test_support.zig");
 const topic_mod = @import("topic.zig");
 const protobuf = @import("protobuf.zig");
 const Overlay = @import("overlay.zig").Overlay;
-const Set = @import("sessions.zig").PeerSet;
 const std = @import("std");
 const c = @import("constants.zig");
 const Context = @import("overlay.zig").Context;
@@ -99,7 +98,7 @@ test "gossip heartbeat admits sessions newer than its score snapshot" {
     try std.testing.expect(f.g.overlay.inMesh(f.topic, peer.index));
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expect(f.g.overlay.inMesh(f.topic, peer.index));
-    try std.testing.expect(!f.g.peers.backedOff(f.g.sessions.rows[peer.index].logical, f.topic, f.g.overlay.rows[f.topic].generation, 2));
+    try std.testing.expect(!f.g.peers.backedOff(f.g.sessions.rows[peer.index].logical, f.topic, 2));
 }
 
 test "gossip opportunistic graft improves a mesh below its target degree" {
@@ -370,27 +369,6 @@ test "gossip policy topic capacity supports two full fork subnet sets" {
     try std.testing.expect(overlay.findTopic("/eth2/02000000/beacon_block/ssz_snappy") != null);
 }
 
-test "gossip state intern snapshots an aliased retiring topic string" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
-    defer g.deinit();
-    const overlay = g.overlay;
-    const oversized = [_]u8{'x'} ** (topic_mod.topic_max_len + 1);
-    try std.testing.expectEqual(@as(?u16, null), gossip_test.intern(&g, &oversized));
-    try std.testing.expectEqual(@as(?u16, null), gossip_test.intern(&g, "invalid"));
-    const original = "/eth2/00000000/a/ssz_snappy/b/ssz_snappy";
-    const shorter = "/eth2/00000000/a/ssz_snappy";
-    try std.testing.expectEqual(@as(?u16, 0), gossip_test.intern(&g, original));
-    const input = overlay.topicString(0)[0..shorter.len];
-    overlay.rows[0].active = false;
-    try std.testing.expectEqual(@as(?u16, 0), gossip_test.intern(&g, input));
-    try std.testing.expectEqualStrings(shorter, overlay.topicString(0));
-    try std.testing.expectEqual(@as(u64, 2), overlay.rows[0].generation);
-    const maximum = "/eth2/00000000/sync_committee_contribution_and_proof/ssz_snappy";
-    try std.testing.expectEqual(topic_mod.topic_max_len, maximum.len);
-    try std.testing.expectEqual(@as(?u16, 1), gossip_test.intern(&g, maximum));
-    try std.testing.expectEqualStrings(maximum, overlay.topicString(1));
-}
-
 test "mesh changes count each committed join and leave once by reason, not controls" {
     var f = try Fixture.init(8);
     defer f.g.deinit();
@@ -430,7 +408,7 @@ test "mesh changes count each committed join and leave once by reason, not contr
     try std.testing.expectEqual(@as(u64, 16), meshChangeTotal(overlay));
 }
 
-test "mesh changes follow reused sessions and a reused overlay row's current topic kind" {
+test "mesh changes follow reused sessions across topic expiry" {
     var f = try Fixture.init(1);
     defer f.g.deinit();
     const overlay = f.g.overlay;
@@ -445,13 +423,14 @@ test "mesh changes follow reused sessions and a reused overlay row's current top
     overlay.setLocal(&context, f.topic, false);
     overlay.flushSubscriptions(&f.g.sessions.rows[next.index].io.tx, &f.g.sessions.control_scratch, context.now);
     context.now = std.math.maxInt(u64) / 2;
-    overlay.reclaimTopic(&context, &f.g.messages.topicPins(), f.topic);
+    overlay.expireTopic(&context, f.topic, f.g.messages.validation.retainsTopic(f.topic));
     try std.testing.expect(!overlay.rows[f.topic].active);
     const exit = "/eth2/01020304/voluntary_exit/ssz_snappy";
     try gossip_test.subscribe(&f.g, exit);
-    try std.testing.expectEqual(f.topic, overlay.findTopic(exit).?);
+    const exit_topic = overlay.findTopic(exit).?;
+    try std.testing.expect(exit_topic != f.topic);
     _ = overlay.peerSubscription(&context, next.index, exit, true);
-    overlay.onGraft(&context, f.topic, next.index);
+    overlay.onGraft(&context, exit_topic, next.index);
     try std.testing.expectEqual(@as(u64, 2), try meshChanges(overlay, "beacon_block", "join", "remote_graft"));
     try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "beacon_block", "leave", "session_end"));
     try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "beacon_block", "leave", "local_unsubscribe"));

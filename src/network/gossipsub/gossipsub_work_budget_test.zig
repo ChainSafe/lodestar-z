@@ -1,3 +1,4 @@
+const topic_fixture = @import("topic_fixture.zig");
 const Now = @import("../types.zig").Now;
 const schedule_test_support = @import("../schedule_test_support.zig");
 const support = @import("test_support.zig");
@@ -129,7 +130,7 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
 }
 
 test "gossipsub IHAVE maximum advertisement shares oversized allowance with data and makes progress" {
-    const small = try configuration.resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
+    const small = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     var options = small.core.protocols.gossipsub;
     options.work_per_pump = 1;
     options.decompress_per_peer_bytes = 1;

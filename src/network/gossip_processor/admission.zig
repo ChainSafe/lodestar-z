@@ -10,7 +10,7 @@ const assert = std.debug.assert;
 pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candidate: *gossip.Gossipsub.MessageAdmission, now: u64, received_at: u64, slot: u64) bool {
     const message = &candidate.event;
     if (table.closed or now >= message.deadline or table.order == std.math.maxInt(u64)) return false;
-    const topic = candidate.canonical orelse return false;
+    const topic = candidate.canonical;
     const kind = topic.name.kind;
     const fork = table.fork(topic.digest) orelse {
         table.refuse(kind, .ineligible);

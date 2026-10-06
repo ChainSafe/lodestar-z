@@ -191,8 +191,7 @@ pub const NetworkCore = struct {
         errdefer allocator.free(self.native_events);
         self.local_intent_workspace = try allocator.create(gossip.local_intent.Workspace);
         errdefer allocator.destroy(self.local_intent_workspace);
-        self.local_intent_workspace.* = try gossip.local_intent.Workspace.init(allocator, self.protocols.gossipsub.topicCapacity());
-        errdefer self.local_intent_workspace.deinit(allocator);
+        self.local_intent_workspace.* = .{};
         self.initialized = true;
     }
 
@@ -206,7 +205,6 @@ pub const NetworkCore = struct {
             owned.deinit(io);
             self.allocator.destroy(owned);
         }
-        self.local_intent_workspace.deinit(self.allocator);
         self.allocator.destroy(self.local_intent_workspace);
         self.protocols.deinit();
         self.control_protocol.deinit(self.allocator);

@@ -209,7 +209,7 @@ test "gossip admission rejects ineligible candidates without replacing work and 
     opts.validation_capacity = processor.limits.items(&limits);
     var g = try support.init(t.allocator, opts);
     defer g.deinit();
-    var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy.?, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
+    var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
     defer table.deinit();
     defer table.close();
     var consumer: Consumer = .{ .table = &table, .owner = &g };
@@ -252,7 +252,7 @@ test "gossip admission leaves queued work intact when a host copy pins the requi
     opts.validation_capacity = processor.limits.items(&limits);
     var g = try support.init(t.allocator, opts);
     defer g.deinit();
-    var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy.?, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
+    var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
     defer table.deinit();
     defer table.close();
     var consumer: Consumer = .{ .table = &table, .owner = &g };
@@ -296,7 +296,7 @@ test "gossip admission after a refused victim selection retires only its own vic
     opts.validation_capacity = processor.limits.items(&limits);
     var g = try support.init(t.allocator, opts);
     defer g.deinit();
-    var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy.?, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
+    var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
     defer table.deinit();
     defer table.close();
     var consumer: Consumer = .{ .table = &table, .owner = &g };
@@ -821,7 +821,7 @@ test "gossip replacement preflights compressed and decoded pages across multiple
     opts.validation_capacity = processor.limits.items(&limits);
     var g = try support.init(t.allocator, opts);
     defer g.deinit();
-    var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy.?, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
+    var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
     defer table.deinit();
     defer table.close();
     var consumer: Consumer = .{ .table = &table, .owner = &g };
