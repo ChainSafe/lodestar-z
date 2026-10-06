@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import {ActionQueue} from "./network-action-queue.js";
 import {LogDelivery} from "./network-log-delivery.js";
-import {CONTROL, SETTLE_CELLS, escalate} from "./network-turn-scheduler.js";
+import {CONTROL, SETTLE_CELLS, TurnScheduler, escalate} from "./network-turn-scheduler.js";
 
 /**
  * @typedef {import("./network-turn-scheduler.js").Continuation} Continuation
@@ -19,14 +19,12 @@ import {CONTROL, SETTLE_CELLS, escalate} from "./network-turn-scheduler.js";
  * @typedef {import("./network-runtime.js").NativeEscalation} NativeEscalation
  * @typedef {import("./network-runtime.js").NativeGossipBatch} NativeGossipBatch
  * @typedef {import("./network-runtime.js").NativeGossipDependencyCheck} NativeGossipDependencyCheck
- * @typedef {import("./network-turn-scheduler.js").TurnScheduler} TurnScheduler
  * @typedef {import("./network-action-queue.js").CoalescedAction} CoalescedAction
  * @typedef {{failure: Error | null}} Terminal
- * @typedef {{resolve(): void, reject(error: unknown): void, remaining: number, weak: WeakRef<Settler> | null}} Settler
+ * @typedef {{resolve(): void, reject(error: unknown): void, remaining: number}} Settler
  * @typedef {{adopted: boolean, handles: Handle[], job: GossipJob | null, urgent: boolean}} Job
  * @typedef {{adopted: boolean, incoming: Incoming}} Start
  * @typedef {Pick<NativeNetworkApplicationRuntime, "exchange" | "fail" | "drainLogs"> & {
- * scheduler: TurnScheduler,
  * closed: Promise<CloseResult>,
  * close(): Promise<CloseResult>,
  * state: string
@@ -43,17 +41,10 @@ export const BURST_NAME = "lodestar_native_drain_burst_seconds";
 export const BURST_BUCKETS = Object.freeze([0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2]);
 const VERDICTS = new Set(["accept", "reject", "ignore"]);
 const noop = () => undefined;
-/**
- * Each report's settler, kept alive by the report itself. The pump also holds every unfinished settler while it lives;
- * once it is collected, only a report still reachable keeps its settler, and a promise derived from a report does not
- * keep the report.
- *
- * @type {WeakMap<Promise<void>, Settler>}
- */
-const settlers = new WeakMap();
 
 function closedError() {
-  return Object.assign(new Error("NetworkClosed"), {code: "NetworkClosed"});
+  // Retained report errors must not keep the pump through V8's captured stack frames.
+  return Object.assign(new Error("NetworkClosed"), {code: "NetworkClosed", stack: "Error: NetworkClosed"});
 }
 
 /** @param {string} callback */
@@ -69,7 +60,7 @@ function keyOf(handle) {
 /**
  * The network's close result once the completion owner settled the runtime's close: the first failure, a delivery
  * failure or the owner's terminal error, whichever came first, even when a requested close was already underway; else
- * a requested close. It holds no host or pump reference, since the completion owner roots its reaction.
+ * a requested close.
  *
  * @param {Promise<CloseResult>} closed
  * @param {Terminal} terminal
@@ -129,13 +120,13 @@ class IncomingRequest {
  * A null host capacity, or a closing facade, leaves settlement and acknowledgements only, until native
  * reports closed. A broken bridge contract escalates through native `fail`, which terminates the process.
  *
- * The runtime's scheduler and the closed observation hold the pump weakly, so a dropped facade and host can be collected.
+ * Native notifications and scheduled turns retain the pump until close finishes. Host tasks that can outlive close
+ * hold it weakly.
  */
 export class NativePump {
   /** @type {Runtime | null} */
   #runtime = null;
-  /** @type {TurnScheduler | null} */
-  #scheduler = null;
+  #scheduler = new TurnScheduler(this);
   #host;
   /** Terminal bookkeeping the facade shares; it holds no host reference. */
   #terminal;
@@ -161,13 +152,6 @@ export class NativePump {
    * @type {Map<string, Settler>}
    */
   #reported = new Map();
-  /**
-   * Each unsettled report's settler, held weakly: a report retained elsewhere settles at close although the pump and
-   * host were collected, and one nobody retains roots neither its reactions nor the host they capture.
-   *
-   * @type {Set<WeakRef<Settler>>}
-   */
-  #unsettled = new Set();
   #burst = {buckets: new Array(BURST_BUCKETS.length).fill(0), count: 0, sum: 0};
   /** @type {LogDelivery | null} */
   #logs = null;
@@ -186,33 +170,15 @@ export class NativePump {
   }
 
   /**
-   * Starts draining `runtime` on its scheduler, whose notifications call `request`, and delivering its log records.
+   * Starts draining `runtime`, whose notifications call `request`, and delivering its log records.
    * @param {Runtime} runtime
    */
   attach(runtime) {
     this.#runtime = runtime;
-    this.#scheduler = runtime.scheduler;
-    this.#scheduler.bind(this);
-    NativePump.#observe(this.#weak, this.#unsettled, runtime.closed);
+    const stop = () => this.#stop();
+    runtime.closed.then(stop, stop);
     this.#logs = new LogDelivery(runtime, this.#host, /** @param {unknown} error */ (error) => this.#error(error));
     this.#logs.start();
-  }
-
-  /**
-   * @param {WeakRef<NativePump>} weak
-   * @param {Set<WeakRef<Settler>>} unsettled
-   * @param {Promise<CloseResult>} closed
-   */
-  static #observe(weak, unsettled, closed) {
-    const stop = () => {
-      // Shutdown prevents the owner from disposing of whatever it has not acknowledged.
-      const pending = [...unsettled];
-      unsettled.clear();
-      for (const settler of pending) settler.deref()?.reject(closedError());
-      const pump = weak.deref();
-      if (pump) pump.#stop();
-    };
-    closed.then(stop, stop);
   }
 
   /** A native notification, or capacity the host released. */
@@ -311,13 +277,16 @@ export class NativePump {
   }
 
   #schedule() {
-    if (!this.#stopped) this.#scheduler?.schedule();
+    if (!this.#stopped) this.#scheduler.schedule();
   }
 
   #stop() {
+    if (this.#stopped) return;
     this.#stopped = true;
-    this.#scheduler?.stop();
+    this.#scheduler.stop();
     this.close();
+    for (const settler of new Set(this.#reported.values())) settler.reject(closedError());
+    this.#reported.clear();
     // Native keeps its records past close, so the last ones, the shutdown's included, still reach the host.
     this.#logs?.stop();
   }
@@ -431,7 +400,6 @@ export class NativePump {
       if (!job) continue;
       this.#reported.delete(key);
       if (--job.remaining > 0) continue;
-      if (job.weak) this.#unsettled.delete(job.weak);
       job.resolve();
     }
   }
@@ -486,10 +454,7 @@ export class NativePump {
       // A host that does not await a job's disposition sees no unhandled rejection at shutdown.
       reported.catch(noop);
       /** @type {Settler} */
-      const settle = {reject, remaining: natives.length, resolve, weak: null};
-      settle.weak = new WeakRef(settle);
-      settlers.set(reported, settle);
-      this.#unsettled.add(settle.weak);
+      const settle = {reject, remaining: natives.length, resolve};
       for (const {handle} of natives) this.#reported.set(keyOf(handle), settle);
       const messages = natives.map((message) => ({
         attestationData: message.attestationData,

@@ -549,11 +549,6 @@ export interface GossipJob {
   /**
    * Resolves after the owner disposes of every returned verdict: eligible accepts have undergone forwarding admission,
    * and expired or already resolved messages are retired. Rejects with NetworkClosed if shutdown prevents it.
-   *
-   * While the network stays reachable until its close() completes, every report and anything derived from it settles.
-   * A network dropped without close() closes once collected: a report retained directly then rejects with
-   * NetworkClosed, but a promise only derived from it, such as `reported.then(...)` or `Promise.all([..., reported])`,
-   * may stay pending.
    */
   readonly reported: Promise<void>;
 }
@@ -676,12 +671,18 @@ export interface NativeNetwork {
   metrics(): string;
   /** Selects the threshold native records are kept at from now on. */
   setLogLevel(level: NativeLogLevel): void;
+  /**
+   * Stops delivery and completes native shutdown and outstanding operations. The binding finishes shutdown even if
+   * only the returned promise remains reachable. Host serving and validation tasks may finish later.
+   */
   close(): Promise<CloseResult>;
 }
 
 /**
- * Initialize from the owning thread using config.beaconConfig. One network is live per process; another
- * initializes only after the previous one is garbage collected. Copies configuration and returns a running network
- * whose binding drains it for `host`; failure is terminal. Invokes no host callback synchronously.
+ * Initialize from the owning thread using config.beaconConfig. One native runtime is live per process; a replacement
+ * requires the previous runtime to be fully released, including garbage collection after close.
+ * Copies configuration and returns a running network drained for `host`. Failure is terminal.
+ * The application must call close(); dropping references does not request shutdown. Environment teardown stops
+ * native work even when JavaScript cannot run. Invokes no host callback synchronously.
  */
 export function createNativeNetwork(config: NativeApplicationConfig, host: NativeHost): NativeNetwork;

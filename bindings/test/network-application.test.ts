@@ -467,17 +467,9 @@ test("all typed stores and the connect allowance reject without partial admissio
   }
 });
 
-test.each(["gc", "exit"])("application lifecycle subprocess %s", childTestTimeout(), (mode) => {
-  const output = runChild([
-    "--import",
-    "tsx",
-    "--expose-gc",
-    "--import",
-    "tsx",
-    "bindings/test/fixtures/network-application-lifecycle.mjs",
-    mode,
-  ]);
-  expect(output).toContain(mode === "exit" ? "application-ready-exit" : "application-command-settled NetworkClosed");
+test("application exits with idle native work", childTestTimeout(), () => {
+  const output = runChild(["--import", "tsx", "bindings/test/fixtures/network-application-lifecycle.mjs"]);
+  expect(output).toContain("application-ready-exit");
 });
 
 test("identity reads the current signed ENR and copied intent ignores later input mutation", async () => {

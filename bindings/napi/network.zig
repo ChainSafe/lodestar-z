@@ -101,8 +101,7 @@ fn jsStopped(err: anyerror) bool {
     return err == error.Closing or err == error.CannotRunJS or err == error.PendingException;
 }
 
-/// The notification callback only schedules: the host runs an exchange, which arms again once nothing is queued. The
-/// completion owner always does, also for a collected wrapper.
+/// The notification callback only schedules: the host runs an exchange, which arms again once nothing is queued.
 fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     runtime.lock();
     const alive = runtime.env_alive;
@@ -140,11 +139,6 @@ pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value)
 /// Throws what an exchange would for `action`, applying nothing, so a host's invalid input fails its own call.
 pub fn checkAction(_: *@This(), action: js.Value) !void {
     _ = try exchange_js.parseAction(action.val);
-}
-
-/// Stops the owner at once for a wrapper collected without close. JavaScript still drains every result.
-pub fn abandon(self: *@This()) void {
-    if (self.runtime) |runtime| runtime.abandon();
 }
 
 /// A private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied, so no

@@ -229,14 +229,14 @@ export interface NativeNetworkApplicationRuntime {
 
 /**
  * Initialize from the owning thread using config.beaconConfig. One runtime is live per process;
- * another initializes only after the previous one is garbage collected.
+ * another initializes only after the previous one closes and is fully released, including garbage collection.
  * Copies configuration and returns a running runtime; failure is terminal.
  * Calls onWorkAvailable on that thread when completions, the close result, peer events, incoming requests, or gossip
  * work arrive after an exchange found nothing queued.
  * onWorkAvailable must only schedule an exchange in a later macrotask. No further notification arrives while work
  * stays queued, so the host exchanges again while one returns `more`, retries on a timer while it returns
  * `disabledWaiting` or `parked` work it can take later, and never cancels a scheduled exchange, also after the
- * runtime closes. A runtime collected without close stops at once, and its admitted operations still settle.
+ * runtime closes. The host must retain and drain the runtime through its close result.
  */
 export function initializeNativeNetworkRuntime(
   config: NativeApplicationConfig,

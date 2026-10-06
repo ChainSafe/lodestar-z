@@ -1,9 +1,5 @@
-import {TurnScheduler} from "./network-turn-scheduler.js";
-
 /** The families whose completions the owner settles, each with a record per native cell. */
 const FAMILIES = ["publication", "command", "request", "incoming"];
-/** The longest timer period, whose timer only holds what it is given and keeps the event loop alive. */
-const HOLD_MS = 2 ** 31 - 1;
 const noop = () => undefined;
 
 /**
@@ -77,15 +73,10 @@ function settle(family, record, completion) {
 }
 
 /**
- * Owns one runtime's operation records, its close promise and its route to native, and outlives the wrapper: native's
- * notifications hold it, so every admitted operation settles also after the wrapper and its host were collected, and
- * the close settles last. It forwards each notification through `notify`, which reports whether a live wrapper took
- * it; once none does, it stops native and drains control alone on the runtime's turns. It holds the wrapper, the pump
- * and the host only weakly.
+ * Owns one runtime's operation records and close promise. Exchanges settle every admitted operation before close.
  */
 export class CompletionOwner {
   #native;
-  #notify;
   /** Each family's records, sized from native's cells. */
   #tables = new Map();
   #resolveClosed = noop;
@@ -96,28 +87,10 @@ export class CompletionOwner {
   closed = new Promise((resolve) => {
     this.#resolveClosed = resolve;
   });
-  #abandoned = false;
-  /**
-   * From native's last notification until its close result arrives. Native then released its notifier, so this holds
-   * the owner and keeps the event loop alive for the exchanges that deliver the rest, also after the wrapper's
-   * finalizer handed them to the owner.
-   */
-  #hold = undefined;
-  #closed = false;
-  /** The runtime's one scheduling flag and retry timer, which a pump shares while it lives. */
-  scheduler = new TurnScheduler(this);
 
-  constructor(native, notify) {
+  constructor(native) {
     this.#native = native;
-    this.#notify = notify;
   }
-
-  /** Native's notification: a live wrapper takes it, and otherwise the owner drains. */
-  notifier = () => {
-    if (!this.#closed && this.#hold === undefined && ["closed", "failed"].includes(this.#native.getState()))
-      this.#hold = setInterval(noop, HOLD_MS, this);
-    if (!this.#notify()) this.abandon();
-  };
 
   /** Sizes each family's records from native's `capacities`. */
   size(capacities) {
@@ -159,25 +132,12 @@ export class CompletionOwner {
     return handle;
   }
 
-  /** One exchange: its completions settle their records, and its close result settles `closed` and ends the turns. */
+  /** One exchange: its completions settle their records before its close result settles `closed`. */
   exchange(actions, demand) {
     const result = this.#native.exchange(actions, demand);
     for (const completion of result.completions) this.#complete(completion);
     if (result.closed !== null) this.#close(result.closed);
     return result;
-  }
-
-  fail(site, reason) {
-    this.#native.fail(site, reason);
-  }
-
-  /** Stops native at once for a wrapper collected without close, then drains what it settles. */
-  abandon() {
-    if (!this.#abandoned) {
-      this.#abandoned = true;
-      this.#native.abandon();
-    }
-    this.scheduler.schedule();
   }
 
   #complete(completion) {
@@ -191,17 +151,13 @@ export class CompletionOwner {
 
   /** Native closed after every completion it promised, so a live record is one it left missing. */
   #close(result) {
-    this.#closed = true;
-    clearInterval(this.#hold);
     let live = 0;
     for (const table of this.#tables.values()) live += table.live;
     if (live > 0) this.#breach(`closed with records unsettled: ${live}`);
-    this.scheduler.stop();
     this.#resolveClosed(result);
   }
 
   #breach(reason) {
-    this.scheduler.stop();
     this.#native.fail("completion_contract", reason.slice(0, 64));
     throw Error("Native escalation returned");
   }

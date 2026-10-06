@@ -1,56 +1,6 @@
-import {peerIdFromHex, startRuntime} from "../utils/network.js";
-import assert from "node:assert/strict";
-import {createSocket} from "node:dgram";
-import {setTimeout as delay} from "node:timers/promises";
+import {applicationConfig, localIntent, startRuntime} from "../utils/network.js";
 
-import {applicationConfig, localIntent} from "../utils/network.ts";
-
-const mode = process.argv[2];
 const config = applicationConfig();
-let runtime = startRuntime(config, () => {
-  throw Error("application-notifier");
-});
-const identity = await runtime.identity;
+const runtime = startRuntime(config);
 await runtime.applyIntent(localIntent(config), config.initialSlot);
-if (mode === "exit") {
-  console.log("application-ready-exit");
-} else {
-  let settlements = 0;
-  const pending =
-    mode === "gc"
-      ? runtime.connect(
-          peerIdFromHex("00250802122102c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"),
-          [{family: 4, address: Uint8Array.of(127, 0, 0, 1), port: 9}],
-          60000n
-        )
-      : runtime.getIdentity();
-  const command = pending.then(
-    () => {
-      settlements++;
-      return "ok";
-    },
-    (error) => {
-      settlements++;
-      return error.code;
-    }
-  );
-  const weak = new WeakRef(runtime);
-  runtime = null;
-  for (let i = 0; i < 100; i++) {
-    await delay(10);
-    global.gc();
-    if (!weak.deref()) break;
-  }
-  assert.equal(weak.deref(), undefined, "a retained command Promise must not retain its facade");
-  const result = await command;
-  assert(["ok", "NetworkClosed", "NetworkResultAllocationFailed"].includes(result));
-  if (mode === "gc") assert.equal(result, "NetworkClosed");
-  assert.equal(settlements, 1);
-  const socket = createSocket("udp4");
-  await new Promise((resolve, reject) => {
-    socket.once("error", reject);
-    socket.bind(identity.localEndpoint.port, "127.0.0.1", resolve);
-  });
-  socket.close();
-  console.log("application-command-settled", result);
-}
+console.log("application-ready-exit");

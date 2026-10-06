@@ -24,6 +24,9 @@ Initialization installs complete configuration and initial protocol state before
 work. Every configured hard fork whose activation epoch is not `FAR_FUTURE_EPOCH` must be supported,
 including forks that are not active yet. The host applies subscriptions and peer demand through
 ordinary runtime updates.
+The application owns the network and explicitly closes it; dropping JavaScript references does not
+request shutdown. Once close begins, the binding retains its pump through delivery of outstanding
+completions and the close result, without waiting for host serving or validation tasks to retire.
 An initialization failure or shutdown is terminal for that runtime. While one runtime is live,
 another initialization, including from another Node.js environment, is rejected; after it is fully
 released, a new runtime may initialize. The owning thread coordinates shutdown and joins the network

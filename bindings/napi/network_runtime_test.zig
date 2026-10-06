@@ -82,7 +82,7 @@ test "a payload release while the owner waits for budget wakes the owner once" {
     try runtime.wake.?.drain();
 }
 
-test "abandon wakes an owner already stopping gracefully" {
+test "forced teardown wakes an owner already stopping gracefully" {
     var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false, .graceful = true };
     runtime.wake = try network_wake.Wake.init();
     defer runtime.wake.?.deinit();
@@ -90,8 +90,8 @@ test "abandon wakes an owner already stopping gracefully" {
     try runtime.wake.?.drain();
     var readable = [_]std.c.pollfd{.{ .fd = runtime.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
     try std.testing.expectEqual(@as(c_int, 0), std.c.poll(&readable, 1, 0));
-    runtime.abandon();
-    try std.testing.expect(!runtime.graceful);
+    runtime.forceStop(false);
+    try std.testing.expect(runtime.disposed and !runtime.graceful);
     try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&readable, 1, 0));
     try runtime.wake.?.drain();
 }

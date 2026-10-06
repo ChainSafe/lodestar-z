@@ -3,46 +3,24 @@ import {IncomingRecord, NativeIncoming} from "./network-incoming.js";
 import {NativeRequest, RequestRecord} from "./network-request.js";
 import {CompletionOwner} from "./network-tickets.js";
 
-/** Stops the native runtime of a wrapper collected without close; its completion owner drains the rest. */
-const abandonment = new FinalizationRegistry((owner) => owner.deref()?.abandon());
-
 export class NativeRuntime {
   #native;
   #owner;
   #closed;
-  #onWorkAvailable;
 
   constructor(config, onWorkAvailable) {
     this.#native = new bindings.NativeNetworkRuntime();
-    this.#onWorkAvailable = onWorkAvailable;
-    const weak = new WeakRef(this);
-    const owner = new CompletionOwner(this.#native, NativeRuntime.#notifier(weak));
-    const callback = typeof onWorkAvailable === "function" ? owner.notifier : onWorkAvailable;
-    const initialized = this.#native.initialize(config, callback);
+    const owner = new CompletionOwner(this.#native);
+    const initialized = this.#native.initialize(config, onWorkAvailable);
     owner.size(initialized.capacities);
     this.#owner = owner;
-    abandonment.register(this, new WeakRef(owner));
     this.identity = initialized.identity;
     this.limits = initialized.limits;
     this.#closed = owner.closed;
   }
 
-  /** Reports whether a live wrapper's host took the notification. */
-  static #notifier(weak) {
-    return () => {
-      const runtime = weak.deref();
-      if (runtime === undefined) return false;
-      runtime.#onWorkAvailable();
-      return true;
-    };
-  }
-
   get closed() {
     return this.#closed;
-  }
-  /** Schedules bounded host turns for this runtime. */
-  get scheduler() {
-    return this.#owner.scheduler;
   }
   get state() {
     return this.#native.getState();

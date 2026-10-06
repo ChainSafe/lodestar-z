@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {setTimeout as delay} from "node:timers/promises";
 import {createNativeNetwork} from "../../src/network.js";
-import {initializeNativeNetworkRuntime} from "../../src/network-runtime.js";
+import {initializeNativeNetworkRuntime, runtimeOf} from "../../src/network-runtime.js";
 import {
   applicationConfig,
   holdSettling,
@@ -24,9 +24,10 @@ if (mode === "exit") {
   const runtime = startRuntime(applicationConfig());
   assert.equal(runtime.state, "running");
   console.log("ready-exit");
-} else if (mode === "gc") {
+} else if (mode === "closed-gc") {
   let runtime = startRuntime(applicationConfig());
   const identity = runtime.identity;
+  await runtime.close();
   const weak = new WeakRef(runtime);
   runtime = null;
   for (let i = 0; i < 100; i++) {
@@ -34,7 +35,7 @@ if (mode === "exit") {
     global.gc();
     if (!weak.deref()) break;
   }
-  assert.equal(weak.deref(), undefined, "TSFN must not retain the wrapper");
+  assert.equal(weak.deref(), undefined, "A closed runtime must be collectible");
   await delay(20);
   const socket = createSocket("udp4");
   await new Promise((resolve, reject) => {
@@ -44,7 +45,7 @@ if (mode === "exit") {
   socket.close();
   await runtimeReleased();
   await startRuntime(applicationConfig()).close();
-  console.log("gc-rebound");
+  console.log("closed-gc-rebound");
 } else if (mode === "promises") {
   const config = applicationConfig();
   let runtime = startRuntime(config);
@@ -67,49 +68,27 @@ if (mode === "exit") {
   assert.deepEqual(settlements.counts, [1, 1, 1, 1, 1, 1]);
   assert.equal(settlements.outcomes[0], "NetworkClosed");
   console.log("promises-settled");
-} else if (mode === "facade-gc" || mode === "facade-gc-reaction" || mode === "facade-gc-derived") {
-  // A dropped facade and its host are collected without close, while operation promises alone remain and settle when
-  // native closes. A job's report retained elsewhere rejects then; one dropped with the host may hold a deferred
-  // handler that captures the host, which holds the facade, and still roots none of them. Promises only derived from
-  // a report may stay pending once the report is collected.
-  const retained = mode === "facade-gc";
-  const derivedOnly = mode === "facade-gc-derived";
+} else if (mode === "close-reports") {
   const {startPeer} = await import("../utils/network-peer.js");
   const config = applicationConfig();
   const remoteConfig = applicationConfig();
-  // Not the unreachable peer's key.
   remoteConfig.identitySecretKey[31] = 3;
   const remote = await startPeer(remoteConfig);
-  let deliver;
-  const delivered = new Promise((resolve) => {
-    deliver = resolve;
-  });
+  const {promise: validation, resolve: validated} = Promise.withResolvers();
+  const {promise: delivered, resolve: deliver} = Promise.withResolvers();
+  const outcome = (promise) => promise.then(() => null, error => error);
   let host = {
     network: null,
-    handled: 0,
     capacity: () => ({ordinary: true, serving: 32}),
-    // The validation never finishes, so the job's report stays outstanding.
     validate(job) {
-      if (retained) deliver({reported: job.reported});
-      else if (derivedOnly) {
-        // The handoff holds the derivatives and a weak reference, never the report itself.
-        const outcome = (promise) => promise.then(
-          () => "resolved",
-          (error) => error.code
-        );
-        const derived = [outcome(job.reported), outcome(Promise.all([delay(0), job.reported]))];
-        deliver({derived, reported: null, source: new WeakRef(job.reported)});
-      } else {
-        job.reported.then(() => this.handled++, noop);
-        deliver({reported: null});
-      }
-      return new Promise(() => undefined);
+      deliver([outcome(job.reported), outcome(Promise.all([Promise.resolve(), job.reported]))]);
+      return validation;
     },
     checkDependencies: (checks) => checks.map(() => false),
     serve: (request) => request.cancel(),
-    peers: () => undefined,
-    failed: () => undefined,
-    logs: () => undefined,
+    peers: noop,
+    failed: noop,
+    logs: noop,
   };
   let network = createNativeNetwork(config, host);
   host.network = network;
@@ -129,85 +108,64 @@ if (mode === "exit") {
   const block = new Uint8Array(4000).fill(7);
   new DataView(block.buffer).setBigUint64(100, 100n, true);
   await remote.publishGossip(topicName(), block, {allowZeroPeers: false});
-  let {reported, derived, source} = await delivered;
-  const report = reported?.then(
-    () => "resolved",
-    (error) => error.code
-  );
-  reported = null;
-  const closed = network.closed;
-  const settlements = new Settlements();
-  const unsettled = settlements.unsettledAtClose(closed);
-  settlements.watch(() => network.connect(...unreachableConnect()));
-  settlements.watch(() =>
-    network.publish(topicName(), new Uint8Array(4000), {allowZeroPeers: true, ignoreDuplicate: true})
-  );
+  const reports = await delivered;
+  const closing = network.close();
   const weakNetwork = new WeakRef(network);
   const weakHost = new WeakRef(host);
   network = null;
   host = null;
+  assert.deepEqual(await closing, {reason: "requested"});
+  const errors = await Promise.all(reports);
+  assert.deepEqual(errors.map(error => error.code), ["NetworkClosed", "NetworkClosed"]);
   for (let i = 0; i < 100; i++) {
     await delay(10);
     global.gc();
     if (!weakNetwork.deref() && !weakHost.deref()) break;
   }
-  assert.equal(weakNetwork.deref(), undefined, "Nothing but the host may retain the facade");
-  assert.equal(weakHost.deref(), undefined, "Only the facade may retain the host");
-  await settlements.settled();
-  assert.deepEqual(await closed, {reason: "requested"});
-  assert.deepEqual(await unsettled, []);
-  assert.deepEqual(settlements.counts, [1, 1]);
-  assert.equal(settlements.outcomes[0], "NetworkClosed");
-  if (retained) assert.equal(await Promise.race([report, delay(5000, "pending")]), "NetworkClosed");
-  if (derivedOnly) {
-    const outcomes = await Promise.all(derived.map((promise) => Promise.race([promise, delay(1000, "pending")])));
-    derived = null;
-    // A report that outlived native close was rejected, and its derivatives with it. Once it was collected they may
-    // stay pending, and either outcome is correct.
-    if (source.deref() === undefined) assert(outcomes.every((outcome) => outcome === "pending" || outcome === "NetworkClosed"));
-    else assert.deepEqual(outcomes, ["NetworkClosed", "NetworkClosed"]);
-    console.log(`derived ${outcomes.join(",")}; source ${source.deref() === undefined ? "collected" : "retained"}`);
-  }
-  await remote.stop();
+  assert.equal(weakNetwork.deref(), undefined);
+  assert.equal(weakHost.deref(), undefined, "Pending validation must not retain a closed host");
   await runtimeReleased();
-  console.log("facade-collected");
-} else if (mode === "orphan") {
-  // A host that never exchanges drops its runtime with operations outstanding. The collected wrapper's completion
-  // owner stops native and settles them on its own turns, after native's last notification and with no timer left,
-  // through as many exchanges of 32 publication completions as it takes.
+  assert(errors.every(error => error instanceof Error));
+  validated(["accept"]);
+  await remote.stop();
+  console.log("close-reports-settled");
+} else if (mode === "close-batches") {
+  // No other I/O or timer keeps this process alive while the public pump drains several completion batches.
   const config = applicationConfig();
   config.profile = "beaconNode";
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
   config.resources.nativeBudgetBytes = 512 * 1024 * 1024;
-  let runtime = initializeNativeNetworkRuntime(config, noop);
-  const outcome = (promise) =>
-    promise.then(
-      () => "resolved",
-      (error) => error.code
-    );
-  const outcomes = Promise.all([runtime.getIdentity(), runtime.connect(...unreachableConnect())].map(outcome));
-  const published = Promise.all(
-    Array.from({length: 100}, (_, i) =>
-      outcome(
-        runtime.publishGossip(topicName(), new Uint8Array(4000).fill(i), {allowZeroPeers: true, ignoreDuplicate: true})
-      )
-    )
-  );
-  const closed = runtime.closed;
-  const weak = new WeakRef(runtime);
-  runtime = null;
-  for (let i = 0; i < 100; i++) {
-    await delay(10);
-    global.gc();
-    if (!weak.deref()) break;
+  const settlements = new Settlements();
+  const batches = [];
+  function closePending() {
+    const network = createNativeNetwork(config, {
+      capacity: () => null,
+      validate: async () => [],
+      checkDependencies: (checks) => checks.map(() => false),
+      serve: (request) => request.cancel(),
+      peers: noop,
+      failed: noop,
+      logs: noop,
+    });
+    const runtime = runtimeOf(network);
+    const exchange = runtime.exchange.bind(runtime);
+    runtime.exchange = (...args) => {
+      const result = exchange(...args);
+      batches.push(result.completions.length);
+      return result;
+    };
+    runtime.holdOperations(true);
+    for (let i = 0; i < 100; i++)
+      settlements.watch(() => network.publish(topicName(), new Uint8Array(4000), {allowZeroPeers: true}));
+    return network.close();
   }
-  assert.equal(weak.deref(), undefined, "The completion owner must not retain the wrapper");
-  assert.deepEqual(await closed, {reason: "requested"});
-  const [identity, connect] = await outcomes;
-  assert(identity === "resolved" || identity === "NetworkClosed");
-  assert.equal(connect, "NetworkClosed");
-  assert((await published).every((result) => result === "resolved" || result === "NetworkClosed"));
-  console.log("orphan-drained");
+  const closing = closePending();
+  global.gc();
+  assert.deepEqual(await closing, {reason: "requested"});
+  assert.deepEqual(settlements.counts, Array(100).fill(1));
+  assert.deepEqual(settlements.outcomes, Array(100).fill("NetworkClosed"));
+  assert.deepEqual(batches.filter(count => count > 0), [32, 32, 32, 4]);
+  console.log("close-batches-settled");
 } else if (mode === "publication-exit" || mode === "command-exit" || mode === "request-exit") {
   // A completed publication, command or request pull leaves a running, idle network, which the process exits under
   // without a close. So does a request whose outcome no pull took.

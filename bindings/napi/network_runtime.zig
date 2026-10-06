@@ -284,21 +284,15 @@ pub const Runtime = struct {
         self.hook_live = false;
         self.release();
     }
-    /// Stops the owner at once and joins it, without disposing of what JavaScript can still settle.
-    pub fn abandon(self: *Runtime) void {
+    pub fn forceStop(self: *Runtime, env_dying: bool) void {
         self.lock();
+        self.disposed = true;
+        if (env_dying) self.env_alive = false;
         self.graceful = false;
         if (self.stop and !self.quiescent) self.signalLocked();
         self.unlock();
         self.requestStop();
         self.join();
-    }
-    pub fn forceStop(self: *Runtime, env_dying: bool) void {
-        self.lock();
-        self.disposed = true;
-        if (env_dying) self.env_alive = false;
-        self.unlock();
-        self.abandon();
     }
     /// Environment disposal reclaims every cell JavaScript can no longer take, rather than emulating its delivery.
     pub fn reclaim(self: *Runtime) void {
@@ -384,7 +378,7 @@ pub const Runtime = struct {
         self.retireRequestStorageLocked();
         self.state = if (self.reason == .failed) .failed else .closed;
         std.log.scoped(.network_runtime).info("owner_stopped reason={s} turns={d} operational_failures={d}", .{ @tagName(self.reason), self.owner_turns, self.operational_failures });
-        // Every host sees quiescence, also one whose waiting payload left it disarmed or one already collected.
+        // Every host sees quiescence, also one whose waiting payload left it disarmed.
         self.readiness.armed = false;
         self.refreshLocked();
         self.notifyLocked();
