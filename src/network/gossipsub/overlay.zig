@@ -31,6 +31,7 @@ pub const Row = struct {
     kind: topic_mod.Kind,
     string: [topic_mod.topic_max_len]u8 = undefined,
     string_len: u8 = 0,
+    /// Remote declarations survive local topic inactivity.
     subscribers: PeerSet = PeerSet.empty,
     mesh: PeerSet = PeerSet.empty,
     fanout: PeerSet = PeerSet.empty,
@@ -155,7 +156,6 @@ pub const Overlay = struct {
         row.active = true;
         row.retire_after_ms = null;
         context.peers.scores.applyValidatedTopic(topic, self.topicParams(context, row.kind, self.slot));
-        self.namespace.initializeSubscribers(topic, &row.subscribers);
     }
 
     pub fn expireTopic(self: *Overlay, context: *const Context, topic: u16, has_attribution: bool) void {
@@ -172,7 +172,6 @@ pub const Overlay = struct {
             if (context.now < context.peers.backoffs[peer * self.rows.len + topic].until) return;
         }
         row.active = false;
-        row.subscribers = .empty;
         context.peers.scores.applyValidatedTopic(topic, context.options.score_params.topic);
     }
 
@@ -256,7 +255,6 @@ pub const Overlay = struct {
     }
 
     fn applySubscription(self: *Overlay, context: *const Context, topic: u16, peer: u16, on: bool, leave: MeshReason) void {
-        assert(self.rows[topic].active);
         if (self.rows[topic].subscribers.isSet(peer) != on) self.subscription_revision +|= 1;
         if (on) self.rows[topic].subscribers.set(peer) else {
             self.rows[topic].subscribers.unset(peer);
@@ -270,12 +268,19 @@ pub const Overlay = struct {
     }
 
     pub fn subnetSubscriptions(self: *const Overlay, peer: ?u16, digest: [4]u8) topic_policy.Subnets {
-        if (peer) |index| return self.namespace.subnets(index, digest);
         var result: topic_policy.Subnets = .{};
-        for (self.rows) |*row| {
-            if (!row.active or !(if (peer) |index| row.subscribers.isSet(index) else row.subscribed)) continue;
-            const parsed = topic_mod.parseCanonical(row.topicString()) orelse continue;
-            if (std.mem.eql(u8, &digest, &parsed.digest)) result.add(parsed.name);
+        for (self.namespace.boundaries, self.namespace.offsets) |*boundary, *starts| {
+            if (!std.mem.eql(u8, &boundary.digest, &digest)) continue;
+            result.column_subnet_count = boundary.rules[@intFromEnum(topic_mod.Kind.data_column_sidecar)].count;
+            inline for (.{ topic_mod.Kind.beacon_attestation, topic_mod.Kind.sync_committee, topic_mod.Kind.data_column_sidecar }) |kind| {
+                const k = @intFromEnum(kind);
+                for (0..boundary.rules[k].count) |subnet| {
+                    const row = &self.rows[starts[k] + subnet];
+                    if (if (peer) |index| row.subscribers.isSet(index) else row.subscribed)
+                        result.add(.{ .kind = kind, .subnet = @intCast(subnet) });
+                }
+            }
+            break;
         }
         return result;
     }
@@ -288,8 +293,8 @@ pub const Overlay = struct {
         return &self.rows[topic].fanout;
     }
 
-    pub fn init(a: std.mem.Allocator, seed: u64, boundaries: []const topic_policy.Boundary, connected: u16) !Overlay {
-        var namespace = try topic_policy.Namespace.init(a, boundaries, connected);
+    pub fn init(a: std.mem.Allocator, seed: u64, boundaries: []const topic_policy.Boundary) !Overlay {
+        var namespace = try topic_policy.Namespace.init(a, boundaries);
         errdefer namespace.deinit(a);
         const rows = try a.alloc(Row, namespace.topic_count);
         for (rows, 0..) |*row, index| {
@@ -587,18 +592,16 @@ pub const Overlay = struct {
     }
 
     pub fn peerDisconnected(self: *Overlay, context: *const Context, peer: u16) void {
-        for (self.rows, 0..) |*row, topic| {
-            if (row.active) self.applySubscription(context, @intCast(topic), peer, false, .session_end);
+        for (0..self.rows.len) |topic| {
+            self.applySubscription(context, @intCast(topic), peer, false, .session_end);
         }
-        self.namespace.clearPeer(peer);
     }
 
     pub fn peerSubscription(self: *Overlay, context: *const Context, peer: u16, name: []const u8, on: bool) ?u16 {
+        assert(peer < context.sessions.rows.len);
         const match = self.namespace.lookup(name) orelse return null;
-        self.namespace.setSubscription(peer, match.ordinal, on);
-        const topic = self.findTopic(name) orelse return null;
-        self.applySubscription(context, topic, peer, on, .remote_unsubscribe);
-        return topic;
+        self.applySubscription(context, match.ordinal, peer, on, .remote_unsubscribe);
+        return if (self.rows[match.ordinal].active) match.ordinal else null;
     }
 
     fn logChange(self: *const Overlay, context: *const Context, topic: u16, peer: u16, comptime event: []const u8, backoff_ms: u64) void {
@@ -611,7 +614,7 @@ pub const Overlay = struct {
 test "gossip policy review I3 shuffle budget holds at empty singleton and capacity" {
     var members: [c.peers_cap]u16 = undefined;
     for ([_]usize{ 0, 1, 3, c.peers_cap }) |len| {
-        var mesh = try Overlay.init(std.testing.allocator, 17, &.{.{ .digest = @splat(0), .rules = .{topic_policy.Rule{ .count = 1 }} ++ .{topic_policy.Rule{}} ** (topic_policy.kind_count - 1) }}, 1);
+        var mesh = try Overlay.init(std.testing.allocator, 17, &.{.{ .digest = @splat(0), .rules = .{topic_policy.Rule{ .count = 1 }} ++ .{topic_policy.Rule{}} ** (topic_policy.kind_count - 1) }});
         defer mesh.deinit(std.testing.allocator);
         var expected = mesh.rng;
         for (0..len -| 1) |_| _ = expected.next();
@@ -624,7 +627,7 @@ test "gossip policy review I3 shuffle budget holds at empty singleton and capaci
             seen.set(peer);
         }
     }
-    var mesh = try Overlay.init(std.testing.allocator, 17, &.{.{ .digest = @splat(0), .rules = .{topic_policy.Rule{ .count = 1 }} ++ .{topic_policy.Rule{}} ** (topic_policy.kind_count - 1) }}, 1);
+    var mesh = try Overlay.init(std.testing.allocator, 17, &.{.{ .digest = @splat(0), .rules = .{topic_policy.Rule{ .count = 1 }} ++ .{topic_policy.Rule{}} ** (topic_policy.kind_count - 1) }});
     defer mesh.deinit(std.testing.allocator);
     var ordered = [_]u16{ 0, 1, 2, 3, 4, 5, 6, 7 };
     mesh.shuffle(&ordered);

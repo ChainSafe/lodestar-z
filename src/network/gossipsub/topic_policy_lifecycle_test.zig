@@ -62,7 +62,7 @@ test "topic policy remembers real inactive subscriptions without event pressure 
     try support.unsubscribe(pair.shared.client.gossipsub, name);
     for (0..20) |_| try pair.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), pair.shared.server.gossipsub.overlay.subscribers(t).count());
-    try std.testing.expect(!pair.shared.server.gossipsub.overlay.namespace.subscribed(0, 0));
+    try std.testing.expect(!pair.shared.server.gossipsub.overlay.subscribers(0).isSet(0));
 }
 
 test "gossip accepted mesh membership does not invent a declared subscription across retirement" {
@@ -76,11 +76,9 @@ test "gossip accepted mesh membership does not invent a declared subscription ac
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     support.control(&g, grafted.index, .{ .graft = name }, now);
     support.control(&g, declared.index, .{ .subscription = .{ .topic = name, .subscribe = true } }, now);
-    const ns = &g.overlay.namespace;
     try std.testing.expect(g.overlay.inMesh(topic, grafted.index));
     try std.testing.expect(!g.overlay.subscribers(topic).isSet(grafted.index));
-    try std.testing.expect(!ns.subscribed(grafted.index, 0));
-    try std.testing.expect(ns.subscribed(declared.index, 0));
+    try std.testing.expect(g.overlay.subscribers(topic).isSet(declared.index));
     var context = g.overlayContext(now.millis());
     g.overlay.maintain(&context, topic);
     try std.testing.expect(g.overlay.inMesh(topic, grafted.index));
@@ -167,11 +165,11 @@ test "topic policy physical close clears bits while same connection stream repla
     try support.subscribe(pair.shared.client.gossipsub, name);
     for (0..20) |_| try pair.pumpOnce();
     const index = pair.shared.server.gossipsub.sessions.find(pair.shared.handles.server).?;
-    const ns = &pair.shared.server.gossipsub.overlay.namespace;
-    try std.testing.expect(ns.subscribed(index, 0));
+    const overlay = pair.shared.server.gossipsub.overlay;
+    try std.testing.expect(overlay.subscribers(0).isSet(index));
     session_io.resetInbound(pair.shared.server.gossipsub, &pair.shared.pair.server, index);
     session_io.resetOutbound(pair.shared.server.gossipsub, &pair.shared.pair.server, index);
-    try std.testing.expect(ns.subscribed(index, 0));
+    try std.testing.expect(overlay.subscribers(0).isSet(index));
     for (0..20) |_| try pair.pumpOnce();
     const client_index = pair.shared.client.gossipsub.sessions.find(pair.shared.handles.client).?;
     const replacement_stream = try pair.shared.client.router.beginOutbound(&pair.shared.pair.client, pair.shared.handles.client, .{ .meshsub = .v1_1 }, pair.shared.pair.now);
@@ -179,19 +177,19 @@ test "topic policy physical close clears bits while same connection stream repla
     for (0..20) |_| try pair.pumpOnce();
     try std.testing.expect(pair.shared.server.gossipsub.sessions.rows[index].in_stream != null);
     try std.testing.expect(pair.shared.server.gossipsub.sessions.rows[index].outbound == .live);
-    try std.testing.expect(ns.subscribed(index, 0));
+    try std.testing.expect(overlay.subscribers(0).isSet(index));
     var stale = pair.shared.handles.server;
     stale.generation += 1;
     pair.shared.server.gossipsub.connectionClosed(stale);
-    try std.testing.expect(ns.subscribed(index, 0));
+    try std.testing.expect(overlay.subscribers(0).isSet(index));
     const other = support.addPeer(pair.shared.server.gossipsub, .{ .index = 77, .generation = 1 }, .v1_2).?;
-    ns.setSubscription(other.index, 0, true);
+    _ = overlay.peerSubscription(&pair.shared.server.gossipsub.overlayContext(pair.shared.pair.now.millis()), other.index, name, true);
     pair.shared.server.gossipsub.connectionClosed(pair.shared.handles.server);
-    try std.testing.expect(!ns.subscribed(index, 0));
-    try std.testing.expect(ns.subscribed(other.index, 0));
+    try std.testing.expect(!overlay.subscribers(0).isSet(index));
+    try std.testing.expect(overlay.subscribers(0).isSet(other.index));
     const replacement = support.addPeer(pair.shared.server.gossipsub, stale, .v1_2).?;
     try std.testing.expectEqual(index, replacement.index);
-    try std.testing.expect(!ns.subscribed(index, 0));
+    try std.testing.expect(!overlay.subscribers(0).isSet(index));
     try support.subscribe(pair.shared.server.gossipsub, name);
     const t = pair.shared.server.gossipsub.overlay.findTopic(name).?;
     try std.testing.expect(!pair.shared.server.gossipsub.overlay.subscribers(t).isSet(index));
@@ -271,7 +269,6 @@ test "topic policy copied startup allocation prefixes and whole owner memory rec
     var g = try support.init(ledger.allocator(), options(&boundaries));
     defer g.deinit();
     const ns = &g.overlay.namespace;
-    try std.testing.expectEqual(@as(usize, 2 * 13 * 8), ns.subscriptions.len * 8);
     try std.testing.expectEqual(g.memoryPlan().total_bytes - @sizeOf(Gossipsub), ledger.bytes);
     try std.testing.expect(g.options.topic_policy.len == 0);
     boundaries[0].digest = @splat(0);

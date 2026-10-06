@@ -26,15 +26,9 @@ pub const Boundary = struct {
         return self.masks[mask_offsets[k]..mask_offsets[k + 1]];
     }
 };
-pub const OrdinalSet = std.StaticBitSet(policy.topic_max);
-pub const TopicSet = std.DynamicBitSetUnmanaged;
-
-pub fn topicSetBytes(topics: usize) usize {
-    return ((topics + @bitSizeOf(usize) - 1) / @bitSizeOf(usize) + 1) * @sizeOf(usize);
-}
 /// Private scratch between preparation and commit in one serialized owner call.
 pub const Workspace = struct {
-    desired: OrdinalSet = .empty,
+    desired: std.StaticBitSet(policy.topic_max) = .empty,
     now_ms: u64 = 0,
     slot: u64 = 0,
     prepared: bool = false,
