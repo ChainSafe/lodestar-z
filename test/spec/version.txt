@@ -3,3 +3,4 @@
 // Do not commit changes by hand.
 
 v1.7.0-beta.2
+ssz-specs v0.0.1.dev2

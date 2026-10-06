@@ -117,6 +117,16 @@
                 .default = "test/spec/spec_tests",
                 .description = "Output directory for downloaded spec tests.",
             },
+            .ssz_spec_test_url = .{
+                .type = .string,
+                .default = "https://github.com/ethereum/ssz-specs",
+                .description = "Git repo URL for SSZ spec tests.",
+            },
+            .ssz_spec_test_version = .{
+                .type = .string,
+                .default = "v0.0.1.dev2",
+                .description = "SSZ spec tests version tag.",
+            },
         },
     },
     // Preset bundles let CI keep using `-Dpreset=mainnet` / `-Dpreset=minimal`.
@@ -267,7 +277,7 @@
         .write_ssz_generic_spec_tests = .{
             .root_module = .{
                 .root_source_file = "test/spec/ssz/write_generic_tests.zig",
-                .imports = .{.spec_test_options},
+                .imports = .{ .spec_test_options, .ssz },
             },
         },
         .write_ssz_static_spec_tests = .{
