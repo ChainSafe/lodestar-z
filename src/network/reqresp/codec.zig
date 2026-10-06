@@ -35,7 +35,6 @@ pub const Error = error{
     BadChecksum,
     TooManyCompressedBytes,
     TooManyBytes,
-    ReservedResult,
     InvalidCompressed,
     BufferTooSmall,
     Truncated,
@@ -122,7 +121,7 @@ pub const Decoder = struct {
     pub fn protocolFault(self: *const Decoder, err: Error) bool {
         return switch (err) {
             error.LengthOutOfBounds => self.length_protocol_fault,
-            error.BufferTooSmall, error.ReservedResult => false,
+            error.BufferTooSmall => false,
             error.VarintTooLong, error.BadIdentifier, error.BadFrameType, error.BadFrameLength, error.FrameTooLarge, error.BadChecksum, error.TooManyCompressedBytes, error.TooManyBytes, error.InvalidCompressed, error.Truncated => true,
         };
     }

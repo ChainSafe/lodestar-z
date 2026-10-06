@@ -27,7 +27,7 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     const topic_len = try decode.text(topic, &name);
     const canonical = n.gossipsub.topic.parseCanonical(name[0..topic_len]) orelse return rejectInput(runtime.env, error.UnknownTopic);
     const publish_options = try g.optionsFor(options);
-    const len = try payloadLength(data);
+    const len = payloadLength(data) catch |err| return rejectInput(runtime.env, err);
     const token = runtime.reservePublication(canonical.name.kind, len) catch |err| return rejectInput(runtime.env, err);
     errdefer runtime.retirePublication(token);
     const cell = runtime.publications.?.get(token).?;

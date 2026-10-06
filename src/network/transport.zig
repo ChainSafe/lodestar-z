@@ -375,6 +375,7 @@ pub const Transport = struct {
     }
 
     fn receiveBatch(self: *Transport, io: std.Io, result: *Progress, ready: [2]bool) AdvanceError!void {
+        assert(self.batch_len == 0);
         var eligible = ready;
         var count: u32 = 0;
         while (count < self.work_limits.receive_per_turn_max) : (count += 1) {

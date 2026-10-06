@@ -307,7 +307,6 @@ export type NativeDisconnectReason =
   | "host"
   | "shutdown"
   | "transport_closed"
-  | "duplicate"
   | "capacity"
   | "incompatible_fork"
   | "future_head"
@@ -446,9 +445,13 @@ export interface NativeGossipPublishOptions {
   flood?: boolean;
 }
 export interface NativeGossipPublishResult {
+  /** Recipients whose send queues accepted the message. */
   queued: number;
+  /** Recipients whose send queues refused the message. */
   pressured: number;
+  /** Selected recipients: queued + pressured + unavailable. */
   selected: number;
+  /** Selected recipients without an available gossip stream. */
   unavailable: number;
   duplicate: boolean;
 }
@@ -556,7 +559,10 @@ export interface DependencyCheck {
   readonly topic: string;
 }
 
-/** A serving start. Its serving capacity stays charged until the promise `serve` returned settles. */
+/**
+ * A serving start. Its serving capacity stays charged until the stream closes and the promise `serve` returned
+ * settles. At most one ready() or respond() call may be pending.
+ */
 export interface IncomingRequest {
   readonly peerId: PeerIdStr;
   readonly connection: NativeConnection;
@@ -578,7 +584,8 @@ export interface IncomingRequest {
 export interface NativeHost {
   /**
    * Null requests control-only draining. Serving is current additional host capacity, excluding active work; ordinary
-   * is whether ordinary gossip can execute. A throw or an invalid value pauses payload delivery, reports the error,
+   * is whether ordinary gossip can execute. Serving must be finite; it is floored and clamped to 0..32.
+   * A throw or an invalid value pauses payload delivery, reports the error,
    * and retries while control and completions continue to drain.
    */
   capacity(): {ordinary: boolean; serving: number} | null;
@@ -589,7 +596,10 @@ export interface NativeHost {
   validate(job: GossipJob): Promise<readonly Verdict[]>;
   /** One classification per check, in order. A throw or the wrong count classifies every check unavailable. */
   checkDependencies(checks: readonly DependencyCheck[]): readonly boolean[];
-  /** Settles only after the serving source and its child work retire. A throw or rejection fails the stream. */
+  /**
+   * Ends the stream with finish(), fail() or cancel(), and settles only after the source and its child work retire.
+   * A throw or rejection fails the stream.
+   */
   serve(request: IncomingRequest): Promise<void>;
   /** Updates replace the previous state of the same peer. A throw fails the network. */
   peers(events: readonly NativePeerObservation[]): void;
@@ -611,6 +621,11 @@ export interface NativeHost {
   error?(error: unknown): void;
 }
 
+/**
+ * updateStatus, connect, disconnect, setDirectPeer, reStatus and the get* methods can throw during admission,
+ * including NetworkCommandFull when command or snapshot capacity is occupied. Their promises report admitted
+ * operations' outcomes. applyIntent and publish reject admission errors through their promises.
+ */
 export interface NativeNetwork {
   readonly limits: NativeResolvedLimits;
   /** Native shutdown and its promised completions finished. A failed network cannot restart. */

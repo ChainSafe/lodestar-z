@@ -914,7 +914,7 @@ describe("binding pump delivery", () => {
     expect(retained).toEqual([...retained].sort((a, b) => a - b));
   });
 
-  it("never starts more than one turn's allowance, however many turns the budget ended", async () => {
+  it("starts held requests after expensive exchanges within the per-turn allowance", async () => {
     const node = fixture();
     const queue = Array.from({length: 40}, (_, i) => incoming(`start-${i}`));
     let spend = 4;
@@ -927,17 +927,18 @@ describe("binding pump delivery", () => {
       return {...idle, serving: queue.splice(0, count) as NativeIncomingRequest[]};
     });
     node.pump.request();
-    // Four turns the budget ended: the first holds eight starts, which leave the others no allowance.
-    for (let i = 0; i < 4; i++) await macrotask();
-    expect(queue).toHaveLength(32);
-    expect(node.calls()[3][1]).toMatchObject({capacity: {serving: 24}, servingStarts: 0});
-    expect(node.host.serve).not.toHaveBeenCalled();
+    for (let i = 0; i < 4; i++) {
+      await macrotask();
+      expect(node.host.serve).toHaveBeenCalledTimes(i);
+    }
+    expect(queue).toHaveLength(30);
+    expect(node.calls()[3][1]).toMatchObject({capacity: {serving: 25}, servingStarts: 1});
     await macrotask();
-    expect(node.host.serve).toHaveBeenCalledTimes(8);
-    expect(queue).toHaveLength(32);
+    expect(node.host.serve).toHaveBeenCalledTimes(11);
+    expect(queue).toHaveLength(29);
     node.pump.request();
     await macrotask();
-    expect(node.host.serve).toHaveBeenCalledTimes(16);
+    expect(node.host.serve).toHaveBeenCalledTimes(19);
   });
 
   it("retains serving capacity until serve settles, registered before host code; a failure fails the stream once", async () => {

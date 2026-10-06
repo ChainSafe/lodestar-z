@@ -7,9 +7,9 @@ const native_sockets = compat.native_sockets;
 const Address = @import("address.zig").Address;
 
 /// Owns at most one socket per configured address family. The caller serializes
-/// operations and close, does not copy a live owner, and uses a compatible close provider.
-/// Raw handles are borrowed readiness inputs, not permission to receive or close.
-/// Operation-time overrides remain supported; Threaded operations cannot use non-native handles.
+/// operations and close and does not copy a live owner. Pass an `std.Io` compatible
+/// with the socket handles; Threaded operations require native handles.
+/// Readiness checks borrow raw handles without transferring ownership.
 pub const Sockets = struct {
     values: [2]?net.Socket = .{ null, null },
     /// Buffer sizes per family as getsockopt reported them after `requestBuffers`. Linux reports
@@ -298,7 +298,7 @@ pub const Sockets = struct {
 
     /// Sends in input order, stopping at the first error with its exact accepted prefix.
     /// A later oversized entry is checked only after sending its valid prefix; earlier I/O
-    /// failures win. Larger slices use bounded scratch chunks. No ancillary data or retry queue.
+    /// failures win. Larger slices use bounded scratch chunks.
     pub fn sendMany(self: *const Sockets, io: std.Io, messages: []const Outgoing, payload_max: usize, scratch: *BatchScratch) SendOutcome {
         var begin: usize = 0;
         while (begin < messages.len) {

@@ -136,7 +136,7 @@ test "codec streams a chunk through the writer identically to the one-shot encod
     try std.testing.expectEqualSlices(u8, expected, streamed[0..cursor]);
 }
 
-test "codec decodes error chunks and rejects reserved results" {
+test "codec decodes standard custom and reserved error results" {
     var sink: [codec.error_message_max]u8 = undefined;
     var scratch: [codec.frame_scratch_max]u8 = undefined;
     var out: [128]u8 = undefined;

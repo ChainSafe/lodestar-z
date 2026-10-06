@@ -805,7 +805,6 @@ fn recordFailure(owner: *ReqResp, record: *const RequestState, index: u16, event
     } else {
         const detail: []const u8 = switch (reason) {
             .invalid_response => |err| @errorName(err),
-            .invalid_request => |err| @errorName(err),
             .negotiation_failed => |failure| @tagName(failure),
             else => record.failure_detail,
         };
