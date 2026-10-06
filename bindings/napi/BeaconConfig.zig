@@ -49,7 +49,7 @@ fn create(allocator: std.mem.Allocator, object: js.Value, genesis_root: js.Uint8
     // Configuration getters may detach the input buffer.
     const root = root_slice[0..32].*;
 
-    const owned = try OwnedConfigRc.init(allocator, .{});
+    const owned = try OwnedConfigRc.create(allocator, .{});
     errdefer owned.unref();
 
     const object_value = try object.toValue().coerceToObject();

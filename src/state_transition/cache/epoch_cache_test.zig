@@ -11,6 +11,40 @@ const EffectiveBalanceIncrementsRc = @import("effective_balance_increments.zig")
 const effectiveBalanceIncrementsInit = @import("effective_balance_increments.zig").effectiveBalanceIncrementsInit;
 const SLOTS_PER_EPOCH = @import("preset").preset.SLOTS_PER_EPOCH;
 
+test "memory_safety: createFromState releases shuffling inputs on every allocation failure" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+    const state = test_state.cached_state.state;
+    const immutable_data = @import("epoch_cache.zig").EpochCacheImmutableData{
+        .config = test_state.config,
+        .pubkey_cache = test_state.pubkey_cache,
+    };
+    const options = @import("epoch_cache.zig").EpochCacheOpts{
+        .skip_sync_committee_cache = true,
+        .skip_sync_pubkeys = true,
+    };
+
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    const cache = try EpochCache.createFromState(counting.allocator(), std.testing.io, state, immutable_data, options);
+    cache.deinit();
+    const allocation_count = counting.alloc_index;
+    try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+
+    for (0..allocation_count) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(
+            error.OutOfMemory,
+            EpochCache.createFromState(failing.allocator(), std.testing.io, state, immutable_data, options),
+        );
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
 test "memory_safety: setSyncCommitteesIndexed should release each cache once on allocation failure" {
     const allocator = std.testing.allocator;
     const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
@@ -26,10 +60,10 @@ test "memory_safety: setSyncCommitteesIndexed should release each cache once on 
         var failing_allocator = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
         var epoch_cache: EpochCache = undefined;
         epoch_cache.allocator = failing_allocator.allocator();
-        epoch_cache.current_sync_committee_indexed = try SyncCommitteeCacheRc.init(allocator, .initEmpty());
+        epoch_cache.current_sync_committee_indexed = try SyncCommitteeCacheRc.create(allocator, .initEmpty());
         defer epoch_cache.current_sync_committee_indexed.unref();
 
-        epoch_cache.next_sync_committee_indexed = try SyncCommitteeCacheRc.init(allocator, .initEmpty());
+        epoch_cache.next_sync_committee_indexed = try SyncCommitteeCacheRc.create(allocator, .initEmpty());
         defer epoch_cache.next_sync_committee_indexed.unref();
 
         const old_current = epoch_cache.current_sync_committee_indexed;
@@ -62,13 +96,13 @@ test "memory_safety: setSyncCommitteesIndexed should preserve caches on every OO
         ) !void {
             var epoch_cache: EpochCache = undefined;
             epoch_cache.allocator = allocator;
-            epoch_cache.current_sync_committee_indexed = try SyncCommitteeCacheRc.init(
+            epoch_cache.current_sync_committee_indexed = try SyncCommitteeCacheRc.create(
                 std.testing.allocator,
                 .initEmpty(),
             );
             defer epoch_cache.current_sync_committee_indexed.unref();
 
-            epoch_cache.next_sync_committee_indexed = try SyncCommitteeCacheRc.init(
+            epoch_cache.next_sync_committee_indexed = try SyncCommitteeCacheRc.create(
                 std.testing.allocator,
                 .initEmpty(),
             );
@@ -173,6 +207,49 @@ test "memory_safety: EpochCache.clone does not retain shared references when all
     );
 }
 
+test "memory_safety: afterProcessEpoch releases copied indices when RC allocation fails" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    {
+        var test_state = try TestCachedBeaconState.init(failing.allocator(), &pool, 256);
+        defer test_state.deinit();
+
+        const epoch_cache = test_state.cached_state.epoch_cache;
+        const transition_cache = test_state.epoch_transition_cache;
+        try std.testing.expect(transition_cache.next_shuffling == null);
+        try std.testing.expect(transition_cache.next_shuffling_active_indices.len > 0);
+        const previous_shuffling = epoch_cache.previous_shuffling;
+        const current_shuffling = epoch_cache.current_shuffling;
+        const next_shuffling = epoch_cache.next_shuffling;
+        const previous_decision_root = epoch_cache.previous_decision_root;
+        const current_decision_root = epoch_cache.current_decision_root;
+        const next_decision_root = epoch_cache.next_decision_root;
+        const allocated_bytes = failing.allocated_bytes;
+        const freed_bytes = failing.freed_bytes;
+
+        // The copied indices allocate first; the RC wrapper allocation must fail next.
+        failing.fail_index = failing.alloc_index + 1;
+        try std.testing.expectError(
+            error.OutOfMemory,
+            epoch_cache.afterProcessEpoch(test_state.cached_state.state, transition_cache),
+        );
+        try std.testing.expect(failing.has_induced_failure);
+        const copied_bytes = transition_cache.next_shuffling_active_indices.len * @sizeOf(ct.primitive.ValidatorIndex.Type);
+        try std.testing.expectEqual(copied_bytes, failing.allocated_bytes - allocated_bytes);
+        try std.testing.expectEqual(copied_bytes, failing.freed_bytes - freed_bytes);
+        try std.testing.expectEqual(previous_shuffling, epoch_cache.previous_shuffling);
+        try std.testing.expectEqual(current_shuffling, epoch_cache.current_shuffling);
+        try std.testing.expectEqual(next_shuffling, epoch_cache.next_shuffling);
+        try std.testing.expectEqual(previous_decision_root, epoch_cache.previous_decision_root);
+        try std.testing.expectEqual(current_decision_root, epoch_cache.current_decision_root);
+        try std.testing.expectEqual(next_decision_root, epoch_cache.next_decision_root);
+    }
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
 test "memory_safety: afterProcessEpoch should preserve shuffling state when decision-root calculation fails" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
@@ -214,7 +291,7 @@ test "effectiveBalanceIncrementsAppend grows in place only when the list is not 
     {
         var increments = try effectiveBalanceIncrementsInit(allocator, 4);
         errdefer increments.deinit(allocator);
-        epoch_cache.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(allocator, increments);
+        epoch_cache.effective_balance_increments = try EffectiveBalanceIncrementsRc.create(allocator, increments);
     }
     defer epoch_cache.effective_balance_increments.unref();
 

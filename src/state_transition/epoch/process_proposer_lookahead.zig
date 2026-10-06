@@ -81,7 +81,7 @@ pub fn processProposerLookahead(
     };
     const next_shuffling_rc = blk: {
         errdefer next_shuffling.deinit();
-        break :blk try EpochShufflingRc.init(epoch_cache.allocator, next_shuffling);
+        break :blk try EpochShufflingRc.create(epoch_cache.allocator, next_shuffling);
     };
     errdefer next_shuffling_rc.unref();
 

@@ -38,6 +38,7 @@ pub const EpochShuffling = struct {
 
     committees_per_slot: usize,
 
+    /// Takes ownership of `active_indices` on success; the caller retains ownership on failure.
     pub fn init(allocator: Allocator, seed: [32]u8, epoch: Epoch, active_indices: []const ValidatorIndex) !*EpochShuffling {
         if (active_indices.len > std.math.maxInt(u32)) return error.InvalidActiveIndicesLength;
 
@@ -126,10 +127,8 @@ test EpochShuffling {
     }
 }
 
-/// Takes ownership of the given `active_indices`.
+/// Takes ownership of `active_indices` on success; the caller retains ownership on failure.
 pub fn computeEpochShuffling(allocator: Allocator, state: *AnyBeaconState, active_indices: []ValidatorIndex, epoch: Epoch) !*EpochShuffling {
-    errdefer allocator.free(active_indices);
-
     return switch (state.forkSeq()) {
         inline else => |f| computeEpochShufflingForFork(f, allocator, state.castToFork(f), active_indices, epoch),
     };
