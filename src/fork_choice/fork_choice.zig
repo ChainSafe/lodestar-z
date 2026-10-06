@@ -1369,7 +1369,7 @@ pub const ForkChoice = struct {
         fn call(ctx: ?*anyopaque) error{OutOfMemory}!*EffectiveBalanceIncrementsRc {
             const self: *OnBlockBalancesCtx = @ptrCast(@alignCast(ctx.?));
             const balances = self.getter.get(self.checkpoint, self.state);
-            return EffectiveBalanceIncrementsRc.init(balances.allocator, balances);
+            return EffectiveBalanceIncrementsRc.create(balances.allocator, balances);
         }
     };
 
@@ -2980,7 +2980,7 @@ test "balance negative change: existing balances decrease" {
     {
         var new_list: store.JustifiedBalances = .empty;
         try new_list.appendSlice(allocator, &new_balances);
-        const new_rc = try store.JustifiedBalancesRc.init(allocator, new_list);
+        const new_rc = try store.JustifiedBalancesRc.create(allocator, new_list);
         fc.fc_store.justified.balances.unref();
         fc.fc_store.justified.balances = new_rc;
     }
@@ -3037,7 +3037,7 @@ test "balance same slot change: balance update without vote movement" {
     {
         var new_list: store.JustifiedBalances = .empty;
         try new_list.appendSlice(allocator, &new_balances);
-        const new_rc = try store.JustifiedBalancesRc.init(allocator, new_list);
+        const new_rc = try store.JustifiedBalancesRc.create(allocator, new_list);
         fc.fc_store.justified.balances.unref();
         fc.fc_store.justified.balances = new_rc;
     }
@@ -3098,7 +3098,7 @@ test "balance underflow clamping: old > new does not wrap unsigned" {
     {
         var new_list: store.JustifiedBalances = .empty;
         try new_list.appendSlice(allocator, &new_balances);
-        const new_rc = try store.JustifiedBalancesRc.init(allocator, new_list);
+        const new_rc = try store.JustifiedBalancesRc.create(allocator, new_list);
         fc.fc_store.justified.balances.unref();
         fc.fc_store.justified.balances = new_rc;
     }

@@ -10,14 +10,14 @@ pub fn RefCount(comptime T: type) type {
         instance: T,
 
         /// Takes ownership of `instance` on success; the caller retains ownership on failure.
-        pub fn init(allocator: Allocator, instance: T) !*@This() {
+        pub fn create(allocator: Allocator, instance: T) !*@This() {
             const ptr = try allocator.create(@This());
-            ptr.initIn(allocator, instance);
+            ptr.init(allocator, instance);
             return ptr;
         }
 
         /// Takes ownership of `instance` and uninitialized `self` allocated by `allocator.create`.
-        pub fn initIn(self: *@This(), allocator: Allocator, instance: T) void {
+        pub fn init(self: *@This(), allocator: Allocator, instance: T) void {
             self.* = .{
                 .allocator = allocator,
                 ._ref_count = std.atomic.Value(u32).init(1),

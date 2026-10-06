@@ -129,7 +129,7 @@ pub const EpochCache = struct {
         var effective_balance_increments = try effectiveBalanceIncrementsInit(allocator, validator_count);
         errdefer effective_balance_increments.deinit(allocator);
 
-        return try EffectiveBalanceIncrementsRc.init(allocator, effective_balance_increments);
+        return try EffectiveBalanceIncrementsRc.create(allocator, effective_balance_increments);
     }
 
     /// Takes ownership of `active_indices` on success; the caller retains ownership on failure.
@@ -143,7 +143,7 @@ pub const EpochCache = struct {
         errdefer allocator.destroy(rc);
 
         const epoch_shuffling = try computeEpochShuffling(allocator, state, active_indices, epoch);
-        rc.initIn(allocator, epoch_shuffling);
+        rc.init(allocator, epoch_shuffling);
         return rc;
     }
 
@@ -163,7 +163,7 @@ pub const EpochCache = struct {
         };
         errdefer sync_committee_cache.deinit();
 
-        return try SyncCommitteeCacheRc.init(allocator, sync_committee_cache);
+        return try SyncCommitteeCacheRc.create(allocator, sync_committee_cache);
     }
 
     fn initNextSyncCommitteeCacheRc(
@@ -182,7 +182,7 @@ pub const EpochCache = struct {
         };
         errdefer sync_committee_cache.deinit();
 
-        return try SyncCommitteeCacheRc.init(allocator, sync_committee_cache);
+        return try SyncCommitteeCacheRc.create(allocator, sync_committee_cache);
     }
 
     pub fn createFromState(
@@ -674,7 +674,7 @@ pub const EpochCache = struct {
         var effective_balance_increments = try self.effective_balance_increments.get().clone(self.allocator);
         errdefer effective_balance_increments.deinit(self.allocator);
 
-        const new_rc = try EffectiveBalanceIncrementsRc.init(self.allocator, effective_balance_increments);
+        const new_rc = try EffectiveBalanceIncrementsRc.create(self.allocator, effective_balance_increments);
 
         self.effective_balance_increments.unref();
         self.effective_balance_increments = new_rc;
@@ -874,7 +874,7 @@ pub const EpochCache = struct {
         var next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
         errdefer next_sync_committee_indexed.deinit();
 
-        const next_sync_committee_indexed_rc = try SyncCommitteeCacheRc.init(self.allocator, next_sync_committee_indexed);
+        const next_sync_committee_indexed_rc = try SyncCommitteeCacheRc.create(self.allocator, next_sync_committee_indexed);
 
         // unref the old instance
         self.current_sync_committee_indexed.unref();
@@ -891,7 +891,7 @@ pub const EpochCache = struct {
             var next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
             errdefer next_sync_committee_indexed.deinit();
 
-            break :blk try SyncCommitteeCacheRc.init(self.allocator, next_sync_committee_indexed);
+            break :blk try SyncCommitteeCacheRc.create(self.allocator, next_sync_committee_indexed);
         };
         errdefer next_sync_committee_indexed_rc.unref();
 
@@ -899,7 +899,7 @@ pub const EpochCache = struct {
             var current_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
             errdefer current_sync_committee_indexed.deinit();
 
-            break :blk try SyncCommitteeCacheRc.init(self.allocator, current_sync_committee_indexed);
+            break :blk try SyncCommitteeCacheRc.create(self.allocator, current_sync_committee_indexed);
         };
 
         self.next_sync_committee_indexed.unref();
@@ -954,7 +954,7 @@ pub const EpochCache = struct {
             @memcpy(new_increments.items[0..old.items.len], old.items);
             @memset(new_increments.items[old.items.len..new_len], 0);
 
-            const new_rc = try EffectiveBalanceIncrementsRc.init(self.allocator, new_increments);
+            const new_rc = try EffectiveBalanceIncrementsRc.create(self.allocator, new_increments);
             self.effective_balance_increments.unref();
             self.effective_balance_increments = new_rc;
         }

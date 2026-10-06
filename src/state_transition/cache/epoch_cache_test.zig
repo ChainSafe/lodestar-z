@@ -69,10 +69,10 @@ test "memory_safety: setSyncCommitteesIndexed should release each cache once on 
         var failing_allocator = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
         var epoch_cache: EpochCache = undefined;
         epoch_cache.allocator = failing_allocator.allocator();
-        epoch_cache.current_sync_committee_indexed = try SyncCommitteeCacheRc.init(allocator, .initEmpty());
+        epoch_cache.current_sync_committee_indexed = try SyncCommitteeCacheRc.create(allocator, .initEmpty());
         defer epoch_cache.current_sync_committee_indexed.unref();
 
-        epoch_cache.next_sync_committee_indexed = try SyncCommitteeCacheRc.init(allocator, .initEmpty());
+        epoch_cache.next_sync_committee_indexed = try SyncCommitteeCacheRc.create(allocator, .initEmpty());
         defer epoch_cache.next_sync_committee_indexed.unref();
 
         const old_current = epoch_cache.current_sync_committee_indexed;
@@ -105,13 +105,13 @@ test "memory_safety: setSyncCommitteesIndexed should preserve caches on every OO
         ) !void {
             var epoch_cache: EpochCache = undefined;
             epoch_cache.allocator = allocator;
-            epoch_cache.current_sync_committee_indexed = try SyncCommitteeCacheRc.init(
+            epoch_cache.current_sync_committee_indexed = try SyncCommitteeCacheRc.create(
                 std.testing.allocator,
                 .initEmpty(),
             );
             defer epoch_cache.current_sync_committee_indexed.unref();
 
-            epoch_cache.next_sync_committee_indexed = try SyncCommitteeCacheRc.init(
+            epoch_cache.next_sync_committee_indexed = try SyncCommitteeCacheRc.create(
                 std.testing.allocator,
                 .initEmpty(),
             );
@@ -300,7 +300,7 @@ test "effectiveBalanceIncrementsAppend grows in place only when the list is not 
     {
         var increments = try effectiveBalanceIncrementsInit(allocator, 4);
         errdefer increments.deinit(allocator);
-        epoch_cache.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(allocator, increments);
+        epoch_cache.effective_balance_increments = try EffectiveBalanceIncrementsRc.create(allocator, increments);
     }
     defer epoch_cache.effective_balance_increments.unref();
 
