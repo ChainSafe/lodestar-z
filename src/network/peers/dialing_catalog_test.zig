@@ -36,11 +36,11 @@ test "peer fold candidate promotion honors established quota and outbound reserv
     d.accepted(&c, peer, .{ .index = 3, .generation = 1 }, 0);
     try std.testing.expectEqual(@as(usize, 4), c.snapshots(&snapshots));
     try std.testing.expectEqual(@as(u64, 0), c.get(peer).?.connected_at_ms);
-    try std.testing.expectEqual(@as(u16, 1), c.intent_count);
+    try std.testing.expectEqual(@as(u16, 0), c.intent_count);
     try std.testing.expectEqual(@as(u16, 4), c.connectedCount());
 }
 
-test "peer fold discovery pressure retires hints while retaining established bans and identity" {
+test "peer fold discovery capacity remains available while established bans and closure are retained" {
     var c = try Catalog.initWithIntents(a, opts, 1, 8, 1);
     defer c.deinit(a);
     var d = try dialing.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 1 });
@@ -52,13 +52,14 @@ test "peer fold discovery pressure retires hints while retaining established ban
     d.accepted(&c, peer, conn, 0);
     _ = c.report(peer, .fatal, 0);
     try std.testing.expect(c.disconnect(peer, conn, .banned, 0));
-    try std.testing.expectError(error.Capacity, d.enqueueDiscovered(&c, &second, &.{}, &.{ .syncnets = 1 }, 600_000));
-    var events: [1]t.Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&events));
     const rep = c.rowFor(peer).?.reputation;
     try d.enqueueDiscovered(&c, &second, &.{}, &.{ .syncnets = 1 }, 600_000);
+    var events: [1]t.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&events));
+    try std.testing.expectEqual(t.DisconnectReason.banned, events[0].closed.reason);
     try std.testing.expectEqual(peer, c.find(&first.peer).?);
     try std.testing.expectEqualDeep(rep, c.rowFor(peer).?.reputation);
+    try std.testing.expectEqualDeep(first.hints, c.rowFor(peer).?.dial.hints.?);
     try std.testing.expect(!c.intents.isSet(peer.index));
     try std.testing.expectEqual(@as(u16, 1), c.intent_count);
     try std.testing.expectEqual(Catalog.Admission.banned, admit(&c, &first.peer, 0, .inbound, 600_000));

@@ -10,6 +10,82 @@ const support = @import("dialing_test_support.zig");
 const discovered = support.discovered;
 const initCatalog = support.initCatalog;
 
+test "connected discovery peers preserve records without occupying candidate capacity" {
+    for ([_]bool{ false, true }) |discovered_first| {
+        var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+        var catalog = try initCatalog(a, q.options);
+        defer catalog.deinit(a);
+        var connected = try discovered(1, 1);
+        const conn: t.Handle = .{ .index = 0, .generation = 1 };
+        var out: [1]mod.Dialing.SelectedDial = undefined;
+        if (discovered_first) {
+            try q.enqueueDiscovered(&catalog, &connected, &.{}, &.{ .syncnets = 1 }, 0);
+            try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
+            try std.testing.expect(q.dialStarted(out[0].token, conn));
+        }
+        support.accept(&q, &catalog, &connected.peer, conn, 1);
+        try std.testing.expectEqual(@as(u16, 0), catalog.intent_count);
+        const peer = catalog.find(&connected.peer).?;
+        if (discovered_first) {
+            try std.testing.expectEqualDeep(connected.hints, catalog.rowFor(peer).?.dial.hints.?);
+            try q.enqueue(&catalog, &connected.peer, &.{address}, false, 1);
+            try std.testing.expect(!catalog.rowFor(peer).?.dial.automatic);
+            try q.enqueueDiscovered(&catalog, &connected, &.{}, &.{ .syncnets = 1 }, 1);
+            try std.testing.expect(catalog.rowFor(peer).?.dial.automatic);
+        }
+
+        const waiting = try discovered(2, 1);
+        try q.enqueueDiscovered(&catalog, &waiting, &.{}, &.{ .syncnets = 1 }, 2);
+        connected.hints.sequence += 1;
+        connected.addresses[0] = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 2222 } };
+        try q.enqueueDiscovered(&catalog, &connected, &.{}, &.{ .syncnets = 1 }, 3);
+        try q.enqueueDiscovered(&catalog, &connected, &.{}, &.{ .syncnets = 1 }, 4);
+        try std.testing.expectEqual(@as(u16, 1), catalog.intent_count);
+        try std.testing.expect(!catalog.intents.isSet(peer.index));
+        try std.testing.expectEqualDeep(connected.hints, catalog.rowFor(peer).?.dial.hints.?);
+        const dial = &catalog.rowFor(peer).?.dial;
+        try std.testing.expectEqual(connected.address_count, dial.address_count);
+        try std.testing.expectEqualDeep(connected.addresses[0..connected.address_count], dial.addresses[0..dial.address_count]);
+        try std.testing.expectEqual(@as(u64, 4), catalog.rowFor(peer).?.dial.hints_at_ms);
+        try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 4, &out));
+        try std.testing.expect(out[0].peer.eql(&waiting.peer));
+    }
+}
+
+test "automatic transport retry reacquires only available candidate capacity" {
+    for ([_]bool{ false, true }) |full| {
+        var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+        var catalog = try initCatalog(a, q.options);
+        defer catalog.deinit(a);
+        const candidate = try discovered(1, 1);
+        const waiting = try discovered(2, 1);
+        try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{ .syncnets = 1 }, 0);
+        const conn: t.Handle = .{ .index = 0, .generation = 1 };
+        var out: [1]mod.Dialing.SelectedDial = undefined;
+        try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
+        try std.testing.expect(q.dialStarted(out[0].token, conn));
+        support.accept(&q, &catalog, &candidate.peer, conn, 1);
+        if (full) try q.enqueueDiscovered(&catalog, &waiting, &.{}, &.{ .syncnets = 1 }, 2);
+        support.disconnect(&catalog, &candidate.peer, 1, .transport_closed, 3);
+        const row = catalog.rowFor(catalog.find(&candidate.peer).?).?;
+        try std.testing.expectEqualDeep(candidate.hints, row.dial.hints.?);
+        try std.testing.expectEqual(candidate.address_count, row.dial.address_count);
+        try std.testing.expectEqualDeep(candidate.addresses[0..candidate.address_count], row.dial.addresses[0..row.dial.address_count]);
+        try std.testing.expectEqual(@as(u16, 1), catalog.intent_count);
+        if (full) {
+            try std.testing.expect(!row.dial.automatic);
+            try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 3, &out));
+            try std.testing.expect(out[0].peer.eql(&waiting.peer));
+        } else {
+            const due = support.refreshAndWakeup(&q, &catalog, 3, 1).?;
+            try std.testing.expect(due >= 5_003 and due <= 6_003);
+            try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, due - 1, &out));
+            try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, due, &out));
+            try std.testing.expect(out[0].peer.eql(&candidate.peer));
+        }
+    }
+}
+
 test "peer discovery matches rotate without rewarding additional advertised coverage" {
     var q = try mod.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
     var catalog = try initCatalog(a, q.options);

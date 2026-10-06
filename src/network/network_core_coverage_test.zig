@@ -83,6 +83,35 @@ test "core coverage counts real duty subscriptions separately from custodians" {
     try equal(@as(f64, 0), setup.client.peer_manager.catalog.get(peer.peer).?.score);
 }
 
+test "core custody coverage tolerates negative gossip scores but excludes poor request service" {
+    var setup: core_test.Setup = .{};
+    const local: t.LocalState = .{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } };
+    try init(&setup, &local);
+    defer setup.deinit();
+    try settle(&setup);
+    var snapshots: [4]t.Snapshot = undefined;
+    try equal(@as(usize, 1), setup.client.peer_manager.snapshots(&snapshots));
+    const peer = snapshots[0];
+    var demand: t.Demand = .{};
+    for (0..128) |group| if (peer.custody_groups.?.isSet(group)) {
+        demand.custody_group_targets[group] = 1;
+    };
+    try core_test.updateDemand(&setup.client, &demand, setup.pair.now);
+    const g = setup.client.protocols.gossipsub;
+    setup.client.peer_manager.reconcile(g, setup.pair.now);
+    try equal(@as(u16, 0), setup.client.peer_manager.coverageDeficits().custody_groups);
+
+    gossip_test.penalize(g, peer.connection.?, 7);
+    setup.pair.advance(manager.coverage_reconcile_interval_ms);
+    setup.client.peer_manager.reconcile(g, setup.pair.now);
+    try expect(setup.client.peer_manager.gossipScore(g, peer.peer, setup.pair.now).? < 0);
+    try equal(@as(u16, 0), setup.client.peer_manager.coverageDeficits().custody_groups);
+
+    try equal(.none, setup.client.peer_manager.reportPeer(peer.peer, .mid_tolerance, setup.pair.now).?);
+    setup.client.peer_manager.reconcile(g, setup.pair.now);
+    try equal(@as(u16, 4), setup.client.peer_manager.coverageDeficits().custody_groups);
+}
+
 test "core coverage coalesces subscription and score changes with operation eligibility" {
     var setup: core_test.Setup = .{};
     try init(&setup, &.{ .fork = .{ .fork = .altair } });

@@ -88,7 +88,7 @@ test "core Status and Metadata clear dial failures that QUIC admission keeps" {
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().relevant);
 }
 
-test "core health strikes survive an answered reconnect until a later probe succeeds" {
+test "core health strikes survive rediscovery and reconnect until a later probe succeeds" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -105,8 +105,10 @@ test "core health strikes survive an answered reconnect until a later probe succ
     for (0..12) |_| try setup.step(1);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.catalog.connectedCount());
     try std.testing.expectEqual(@as(u8, 1), serverStrikes(&setup, &server));
+    try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.catalog.intent_count);
     // Both sides hold a Goodbye cooldown after the health close.
     setup.pair.advance(60_000);
+    _ = try discoverServer(&setup);
     try dialServer(&setup);
     for (0..50) |_| try setup.step(1);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().relevant);

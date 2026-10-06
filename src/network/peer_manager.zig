@@ -413,8 +413,7 @@ pub const PeerManager = struct {
             input.ready = !self.local.fork.fork.gte(.fulu) or snapshot.sampling_groups != null;
             input.stable = coverage.stable(&input.coverage, &metadata, snapshot.sampling_groups);
         }
-        if (self.local.fork.fork.gte(.fulu) and snapshot.score >= peers.reputation.prune_score and
-            gossip_score >= 0)
+        if (self.local.fork.fork.gte(.fulu) and snapshot.score >= peers.reputation.prune_score)
             input.coverage.custody_groups = snapshot.custody_groups orelse .empty;
         return input;
     }
