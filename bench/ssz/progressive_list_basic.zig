@@ -10,7 +10,21 @@ const allocator = std.heap.c_allocator;
 const item_count = 1 << 20;
 const probe_count = 4096;
 const sample_count = 9;
-const Work = enum { sparse, clustered, dense, cold_read, warm_read, bulk_read, append, slice };
+const Work = enum {
+    sparse,
+    clustered,
+    dense,
+    cold_read,
+    warm_read,
+    bulk_read,
+    append,
+    slice,
+    from_value,
+    from_bytes,
+    to_value,
+    serialize,
+    iterate,
+};
 
 pub fn main(init: std.process.Init) !void {
     var pool = try Node.Pool.init(.{ .allocator = allocator, .pool_size = 3_000_000 });
@@ -18,6 +32,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("1M items, 2 warmups, 9 samples; median and min/max in ms\n", .{});
     inline for (.{ ssz.UintType(8), ssz.UintType(64) }) |Element| {
         const Progressive = ssz.FixedProgressiveListType(Element);
+        const ProgressiveChunked = ssz.FixedProgressiveListTypeWithOptions(Element, .{ .chunked_leaf = true });
         const Plain = ssz.FixedListType(Element, 1 << 22, .{});
         const Chunked = ssz.FixedListType(Element, 1 << 22, .{ .chunked_leaf = true });
         var value: Progressive.Type = .empty;
@@ -26,8 +41,11 @@ pub fn main(init: std.process.Init) !void {
         for (value.items, 0..) |*item, i| item.* = @intCast(i % 127);
         const output = try allocator.alloc(Element.Type, item_count);
         defer allocator.free(output);
-        inline for (.{ Progressive, Plain, Chunked }) |ST| {
-            const name = if (ST == Progressive) "progressive" else if (ST == Plain) "fixed plain" else "fixed chunked";
+        const serialized = try allocator.alloc(u8, item_count * Element.fixed_size);
+        defer allocator.free(serialized);
+        _ = Progressive.serializeIntoBytes(&value, serialized);
+        inline for (.{ Progressive, ProgressiveChunked, Plain, Chunked }) |ST| {
+            const name = if (ST == Progressive) "progressive" else if (ST == ProgressiveChunked) "prog chunked" else if (ST == Plain) "fixed plain" else "fixed chunked";
             const base = try ST.TreeView.fromValue(allocator, &pool, &value);
             defer base.deinit();
             _ = try base.hashTreeRoot();
@@ -48,6 +66,19 @@ pub fn main(init: std.process.Init) !void {
                 }
                 var expected_root: [32]u8 = undefined;
                 try ST.hashTreeRoot(allocator, &expected, &expected_root);
+                if (work == .to_value) {
+                    var decoded: ST.Type = .empty;
+                    defer decoded.deinit(allocator);
+                    try base.toValue(allocator, &decoded);
+                    if (!std.mem.eql(Element.Type, expected.items, decoded.items)) {
+                        return error.BenchmarkValueMismatch;
+                    }
+                } else if (work == .iterate) {
+                    var iterator = base.iteratorReadonly(0);
+                    for (expected.items) |element| {
+                        if (element != try iterator.next()) return error.BenchmarkValueMismatch;
+                    }
+                }
                 var readings: [sample_count]i64 = undefined;
                 for (0..sample_count + 2) |sample| {
                     var start = std.Io.Timestamp.now(init.io, .awake);
@@ -57,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
                         try readProbes(ST, view);
                         start = std.Io.Timestamp.now(init.io, .awake);
                     }
-                    const actual = try runWork(ST, view, work, output);
+                    const actual = try runWork(ST, &pool, view, work, output, &value, serialized);
                     view.deinit();
                     const elapsed: i64 = @intCast(start.untilNow(init.io, .awake).nanoseconds);
                     if (!std.mem.eql(u8, &expected_root, &actual)) return error.BenchmarkRootMismatch;
@@ -65,6 +96,9 @@ pub fn main(init: std.process.Init) !void {
                         if (!std.mem.eql(Element.Type, expected.items, output)) {
                             return error.BenchmarkValueMismatch;
                         }
+                    }
+                    if (work == .serialize and !std.mem.eql(u8, serialized, std.mem.sliceAsBytes(output))) {
+                        return error.BenchmarkValueMismatch;
                     }
                     if (sample >= 2) readings[sample - 2] = elapsed;
                 }
@@ -99,7 +133,15 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn runWork(comptime ST: type, view: *ST.TreeView, comptime work: Work, output: []ST.Element.Type) ![32]u8 {
+fn runWork(
+    comptime ST: type,
+    pool: *Node.Pool,
+    view: *ST.TreeView,
+    comptime work: Work,
+    output: []ST.Element.Type,
+    value: *const ST.Type,
+    serialized: []const u8,
+) ![32]u8 {
     switch (work) {
         .sparse, .clustered, .dense => {
             const count: usize = if (work == .sparse) 512 else if (work == .clustered) 4096 else item_count;
@@ -119,6 +161,30 @@ fn runWork(comptime ST: type, view: *ST.TreeView, comptime work: Work, output: [
             defer sliced.deinit();
             try sliced.growTo(item_count);
             return (try sliced.hashTreeRoot()).*;
+        },
+        .from_value, .from_bytes => {
+            const root = if (work == .from_value)
+                try ST.tree.fromValue(pool, value)
+            else
+                try ST.tree.deserializeFromBytes(pool, serialized);
+            defer pool.unref(root);
+            return root.getRoot(pool).*;
+        },
+        .to_value => {
+            var decoded: ST.Type = .empty;
+            defer decoded.deinit(allocator);
+            try view.toValue(allocator, &decoded);
+            std.mem.doNotOptimizeAway(decoded.items);
+        },
+        .serialize => {
+            _ = try view.serializeIntoBytes(std.mem.sliceAsBytes(output));
+            std.mem.doNotOptimizeAway(output);
+        },
+        .iterate => {
+            var iterator = view.iteratorReadonly(0);
+            var sum: u64 = 0;
+            for (0..item_count) |_| sum +%= @intCast(try iterator.next());
+            std.mem.doNotOptimizeAway(sum);
         },
     }
     const root = (try view.hashTreeRoot()).*;

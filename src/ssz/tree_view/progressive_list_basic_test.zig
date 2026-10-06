@@ -5,11 +5,260 @@ const List = ssz.FixedProgressiveListType(ssz.UintType(64));
 const allocator = std.testing.allocator;
 const Allocator = std.mem.Allocator;
 const zero_nodes = @import("hashing").max_depth;
+const ChunkedList = ssz.FixedProgressiveListTypeWithOptions(ssz.UintType(64), .{ .chunked_leaf = true });
 
 fn expectRoot(comptime ST: type, view: *ST.TreeView, value: *const ST.Type) !void {
     var expected: [32]u8 = undefined;
     try ST.hashTreeRoot(allocator, value, &expected);
     try std.testing.expectEqualSlices(u8, &expected, try view.hashTreeRoot());
+}
+
+test "progressive chunked basic view matches plain at subtree and blob boundaries" {
+    inline for (.{ ssz.BoolType(), ssz.UintType(8), ssz.UintType(16), ssz.UintType(32), ssz.UintType(64), ssz.UintType(128), ssz.UintType(256) }) |Element| {
+        const ST = ssz.FixedProgressiveListTypeWithOptions(Element, .{ .chunked_leaf = true });
+        const per_chunk = 32 / Element.fixed_size;
+        const len = 342 * per_chunk + 1;
+        var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 4096 });
+        defer pool.deinit();
+        {
+            var value: ST.Type = .empty;
+            defer value.deinit(allocator);
+            const view = try ST.TreeView.fromValue(allocator, &pool, &value);
+            defer view.deinit();
+            for (0..len) |i| {
+                const item: Element.Type = if (Element.Type == bool) i % 3 != 0 else @intCast(i % 251);
+                try view.push(item);
+                try value.append(allocator, item);
+                if (i == 21 * per_chunk or i == 85 * per_chunk) try view.commit();
+            }
+            const output = try allocator.alloc(Element.Type, len);
+            defer allocator.free(output);
+            _ = try view.getAllInto(output);
+            try std.testing.expectEqualSlices(Element.Type, value.items, output);
+            try expectRoot(ST, view, &value);
+            for ([_]usize{ 0, 1, 20 * per_chunk, 21 * per_chunk + 1, 84 * per_chunk, 85 * per_chunk + 1, 148 * per_chunk, 149 * per_chunk, len - 1 }) |start| {
+                var iterator = view.iteratorReadonly(start);
+                for (value.items[start..]) |item| try std.testing.expectEqual(item, try iterator.next());
+                try std.testing.expectError(error.InvalidLength, iterator.next());
+            }
+            for ([_]usize{ 20 * per_chunk, 21 * per_chunk, 84 * per_chunk + 1, 85 * per_chunk, 148 * per_chunk + 1, 149 * per_chunk, 340 * per_chunk, 341 * per_chunk }) |index| {
+                try view.set(index, Element.default_value);
+                value.items[index] = Element.default_value;
+                try std.testing.expectEqual(Element.default_value, try view.get(index));
+            }
+            _ = try view.getAllInto(output);
+            try std.testing.expectEqualSlices(Element.Type, value.items, output);
+            try expectRoot(ST, view, &value);
+            const bytes = try allocator.alloc(u8, try view.serializedSize());
+            defer allocator.free(bytes);
+            _ = try view.serializeIntoBytes(bytes);
+            const restored = try ST.TreeView.deserialize(allocator, &pool, bytes);
+            defer restored.deinit();
+            try expectRoot(ST, restored, &value);
+            for ([_]usize{ 0, 20 * per_chunk, 21 * per_chunk + 1, 84 * per_chunk, 85 * per_chunk + 1, 148 * per_chunk, 149 * per_chunk + 1, 340 * per_chunk, 341 * per_chunk }) |cut| {
+                const sliced = try view.sliceTo(cut);
+                defer sliced.deinit();
+                var expected: ST.Type = .empty;
+                defer expected.deinit(allocator);
+                try expected.appendSlice(allocator, value.items[0 .. cut + 1]);
+                try expectRoot(ST, sliced, &expected);
+                try sliced.growTo(len);
+                try expected.resize(allocator, len);
+                @memset(expected.items[cut + 1 ..], Element.default_value);
+                try sliced.set(len - 1, Element.default_value);
+                try expectRoot(ST, sliced, &expected);
+                _ = try sliced.getAllInto(output);
+                try std.testing.expectEqualSlices(Element.Type, expected.items, output);
+            }
+            try expectRoot(ST, view, &value);
+        }
+        try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
+    }
+}
+
+test "progressive chunked basic zero growth clone and cached blob ownership" {
+    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
+    defer pool.deinit();
+    {
+        const view = try ChunkedList.TreeView.fromValue(allocator, &pool, &ChunkedList.default_value);
+        defer view.deinit();
+        try view.growTo(2048);
+        try std.testing.expectEqual(@as(u64, 0), try view.get(1000));
+        try view.commit();
+        try std.testing.expectEqual(@as(u64, 0), try view.get(1000));
+        try view.set(1000, 12);
+        try view.set(1001, 13);
+        const copy = try view.clone(.{ .transfer_cache = false });
+        defer copy.deinit();
+        try std.testing.expectEqual(@as(u64, 0), try copy.get(1000));
+        try view.commit();
+        try view.set(1000, 14);
+        const transferred = try view.clone(.{ .transfer_cache = true });
+        defer transferred.deinit();
+        try std.testing.expectEqual(@as(u64, 12), try view.get(1000));
+        try std.testing.expectEqual(@as(u64, 12), try transferred.get(1000));
+        try transferred.set(1000, 99);
+        transferred.clearCache();
+        try std.testing.expectEqual(@as(u64, 12), try transferred.get(1000));
+        const zero_slice = try copy.sliceTo(999);
+        defer zero_slice.deinit();
+        try zero_slice.growTo(2048);
+        try std.testing.expectEqualSlices(u8, try copy.hashTreeRoot(), try zero_slice.hashTreeRoot());
+        const used = pool.getNodesInUse();
+        try view.set(1000, 15);
+        const copied = pool.getNodesInUse();
+        try std.testing.expect(copied == used + 1);
+        for (1000..1010) |i| try view.set(i, @intCast(i));
+        try std.testing.expectEqual(copied, pool.getNodesInUse());
+        try view.commit();
+        try std.testing.expectEqual(@as(u64, 12), try transferred.get(1000));
+    }
+    try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
+}
+
+test "progressive chunked basic single proofs preserve canonical gindices" {
+    const pmt = @import("persistent_merkle_tree");
+    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+    {
+        const view = try ChunkedList.TreeView.fromValue(allocator, &pool, &ChunkedList.default_value);
+        defer view.deinit();
+        try view.growTo(2048);
+        try view.set(1000, 1234);
+        const root = (try view.hashTreeRoot()).*;
+        // Chunk 250 is offset 165 inside the 256-chunk subtree at spine index 4.
+        const gindex: pmt.Gindex = @enumFromInt(((@as(u64, 3) << 4) - 1) * 2 * 256 + 165);
+        var proof = try pmt.proof.createSingleProof(allocator, &pool, view.getRoot(), gindex);
+        defer proof.deinit(allocator);
+        const rebuilt = try pmt.proof.createNodeFromSingleProof(&pool, gindex, proof.leaf, proof.witnesses);
+        defer pool.unref(rebuilt);
+        try std.testing.expectEqualSlices(u8, &root, rebuilt.getRoot(&pool));
+        try std.testing.expectEqual(@as(u64, 1234), std.mem.readInt(u64, proof.leaf[0..8], .little));
+    }
+    try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
+}
+
+fn chunkedAllocationFailures(failing: Allocator) !void {
+    var pool = try Node.Pool.init(.{ .allocator = failing, .page_allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+    defer std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse()) catch @panic("leaked nodes");
+    const view = try ChunkedList.TreeView.fromValue(failing, &pool, &ChunkedList.default_value);
+    defer view.deinit();
+    try view.growTo(1368);
+    try view.set(84, 11);
+    try view.set(600, 22);
+    try view.set(1367, 33);
+    try view.commit();
+    const copy = try view.clone(.{ .transfer_cache = false });
+    defer copy.deinit();
+    try view.set(600, 44);
+    try view.commit();
+    const sliced = try view.sliceTo(600);
+    defer sliced.deinit();
+    try sliced.growTo(1368);
+    try sliced.set(800, 55);
+    try sliced.commit();
+    var value: ChunkedList.Type = .empty;
+    defer value.deinit(failing);
+    try sliced.toValue(failing, &value);
+    try std.testing.expectEqual(@as(u64, 44), value.items[600]);
+    try std.testing.expectEqual(@as(u64, 0), value.items[601]);
+    try std.testing.expectEqual(@as(u64, 55), value.items[800]);
+    try std.testing.expectEqual(@as(u64, 22), try copy.get(600));
+}
+
+test "memory_safety: progressive chunked basic allocation failures" {
+    try std.testing.checkAllAllocationFailures(allocator, chunkedAllocationFailures, .{});
+}
+
+test "memory_safety: progressive chunked basic failed publication and slice reclaim payloads" {
+    inline for (.{ false, true }) |slice| {
+        var saw_failure = false;
+        var saw_success = false;
+        for (0..48) |available| {
+            var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 256 });
+            defer pool.deinit();
+            {
+                const view = try ChunkedList.TreeView.fromValue(allocator, &pool, &ChunkedList.default_value);
+                defer view.deinit();
+                try view.growTo(600);
+                try view.set(100, 11);
+                try view.set(500, 22);
+                try view.commit();
+                const original = view.getRoot();
+                const root = (try view.hashTreeRoot()).*;
+                if (!slice) {
+                    try view.growTo(1400);
+                    try view.set(500, 33);
+                    try view.set(1399, 44);
+                }
+                var fillers: [256]Node.Id = undefined;
+                var count: usize = 0;
+                defer for (fillers[0..count]) |node| pool.unref(node);
+                while (pool.nodes.len - pool.getNodesInUse() > available) {
+                    fillers[count] = try pool.createLeafFromUint(0);
+                    count += 1;
+                }
+                const before = pool.getNodesInUse();
+                if (slice) {
+                    if (view.sliceTo(500)) |sliced| {
+                        sliced.deinit();
+                        saw_success = true;
+                    } else |err| {
+                        try std.testing.expectEqual(error.PoolExhausted, err);
+                        saw_failure = true;
+                    }
+                    try std.testing.expectEqual(before, pool.getNodesInUse());
+                } else {
+                    view.commit() catch |err| {
+                        try std.testing.expectEqual(error.PoolExhausted, err);
+                        saw_failure = true;
+                        try std.testing.expectEqual(original, view.getRoot());
+                        try std.testing.expectEqualSlices(u8, &root, original.getRoot(&pool));
+                        try std.testing.expectEqual(@as(u64, 33), try view.get(500));
+                        try std.testing.expectEqual(@as(u64, 44), try view.get(1399));
+                        for (fillers[0..count]) |node| pool.unref(node);
+                        count = 0;
+                        try view.commit();
+                    };
+                    if (count != 0) saw_success = true;
+                    try std.testing.expectEqual(@as(u64, 44), try view.get(1399));
+                }
+            }
+            try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
+        }
+        try std.testing.expect(saw_failure);
+        try std.testing.expect(saw_success);
+    }
+}
+
+test "progressive chunked basic bulk and warmed writes allocate no scratch" {
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var pool = try Node.Pool.init(.{ .allocator = failing.allocator(), .page_allocator = allocator, .pool_size = 1024 });
+    defer pool.deinit();
+    {
+        const view = try ChunkedList.TreeView.fromValue(failing.allocator(), &pool, &ChunkedList.default_value);
+        defer view.deinit();
+        try view.growTo(512);
+        try view.set(400, 11);
+        const used = pool.getNodesInUse();
+        failing.fail_index = failing.alloc_index;
+        for (400..420) |i| try view.set(i, i);
+        var values: [512]u64 = undefined;
+        _ = try view.getAllInto(&values);
+        try std.testing.expectEqual(@as(u64, 419), values[419]);
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expectEqual(used, pool.getNodesInUse());
+        failing.fail_index = std.math.maxInt(usize);
+        try view.commit();
+        failing.fail_index = failing.alloc_index;
+        var bytes: [4096]u8 = undefined;
+        _ = try view.serializeIntoBytes(&bytes);
+        var iterator = view.iteratorReadonly(400);
+        for (400..420) |i| try std.testing.expectEqual(@as(u64, i), try iterator.next());
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+    try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
 }
 
 test "progressive basic view packed types and subtree boundaries" {
@@ -129,25 +378,28 @@ test "progressive basic view clone transfer drops writes and retains root consis
 }
 
 test "progressive basic view integrates as an ordinary container field" {
-    const Container = ssz.VariableContainerType(struct { values: List });
-    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
-    defer pool.deinit();
-    {
-        const parent = try Container.TreeView.fromValue(allocator, &pool, &Container.default_value);
-        defer parent.deinit();
-        const child = try parent.get("values");
-        try child.push(11);
-        try parent.commit();
-        try child.set(0, 22);
-        const copy = try parent.clone(.{ .transfer_cache = false });
-        defer copy.deinit();
-        try std.testing.expectEqual(@as(u64, 11), try (try copy.get("values")).get(0));
-        var bytes: [12]u8 = undefined;
-        _ = try copy.serializeIntoBytes(&bytes);
-        try std.testing.expectEqual(@as(u64, 11), std.mem.readInt(u64, bytes[4..12], .little));
-        try std.testing.expectEqual(@as(u64, 22), try child.get(0));
+    inline for (.{ List, ChunkedList }) |ST| {
+        const Container = ssz.VariableContainerType(struct { values: ST });
+        var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
+        defer pool.deinit();
+        {
+            const parent = try Container.TreeView.fromValue(allocator, &pool, &Container.default_value);
+            defer parent.deinit();
+            const child = try parent.get("values");
+            try child.growTo(601);
+            try child.set(600, 11);
+            try parent.commit();
+            try child.set(600, 22);
+            const copy = try parent.clone(.{ .transfer_cache = false });
+            defer copy.deinit();
+            try std.testing.expectEqual(@as(u64, 11), try (try copy.get("values")).get(600));
+            var bytes: [4 + 601 * 8]u8 = undefined;
+            _ = try copy.serializeIntoBytes(&bytes);
+            try std.testing.expectEqual(@as(u64, 11), std.mem.readInt(u64, bytes[4 + 600 * 8 ..][0..8], .little));
+            try std.testing.expectEqual(@as(u64, 22), try child.get(600));
+        }
+        try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
     }
-    try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
 }
 
 test "memory_safety: progressive basic commit retains writes on pool exhaustion" {

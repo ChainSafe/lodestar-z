@@ -296,18 +296,20 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
     defer pool.deinit();
 
     if (comptime ST.kind == .progressive_list and ssz.isBasicType(ST.Element)) {
-        const view = try ST.TreeView.deserialize(gpa, &pool, serialized_expected);
-        defer view.deinit();
-        try std.testing.expectEqualSlices(u8, &root_expected, try view.hashTreeRoot());
-        const values = try view.getAll(gpa);
-        defer gpa.free(values);
-        try std.testing.expectEqualSlices(ST.Element.Type, value_expected.items, values);
-        for (value_expected.items, 0..) |value, index| try view.set(index, value);
-        try std.testing.expectEqualSlices(u8, &root_expected, try view.hashTreeRoot());
-        const bytes = try gpa.alloc(u8, serialized_expected.len);
-        defer gpa.free(bytes);
-        _ = try view.serializeIntoBytes(bytes);
-        try std.testing.expectEqualSlices(u8, serialized_expected, bytes);
+        inline for (.{ ST, ssz.FixedProgressiveListTypeWithOptions(ST.Element, .{ .chunked_leaf = true }) }) |ViewType| {
+            const view = try ViewType.TreeView.deserialize(gpa, &pool, serialized_expected);
+            defer view.deinit();
+            try std.testing.expectEqualSlices(u8, &root_expected, try view.hashTreeRoot());
+            const values = try view.getAll(gpa);
+            defer gpa.free(values);
+            try std.testing.expectEqualSlices(ST.Element.Type, value_expected.items, values);
+            for (value_expected.items, 0..) |value, index| try view.set(index, value);
+            try std.testing.expectEqualSlices(u8, &root_expected, try view.hashTreeRoot());
+            const bytes = try gpa.alloc(u8, serialized_expected.len);
+            defer gpa.free(bytes);
+            _ = try view.serializeIntoBytes(bytes);
+            try std.testing.expectEqualSlices(u8, serialized_expected, bytes);
+        }
     }
 
     // test conversion between tree and value

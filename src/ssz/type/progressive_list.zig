@@ -10,9 +10,17 @@ const Node = @import("persistent_merkle_tree").Node;
 const progressive = @import("progressive.zig");
 
 pub fn FixedProgressiveListType(comptime ST: type) type {
+    return FixedProgressiveListTypeWithOptions(ST, .{});
+}
+
+/// Chunked storage applies within subtrees of at least ChunkedLeaf.K chunks, preserving SSZ roots.
+pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @import("list.zig").TypeOpts) type {
     comptime {
         if (!isFixedType(ST)) {
             @compileError("ST must be fixed type");
+        }
+        if (_opts.chunked_leaf and !isBasicType(ST)) {
+            @compileError("chunked_leaf requires basic elements");
         }
     }
 
@@ -20,6 +28,9 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
         const Self = @This();
         pub const kind = TypeKind.progressive_list;
         pub const Element: type = ST;
+        pub const opts = _opts;
+        const use_chunked_leaf = opts.chunked_leaf;
+        const chunked = @import("progressive_list_chunks.zig");
         pub const Type: type = std.ArrayList(Element.Type);
         pub const min_size: usize = 0;
         pub const max_size: usize = std.math.maxInt(usize);
@@ -193,6 +204,31 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             }
 
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
+                if (comptime use_chunked_leaf) {
+                    const len = try length(node, pool);
+                    var replacement: Type = .empty;
+                    errdefer replacement.deinit(allocator);
+                    try replacement.resize(allocator, len);
+                    var it = try chunked.Iterator.init(pool, try node.getLeft(pool), chunkCountForLength(len));
+                    var index: usize = 0;
+                    while (try it.next()) |bytes| {
+                        const count = @min(bytes.len / Element.fixed_size, len - index);
+                        if (comptime @import("type_kind.zig").canMemcpySsz(Element)) {
+                            @memcpy(std.mem.sliceAsBytes(replacement.items[index..][0..count]), bytes[0 .. count * Element.fixed_size]);
+                        } else if (comptime Element.kind == .bool) {
+                            for (replacement.items[index..][0..count], bytes[0..count]) |*element, byte| element.* = byte != 0;
+                        } else {
+                            for (replacement.items[index..][0..count], 0..) |*element, i| {
+                                try Element.deserializeFromBytes(bytes[i * Element.fixed_size ..][0..Element.fixed_size], element);
+                            }
+                        }
+                        index += count;
+                    }
+                    std.debug.assert(index == len);
+                    deinit(allocator, out);
+                    out.* = replacement;
+                    return;
+                }
                 const len = try length(node, pool);
                 const chunk_count = if (comptime isBasicType(Element))
                     (Element.fixed_size * len + 31) / 32
@@ -249,6 +285,17 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 const size = try std.math.mul(usize, len, Element.fixed_size);
                 if (out.len < size) return error.InvalidSize;
                 const chunk_count = chunkCountForLength(len);
+                if (comptime use_chunked_leaf) {
+                    var it = try chunked.Iterator.init(pool, try node.getLeft(pool), chunk_count);
+                    var offset: usize = 0;
+                    while (try it.next()) |bytes| {
+                        const count = @min(bytes.len, size - offset);
+                        @memcpy(out[offset..][0..count], bytes[0..count]);
+                        offset += count;
+                    }
+                    std.debug.assert(offset == size);
+                    return size;
+                }
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
                 var offset: usize = 0;
                 while (try it.next()) |chunk| {
@@ -265,6 +312,10 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             }
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                if (comptime use_chunked_leaf) {
+                    try serialized.validate(data);
+                    return chunked.fromBytes(Element, pool, data);
+                }
                 const allocator = pool.allocator;
                 var value = Self.default_value;
                 defer Self.deinit(allocator, &value);
@@ -274,6 +325,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
+                if (comptime use_chunked_leaf) return chunked.fromValue(Element, pool, value.items);
                 const allocator = pool.allocator;
                 const len = value.items.len;
                 const chunk_count = chunkCount(value);
