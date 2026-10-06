@@ -231,6 +231,8 @@ test "core native shutdown cancels shared negotiations before deinit" {
     try std.testing.expect(setup.client.protocols.router.negotiator.active() > 0);
     setup.client.shutdown(setup.pair.now);
     setup.client.shutdown(setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().connected);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.peer_manager.control.counters.closed[@intFromEnum(t.DisconnectReason.shutdown)]);
     try std.testing.expectEqual(@as(usize, 0), setup.client.protocols.router.negotiator.active());
     setup.client.deinit(setup.pair.io());
     try std.testing.expect(!setup.client.initialized);

@@ -67,7 +67,7 @@ test "core publishes the authenticated endpoint after QUIC rebinding" {
     try std.testing.expectEqual(before.connection, after.connection);
     try std.testing.expectEqual(rebound, after.endpoint);
     var event: [1]t.Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), setup.server.peer_manager.catalog.pollEvents(&event));
+    try std.testing.expectEqual(@as(usize, 1), setup.server.peer_manager.pollEvents(&event));
     try std.testing.expectEqual(before.peer, event[0].updated.peer);
     try std.testing.expectEqual(rebound, event[0].updated.endpoint);
 }

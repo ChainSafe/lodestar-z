@@ -68,6 +68,10 @@ test "peer owner replacement waits for cancelled request settlement without inhe
     var old = try startProbe(&manager, 1, at(20_000));
     const replacement: t.Handle = .{ .index = 1, .generation = 2 };
     try std.testing.expectEqualDeep(peer, try admit(&manager, replacement, .outbound, at(20_001)));
+    const revision = manager.catalog.revision;
+    manager.endpointChanged(conn, &.{ .ip4 = .{ .octets = .{ 203, 0, 113, 2 }, .port = 9001 } });
+    try std.testing.expectEqual(revision, manager.catalog.revision);
+    try std.testing.expectEqualDeep(endpoint, manager.catalog.get(peer).?.endpoint);
     try std.testing.expect(manager.retireConnection(peer, conn, .health_error, at(20_001)) == null);
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(manager.control.schedule(&manager.catalog, at(20_001)), at(20_001).millis()) == null);
     try std.testing.expect(manager.catalog.get(peer).?.status == null);
@@ -138,4 +142,53 @@ test "peer owner local probe refusal defers without peer evidence" {
     try std.testing.expectEqual(@as(u8, 0), manager.catalog.rowFor(peer).?.dial.failures);
     try std.testing.expectEqual(@as(f64, 0), manager.catalog.get(peer).?.score);
     try std.testing.expectEqual(@as(u64, 0), manager.catalog.history.rejectedUntil(manager.catalog.history.identityKey(&identity), 10));
+}
+
+test "peer owner shutdown retires published and unqualified connections once in catalog order" {
+    var manager = try init();
+    defer manager.deinit();
+    try std.testing.expect(try manager.addDirectPeer(&identity, &.{endpoint}, at(10)) == null);
+    const connections = [_]t.Handle{
+        .{ .index = 3, .generation = 1 },
+        .{ .index = 0, .generation = 2 },
+        .{ .index = 2, .generation = 3 },
+    };
+    var peers: [connections.len]t.PeerRef = undefined;
+    for (connections, 0..) |connection, index| {
+        const remote: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 1))) };
+        const admission = manager.admit(&.{ .peer_id = remote, .conn = connection, .direction = .outbound }, endpoint, at(10)) orelse return error.AdmissionRefused;
+        try std.testing.expectEqual(index == 0, admission.direct);
+        try std.testing.expect(admission.displaced == null);
+        peers[index] = admission.peer;
+    }
+    try std.testing.expect(manager.catalog.updateStatus(peers[0], connections[0], &manager.local.status, 10));
+    var events: [3]t.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), manager.pollEvents(&events));
+    try std.testing.expect(events[0] == .ready);
+    try std.testing.expect(manager.retireConnection(peers[1], connections[1], .host, at(20)) != null);
+    try manager.connect(&.{ .bytes = @splat(4) }, &.{endpoint}, at(20));
+    try std.testing.expect(manager.stop());
+
+    var cursor: usize = 0;
+    for ([_]usize{ 0, 2 }) |index| {
+        const retired = manager.retireNextConnection(&cursor, at(30)) orelse return error.MissingRetirement;
+        try std.testing.expectEqualDeep(PeerManager.Retired{ .peer = peers[index], .conn = connections[index] }, retired);
+        try std.testing.expect(manager.catalog.findConnection(retired.conn) == null);
+        try std.testing.expect(manager.control.connections[retired.peer.index].peer == null);
+        try std.testing.expect(manager.retireConnection(retired.peer, retired.conn, .shutdown, at(30)) == null);
+    }
+    try std.testing.expect(manager.retireNextConnection(&cursor, at(30)) == null);
+    try std.testing.expectEqual(manager.catalog.rows.len, cursor);
+    try std.testing.expect(manager.retireNextConnection(&cursor, at(30)) == null);
+    try std.testing.expectEqual(@as(u16, 0), manager.peerCounts().connected);
+    try std.testing.expectEqual(@as(u64, 2), manager.control.counters.closed[@intFromEnum(t.DisconnectReason.shutdown)]);
+    try std.testing.expectEqual(@as(usize, 3), manager.pollEvents(&events));
+    for (events, 0..) |event, index| {
+        try std.testing.expectEqualDeep(connections[index], event.closed.connection);
+        try std.testing.expectEqual(if (index == 1) t.DisconnectReason.host else .shutdown, event.closed.reason);
+    }
+    try std.testing.expectEqual(@as(usize, 0), manager.pollEvents(&events));
+    var direct: [4]t.PeerId = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try manager.directPeers(&direct));
+    try std.testing.expectEqualDeep(identity, direct[0]);
 }
