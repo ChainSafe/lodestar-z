@@ -111,7 +111,7 @@ test "gossip default owner memory reconciles requested allocations" {
     try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
 }
 
-test "gossip resource snapshot releases queued bytes and transmit retains with the owner" {
+test "gossip resource snapshot releases queued bytes and descriptors with the owner" {
     var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var ledger: Reservations = .{ .backing = backing.allocator() };
     var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
@@ -120,20 +120,20 @@ test "gossip resource snapshot releases queued bytes and transmit retains with t
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
     const io = &g.sessions.rows[peer.index].io;
-    io.tx.cancelStream(&g.messages.store);
+    io.tx.cancelStream();
     const message = g.messages.store.put([_]u8{1} ** 20, "t", "abc").?;
     g.messages.store.retainHistory(message);
     g.messages.store.seal(message);
     try std.testing.expectEqual(QueueResult.queued, io.tx.queueData(&g.messages.store, message, .forward, .{ .bytes = 10 }, 7));
     const snapshot = g.resourceSnapshot();
     try std.testing.expectEqual(@as(usize, 3), snapshot.queued_bytes);
-    try std.testing.expectEqual(@as(usize, 1), snapshot.held_tx_retains);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.queued_descriptors);
     try std.testing.expectEqualDeep(snapshot, g.resourceSnapshot());
     g.connectionClosed(conn);
     g.messages.store.releaseHistory(message);
     const released = g.resourceSnapshot();
     try std.testing.expectEqual(@as(usize, 0), released.queued_bytes);
-    try std.testing.expectEqual(@as(usize, 0), released.held_tx_retains);
+    try std.testing.expectEqual(@as(usize, 0), released.queued_descriptors);
     try std.testing.expectEqual(calls, backing.allocations);
 }
 
@@ -193,7 +193,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
                 support.heartbeat(&g, now);
                 Gossipsub.finishPump(&g, now);
             },
-            8 => for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store),
+            8 => for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(),
             else => unreachable,
         }
         var pending: usize = 0;
@@ -211,9 +211,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
             pending += validations;
             const history = g.messages.history.get(&g.messages.store, entry.id);
             try std.testing.expectEqual(entry.history, if (history) |record| g.messages.history.message(record).index == index and g.messages.history.message(record).generation == entry.generation else false);
-            var retained: u32 = 0;
-            for (g.sessions.rows) |*peer| retained += @intCast(peer.io.tx.data.retains(.{ .index = @intCast(index), .generation = entry.generation }));
-            try std.testing.expectEqual(entry.tx, retained);
+            try std.testing.expect(entry.validation or entry.history);
         }
         try std.testing.expectEqual(g.messages.store.next.len, occupied_pages + g.messages.store.free_pages);
         var records_pending: usize = 0;

@@ -343,7 +343,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     };
     g.peers.scores.penalize(g.sessions.rows[@intCast(retained)].logical.index, 50);
     g.peers.scores.penalize(g.sessions.rows[advertised].logical.index, 50);
-    for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
+    for (g.sessions.rows) |*peer| peer.io.tx.cancelStream();
     g.last_now_ms = 2;
     g.opportunistic_at = 2;
     support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
@@ -359,7 +359,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     try std.testing.expect(!g.cycle.isActive());
     try std.testing.expectEqual(@as(usize, 1), g.sessions.rows[advertised].io.tx.control.count);
     try std.testing.expectEqual(epoch, g.cycle.epoch);
-    for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
+    for (g.sessions.rows) |*peer| peer.io.tx.cancelStream();
     g.last_now_ms = 701;
     support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 701, .unix_s = 0 }));
     Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 701, .unix_s = 0 }));
@@ -506,7 +506,7 @@ test "publication subscribed fanout expires through owner maintenance" {
     Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 60_000, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 0), g.overlay.fanoutMembers(t).count());
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), p.index, name, false);
-    g.sessions.rows[p.index].io.tx.cancelStream(&g.messages.store);
+    g.sessions.rows[p.index].io.tx.cancelStream();
     const next_conn: Handle = .{ .index = 1, .generation = 1 };
     const next = support.addPeer(&g, next_conn, .v1_2).?;
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), next.index, name, true);
@@ -516,7 +516,7 @@ test "publication subscribed fanout expires through owner maintenance" {
     try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
     try std.testing.expect(g.overlay.fanoutMembers(t).isSet(next.index));
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[p.index].io.tx.data.count);
-    const queued = g.sessions.rows[next.index].io.tx.data.next(&g.messages.store).?.message;
+    const queued = (try g.sessions.rows[next.index].io.tx.data.next(&g.messages.store)).?.message;
     try std.testing.expectEqual(topic_mod.validMessageId(name, "fresh fanout", .{}), g.messages.store.get(queued).?.id);
 }
 
@@ -551,12 +551,12 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     support.control(&g, peer.index, .{ .iwant = (try reader.next()).?.iwant }, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }));
     const io = &g.sessions.rows[peer.index].io;
     try std.testing.expectEqual(@as(usize, 1), io.tx.data.count);
-    try std.testing.expectEqual(message, io.tx.data.next(&g.messages.store).?.message);
+    try std.testing.expectEqual(message, (try io.tx.data.next(&g.messages.store)).?.message);
     try std.testing.expectEqual(@as(u8, 1), g.messages.history.countsRow(g.messages.history.get(&g.messages.store, id).?)[g.sessions.rows[peer.index].logical.index]);
     var wire: [512]u8 = undefined;
     var used: usize = 0;
     for (0..8) |_| {
-        const segment = io.tx.segment(&g.messages.store);
+        const segment = try io.tx.segment(&g.messages.store);
         if (segment.len == 0) break;
         try std.testing.expect(used + segment.len <= wire.len);
         @memcpy(wire[used..][0..segment.len], segment);
@@ -586,13 +586,13 @@ test "gossip advertisements sample the whole burst independently for each recipi
         std.mem.writeInt(u64, &bytes, i, .little);
         _ = try g.publish(name, &bytes, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     }
-    for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
+    for (g.sessions.rows) |*peer| peer.io.tx.cancelStream();
     g.overlay.rows[t].fanout = .empty;
     const context = g.overlayContext(1);
     g.cycle.begin(context.sessions, context.peers, context.now, false);
     Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = context.now, .unix_s = 0 }));
-    const first = g.sessions.rows[0].io.tx.segment(&g.messages.store);
-    const second = g.sessions.rows[1].io.tx.segment(&g.messages.store);
+    const first = try g.sessions.rows[0].io.tx.segment(&g.messages.store);
+    const second = try g.sessions.rows[1].io.tx.segment(&g.messages.store);
     try std.testing.expect(first.len > 0 and second.len > 0);
     try std.testing.expect(!std.mem.eql(u8, first, second));
     var beyond_prefix: usize = 0;

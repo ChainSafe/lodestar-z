@@ -172,10 +172,10 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 0), f.g.overlay.mesh(f.topic).count());
-    f.g.sessions.rows[0].io.tx.cancelStream(&f.g.messages.store);
+    f.g.sessions.rows[0].io.tx.cancelStream();
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 1), f.g.overlay.mesh(f.topic).count());
-    f.g.sessions.rows[0].io.tx.cancelStream(&f.g.messages.store);
+    f.g.sessions.rows[0].io.tx.cancelStream();
     try std.testing.expect(f.g.sessions.rows[0].io.tx.injectFrame(bytes, true, 2) != null);
     f.g.peers.scores.penalize(0, 7);
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
@@ -203,7 +203,7 @@ test "gossip partial peer turn queues subscription before outgoing GRAFT" {
     try std.testing.expect(f.g.overlay.inMesh(f.topic, 1));
     try std.testing.expectEqual(@as(usize, 2), target.critical.count);
     for (0..2) |i| {
-        const bytes = f.g.writeSegment(f.g.sessions.ref(1));
+        const bytes = try f.g.writeSegment(f.g.sessions.ref(1));
         var prefix = protobuf.Reader.init(bytes);
         const len = try prefix.varint();
         var rpc = protobuf.RpcReader.init(bytes[bytes.len - len ..]);
@@ -241,7 +241,7 @@ test "gossip GRAFT admission preserves subscription and mesh state at both queue
     try std.testing.expectEqual(@as(usize, 2), tx.critical.count);
     try std.testing.expectEqual(@as(u64, 0), meshChangeTotal(f.g.overlay));
     for (0..3) |_| {
-        const segment = tx.segment(&f.g.messages.store);
+        const segment = try tx.segment(&f.g.messages.store);
         if (segment.len == 0) break;
         f.g.advanceWrite(f.g.sessions.ref(0), segment.len, 2);
     }
@@ -294,7 +294,7 @@ test "gossip PRUNE exhaustion ends eligibility even after queue capacity returns
     try std.testing.expect(f.g.sessions.rows[0].outbound == .closing);
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
     try std.testing.expectEqual(@as(u64, 1), try meshChanges(f.g.overlay, "beacon_block", "leave", "local_unsubscribe"));
-    io.tx.cancelStream(&f.g.messages.store);
+    io.tx.cancelStream();
     context.now = c.prune_backoff_ms * 2;
     try gossip_test.subscribe(&f.g, f.g.overlay.topicString(f.topic));
     f.g.overlay.onGraft(&context, f.topic, 0);

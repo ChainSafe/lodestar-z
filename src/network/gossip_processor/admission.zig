@@ -86,7 +86,7 @@ fn capacityAfter(table: *const processor.GossipProcessor, kind: processor.limits
         const cell = &table.cells[token.index];
         assert(cell.kind == kind and cell.input.handle != null);
         const payload = table.store.get(cell.input.handle.?).?;
-        assert(!payload.provisional and !payload.history and payload.tx == 0);
+        assert(!payload.provisional and !payload.history);
         const released = storage.Store.pagesFor(cell.input.len);
         pages += released;
         used -= released * storage.page_bytes;

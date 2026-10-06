@@ -27,7 +27,7 @@ test "IWANT outcomes separate misses, suppression, the retransmission limit, que
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    g.sessions.rows[peer.index].io.tx.cancelStream(&g.messages.store);
+    g.sessions.rows[peer.index].io.tx.cancelStream();
     var known: [3]MessageId = undefined;
     for (&known, 0..) |*id, i| {
         var text: [8]u8 = undefined;

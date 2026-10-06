@@ -103,7 +103,7 @@ test "gossipsub native write credit behind a ready session resumes and blocked w
     try std.testing.expect(!io.tx.ready);
     try std.testing.expect(io.tx.blocked_since != null);
     try std.testing.expect(support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.millis());
-    const before = io.tx.data.next(&g.messages.store).?.cursor.sent;
+    const before = (try io.tx.data.next(&g.messages.store)).?.cursor.sent;
     // A session added now is ready ahead of the writable edge the server's reads will grant.
     _ = support.addPeer(g, .{ .index = 77, .generation = 1 }, .v1_2).?;
     for (0..32) |_| {
@@ -116,8 +116,7 @@ test "gossipsub native write credit behind a ready session resumes and blocked w
     _ = support.pump(g, &setup.shared.pair.client, setup.shared.pair.now);
     try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(g.schedule(), setup.shared.pair.now.millis()));
     _ = support.pump(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expect(io.tx.data.next(&g.messages.store).?.cursor.sent > before);
+    try std.testing.expect((try io.tx.data.next(&g.messages.store)).?.cursor.sent > before);
     g.connectionClosed(setup.shared.handles.client);
     try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
-    for (g.messages.store.entries) |entry| if (entry.active) try std.testing.expectEqual(@as(u32, 0), entry.tx);
 }

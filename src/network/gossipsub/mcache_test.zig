@@ -123,7 +123,7 @@ test "gossip seen TTL applies to duplicate only traffic" {
     try std.testing.expect(cache.add(id, 11));
 }
 
-test "gossip history indexed replacement keeps FIFO age and independent TX retention" {
+test "gossip history indexed replacement keeps FIFO age and invalidates old handles" {
     var store = try storage.Store.init(std.testing.allocator, 4, 16384);
     defer store.deinit(std.testing.allocator);
     var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap);
@@ -133,7 +133,6 @@ test "gossip history indexed replacement keeps FIFO age and independent TX reten
     const first = store.put(a, "a", "old").?;
     history.put(&store, first, 0);
     store.seal(first);
-    store.retainTx(first);
     const second = store.put(b, "b", "other").?;
     history.put(&store, second, 0);
     store.seal(second);
@@ -143,13 +142,12 @@ test "gossip history indexed replacement keeps FIFO age and independent TX reten
     store.seal(replacement);
     try std.testing.expectEqual(@as(usize, 2), history.count);
     try std.testing.expectEqual(replacement, history.message(history.get(&store, a).?));
-    try std.testing.expect(!store.get(first).?.history);
+    try std.testing.expect(store.get(first) == null);
     history.age(&store, constants.mcache_len);
     try std.testing.expect(history.get(&store, b) == null);
     try std.testing.expect(history.get(&store, a) != null);
     history.age(&store, constants.mcache_len + 1);
     try std.testing.expectEqual(@as(usize, 0), history.count);
-    store.releaseTx(first);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
 }
 
@@ -279,7 +277,7 @@ test "history resolved retained capacity bounds counters and stale peers" {
     history.sent(0, .{ .index = 4, .generation = 1 });
 }
 
-test "gossip failed admission preserves history pinned by transmit queues" {
+test "gossip failed admission preserves history borrowed by validation" {
     const a = std.testing.allocator;
     var store = try storage.Store.init(a, 3, storage.page_bytes * 2);
     defer store.deinit(a);
@@ -291,18 +289,13 @@ test "gossip failed admission preserves history pinned by transmit queues" {
         handle.* = history.admitPayload(&store, id, "topic", &([_]u8{1} ** (storage.inline_bytes + 1))).?;
         history.put(&store, handle.*, 0);
         store.seal(handle.*);
-        store.retainTx(handle.*);
+        store.retainValidation(handle.*);
     }
-    defer for (handles) |handle| store.releaseTx(handle);
+    defer for (handles) |handle| store.releaseValidation(handle);
     try std.testing.expectEqual(@as(usize, 2), history.count);
     try std.testing.expect(history.admitPayload(&store, @splat(9), "topic", &([_]u8{1} ** (storage.inline_bytes + 1))) == null);
     try std.testing.expectEqual(@as(usize, 2), history.count);
     try std.testing.expectEqual(@as(usize, 0), store.free_pages);
-    store.releaseTx(handles[1]);
-    store.retainValidation(handles[1]);
-    try std.testing.expect(history.admitPayload(&store, @splat(9), "topic", &([_]u8{1} ** (storage.inline_bytes + 1))) == null);
-    store.retainTx(handles[1]);
-    store.releaseValidation(handles[1]);
 }
 
 test "gossip history emits three windows and defers arrivals during a cycle" {

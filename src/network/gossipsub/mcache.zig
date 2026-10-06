@@ -303,7 +303,7 @@ pub const History = struct {
         return store.put(id, name, bytes);
     }
     fn reclaimable(e: *const storage.Entry) bool {
-        return e.history and !e.provisional and !e.validation and e.tx == 0;
+        return e.history and !e.provisional and !e.validation;
     }
     pub fn put(self: *History, store: *storage.Store, h: storage.Handle, epoch: u64) void {
         if (self.tail != empty_slot) assert(self.entries[self.tail].born_epoch <= epoch);

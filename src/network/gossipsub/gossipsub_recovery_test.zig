@@ -106,13 +106,13 @@ test "gossipsub IWANT promises commit on queue and start at completed control tr
     try std.testing.expect(g.sessions.rows[peer.index].io.tx.inject(&([_]u8{0} ** 64), 1));
     support.control(&g, peer.index, .{ .ihave = .{ .topic = topic, .body = w.written() } }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 1 }));
     try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
-    g.sessions.rows[peer.index].io.tx.cancelStream(&g.messages.store);
+    g.sessions.rows[peer.index].io.tx.cancelStream();
     support.control(&g, peer.index, .{ .ihave = .{ .topic = topic, .body = w.written() } }, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 1 }));
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
     Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1_000, .unix_s = 0 }));
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
     const io = &g.sessions.rows[peer.index].io;
-    const first = io.tx.segment(&g.messages.store);
+    const first = try io.tx.segment(&g.messages.store);
     _ = io.tx.advance(&g.messages.store, 1);
     try std.testing.expectEqual(@as(u64, 3_002), g.recovery.batches[0].expiry);
     const token = io.tx.advance(&g.messages.store, first.len - 1).?.control.token;
@@ -206,7 +206,7 @@ test "gossipsub IHAVE security bounds one identity and deduplicates queued reque
             }
             support.control(&g, peer.index, .{ .ihave = .{ .topic = name, .body = writer.written() } }, Now.fromMilliseconds(.{ .mono_ms = heartbeat * 1000, .unix_s = 1 }));
             for (0..4) |_| {
-                const segment = io.tx.segment(&g.messages.store);
+                const segment = try io.tx.segment(&g.messages.store);
                 if (segment.len == 0) break;
                 if (io.tx.advance(&g.messages.store, segment.len)) |completion| g.writeCompleted(g.sessions.ref(peer.index), completion, heartbeat * 1000);
             }
@@ -254,7 +254,7 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
     support.control(&g, first.index, .{ .iwant = iwant }, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }));
     try std.testing.expectEqual(@as(u8, 0), g.messages.history.countsRow(g.messages.history.get(&g.messages.store, id).?)[logical_peer.index]);
     try std.testing.expectEqual(@as(u64, 1), g.iwant_outcomes[@intFromEnum(IwantOutcome.refused)]);
-    g.sessions.rows[first.index].io.tx.cancelStream(&g.messages.store);
+    g.sessions.rows[first.index].io.tx.cancelStream();
     for (0..4) |_| support.control(&g, first.index, .{ .iwant = iwant }, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 3), g.sessions.rows[first.index].io.tx.data.count);
     g.connectionClosed(.{ .index = 0, .generation = 1 });
@@ -301,7 +301,7 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
     g.recovery.controlSent(.{ .index = 0, .generation = 2 }, token, 12_000, 5);
     g.recovery.controlSent(g.sessions.rows[p.index].conn, token + 1, g.options.iwant_followup_ms, 5);
     try std.testing.expectEqual(@as(?u64, 30_000), g.recovery.nextExpiry());
-    _ = io.tx.segment(&g.messages.store);
+    _ = try io.tx.segment(&g.messages.store);
     try std.testing.expect(io.tx.advance(&g.messages.store, 1) == null);
     try std.testing.expectEqual(@as(?u64, 30_000), g.recovery.nextExpiry());
     g.writeCompleted(g.sessions.ref(p.index), io.tx.advance(&g.messages.store, 6).?, 100);
@@ -349,7 +349,7 @@ test "gossip recovery refusal restores promise slots and identity pins before re
     try std.testing.expect(std.mem.allEqual(u16, g.recovery.buckets, std.math.maxInt(u16)));
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[row.logical.index].pins);
     try std.testing.expect(row.io.tx.submit(&.{ .graft = test_topic }, &g.sessions.control_scratch, 1) != null);
-    row.io.tx.cancelStream(&g.messages.store);
+    row.io.tx.cancelStream();
     _ = try g.recovery.filterPending(row.logical, &ids);
     try g.recovery.requestBatch(&g.peers, &row.io.tx, &g.sessions.control_scratch, &ids, row.logical, row.conn, g.overlay.rng.random(), g.options.iwant_followup_ms, 2);
     try std.testing.expectEqual(@as(usize, 2), g.recovery.len);

@@ -16,15 +16,13 @@ test "gossip store independent retains pages and stale handles" {
     store.retainValidation(h);
     store.retainHistory(h);
     store.seal(h);
-    store.retainTx(h);
     store.releaseHistory(h);
-    store.releaseValidation(h);
     try std.testing.expectEqual(@as(usize, 1), store.free_pages);
     var c = store.cursor(h);
     try std.testing.expectEqual(page_bytes, store.segment(h, c).len);
     store.advance(&c, page_bytes);
     try std.testing.expectEqualSlices(u8, &.{9}, store.segment(h, c));
-    store.releaseTx(h);
+    store.releaseValidation(h);
     try std.testing.expectEqual(@as(usize, 3), store.free_pages);
     const replacement = store.put([_]u8{2} ** 20, "next", "x").?;
     try std.testing.expect(store.get(h) == null);
@@ -61,8 +59,6 @@ test "gossip retained pages and inline descriptors preserve fresh capacity by ki
         handle.* = store.put(@splat(1), name, "small").?;
         store.retainHistory(handle.*);
         store.seal(handle.*);
-        store.retainTx(handle.*);
-        store.releaseHistory(handle.*);
     }
     var pending: [4]Handle = undefined;
     for (&pending) |*handle| {
@@ -74,7 +70,7 @@ test "gossip retained pages and inline descriptors preserve fresh capacity by ki
     try std.testing.expect(store.put(@splat(3), name, "over") == null);
     const block = store.put(@splat(4), "/eth2/01020304/beacon_block/ssz_snappy", "block").?;
     store.seal(block);
-    for (retained) |handle| store.releaseTx(handle);
+    for (retained) |handle| store.releaseHistory(handle);
     for (pending) |handle| store.releaseValidation(handle);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
     try std.testing.expectEqual(store.next.len, store.free_pages);
@@ -91,8 +87,6 @@ test "gossip retained page allowance cannot consume pending or other kind pages"
     const retained = store.put(@splat(1), name, &payload).?;
     store.retainHistory(retained);
     store.seal(retained);
-    store.retainTx(retained);
-    store.releaseHistory(retained);
     const pending = store.put(@splat(2), name, &payload).?;
     store.retainValidation(pending);
     store.seal(pending);
@@ -100,7 +94,7 @@ test "gossip retained page allowance cannot consume pending or other kind pages"
     try std.testing.expect(store.put(@splat(3), name, &payload) == null);
     const block = store.put(@splat(4), "/eth2/01020304/beacon_block/ssz_snappy", &payload).?;
     store.seal(block);
-    store.releaseTx(retained);
+    store.releaseHistory(retained);
     try std.testing.expect(store.canRetain(pending));
     store.releaseValidation(pending);
     try std.testing.expectEqual(store.next.len, store.free_pages);

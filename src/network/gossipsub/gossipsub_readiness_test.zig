@@ -247,7 +247,7 @@ test "gossip resumes a small frame cut by a short write once the stream is writa
     try std.testing.expectEqual(blocked + 1, g.sessions.blocked_writes);
     try std.testing.expect(!io.tx.ready and io.tx.pending() and io.tx.blocked_since != null);
     try std.testing.expectEqual(payloads.len - whole, io.tx.data.count);
-    try std.testing.expectEqual(offset, io.tx.data.next(&g.messages.store).?.cursor.sent);
+    try std.testing.expectEqual(offset, (try io.tx.data.next(&g.messages.store)).?.cursor.sent);
 
     // The server reads, the writable event resumes the cut frame, and every frame arrives intact.
     for (0..256) |_| {

@@ -38,9 +38,7 @@ test "gossipsub legal maximum host acceptance forwards retained pages through ac
     const handle = setup.shared.server_inbox.last().handle;
     const message = setup.shared.server.gossipsub.messages.validation.entries[handle.index].state.pending.message;
     try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, setup.shared.server.gossipsub.report(handle, .accept, setup.shared.pair.now));
-    try std.testing.expectEqual(@as(u32, 1), setup.shared.server.gossipsub.messages.store.get(message).?.tx);
-    for (0..constants.mcache_len) |_| support.ageHistory(setup.shared.server.gossipsub);
-    try std.testing.expect(!setup.shared.server.gossipsub.messages.store.get(message).?.history);
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.gossipsub.sessions.rows[destination].io.tx.data.count);
     var received = false;
     for (0..2000) |_| {
         try setup.pumpOnce();
@@ -51,6 +49,7 @@ test "gossipsub legal maximum host acceptance forwards retained pages through ac
         if (received) break;
     }
     try std.testing.expect(received);
+    for (0..constants.mcache_len) |_| support.ageHistory(setup.shared.server.gossipsub);
     try std.testing.expect(setup.shared.server.gossipsub.messages.store.get(message) == null);
 }
 
@@ -69,12 +68,12 @@ test "gossipsub configured IDONTWANT uses admitted compressed wire bytes" {
     for (&payload, 0..) |*byte, index| byte.* = @intCast(index);
     var compressed: [constants.maxCompressedLen(256)]u8 = undefined;
     for ([_]usize{ 124, 125, 126 }, [_]usize{ 127, 128, 129 }) |size, wire_size| {
-        g.sessions.rows[destination.index].io.tx.cancelStream(&g.messages.store);
+        g.sessions.rows[destination.index].io.tx.cancelStream();
         const len = try snappy.raw.compress(payload[0..size], &compressed);
         try std.testing.expectEqual(wire_size, len);
         try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
         try std.testing.expectEqual(wire_size >= 128, g.sessions.rows[destination.index].io.tx.control.used > 0);
-        g.sessions.rows[destination.index].io.tx.cancelStream(&g.messages.store);
+        g.sessions.rows[destination.index].io.tx.cancelStream();
         try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
         try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
     }

@@ -45,7 +45,6 @@ test "gossipsub large frame deadline releases receive pages despite byte progres
     setup.shared.pair.advance(300);
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.gossipsub.sessions.rows[client_peer].io.tx.data.count);
-    for (setup.shared.client.gossipsub.messages.store.entries) |e| if (e.active) try std.testing.expectEqual(@as(u32, 0), e.tx);
 }
 
 test "gossipsub completed frame expiry releases pages without blaming the peer" {

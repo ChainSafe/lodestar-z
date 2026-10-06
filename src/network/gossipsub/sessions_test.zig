@@ -5,7 +5,6 @@ const constants = @import("constants.zig");
 const std = @import("std");
 const Engine = @import("../quic/Engine.zig");
 const test_support = @import("test_support.zig");
-const message_store = @import("message_store.zig");
 
 test "session slots track connection generations" {
     var sessions = try std.testing.allocator.create(Sessions);
@@ -37,8 +36,6 @@ test "gossip stream cancellation discards unsent work and session reuse preserve
     const a = std.testing.allocator;
     var sessions = try test_support.sessions(a, 1);
     defer sessions.deinit(a);
-    var store = try message_store.Store.init(a, 1, 4096);
-    defer store.deinit(a);
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const first = sessions.addPeer(conn).?;
     const peer = &sessions.rows[first.index];
@@ -50,7 +47,7 @@ test "gossip stream cancellation discards unsent work and session reuse preserve
     peer.io.tx.subscriptionChanged(0, 1);
     const token = peer.io.tx.injectFrame("frame", false, 1).?;
     peer.io.tx.drops[0] = 3;
-    peer.io.tx.cancelStream(&store);
+    peer.io.tx.cancelStream();
     try std.testing.expectEqual(@as(usize, 0), peer.io.tx.subscription_dirty.count());
     try std.testing.expectEqual(@as(u8, 0), peer.io.tx.control_burst);
     try std.testing.expect(peer.suppresses(id, 2));
@@ -66,7 +63,7 @@ test "gossip stream cancellation discards unsent work and session reuse preserve
     try std.testing.expectEqual(@as(usize, 0), peer.io.tx.subscription_dirty.count());
     try std.testing.expectEqual(@as(u64, 3), peer.io.tx.drops[0]);
     try std.testing.expect(peer.io.tx.injectFrame("next", false, 2).? > token);
-    peer.io.tx.cancelStream(&store);
+    peer.io.tx.cancelStream();
 }
 
 test "gossip receive contention reclaims a larger partial frame and preserves completed work" {

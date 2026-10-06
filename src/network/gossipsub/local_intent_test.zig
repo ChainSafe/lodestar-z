@@ -202,9 +202,9 @@ test "local intent history survives former row reuse and real retransmission des
     const served = g.messages.serve(&io.tx, g.sessions.rows[peer.index].logical, id, .{ .bytes = g.options.tx_peer_bytes }, now.millis());
     try std.testing.expect(served == .known);
     try std.testing.expectEqual(.queued, served.known);
-    try std.testing.expectEqual(retained, io.tx.data.next(&g.messages.store).?.message);
-    try std.testing.expectEqualStrings(name, g.messages.store.get(io.tx.data.next(&g.messages.store).?.message).?.topicString());
-    try std.testing.expect(io.tx.segment(&g.messages.store).len > 0);
+    try std.testing.expectEqual(retained, (try io.tx.data.next(&g.messages.store)).?.message);
+    try std.testing.expectEqualStrings(name, g.messages.store.get((try io.tx.data.next(&g.messages.store)).?.message).?.topicString());
+    try std.testing.expect((try io.tx.segment(&g.messages.store)).len > 0);
 }
 
 test "local intent copies retired row input before another assignment reuses it" {
