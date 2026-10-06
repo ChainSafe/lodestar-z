@@ -437,3 +437,77 @@ test "mesh changes follow reused sessions across topic expiry" {
     try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "voluntary_exit", "join", "remote_graft"));
     try std.testing.expectEqual(@as(u64, 5), meshChangeTotal(overlay));
 }
+
+test "remote subscription coverage is fork exact and duplicate announcements preserve its revision" {
+    var g = try subscriptionFixture();
+    defer g.deinit();
+    const peer = gossip_test.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const current = "/eth2/00000000/beacon_attestation_63/ssz_snappy";
+    const future = "/eth2/01010101/sync_committee_3/ssz_snappy";
+    const context = g.overlayContext(1);
+    _ = g.overlay.peerSubscription(&context, peer.index, current, true);
+    _ = g.overlay.peerSubscription(&context, peer.index, future, true);
+    const revision = g.coverageRevision();
+    for (0..100) |_| _ = g.overlay.peerSubscription(&context, peer.index, current, true);
+    _ = g.overlay.peerSubscription(&context, peer.index, "/eth2/02020202/beacon_attestation_63/ssz_snappy", true);
+    try std.testing.expectEqualDeep(revision, g.coverageRevision());
+    const current_subnets = g.overlay.subnetSubscriptions(peer.index, @splat(0));
+    const future_subnets = g.overlay.subnetSubscriptions(peer.index, @splat(1));
+    try std.testing.expectEqual(@as(u64, 1) << 63, current_subnets.attnets);
+    try std.testing.expectEqual(@as(u4, 0), current_subnets.syncnets);
+    try std.testing.expectEqual(@as(u4, 8), future_subnets.syncnets);
+    try std.testing.expectEqual(@as(u64, 0), g.localSubscriptions(@splat(0)).attnets);
+    try std.testing.expect(g.overlay.findTopic(current) == null);
+    g.connectionClosed(g.sessions.rows[peer.index].conn);
+    try std.testing.expectEqual(@as(u64, 0), g.overlay.subnetSubscriptions(peer.index, @splat(0)).attnets);
+    try std.testing.expectEqual(@as(u4, 0), g.overlay.subnetSubscriptions(peer.index, @splat(1)).syncnets);
+    try std.testing.expectEqual(@as(usize, 0), g.resourceSnapshot().remote_subscriptions);
+}
+
+test "remote subscriptions survive local topic expiry and isolate reused sessions" {
+    var g = try subscriptionFixture();
+    defer g.deinit();
+    const first = gossip_test.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const second = gossip_test.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01010101/data_column_sidecar_127/ssz_snappy";
+    const index = g.overlay.namespace.lookup(name).?.ordinal;
+    const context = g.overlayContext(1);
+    _ = g.overlay.peerSubscription(&context, first.index, name, true);
+    _ = g.overlay.peerSubscription(&context, second.index, name, true);
+    try gossip_test.subscribe(&g, name);
+    try gossip_test.unsubscribe(&g, name);
+    g.cancelWrites(first);
+    g.cancelWrites(second);
+    g.overlay.expireTopic(&context, index, false);
+    try std.testing.expect(!g.overlay.rows[index].active);
+    try std.testing.expectEqual(@as(usize, 2), g.overlay.subscribers(index).count());
+    try std.testing.expectEqual(@as(usize, 2), g.resourceSnapshot().remote_subscriptions);
+    const subnets = g.overlay.subnetSubscriptions(first.index, @splat(1));
+    try std.testing.expect(subnets.columns.isSet(127));
+    try std.testing.expectEqual(@as(u16, 128), subnets.column_subnet_count);
+    g.connectionClosed(g.sessions.rows[first.index].conn);
+    const replacement = gossip_test.addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
+    try std.testing.expectEqual(first.index, replacement.index);
+    try std.testing.expect(!g.overlay.subscribers(index).isSet(replacement.index));
+    try std.testing.expect(g.overlay.subscribers(index).isSet(second.index));
+    try gossip_test.subscribe(&g, name);
+    try std.testing.expectEqual(@as(usize, 1), g.overlay.subscribers(index).count());
+    _ = g.overlay.peerSubscription(&context, second.index, name, false);
+    const revision = g.coverageRevision();
+    _ = g.overlay.peerSubscription(&context, second.index, name, false);
+    try std.testing.expectEqualDeep(revision, g.coverageRevision());
+    try std.testing.expectEqual(@as(usize, 0), g.resourceSnapshot().remote_subscriptions);
+}
+
+fn subscriptionFixture() !Gossipsub {
+    return gossip_test.init(std.testing.allocator, .{
+        .random_seed = 1,
+        .connected_capacity = 2,
+        .retained_capacity = 4,
+        .retained_outbound_reserve = 1,
+        .seen_capacity = 16,
+        .mcache_capacity = 16,
+        .validation_capacity = 8,
+        .topic_policy = comptime &.{ topic_fixture.full(@splat(0)), topic_fixture.full(@splat(1)) },
+    });
+}

@@ -261,15 +261,15 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     try contains(stopped, "lodestar_native_gossip_expired_executing 0\n");
 }
 
-test "metrics include remote subscriptions without overlay rows and follow local fork boundary visibility" {
+test "metrics include remote subscriptions on inactive topics and follow local fork boundary visibility" {
     var f = try Fixture.init(&.{ boundary(@splat(0), 100), boundary(@splat(1), 200) });
     defer f.deinit();
     const g = f.node.protocols.gossipsub;
-    const ns = &g.overlay.namespace;
+    const peer = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const context = g.overlayContext(g.last_now_ms);
     const name = "/eth2/00000000/data_column_sidecar_9/ssz_snappy";
-    const current = ns.lookup(name).?.ordinal;
-    ns.setSubscription(0, current, true);
-    ns.setSubscription(0, current, true);
+    _ = g.overlay.peerSubscription(&context, peer.index, name, true);
+    _ = g.overlay.peerSubscription(&context, peer.index, name, true);
     try std.testing.expect(g.overlay.findTopic(name) == null);
     try std.testing.expectEqual(@as(usize, 1), g.resourceSnapshot().remote_subscriptions);
     var output = try f.render(true);
@@ -286,8 +286,9 @@ test "metrics include remote subscriptions without overlay rows and follow local
     try gossip_test.unsubscribe(g, future);
     output = try f.render(true);
     try std.testing.expect(std.mem.find(u8, output, "fulu_200") == null);
-    ns.clearPeer(0);
-    ns.clearPeer(0);
+    const connection = g.sessions.rows[peer.index].conn;
+    g.connectionClosed(connection);
+    g.connectionClosed(connection);
     output = try f.render(true);
     try contains(output, "lodestar_gossip_topic_peers_by_data_column_subnet_count{subnet=\"9\",boundary=\"fulu_100\"} 0\n");
     try std.testing.expectEqual(@as(usize, 0), g.resourceSnapshot().remote_subscriptions);
@@ -473,9 +474,10 @@ test "metrics export stock per-topic gossipsub peer gauges under full topic stri
     var f = try Fixture.init(&.{ boundary(@splat(0), 100), boundary(@splat(1), 200) });
     defer f.deinit();
     const g = f.node.protocols.gossipsub;
-    const ns = &g.overlay.namespace;
+    const peer = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const context = g.overlayContext(g.last_now_ms);
     const column = "/eth2/00000000/data_column_sidecar_9/ssz_snappy";
-    ns.setSubscription(0, ns.lookup(column).?.ordinal, true);
+    _ = g.overlay.peerSubscription(&context, peer.index, column, true);
     var output = try f.render(true);
     try contains(output, "# TYPE gossipsub_topic_peer_count gauge\n");
     try contains(output, "gossipsub_topic_peer_count{topicStr=\"" ++ column ++ "\"} 1\n");

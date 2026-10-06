@@ -58,7 +58,7 @@ pub const Layout = struct {
             .deliveries = delivery.Pool.capacity(options.connected_capacity, options.validation_capacity),
             .receive_arena_bytes = options.receive_arena_bytes,
             .session_buffer_bytes = PeerIo.bufferBytes(options),
-            .namespace_bytes = policy.Namespace.backingBytes(options.topic_policy, options.connected_capacity),
+            .namespace_bytes = policy.Namespace.backingBytes(options.topic_policy),
         };
     }
 

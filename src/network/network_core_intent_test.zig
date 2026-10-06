@@ -721,7 +721,7 @@ test "core local intent fork BPO announcements remembered peer and event borrows
         _ = try pair.pump();
         if (pair.a.last_now.millis() - start > 10_000) break;
         const ns = &gb.overlay.namespace;
-        if (pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1 and ns.subscribed(0, ns.lookup(active).?.ordinal) and ns.subscribed(0, ns.lookup(bpo).?.ordinal) and gb.sessions.rows[0].outStream() != null and pair.a.protocols.gossipsub.sessions.rows[0].outStream() != null) {
+        if (pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1 and gb.overlay.subscribers(ns.lookup(active).?.ordinal).isSet(0) and gb.overlay.subscribers(ns.lookup(bpo).?.ordinal).isSet(0) and gb.sessions.rows[0].outStream() != null and pair.a.protocols.gossipsub.sessions.rows[0].outStream() != null) {
             connected = true;
             break;
         }

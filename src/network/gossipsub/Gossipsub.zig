@@ -123,13 +123,12 @@ pub fn graylistThreshold(self: *const Gossipsub) f64 {
 
 pub const CoverageRevision = struct {
     subscriptions: u64,
-    namespace: u64,
     scores: u64,
     heartbeat: u64,
 
     pub fn cacheable(self: *const CoverageRevision) bool {
         const exhausted = std.math.maxInt(u64);
-        return self.subscriptions != exhausted and self.namespace != exhausted and
+        return self.subscriptions != exhausted and
             self.scores != exhausted and self.heartbeat != exhausted;
     }
 };
@@ -137,7 +136,6 @@ pub const CoverageRevision = struct {
 pub fn coverageRevision(self: *const Gossipsub) CoverageRevision {
     return .{
         .subscriptions = self.overlay.subscription_revision,
-        .namespace = self.overlay.namespace.revision,
         .scores = self.peers.scores.revision,
         .heartbeat = self.cycle.epoch,
     };
@@ -178,7 +176,7 @@ pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
 
     const overlay = try allocator.create(overlay_mod.Overlay);
     errdefer allocator.destroy(overlay);
-    overlay.* = try overlay_mod.Overlay.init(allocator, options.random_seed.?, options.topic_policy, options.connected_capacity);
+    overlay.* = try overlay_mod.Overlay.init(allocator, options.random_seed.?, options.topic_policy);
     errdefer overlay.deinit(allocator);
     overlay.slot = options.initial_slot;
 
@@ -247,7 +245,6 @@ pub fn addPeer(self: *Gossipsub, conn: Handle, metadata: *const peers_mod.Metada
         if (self.peers.rows[ref.index].connection != null) return .duplicate;
     }
     const handle = self.sessions.addPeer(conn) orelse return .capacity;
-    self.overlay.namespace.clearPeer(handle.index);
     const admission_result = self.peers.admit(conn, metadata, now.millis());
     if (admission_result != .admitted) {
         self.sessions.removePeer(handle.index);
@@ -434,13 +431,10 @@ pub fn resourceSnapshot(self: *const Gossipsub) ResourceSnapshot {
         result.queued_bytes += io.tx.data.bytes;
         if (io.reader.declaredLen() != null or io.rpc != null) result.held_frames += 1;
     }
-    for (self.overlay.rows) |topic| {
-        if (!topic.active) continue;
-        for (0..self.sessions.rows.len) |peer| {
-            if (topic.mesh.isSet(peer)) result.mesh_members += 1;
-        }
+    for (self.overlay.rows) |*topic| {
+        result.remote_subscriptions += topic.subscribers.count();
+        result.mesh_members += topic.mesh.count();
     }
-    result.remote_subscriptions = self.overlay.namespace.subscription_count;
     return result;
 }
 
