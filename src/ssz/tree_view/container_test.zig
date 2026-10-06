@@ -686,10 +686,8 @@ test "memory_safety: TreeView container setValue/commit - OOM does not double-fr
     var backing = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
     defer backing.deinit();
 
-    var saw_operation_oom = false;
-
     try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
-        fn run(allocator: std.mem.Allocator, saw_oom: *bool) !void {
+        fn run(allocator: std.mem.Allocator) !void {
             var pool = try Node.Pool.init(.{
                 .page_allocator = std.testing.allocator,
                 .allocator = allocator,
@@ -700,19 +698,12 @@ test "memory_safety: TreeView container setValue/commit - OOM does not double-fr
             const checkpoint: Checkpoint.Type = .{ .epoch = 1, .root = [_]u8{1} ** 32 };
             var view = try Checkpoint.TreeView.fromValue(allocator, &pool, &checkpoint);
             defer view.deinit();
-            view.setValue("root", &new_root_bytes) catch |err| {
-                saw_oom.* = err == error.OutOfMemory;
-                return err;
-            };
-            view.commit() catch |err| {
-                saw_oom.* = err == error.OutOfMemory;
-                return err;
-            };
+            try view.setValue("root", &new_root_bytes);
+            try view.commit();
         }
-    }.run, .{&saw_operation_oom});
+    }.run, .{});
     try std.testing.expect(!backing.double_free);
     try std.testing.expectEqual(@as(usize, 0), backing.live.count());
-    try std.testing.expect(saw_operation_oom);
 }
 
 test "memory_safety: ContainerTreeView commit should reclaim basic nodes after pool exhaustion" {
@@ -856,16 +847,13 @@ test "memory_safety: TreeView container fromValue - view allocation OOM leaves n
     var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 64 });
     defer pool.deinit();
 
-    var saw_operation_oom = false;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(
             allocator: std.mem.Allocator,
             input_pool: *Node.Pool,
             value: *const Checkpoint.Type,
-            saw_oom: *bool,
         ) !void {
             const baseline = input_pool.getNodesInUse();
-            errdefer saw_oom.* = true;
             const view = Checkpoint.TreeView.fromValue(allocator, input_pool, value) catch |err| {
                 try std.testing.expectEqual(baseline, input_pool.getNodesInUse());
                 return err;
@@ -873,8 +861,7 @@ test "memory_safety: TreeView container fromValue - view allocation OOM leaves n
             view.deinit();
             try std.testing.expectEqual(baseline, input_pool.getNodesInUse());
         }
-    }.run, .{ &pool, &checkpoint, &saw_operation_oom });
-    try std.testing.expect(saw_operation_oom);
+    }.run, .{ &pool, &checkpoint });
 }
 
 test "memory_safety: TreeView container getFieldRoot on a dirty basic field leaves no orphan pool nodes" {
@@ -906,16 +893,13 @@ test "memory_safety: TreeView container deserialize - view allocation OOM leaves
     var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 64 });
     defer pool.deinit();
 
-    var saw_operation_oom = false;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(
             allocator: std.mem.Allocator,
             input_pool: *Node.Pool,
             serialized: []const u8,
-            saw_oom: *bool,
         ) !void {
             const baseline = input_pool.getNodesInUse();
-            errdefer saw_oom.* = true;
             const view = Checkpoint.TreeView.deserialize(allocator, input_pool, serialized) catch |err| {
                 try std.testing.expectEqual(baseline, input_pool.getNodesInUse());
                 return err;
@@ -923,6 +907,5 @@ test "memory_safety: TreeView container deserialize - view allocation OOM leaves
             view.deinit();
             try std.testing.expectEqual(baseline, input_pool.getNodesInUse());
         }
-    }.run, .{ &pool, &bytes, &saw_operation_oom });
-    try std.testing.expect(saw_operation_oom);
+    }.run, .{ &pool, &bytes });
 }

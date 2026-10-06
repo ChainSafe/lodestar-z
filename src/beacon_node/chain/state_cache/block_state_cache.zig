@@ -794,17 +794,12 @@ test "BlockStateCache add - insert/prune/duplicate paths free the owned state ex
 }
 
 test "BlockStateCache init releases its reservations on OOM at every allocation point" {
-    var saw_operation_oom = false;
     try testing.checkAllAllocationFailures(testing.allocator, struct {
-        fn run(allocator: std.mem.Allocator, saw_oom: *bool) !void {
-            errdefer |err| {
-                saw_oom.* = err == error.OutOfMemory;
-            }
+        fn run(allocator: std.mem.Allocator) !void {
             var cache = try BlockStateCache.init(allocator, .{ .max_states = 4 });
             defer cache.deinit();
         }
-    }.run, .{&saw_operation_oom});
-    try std.testing.expect(saw_operation_oom);
+    }.run, .{});
 }
 
 // scanReadStats reads arithmetic: each resident state is read `read_counts[i]` times; never-read

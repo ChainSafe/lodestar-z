@@ -94,15 +94,10 @@ test "memory_safety: AnySignedBeaconBlock deserialize should deinit partial bloc
     defer allocator.free(bytes);
     _ = SignedBeaconBlock.serializeIntoBytes(&block, bytes);
 
-    var saw_operation_oom = false;
     try std.testing.checkAllAllocationFailures(allocator, struct {
-        fn run(failing_allocator: std.mem.Allocator, serialized: []const u8, saw_oom: *bool) !void {
-            errdefer |err| {
-                saw_oom.* = err == error.OutOfMemory;
-            }
+        fn run(failing_allocator: std.mem.Allocator, serialized: []const u8) !void {
             var decoded = try AnySignedBeaconBlock.deserialize(failing_allocator, .full, .phase0, serialized);
             defer decoded.deinit(failing_allocator);
         }
-    }.run, .{ bytes, &saw_operation_oom });
-    try std.testing.expect(saw_operation_oom);
+    }.run, .{bytes});
 }

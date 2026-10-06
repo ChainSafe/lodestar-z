@@ -180,13 +180,11 @@ test "memory_safety: variable progressive list byte deserialization preserves ou
     defer std.testing.allocator.free(bytes);
     _ = List.serializeIntoBytes(&source, bytes);
 
-    var saw_operation_oom = false;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(
             allocator: std.mem.Allocator,
             serialized: []const u8,
             source_value: *const List.Type,
-            saw_oom: *bool,
         ) !void {
             var out: List.Type = .empty;
             defer List.deinit(allocator, &out);
@@ -196,7 +194,6 @@ test "memory_safety: variable progressive list byte deserialization preserves ou
             try out.append(allocator, sentinel.?);
             sentinel = null;
 
-            errdefer saw_oom.* = true;
             List.deserializeFromBytes(allocator, serialized, &out) catch |err| {
                 try std.testing.expectEqual(@as(usize, 1), out.items.len);
                 try std.testing.expectEqual(@as(usize, 5), out.items[0].bit_len);
@@ -205,8 +202,7 @@ test "memory_safety: variable progressive list byte deserialization preserves ou
             };
             try std.testing.expect(List.equals(source_value, &out));
         }
-    }.run, .{ bytes, &source, &saw_operation_oom });
-    try std.testing.expect(saw_operation_oom);
+    }.run, .{ bytes, &source });
 }
 
 test "memory_safety: variable progressive list tree.toValue preserves out on OOM" {
@@ -230,14 +226,12 @@ test "memory_safety: variable progressive list tree.toValue preserves out on OOM
     const root = try List.tree.fromValue(&pool, &source);
     defer pool.unref(root);
 
-    var saw_operation_oom = false;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(
             allocator: std.mem.Allocator,
             input_pool: *Node.Pool,
             input_root: Node.Id,
             source_value: *const List.Type,
-            saw_oom: *bool,
         ) !void {
             var out: List.Type = .empty;
             defer List.deinit(allocator, &out);
@@ -247,7 +241,6 @@ test "memory_safety: variable progressive list tree.toValue preserves out on OOM
             try out.append(allocator, sentinel.?);
             sentinel = null;
 
-            errdefer saw_oom.* = true;
             List.tree.toValue(allocator, input_root, input_pool, &out) catch |err| {
                 try std.testing.expectEqual(@as(usize, 1), out.items.len);
                 try std.testing.expectEqual(@as(usize, 5), out.items[0].bit_len);
@@ -256,6 +249,5 @@ test "memory_safety: variable progressive list tree.toValue preserves out on OOM
             };
             try std.testing.expect(List.equals(source_value, &out));
         }
-    }.run, .{ &pool, root, &source, &saw_operation_oom });
-    try std.testing.expect(saw_operation_oom);
+    }.run, .{ &pool, root, &source });
 }

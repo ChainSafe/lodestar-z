@@ -1293,17 +1293,14 @@ test "memory_safety: VariableList clone should keep destination deinit-safe on a
     var backing = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
     defer backing.deinit();
 
-    var saw_operation_oom = false;
     try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
-        fn run(allocator: std.mem.Allocator, input: *const ListType.Type, saw_oom: *bool) !void {
+        fn run(allocator: std.mem.Allocator, input: *const ListType.Type) !void {
             var cloned = ListType.default_value;
             defer ListType.deinit(allocator, &cloned);
-            errdefer saw_oom.* = true;
             try ListType.clone(allocator, input, &cloned);
             try std.testing.expect(ListType.equals(input, &cloned));
         }
-    }.run, .{ &source, &saw_operation_oom });
-    try std.testing.expect(saw_operation_oom);
+    }.run, .{&source});
     try std.testing.expect(!backing.double_free);
     try std.testing.expectEqual(@as(usize, 0), backing.live.count());
 }

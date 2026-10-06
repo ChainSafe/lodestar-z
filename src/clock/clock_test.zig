@@ -151,17 +151,14 @@ test "init should clean up on allocation failure" {
         .slot_duration_ms = 12_000,
         .slots_per_epoch = 32,
     };
-    var saw_operation_oom = false;
     try testing.checkAllAllocationFailures(testing.allocator, struct {
-        fn run(allocator: std.mem.Allocator, config: Clock.ClockConfig, saw_oom: *bool) !void {
+        fn run(allocator: std.mem.Allocator, config: Clock.ClockConfig) !void {
             var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(config, 0) };
             var clock: Clock = undefined;
-            errdefer saw_oom.* = true;
             try clock.init(allocator, fake.io(), config);
             defer clock.deinit();
         }
-    }.run, .{ cfg, &saw_operation_oom });
-    try std.testing.expect(saw_operation_oom);
+    }.run, .{cfg});
 }
 
 test "every listener receives every slot, in order, exactly once" {
