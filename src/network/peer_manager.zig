@@ -14,6 +14,7 @@ const logging = @import("logging.zig");
 const ReqResp = @import("reqresp/root.zig").ReqResp;
 const identify = @import("identify/root.zig");
 const types = @import("types.zig");
+const wake_sources = @import("wake_sources.zig");
 
 pub const coverage_reconcile_interval_ms = 1_000;
 pub const replacement_interval_ms = 5_000;
@@ -81,6 +82,7 @@ pub const PeerManager = struct {
         candidate_selections: u64 = 0,
     };
     pub const PeerCounts = struct { connected: u16, relevant: u16, outbound_relevant: u16 };
+    pub const Capacities = struct { peers: usize, dials: usize };
 
     pub fn validateOptions(options: Options) !void {
         try options.peers.validate();
@@ -240,9 +242,6 @@ pub const PeerManager = struct {
     pub fn identified(self: *PeerManager, results: []const identify.Handler.Result) void {
         self.control.identifyResults(&self.catalog, results);
     }
-    pub fn controlSchedule(self: *const PeerManager, now: Now) types.Schedule {
-        return self.control.schedule(&self.catalog, now);
-    }
     /// Advances the cursor to the next connection needing revalidation after a fork change. The caller cancels
     /// the returned request; its reservation survives until the protocol's terminal event.
     pub fn nextRevalidation(self: *PeerManager, cursor: *usize, now: Now) ?peers.Control.Connection {
@@ -281,7 +280,7 @@ pub const PeerManager = struct {
     fn currentSelectionRevision(self: *const PeerManager, gossipsub: *const gossip.Gossipsub) SelectionRevision {
         return .{ .catalog = self.catalog.revision, .delivery = gossipsub.deliveryRevision(), .gossip = gossipsub.coverageRevision() };
     }
-    pub fn policySchedule(self: *const PeerManager, gossipsub: *const gossip.Gossipsub) types.Schedule {
+    fn policySchedule(self: *const PeerManager, gossipsub: *const gossip.Gossipsub) types.Schedule {
         const before = self.selection_revision orelse return .{ .runnable = true };
         const after = self.currentSelectionRevision(gossipsub);
         if (before.catalog != after.catalog or before.delivery != after.delivery) return .{ .runnable = true };
@@ -296,8 +295,17 @@ pub const PeerManager = struct {
         self.native_dial_room = engine.limits.connections_max -| engine.resourceSnapshot().active;
     }
 
-    pub fn peerSchedule(self: *const PeerManager, capacity: usize) types.Schedule {
-        return .{ .runnable = capacity > 0 and self.catalog.eventsPending() };
+    /// Observes scheduling without applying pending work. Recompute after owner mutation.
+    pub fn collectWakeups(self: *const PeerManager, gossipsub: *const gossip.Gossipsub, now: Now, capacities: Capacities, wakeups: *wake_sources.Wakeups) void {
+        std.debug.assert(self.phase != .stopped);
+        wakeups.note(.peer_events, .{ .runnable = capacities.peers > 0 and self.catalog.eventsPending() });
+        wakeups.note(.control, self.control.schedule(&self.catalog, now));
+        if (self.phase != .running) return;
+        wakeups.note(.dial, self.dialing.schedule(&self.catalog, @min(capacities.dials, self.dialRoom())));
+        wakeups.note(.dial, .{ .runnable = self.dialing.selectionNeeded(&self.catalog), .deadline = time.optionalMilliseconds(self.dialing.selection_deadline) });
+        wakeups.note(.peer_policy, self.policySchedule(gossipsub));
+        wakeups.note(.peer_policy, .{ .deadline = time.optionalMilliseconds(self.reconciliation_deadline) });
+        wakeups.note(.peer_policy, .{ .deadline = time.optionalMilliseconds(if (self.custody_pending) now.millis() +| 1 else null) });
     }
     /// Requires demand validated against the local fork before publication.
     pub fn commitDemand(self: *PeerManager, demand: *const t.Demand) void {
@@ -430,7 +438,7 @@ pub const PeerManager = struct {
         self.discovery_need.syncnets = self.selection.deficits.missing.syncnets;
         self.discovery_need.custody = self.selection.deficits.groups > 0 or self.selection.deficits.custody_groups > 0;
     }
-    pub fn dialRoom(self: *const PeerManager) u16 {
+    fn dialRoom(self: *const PeerManager) u16 {
         const attempts = self.dialing.attempts();
         const demand = self.dialing.demandCounts(&self.catalog);
         const capacity = self.catalog.options.max_peers -| self.catalog.connectedCount() -| demand.pending;

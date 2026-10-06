@@ -7,6 +7,11 @@ const Gossipsub = @import("gossipsub/Gossipsub.zig");
 const test_support = @import("gossipsub/test_support.zig");
 const policy = @import("peers/policy.zig");
 const quic_test_support = @import("quic/test_support.zig");
+const wake_sources = @import("wake_sources.zig");
+const Source = wake_sources.Source;
+const time = @import("time.zig");
+const Schedule = @import("schedule.zig").Schedule;
+const Dialing = @import("peers/dialing.zig").Dialing;
 
 const Fixture = struct {
     manager: PeerManager,
@@ -38,6 +43,12 @@ const Fixture = struct {
         self.gossip.deinit();
         self.manager.deinit();
     }
+
+    fn wakeups(self: *const Fixture, now: Now, capacities: PeerManager.Capacities) wake_sources.Wakeups {
+        var result: wake_sources.Wakeups = .{};
+        self.manager.collectWakeups(&self.gossip, now, capacities, &result);
+        return result;
+    }
 };
 
 test "peer manager reconciliation reads preserve completed demand and catalog evaluation" {
@@ -63,7 +74,7 @@ test "peer manager reconciliation reads preserve completed demand and catalog ev
     try std.testing.expectEqual(@as(u8, 1), need.syncnets);
 
     owner.commitDemand(&.{});
-    try std.testing.expect(owner.policySchedule(g).runnable);
+    try std.testing.expect(fixture.wakeups(now, .{ .peers = 0, .dials = 0 }).sources[@intFromEnum(Source.peer_policy)].runnable);
     const dirty = view.counters;
     for (0..8) |_| {
         try std.testing.expectEqualDeep(deficits, view.coverageDeficits());
@@ -79,7 +90,7 @@ test "peer manager reconciliation reads preserve completed demand and catalog ev
     const peer = owner.catalog.admit(&identity, &view.local_identity, conn, &.{ .direction = .outbound, .endpoint = quic_test_support.server_address, .now_ms = now.millis() }).admitted.peer;
     try std.testing.expect(owner.catalog.updateStatus(peer, conn, &owner.local.status, now.millis()));
     try std.testing.expect(owner.catalog.setDirect(peer, true));
-    try std.testing.expect(owner.policySchedule(g).runnable);
+    try std.testing.expect(fixture.wakeups(now, .{ .peers = 0, .dials = 0 }).sources[@intFromEnum(Source.peer_policy)].runnable);
     try std.testing.expectEqualDeep(policy.Deficits{}, view.coverageDeficits());
     try std.testing.expectEqualDeep(DiscoveryNeed{ .general = true }, view.discoveryNeed());
     owner.reconcile(g, now);
@@ -98,4 +109,64 @@ test "peer manager reconciliation exhausted revisions stay invalidated" {
     const before = owner.counters.selections;
     owner.reconcile(g, now);
     try std.testing.expectEqual(before + 1, owner.counters.selections);
+}
+
+test "peer manager wakeups preserve dial bookkeeping and expiry without output capacity" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const owner = &fixture.manager;
+    const now = Now.fromMilliseconds(.{ .mono_ms = 1000, .unix_s = 0 });
+    const identity: t.PeerId = .{ .bytes = @splat(1) };
+    try owner.connectUntil(&identity, &.{quic_test_support.server_address}, now, 4000);
+    owner.native_dial_room = 4;
+    const blocked: PeerManager.Capacities = .{ .peers = 0, .dials = 0 };
+    const first = fixture.wakeups(now, blocked);
+    try std.testing.expect(first.sources[@intFromEnum(Source.dial)].runnable);
+    const dirty = owner.catalog.dial.dirty_count;
+    const visits = owner.dialing.visits;
+    const counters = owner.counters;
+    for (0..3) |_| try std.testing.expectEqualDeep(first, fixture.wakeups(now, blocked));
+    try std.testing.expectEqual(dirty, owner.catalog.dial.dirty_count);
+    try std.testing.expectEqual(visits, owner.dialing.visits);
+    try std.testing.expectEqualDeep(counters, owner.counters);
+
+    owner.reconcile(&fixture.gossip, now);
+    owner.dialing.refresh(&owner.catalog, now.millis());
+    const deferred = fixture.wakeups(now, blocked).sources[@intFromEnum(Source.dial)];
+    try std.testing.expectEqualDeep(Schedule{ .deadline = time.milliseconds(4000) }, deferred);
+    try std.testing.expect(fixture.wakeups(now, .{ .peers = 0, .dials = 1 }).sources[@intFromEnum(Source.dial)].due(now.monotonic));
+
+    const expired = Now.fromMilliseconds(.{ .mono_ms = 4000, .unix_s = 3 });
+    var close: [Dialing.attempts_max]t.Handle = undefined;
+    try std.testing.expectEqual(@as(usize, 0), owner.expireDials(expired, &close).len);
+    owner.reconcile(&fixture.gossip, expired);
+    try std.testing.expect(owner.catalog.find(&identity) == null);
+    try std.testing.expectEqualDeep(Schedule{}, fixture.wakeups(expired, blocked).sources[@intFromEnum(Source.dial)]);
+}
+
+test "peer manager quiescence preserves control and peer delivery wakeups" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const owner = &fixture.manager;
+    const now = Now.fromMilliseconds(.{ .mono_ms = 1000, .unix_s = 0 });
+    const identity: t.PeerId = .{ .bytes = @splat(1) };
+    const conn: t.Handle = .{ .index = 0, .generation = 1 };
+    const admission = owner.admit(&.{ .peer_id = identity, .conn = conn, .direction = .outbound }, quic_test_support.server_address, now) orelse return error.AdmissionRefused;
+    try std.testing.expect(owner.catalog.updateStatus(admission.peer, conn, &owner.local.status, now.millis()));
+    var event: [1]t.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), owner.catalog.pollEvents(&event));
+    try std.testing.expect(event[0] == .ready);
+    try owner.connectUntil(&.{ .bytes = @splat(2) }, &.{quic_test_support.client_address}, now, 4000);
+    try std.testing.expect(owner.quiesce(now));
+
+    const blocked = fixture.wakeups(now, .{ .peers = 0, .dials = 1 });
+    try std.testing.expect(blocked.sources[@intFromEnum(Source.control)].due(now.monotonic));
+    try std.testing.expectEqualDeep(Schedule{}, blocked.sources[@intFromEnum(Source.dial)]);
+    try std.testing.expectEqualDeep(Schedule{}, blocked.sources[@intFromEnum(Source.peer_policy)]);
+    try std.testing.expectEqualDeep(Schedule{}, blocked.sources[@intFromEnum(Source.peer_events)]);
+    try std.testing.expect(fixture.wakeups(now, .{ .peers = 1, .dials = 1 }).sources[@intFromEnum(Source.peer_events)].runnable);
+    try std.testing.expectEqual(@as(usize, 1), owner.catalog.pollEvents(&event));
+    try std.testing.expect(event[0] == .updated);
+    try std.testing.expect(!event[0].updated.relevant);
+    try std.testing.expectEqualDeep(Schedule{}, fixture.wakeups(now, .{ .peers = 1, .dials = 1 }).sources[@intFromEnum(Source.peer_events)]);
 }

@@ -529,16 +529,8 @@ pub const NetworkCore = struct {
         std.debug.assert(self.phase() != .stopped);
         var result: wake_sources.Wakeups = .{};
         const pm = &self.peer_manager;
-        result.note(.peer_events, pm.peerSchedule(outputs.peers.len));
+        pm.collectWakeups(self.protocols.gossipsub, now, .{ .peers = outputs.peers.len, .dials = dials_per_turn }, &result);
         self.protocols.collectWakeups(.{ .application = outputs.application.len, .control = controls_per_turn, .identify = identify_per_turn }, &result);
-        result.note(.control, pm.controlSchedule(now));
-        if (pm.phase == .running) {
-            result.note(.dial, pm.dialing.schedule(&pm.catalog, @min(dials_per_turn, pm.dialRoom())));
-            result.note(.dial, .{ .runnable = pm.dialing.selectionNeeded(&pm.catalog), .deadline = time.optionalMilliseconds(pm.dialing.selection_deadline) });
-            result.note(.peer_policy, pm.policySchedule(self.protocols.gossipsub));
-            result.note(.peer_policy, .{ .deadline = time.optionalMilliseconds(pm.reconciliation_deadline) });
-            result.note(.peer_policy, .{ .deadline = time.optionalMilliseconds(if (pm.custody_pending) now.millis() +| 1 else null) });
-        }
         const quic = &self.transport.engine;
         result.note(.transport_backlog, .{ .runnable = quic.backlog() });
         result.note(.transport_events, .{ .runnable = quic.eventsPending() or quic.releasesPending() });
