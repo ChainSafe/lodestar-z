@@ -21,6 +21,7 @@ const session_io = @import("gossipsub/session_io.zig");
 const KeyPair = @import("wire/keys.zig").KeyPair;
 const time = @import("time.zig");
 const topic_fixture = @import("gossipsub/topic_fixture.zig");
+const Source = @import("wake_sources.zig").Source;
 
 fn init(setup: *core_test.Setup, local: *const t.LocalState) !void {
     var opts = core_test.resolvedOptions();
@@ -128,7 +129,7 @@ test "core coverage coalesces subscription and score changes with operation elig
     gossip_test.control(g, index, .{ .subscription = .{ .topic = attestation, .subscribe = true } }, setup.pair.now);
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     try equal(baseline, setup.client.peer_manager.counters.selections);
-    const due = schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.policySchedule(setup.client.protocols.gossipsub), setup.pair.now.millis()).?;
+    const due = schedule_test_support.wakeupMilliseconds(setup.client.wakeups(setup.pair.now, .{}).sources[@intFromEnum(Source.peer_policy)], setup.pair.now.millis()).?;
     try equal(setup.pair.now.millis() + manager.coverage_reconcile_interval_ms, due);
     const revision = g.coverageRevision();
     for (0..100) |_| gossip_test.control(g, index, .{ .subscription = .{ .topic = attestation, .subscribe = true } }, setup.pair.now);
