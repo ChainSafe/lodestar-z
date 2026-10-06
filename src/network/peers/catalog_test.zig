@@ -662,7 +662,7 @@ test "peer catalog uses empty established slots before reclaiming disconnected i
             c.rowForMut(peer).?.dial.addresses = .{ .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9001 } }, .unspecified };
             c.rowForMut(peer).?.dial.address_count = 1;
             try std.testing.expectEqual(peer, admit(&c, &remote, first, direction, 0).admitted.peer);
-            try std.testing.expect(c.disconnect(peer, first, .host, 1));
+            try std.testing.expect(c.disconnect(peer, first, .transport_closed, 1));
             var events: [3]t.Event = undefined;
             _ = c.pollEvents(&events);
             const before = c.rowFor(peer).?.dial;

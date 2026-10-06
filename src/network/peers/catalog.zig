@@ -547,6 +547,7 @@ pub const Catalog = struct {
         return peer;
     }
 
+    /// Releases dial capacity without discarding an established peer's addresses or ENR hints.
     pub fn releaseIntent(self: *Catalog, peer: t.PeerRef) void {
         const row = self.rowForMut(peer) orelse return;
         std.debug.assert(!row.direct and row.attempt == null);
@@ -558,12 +559,9 @@ pub const Catalog = struct {
         self.markDial(peer.index);
         if (row.established_slot == null) {
             self.forget(peer);
-        } else {
-            row.dial = .{ .failures = row.dial.failures, .eligible_at_ms = row.dial.eligible_at_ms, .history_until_ms = row.dial.history_until_ms };
-            if (row.connection == null) {
-                row.custody_work = null;
-                row.custody_context = null;
-            }
+        } else if (row.connection == null) {
+            row.custody_work = null;
+            row.custody_context = null;
         }
     }
 
@@ -723,20 +721,28 @@ pub const Catalog = struct {
         if (reason == .capacity or reason == .count_pruning) {
             if (row.reputation.redial_until_ms <= now_ms)
                 row.reputation.deferRedial(now_ms, goodbye.cooldownMs(129));
-            return;
+        } else {
+            row.dial.connectionClosed(now_ms, now_ms -| row.connected_at_ms, self.random.random().int(u16) % 1_001);
+            if (reason == .health_timeout or reason == .health_error) {
+                self.remembered.forget(&row.identity);
+                self.recordHealth(index, now_ms);
+            }
         }
-        row.dial.connectionClosed(now_ms, now_ms -| row.connected_at_ms, self.random.random().int(u16) % 1_001);
-        if (reason == .health_timeout or reason == .health_error) {
-            self.remembered.forget(&row.identity);
-            self.recordHealth(index, now_ms);
+        if (!row.dial.automatic) return;
+        if (reason == .transport_closed) {
+            _ = self.retainIntent(&row.identity) catch {
+                row.dial.automatic = false;
+                return;
+            };
+        } else {
+            row.dial.automatic = false;
+            if (!row.direct and row.dial.manual_until_ms == 0 and row.attempt == null)
+                self.releaseIntent(self.reference(index));
         }
     }
 
-    /// Charges a health close to the endpoint the connection was dialed to; an inbound connection
-    /// says nothing about the intent's endpoints. The row's own backoff is lost when a later
-    /// admission reclaims the row, so only this history entry carries the escalation to a
-    /// rediscovered intent. A discovery-only intent then moves off the endpoints its history blocks,
-    /// and drops once every one is blocked, as after a failed dial.
+    /// Charges a health close to the dialed endpoint; an inbound connection says nothing about
+    /// the peer's advertised endpoints. History survives reclamation of the established row.
     fn recordHealth(self: *Catalog, index: usize, now_ms: u64) void {
         const row = &self.rows[index];
         const key = self.history.endpointKey(&row.identity, row.dialed orelse return);
@@ -744,16 +750,6 @@ pub const Catalog = struct {
         const sequence = if (dial.hints) |hints| hints.sequence else 0;
         self.history.recordEndpoint(key, .health, sequence, now_ms);
         self.history.markRetry(key, .health, now_ms);
-        if (!dial.automatic or row.direct or dial.manual_until_ms != 0) return;
-        for (0..dial.address_count) |offset| {
-            const position: u8 = @intCast((dial.address_index + offset) % dial.address_count);
-            if (!self.history.blocked(self.history.endpointKey(&row.identity, dial.addresses[position]), sequence, now_ms)) {
-                dial.address_index = position;
-                return;
-            }
-        }
-        dial.automatic = false;
-        if (row.attempt == null) self.releaseIntent(self.reference(index));
     }
 
     /// Clears the connection-failure evidence of the endpoint the connection was dialed to. Control

@@ -28,7 +28,7 @@ test "peer dial queue exponential retry remains bounded through repeated failure
     }
 }
 
-test "peer pruning defers automatic redial without blocking explicit intent or recording failures" {
+test "peer pruning requires rediscovery or explicit intent without recording failures" {
     for ([_]bool{ false, true }) |explicit| {
         var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
         var catalog = try initCatalog(a, q.options);
@@ -41,14 +41,47 @@ test "peer pruning defers automatic redial without blocking explicit intent or r
         _ = catalog.deferRedial(catalog.find(&candidate.peer).?, conn, 0, 300_000);
         disconnect(&catalog, &candidate.peer, 0, .count_pruning, 2_000);
         try std.testing.expectEqual(@as(u8, 0), candidates[0].dial.failures);
-        try std.testing.expectEqual(@as(u64, 300_000), support.refreshAndWakeup(&q, &catalog, 2_000, 1).?);
+        try std.testing.expectEqual(@as(u16, 0), catalog.intent_count);
+        try std.testing.expect(support.refreshAndWakeup(&q, &catalog, 2_000, 1) == null);
+        try std.testing.expectEqualDeep(candidate.hints, candidates[0].dial.hints.?);
         var out: [1]mod.Dialing.SelectedDial = undefined;
         try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, 299_999, &out));
         if (explicit) {
-            try q.enqueue(&catalog, &candidate.peer, &.{address}, false, 299_999);
+            const manual: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 2222 } };
+            try q.enqueue(&catalog, &candidate.peer, &.{ manual, address }, false, 299_999);
             try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 299_999, &out));
+            try std.testing.expect(out[0].address.eql(manual));
         } else {
+            try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, 300_000, &out));
+            try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{ .syncnets = 1 }, 300_000);
             try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 300_000, &out));
+        }
+    }
+}
+
+test "peer local closes end discovery retries while preserving direct intent" {
+    for ([_]t.DisconnectReason{ .host, .health_timeout, .invalid_metadata, .count_pruning }) |reason| {
+        for ([_]bool{ false, true }) |direct| {
+            var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+            var catalog = try initCatalog(a, q.options);
+            defer catalog.deinit(a);
+            const candidate = try discovered(1, 1);
+            try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{ .syncnets = 1 }, 0);
+            if (direct) try q.enqueue(&catalog, &candidate.peer, &.{address}, true, 0);
+            const conn: t.Handle = .{ .index = 0, .generation = 1 };
+            accept(&q, &catalog, &candidate.peer, conn, 1);
+            disconnect(&catalog, &candidate.peer, 1, reason, 2);
+            try std.testing.expectEqual(@as(u16, @intFromBool(direct)), catalog.intent_count);
+            const due = support.refreshAndWakeup(&q, &catalog, 2, 1);
+            var out: [1]mod.Dialing.SelectedDial = undefined;
+            if (direct) {
+                try std.testing.expect(due.? > 2);
+                try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, due.?, &out));
+                try std.testing.expect(out[0].peer.eql(&candidate.peer));
+            } else {
+                try std.testing.expect(due == null);
+                try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, 300_000, &out));
+            }
         }
     }
 }

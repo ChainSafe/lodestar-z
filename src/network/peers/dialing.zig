@@ -90,13 +90,18 @@ pub const Dialing = struct {
         if (deadline_ms <= now_ms or deadline_ms - now_ms > 86_400_000) return error.InvalidDeadline;
         if (addresses.len == 0 or addresses.len > 2) return error.InvalidAddress;
         for (addresses) |address| if (address.port() == 0) return error.InvalidAddress;
-        const existing = if (catalog.find(peer)) |ref| catalog.rowFor(ref) else null;
+        const existing = catalog.find(peer);
         var prepared: [2]t.Address = undefined;
         var count: u8 = 0;
-        if (existing) |row| if (!row.dial.automatic) {
-            prepared = row.dial.addresses;
-            count = row.dial.address_count;
-        };
+        var address_index: u8 = 0;
+        if (existing) |ref| {
+            const dial = &catalog.rowFor(ref).?.dial;
+            if (catalog.intents.isSet(ref.index) and !dial.automatic) {
+                prepared = dial.addresses;
+                count = dial.address_count;
+                address_index = dial.address_index;
+            }
+        }
         for (addresses) |address| {
             var found = false;
             for (prepared[0..count]) |known| found = found or known.eql(address);
@@ -109,7 +114,7 @@ pub const Dialing = struct {
         const row = catalog.rowForMut(ref).?;
         row.dial.addresses = prepared;
         row.dial.address_count = count;
-        if (row.dial.automatic) row.dial.address_index = 0;
+        row.dial.address_index = address_index;
         row.dial.automatic = false;
         row.dial.replay = .none;
         if (direct) _ = catalog.setDirect(ref, true);
@@ -136,10 +141,12 @@ pub const Dialing = struct {
                 if (candidate.hints.sequence == previous.sequence) {
                     if (!std.meta.eql(previous, hints)) return error.StaleRecord;
                     if (row.dial.automatic) try mergeAddresses(&row.dial, candidate);
-                    row.dial.hints_at_ms = now_ms;
-                    self.selection_dirty = true;
-                    catalog.markDial(ref.index);
-                    return;
+                    if (catalog.intents.isSet(ref.index) or (row.connection != null and row.dial.automatic)) {
+                        row.dial.hints_at_ms = now_ms;
+                        self.selection_dirty = true;
+                        catalog.markDial(ref.index);
+                        return;
+                    }
                 }
             }
             const retained = catalog.intents.isSet(ref.index);
@@ -148,7 +155,7 @@ pub const Dialing = struct {
             if (!retained) {
                 applyAddresses(&incoming.dial, &admitted);
                 Catalog.prepareCandidateCustody(&incoming, context);
-                _ = try retainCandidate(catalog, &incoming, context, wanted, now_ms);
+                if (row.connection == null) _ = try retainCandidate(catalog, &incoming, context, wanted, now_ms);
                 row.dial.automatic = true;
             }
             row.node_id = candidate.node_id;
@@ -514,9 +521,10 @@ pub const Dialing = struct {
     }
     fn releaseUnused(catalog: *Catalog, peer: t.PeerRef) void {
         const row = catalog.rowFor(peer).?;
-        if (!row.direct and !row.dial.automatic and row.dial.manual_until_ms == 0 and row.attempt == null) catalog.releaseIntent(peer);
+        if (!row.direct and row.dial.manual_until_ms == 0 and row.attempt == null and
+            (row.connection != null or !row.dial.automatic)) catalog.releaseIntent(peer);
     }
-    /// Releases an intent that no longer holds a direct, discovery, manual or attempt claim.
+    /// Releases a completed or unused intent while preserving direct peers and live attempts.
     pub fn releaseIfUnused(catalog: *Catalog, peer: t.PeerRef) void {
         if (!catalog.intents.isSet(peer.index)) return;
         releaseUnused(catalog, peer);
