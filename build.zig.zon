@@ -283,7 +283,7 @@
         .write_ssz_static_spec_tests = .{
             .root_module = .{
                 .root_source_file = "test/spec/ssz/write_static_tests.zig",
-                .imports = .{.spec_test_options},
+                .imports = .{ .spec_test_options, .consensus_types },
             },
         },
         .write_bls_spec_tests = .{
