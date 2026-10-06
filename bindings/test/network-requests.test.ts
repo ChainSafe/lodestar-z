@@ -162,7 +162,7 @@ stockTest(
         phase: "response",
         reason: "cancelled",
       });
-      const commands = Array.from({length: 32}, () => runtime.getIdentity());
+      const commands = Array.from({length: 31}, () => runtime.getIdentity());
       const retired = stream.return?.();
       expect(stream.throw?.(Error("ignored"))).toBe(retired);
       expect(stream.return?.()).toBe(retired);
@@ -325,7 +325,7 @@ stockTest(
       await waitFor(async () => (await peer.command("stats")).control.status >= 2);
       expect((await runtime.getPeers()).peers[0].metadata?.sequenceNumber).toBe(1n);
       await Promise.all(streams.map((stream) => stream.return?.()));
-      const commands = Array.from({length: 32}, () => runtime.getIdentity());
+      const commands = Array.from({length: 31}, () => runtime.getIdentity());
       const independent = runtime.request(id, BLOCKS, new Uint8Array(32));
       await Promise.all(commands);
       await independent.return?.();

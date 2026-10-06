@@ -274,7 +274,7 @@ test "control-only exchanges settle in batches immediately while queued payload 
     const runtime = &fixture.runtime;
     publishPeer(runtime);
     const exit = try admit(runtime, .voluntary_exit, null, "data");
-    for (0..commands.capacity) |_| _ = try completeCommand(runtime, .getIdentity);
+    for (0..commands.capacity - 1) |_| _ = try completeCommand(runtime, .getIdentity);
     var host: Host = .{ .runtime = runtime };
     var batches: usize = 0;
     var demand = control;
@@ -605,20 +605,20 @@ test "command completions arrive at most `settle` per exchange, fairly under ref
     const low = try completeCommand(runtime, .getPeers);
     const unfinished = [_]commands.Token{ try runtime.reserveCommand(.getIdentity), try runtime.reserveCommand(.getIdentity) };
     const high = try completeCommand(runtime, .getDirectPeers);
-    try std.testing.expectEqual(@as(u8, 3), high.index);
+    try std.testing.expectEqual(low.index + 3, high.index);
     var host: Host = .{ .runtime = runtime };
     var demand = control;
     demand.settle = 1;
     var delivered: [4]commands.Token = undefined;
     for (&delivered, 0..) |*token, pass| {
         // The lowest cell completes again whenever it was delivered, taking the freed snapshot store.
-        if (pass > 0 and runtime.table.cells[0].state == .free) _ = try completeCommand(runtime, .getPeers);
+        if (pass > 0 and runtime.table.cells[low.index].state == .free) _ = try completeCommand(runtime, .getPeers);
         const result = try host.turn(&.{}, demand);
         try std.testing.expectEqual(@as(usize, 1), result.command_count);
         token.* = result.commands[0];
         try std.testing.expectEqual(commands.State.free, runtime.table.cells[token.index].state);
     }
-    try std.testing.expectEqualSlices(commands.Token, &.{ low, high, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 3 } }, &delivered);
+    try std.testing.expectEqualSlices(commands.Token, &.{ low, high, .{ .index = low.index, .generation = low.generation + 1 }, .{ .index = low.index, .generation = low.generation + 2 } }, &delivered);
     // Delivery freed each snapshot store, so both remain available.
     try std.testing.expect(!runtime.table.stores[1][0] and !runtime.table.stores[1][1]);
     try std.testing.expectEqual(@as(usize, 0), host.idled);
