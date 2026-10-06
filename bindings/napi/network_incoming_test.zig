@@ -168,3 +168,58 @@ test "incoming serving start rollback and commit preserve a close while pinned" 
         }
     }
 }
+
+test "sent responses wait for next-chunk credit and can close while waiting" {
+    const Ending = enum { after_next_credit, cancelled, shutdown };
+    for ([_]Ending{ .after_next_credit, .cancelled, .shutdown }) |ending| {
+        var runtime: Runtime = .{ .env = undefined };
+        const response_max = rr.Protocol.blocks_by_root_v2.info().response_max;
+        runtime.payload_budget.limit = response_max;
+        runtime.incoming = try Table.init(std.testing.allocator, 1, &runtime.payload_budget);
+        const table = &runtime.incoming.?;
+        defer table.deinit();
+        const token = try table.reserve(.blocks_by_root_v2, 32);
+        try table.allocate(token, &(@as([32]u8, @splat(0))));
+        const cell = table.get(token).?;
+        cell.native = true;
+        cell.handle = .{ .direction = .inbound, .index = 0, .generation = 1 };
+        _ = table.pinStart().?;
+        table.commitStart(token);
+        try table.reserveResponse(cell, 4000);
+        cell.response = try std.testing.allocator.alloc(u8, 4000);
+        cell.state = .response_native;
+        cell.response_awaited = true;
+        try runtime.payload_budget.reserve(.publication, response_max - 4000);
+        {
+            runtime.lock();
+            defer runtime.unlock();
+            try incoming.captureLocked(&runtime, .{ .chunk_sent = .{ .request = cell.handle, .chunks = 1 } }, n.Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
+        }
+        try std.testing.expect(cell.response.len == 0 and cell.response_reservation == 0);
+        try std.testing.expect(!table.anyDue() and cell.response_awaited and runtime.host_due);
+        try std.testing.expectError(error.NetworkBridgeFull, table.reserveResponse(cell, response_max));
+        runtime.payload_budget.release(.publication, response_max - 4000);
+        if (ending == .after_next_credit) {
+            try table.reserveResponse(cell, response_max);
+            cell.ack = .sent;
+            table.refresh(cell);
+            try std.testing.expect(table.anyDue());
+            const completion = table.pin(token.index);
+            try std.testing.expect(completion.ack.? == .sent and !completion.closed);
+            _ = table.commit(completion);
+            try std.testing.expectEqual(response_max, cell.response_reservation);
+        }
+        runtime.lock();
+        if (ending == .cancelled) {
+            try incoming.captureLocked(&runtime, .{ .failed = .{ .request = cell.handle, .reason = .cancelled } }, n.Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
+        } else incoming.closeLocked(&runtime);
+        runtime.unlock();
+        const completion = table.pin(token.index);
+        try std.testing.expect(completion.closed);
+        if (ending == .cancelled) try std.testing.expectEqual(incoming.Ack{ .failed = .cancelled }, completion.ack.?);
+        if (ending == .shutdown) try std.testing.expect(completion.ack.? == .closed);
+        _ = table.commit(completion);
+        try std.testing.expectEqual(@as(usize, 0), runtime.payload_budget.used);
+        try std.testing.expect(table.get(token) == null);
+    }
+}
