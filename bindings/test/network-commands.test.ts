@@ -100,15 +100,16 @@ test.each(commands())("%s, held unstarted at close, each reject with NetworkClos
   expect(await closed).toEqual({reason: "requested"});
 });
 
-test("a full command table refuses admission without a record: a throw, and a rejection from applyIntent", async () => {
+test("ordinary command pressure preserves one local-state admission", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config);
   try {
-    const admitted = Array.from({length: 32}, () => runtime.getIdentity());
+    const admitted = Array.from({length: 31}, () => runtime.getIdentity());
     expect(() => runtime.getIdentity()).toThrow("NetworkCommandFull");
-    await expect(runtime.applyIntent(localIntent(config), 100n)).rejects.toThrow("NetworkCommandFull");
+    const state = runtime.applyIntent(localIntent(config), 100n);
+    const refused = expect(runtime.applyIntent(localIntent(config), 100n)).rejects.toThrow("NetworkCommandFull");
 
-    await Promise.all(admitted);
+    await Promise.all([...admitted, state, refused]);
     expect((await runtime.getIdentity()).peerId).toBe(runtime.identity.peerId);
   } finally {
     // A refused command left no record, so the close result finds none missing.

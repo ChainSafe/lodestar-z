@@ -63,7 +63,9 @@ pub const Table = struct {
             };
             if (store == null) return error.NetworkCommandFull;
         }
-        for (&self.cells, 0..) |*cell, i| {
+        // A single producer of local state can always submit despite unrelated command pressure.
+        const start: usize = if (command == .applyIntent or command == .updateStatus) 0 else 1;
+        for (self.cells[start..], start..) |*cell, i| {
             if (cell.state != .free) continue;
             const generation = std.math.add(u64, cell.generation, 1) catch return error.NetworkSequenceExhausted;
             const order = try self.nextOrder();

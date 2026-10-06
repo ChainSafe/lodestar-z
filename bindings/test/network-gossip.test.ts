@@ -251,7 +251,7 @@ test("gossip delivery and verdict acknowledgement progress with a full command t
   try {
     holdSettling(pair.right, true);
     pair.right.holdOperations(true);
-    commands = Promise.allSettled(Array.from({length: 32}, () => pair.right.getIdentity()));
+    commands = Promise.allSettled(Array.from({length: 31}, () => pair.right.getIdentity()));
     expect(() => pair.right.getIdentity()).toThrow("NetworkCommandFull");
 
     await pair.left.publishGossip(TOPIC, blockPayload(4000, 4), {allowZeroPeers: false});
@@ -272,7 +272,7 @@ test("gossip delivery and verdict acknowledgement progress with a full command t
 
     pair.right.holdOperations(false);
     holdSettling(pair.right, false);
-    expect((await commands).map((outcome) => outcome.status)).toEqual(Array(32).fill("fulfilled"));
+    expect((await commands).map((outcome) => outcome.status)).toEqual(Array(31).fill("fulfilled"));
   } finally {
     pair.right.holdOperations(false);
     holdSettling(pair.right, false);

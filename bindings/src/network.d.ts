@@ -614,6 +614,7 @@ export interface NativeNetwork {
   readonly limits: NativeResolvedLimits;
   /** Native shutdown and its promised completions finished. A failed network cannot restart. */
   readonly closed: Promise<CloseResult>;
+  /** Shares reserved admission with updateStatus; one state operation at a time avoids ordinary command pressure. */
   applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;
   /** Updates Status for the active fork; preserves clock, subscriptions, Metadata, ENR and demand. */
   updateStatus(status: NetworkStatusUpdate): Promise<void>;

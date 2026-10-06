@@ -281,7 +281,7 @@ test("bounded typed stores refuse the third intent and unwind malformed input", 
       await expect(runtime.applyIntent(malformed, 103n)).rejects.toThrow();
     }
     await runtime.applyIntent(localIntent(config), 103n);
-    const pending = Array.from({length: 32}, () => runtime.getIdentity());
+    const pending = Array.from({length: 31}, () => runtime.getIdentity());
     expect(() => runtime.getIdentity()).toThrow("NetworkCommandFull");
     await Promise.all(pending);
   } finally {
@@ -382,7 +382,7 @@ test("peer penalties accumulate while the command lane is full", async () => {
     const [, remote] = await Promise.all([a.identity, b.identity]);
     await Promise.all([a.applyIntent(localIntent(first), 100n), b.applyIntent(localIntent(second), 100n)]);
     await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
-    const pending = Array.from({length: 32}, () => a.getIdentity());
+    const pending = Array.from({length: 31}, () => a.getIdentity());
     expect(() => a.getIdentity()).toThrow("NetworkCommandFull");
     // Reports coalesce per identity and action, as the host's ledger batches them into one action.
     exchange(a, settleOnly, [{action: "high_tolerance", count: 3, peerId: remote.peerId, type: "reportPeer"}]);

@@ -4,12 +4,16 @@ const n = @import("network");
 const commands = @import("network_commands.zig");
 const Table = commands.Table;
 
-test "application admission reserves 32 commands and at most 16 connects" {
+test "application admission reserves one local-state cell and at most 16 connects" {
     var table: Table = .{};
     for (0..16) |_| _ = try table.reserve(.connect);
     try std.testing.expectError(error.NetworkCommandFull, table.reserve(.connect));
-    for (0..16) |_| _ = try table.reserve(.getIdentity);
+    for (0..15) |_| _ = try table.reserve(.getIdentity);
     try std.testing.expectError(error.NetworkCommandFull, table.reserve(.getIdentity));
+    const state = try table.reserve(.applyIntent);
+    try std.testing.expectError(error.NetworkCommandFull, table.reserve(.updateStatus));
+    table.retire(state);
+    _ = try table.reserve(.updateStatus);
 }
 
 test "typed reservations unwind and identities never wrap" {
@@ -23,7 +27,7 @@ test "typed reservations unwind and identities never wrap" {
     try std.testing.expectEqual(first.generation + 1, next.generation);
     table.retire(next);
     table.cells[0].generation = std.math.maxInt(u64);
-    try std.testing.expectError(error.NetworkSequenceExhausted, table.reserve(.getIdentity));
+    try std.testing.expectError(error.NetworkSequenceExhausted, table.reserve(.updateStatus));
     table.sequence = std.math.maxInt(u64);
     try std.testing.expectError(error.NetworkSequenceExhausted, table.advance());
     table.admission_sequence = std.math.maxInt(u64) - 2;
@@ -50,4 +54,17 @@ test "authenticated connect completion latches before a later close in the borro
     try std.testing.expect(!commands.latchConnects(&table, &events, Now.fromMilliseconds(.{ .mono_ms = 4, .unix_s = 0 })));
     try std.testing.expect(table.cells[token.index].failure == null);
     table.retire(token);
+}
+
+test "reserved state capacity retains ordinary execution order" {
+    var table: Table = .{};
+    const first = try table.reserve(.getIdentity);
+    const state = try table.reserve(.applyIntent);
+    const last = try table.reserve(.getIdentity);
+    for ([_]commands.Token{ first, state, last }) |token| table.transition(table.get(token), .queued);
+    for ([_]commands.Token{ first, state, last }) |token| {
+        try std.testing.expectEqual(token, table.nextQueued().?);
+        table.retire(token);
+    }
+    try std.testing.expect(table.nextQueued() == null);
 }
