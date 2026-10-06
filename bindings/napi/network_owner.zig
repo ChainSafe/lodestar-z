@@ -14,6 +14,7 @@ const requests_mod = @import("network_requests.zig");
 const publications = @import("network_publications.zig");
 const processor_metrics = n.metrics.processor;
 const network_wake = @import("network_wake.zig");
+const test_support = @import("network_test_support.zig");
 
 pub const Owner = struct {
     threaded_live: bool = false,
@@ -348,6 +349,7 @@ test "a command queued after wait planning executes in the turn whose poll obser
     const resolved = try n.configuration.resolve(.{
         .profile = .small,
         .seed = 1,
+        .gossip = .{ .topic_policy = &test_support.topic_policy },
         .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }},
         .admission_policy = .{ .deneb_start_slot = 0, .blocks_pre_deneb = 1024, .blocks_deneb = 128, .blob_identifiers_deneb = 768, .blob_identifiers_electra = 1152, .number_of_columns = 128, .column_chunks = 16384, .blob_schedule = &.{.{ .start_slot = 0, .max_blobs = 6 }} },
     });
@@ -423,6 +425,7 @@ test "queued request and disconnect share the protocol turn clock while latency 
     const resolved = try n.configuration.resolve(.{
         .profile = .small,
         .seed = 1,
+        .gossip = .{ .topic_policy = &test_support.topic_policy },
         .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }},
         .admission_policy = .{ .deneb_start_slot = 0, .blocks_pre_deneb = 1024, .blocks_deneb = 128, .blob_identifiers_deneb = 768, .blob_identifiers_electra = 1152, .number_of_columns = 128, .column_chunks = 16384, .blob_schedule = &.{.{ .start_slot = 0, .max_blobs = 6 }} },
     });
@@ -487,7 +490,7 @@ test "queued request and disconnect share the protocol turn clock while latency 
 
     const request = try runtime.requests.?.reserve(.blocks_by_root_v2, 32);
     defer {
-        owner.core.shutdown(Clock.time);
+        owner.core.deinit(io);
         requests_mod.closeLocked(&runtime);
         runtime.requests.?.retire(request);
     }

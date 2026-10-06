@@ -43,7 +43,7 @@ fn expectQuiescentGoodbye(setup: *Setup, serving: usize) !void {
     try std.testing.expect(received);
 }
 
-fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
+fn quiescenceRequest(mode: enum { fin, selection, delivered }) !void {
     const hold_selection = mode == .selection;
     const multistream = @import("wire/multistream.zig");
     var setup: Setup = .{};
@@ -64,7 +64,7 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
     const body = try rr.codec.encodeRequest(&([_]u8{7} ** 32), bytes[header.len + proposal.len ..]);
     const total = header.len + proposal.len + body.len;
     const first = if (hold_selection) header.len else total;
-    try std.testing.expectEqual(first, try setup.pair.server.write(stream, bytes[0..first], mode == .borrowed));
+    try std.testing.expectEqual(first, try setup.pair.server.write(stream, bytes[0..first], mode == .delivered));
     for (0..20) |_| try setup.step(0);
     var held = false;
     if (hold_selection) {
@@ -73,22 +73,24 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
         }
     } else {
         for (setup.client.protocols.reqresp.inbound) |slot| {
-            if (slot.request.running() and slot.request.protocol == .blocks_by_root_v2 and (slot.state == .receiving_request or mode == .borrowed) and slot.request.io.decoder.isDone()) held = true;
+            if (slot.request.running() and slot.request.protocol == .blocks_by_root_v2 and (slot.state == .receiving_request or mode == .delivered) and slot.request.io.decoder.isDone()) held = true;
         }
     }
     try std.testing.expect(held);
-    var borrowed: []const u8 = &.{};
-    if (mode == .borrowed) {
+    var delivered: ?rr.ReqResp.RequestHandle = null;
+    if (mode == .delivered) {
         var application: [1]rr.ReqResp.Event = undefined;
         const counts = (try setup.turn(&setup.client, .{ .application = &application })).counts;
         try std.testing.expectEqual(@as(usize, 1), counts.application);
-        borrowed = application[0].request.bytes;
-        try std.testing.expectEqualSlices(u8, &([_]u8{7} ** 32), borrowed);
+        try std.testing.expectEqualSlices(u8, &([_]u8{7} ** 32), application[0].request.bytes);
+        delivered = application[0].request.request;
     }
     const serving = setup.client.protocols.reqresp.resourceSnapshot().serving_occupied;
     setup.client.beginGracefulClose(setup.pair.now);
-    if (mode == .borrowed) {
-        try std.testing.expectEqualSlices(u8, &([_]u8{7} ** 32), borrowed);
+    if (delivered) |handle| {
+        const request = &setup.client.protocols.reqresp.inbound[handle.index].request;
+        try std.testing.expectEqual(.closed, request.stream_owner);
+        try std.testing.expectEqual(.cancelled, request.terminalEvent().?.failed.reason);
     } else try std.testing.expectEqual(total - first, try setup.pair.server.write(stream, bytes[first..total], true));
     try expectQuiescentGoodbye(&setup, serving);
 }
@@ -155,7 +157,7 @@ test "core native application response borrows survive same turn hard close" {
     const size = rr.Protocol.blocks_by_root_v2.info().response_max;
     const sink = try std.testing.allocator.alloc(u8, size);
     defer std.testing.allocator.free(sink);
-    defer setup.client.shutdown(setup.pair.now);
+    defer setup.client.deinit(setup.pair.io());
     const request = try setup.client.sendReqRespRequest(
         &setup.server.peerId(),
         .blocks_by_root_v2,
@@ -217,7 +219,7 @@ test "core native application response borrows survive same turn hard close" {
     );
 }
 
-test "core native shutdown cancels shared negotiations before native retirement without outputs" {
+test "core native shutdown cancels shared negotiations before deinit" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -230,9 +232,8 @@ test "core native shutdown cancels shared negotiations before native retirement 
     setup.client.shutdown(setup.pair.now);
     setup.client.shutdown(setup.pair.now);
     try std.testing.expectEqual(@as(usize, 0), setup.client.protocols.router.negotiator.active());
-    for (0..8) |_| try setup.step(0);
-    try std.testing.expect(setup.pair.client.registry.slots[conn.index].conn == null);
-    try std.testing.expectEqual(@as(u16, 0), setup.pair.client.registry.active_len);
+    setup.client.deinit(setup.pair.io());
+    try std.testing.expect(!setup.client.initialized);
 }
 
 test "core native application response borrows survive immediate public close" {
@@ -245,7 +246,7 @@ test "core native application response borrows survive immediate public close" {
     const size = rr.Protocol.blocks_by_root_v2.info().response_max;
     const sink = try std.testing.allocator.alloc(u8, size);
     defer std.testing.allocator.free(sink);
-    defer setup.client.shutdown(setup.pair.now);
+    defer setup.client.deinit(setup.pair.io());
     const request = try setup.client.sendReqRespRequest(
         &setup.server.peerId(),
         .blocks_by_root_v2,
@@ -324,8 +325,8 @@ test "application quiescence rejects a held gossip listener message handoff" {
     try quiescenceGossip(true);
 }
 
-test "application quiescence preserves the current request borrow before deferred cancellation" {
-    try quiescenceRequest(.borrowed);
+test "application quiescence immediately cancels a consumed request" {
+    try quiescenceRequest(.delivered);
 }
 
 test "core native wrong fork Goodbye hard closes with zero output and shutdown repeats" {
@@ -383,7 +384,7 @@ test "core reconciliation clears policy observations at quiescence and shutdown"
         try std.testing.expectEqualDeep(policy.Deficits{}, view.coverageDeficits());
         try std.testing.expectEqualDeep(DiscoveryNeed{}, view.discoveryNeed());
         try std.testing.expectEqualDeep(counters, view.counters);
-        _ = try setup.turn(&setup.client, .{});
+        if (graceful) _ = try setup.turn(&setup.client, .{});
         try std.testing.expectEqualDeep(policy.Deficits{}, view.coverageDeficits());
         try std.testing.expectEqualDeep(DiscoveryNeed{}, view.discoveryNeed());
     }

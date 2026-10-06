@@ -705,7 +705,6 @@ test "core sampling delivery follows real outbound stream retirement replacement
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().groups);
     try std.testing.expectEqual(snapshot.custody_groups, setup.client.peer_manager.catalog.get(snapshot.peer).?.custody_groups);
     setup.client.shutdown(setup.pair.now);
-    _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.peerCounts().connected);
     try std.testing.expect(!handler.deliveryAvailable(snapshot.connection.?));
 }

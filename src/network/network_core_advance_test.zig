@@ -4,10 +4,8 @@ const Source = @import("wake_sources.zig").Source;
 const types = @import("types.zig");
 const Dialing = @import("peers/dialing.zig").Dialing;
 const time = @import("time.zig");
-const NetworkCore = @import("network_core.zig").NetworkCore;
 const test_support = @import("quic/test_support.zig");
 const fault_io = @import("fault_io");
-const wait = @import("wait.zig");
 
 test "core connection deadlines preserve fractions through millisecond expiry" {
     const setup = try std.testing.allocator.create(Setup);
@@ -37,27 +35,28 @@ test "core connection deadlines preserve fractions through millisecond expiry" {
     try std.testing.expect(catalog.find(&identity) == null);
 }
 
-test "core advance uses supplied time and schedules deferred application shutdown" {
+test "core advance uses supplied time after immediate application shutdown" {
     const setup = try std.testing.allocator.create(Setup);
     defer std.testing.allocator.destroy(setup);
     setup.* = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
     const core = &setup.client;
-    core.protocols.quiesceApplications();
+    core.beginGracefulClose(setup.pair.now);
+    try std.testing.expect(!core.protocols.applications_open);
     const before = core.wakeups(setup.pair.now, .{});
-    try std.testing.expect(before.sources[@intFromEnum(Source.gossip)].runnable);
+    try std.testing.expect(!before.sources[@intFromEnum(Source.gossip)].runnable);
     var tick = setup.pair.now;
     tick.monotonic = time.milliseconds(tick.millis() + 1);
     const result = core.advance(setup.pair.io(), .{ .now = tick, .readiness = .{} }, .{}, .{});
     try std.testing.expect(result.failure == null);
     try std.testing.expectEqual(tick, result.transport.now);
-    try std.testing.expectEqual(.closed, core.protocols.applications);
+    try std.testing.expect(!core.protocols.applications_open);
     const after = core.wakeups(tick, .{});
     try std.testing.expect(!after.sources[@intFromEnum(Source.gossip)].runnable);
 }
 
-test "core close delivery schedules retirement before it becomes closed" {
+test "core peer close delivery schedules transport retirement" {
     const setup = try std.testing.allocator.create(Setup);
     defer std.testing.allocator.destroy(setup);
     setup.* = .{};
@@ -66,8 +65,7 @@ test "core close delivery schedules retirement before it becomes closed" {
     for (0..50) |_| try setup.step(0);
     const core = &setup.client;
     const now = setup.pair.now;
-    core.shutdown(now);
-    try std.testing.expect(!core.isClosed());
+    try std.testing.expect(core.closePeer(&setup.server.peerId(), now));
     try setup.pair.pump();
     const closed = core.advance(setup.pair.io(), .{ .now = now, .readiness = .{} }, .{}, .{});
     try std.testing.expect(closed.failure == null);
@@ -75,13 +73,13 @@ test "core close delivery schedules retirement before it becomes closed" {
     for (closed.transport_events) |event| closed_count += @intFromBool(event == .closed);
     try std.testing.expectEqual(@as(usize, 1), closed_count);
     try std.testing.expect(core.transport.engine.releasesPending());
-    try std.testing.expect(!core.isClosed());
+    try std.testing.expectEqual(@as(u16, 1), core.transport.engine.resourceSnapshot().active);
     const pending = core.wakeups(now, .{});
     try std.testing.expect(pending.sources[@intFromEnum(Source.transport_events)].runnable);
     const retired = core.advance(setup.pair.io(), .{ .now = now, .readiness = .{} }, .{}, .{});
     try std.testing.expect(retired.failure == null);
     try std.testing.expectEqual(@as(usize, 0), retired.transport_events.len);
-    try std.testing.expect(core.isClosed());
+    try std.testing.expectEqual(@as(u16, 0), core.transport.engine.resourceSnapshot().active);
     try std.testing.expect(!core.transport.engine.releasesPending());
 }
 
@@ -100,7 +98,7 @@ test "core advance preserves completed events when readiness fails" {
     try std.testing.expect(result.transport_events[0] == .closed);
 }
 
-test "core shutdown drains a cancelled request once before retirement" {
+test "core shutdown discards an undelivered request result on deinit" {
     const rr = @import("reqresp/root.zig");
     const setup = try std.testing.allocator.create(Setup);
     defer std.testing.allocator.destroy(setup);
@@ -111,28 +109,17 @@ test "core shutdown drains a cancelled request once before retirement" {
     const core = &setup.client;
     const sink = try std.testing.allocator.alloc(u8, rr.Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
-    defer core.shutdown(setup.pair.now);
-    const request = try core.sendReqRespRequest(&setup.server.peerId(), .blocks_by_root_v2, &([_]u8{0} ** 32), sink, .{}, setup.pair.now);
+    defer core.deinit(setup.pair.io());
+    _ = try core.sendReqRespRequest(&setup.server.peerId(), .blocks_by_root_v2, &([_]u8{0} ** 32), sink, .{}, setup.pair.now);
     core.shutdown(setup.pair.now);
-    try setup.pair.pump();
-    _ = core.advance(setup.pair.io(), .{ .now = setup.pair.now, .readiness = .{} }, .{}, .{});
-    _ = core.advance(setup.pair.io(), .{ .now = setup.pair.now, .readiness = .{} }, .{}, .{});
-    try std.testing.expect(!core.isClosed());
-    const blocked = core.waitPlan(setup.pair.now, .{}, .{});
-    try std.testing.expect(blocked.timeout.deadline.compare(.gt, blocked.now.monotonic));
-    var output: [1]rr.ReqResp.Event = undefined;
-    try std.testing.expect(core.waitPlan(setup.pair.now, .{ .application = &output }, .{}).timeout.deadline.compare(.eq, setup.pair.now.monotonic));
-    const delivered = core.advance(setup.pair.io(), .{ .now = setup.pair.now, .readiness = .{} }, .{ .application = &output }, .{});
-    try std.testing.expectEqual(@as(usize, 1), delivered.counts.application);
-    try std.testing.expectEqual(request, output[0].failed.request);
-    try std.testing.expectEqual(.cancelled, output[0].failed.reason);
-    try std.testing.expect(!core.isClosed());
-    const retired = core.advance(setup.pair.io(), .{ .now = setup.pair.now, .readiness = .{} }, .{ .application = &output }, .{});
-    try std.testing.expectEqual(@as(usize, 0), retired.counts.application);
-    try std.testing.expect(core.isClosed());
+    try std.testing.expectEqual(.stopped, core.phase());
+    try std.testing.expect(core.protocols.reqresp.pendingCounts().outbound > 0);
+    core.deinit(setup.pair.io());
+    try std.testing.expect(!core.initialized);
+    try std.testing.expectEqual(@as(usize, 0), core.reservations.bytes);
 }
 
-test "core shutdown waits for retained host serving work after stream retirement" {
+test "core shutdown discards retained host serving work without a release" {
     const rr = @import("reqresp/root.zig");
     const setup = try std.testing.allocator.create(Setup);
     defer std.testing.allocator.destroy(setup);
@@ -142,63 +129,27 @@ test "core shutdown waits for retained host serving work after stream retirement
     for (0..50) |_| try setup.step(0);
     const sink = try std.testing.allocator.alloc(u8, rr.Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
-    defer setup.client.shutdown(setup.pair.now);
+    defer setup.client.deinit(setup.pair.io());
     _ = try setup.client.sendReqRespRequest(&setup.server.peerId(), .blocks_by_root_v2, &([_]u8{0} ** 32), sink, .{}, setup.pair.now);
     const core = &setup.server;
     var output: [1]rr.ReqResp.Event = undefined;
-    var retained: ?rr.ReqResp.RequestHandle = null;
     var serving: ?rr.ReqResp.ServingHandle = null;
     for (0..50) |_| {
         try setup.pair.pump();
         _ = try setup.turn(&setup.client, .{});
         const result = try setup.turn(core, .{ .application = &output });
         if (result.counts.application == 1 and output[0] == .request) {
-            retained = output[0].request.request;
-            serving = core.retainServing(retained.?) orelse return error.TestUnexpectedResult;
+            serving = core.retainServing(output[0].request.request) orelse return error.TestUnexpectedResult;
             break;
         }
     }
-    try std.testing.expect(retained != null);
-    const host_socket = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
-    defer host_socket.close(std.testing.io);
-    try core.setHostWake(host_socket.handle);
-    defer core.setHostWake(null) catch unreachable;
+    try std.testing.expect(serving != null);
     core.shutdown(setup.pair.now);
     try std.testing.expectError(error.ProtocolDisabled, core.protocols.request(&core.transport.engine, .{ .index = 0, .generation = 1 }, .ping_v1, &.{}, &.{}, .{}, setup.pair.now));
-    var terminal_count: usize = 0;
-    for (0..5) |_| {
-        try setup.pair.pump();
-        const result = core.advance(setup.pair.io(), .{ .now = setup.pair.now, .readiness = .{} }, .{ .application = &output }, .{});
-        if (result.counts.application == 1 and output[0] == .failed) {
-            try std.testing.expectEqual(retained.?, output[0].failed.request);
-            terminal_count += 1;
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 1), terminal_count);
-    try std.testing.expectEqual(@as(u16, 0), core.transport.engine.resourceSnapshot().active);
-    try std.testing.expect(!core.isClosed());
-    try std.testing.expect(core.waitPlan(setup.pair.now, .{ .application = &output }, .{}).timeout.deadline.compare(.gt, setup.pair.now.monotonic));
-    const Completion = struct {
-        socket: std.Io.net.Socket,
-        serving: rr.ReqResp.ServingHandle,
-        released: bool = false,
-
-        fn apply(context: *anyopaque, owner: *NetworkCore, _: types.Now) NetworkCore.HostProgress {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            var byte: [1]u8 = undefined;
-            const packet = self.socket.receiveTimeout(std.testing.io, &byte, .{ .duration = .{ .clock = .awake, .raw = .zero } }) catch return .{};
-            if (std.mem.eql(u8, packet.data, "c")) self.released = owner.releaseServing(self.serving);
-            return .{};
-        }
-    };
-    var completion: Completion = .{ .socket = host_socket, .serving = serving.? };
-    try host_socket.send(std.testing.io, &host_socket.address, "c");
-    const ready = wait.poll(std.testing.io, core.waitPlan(setup.pair.now, .{}, .{}).sources, .{ .duration = .{ .clock = .awake, .raw = .zero } });
-    try std.testing.expect(ready.host);
-    const result = core.advance(setup.pair.io(), .{ .now = setup.pair.now, .readiness = ready }, .{}, .{ .handler = .{ .context = &completion, .apply = Completion.apply } });
-    try std.testing.expect(result.failure == null);
-    try std.testing.expect(completion.released);
-    try std.testing.expect(core.isClosed());
+    try std.testing.expect(core.protocols.reqresp.serving.entries[serving.?.index].retained);
+    core.deinit(setup.pair.io());
+    try std.testing.expect(!core.initialized);
+    try std.testing.expectEqual(@as(usize, 0), core.reservations.bytes);
 }
 
 test "core clock failure preserves dial intent without starting a connection" {
@@ -246,13 +197,10 @@ test "core lifecycle only advances and closed owners reject new connections" {
         core.shutdown(setup.pair.now);
         core.shutdown(setup.pair.now);
         core.beginGracefulClose(setup.pair.now);
-        try std.testing.expectEqual(.stopping, core.phase());
-        for (0..3) |_| _ = core.advance(setup.pair.io(), .{ .now = setup.pair.now }, .{}, .{});
-        try std.testing.expect(core.isClosed());
+        try std.testing.expectEqual(.stopped, core.phase());
         try std.testing.expectError(error.Stopped, core.transport.engine.dial(&test_support.client_address, setup.client.peerId(), setup.pair.now));
-        try setup.pair.pump();
-        _ = core.advance(setup.pair.io(), .{ .now = setup.pair.now }, .{}, .{});
-        try std.testing.expect(core.isClosed());
+        core.deinit(setup.pair.io());
+        try std.testing.expect(!core.initialized);
     }
 }
 

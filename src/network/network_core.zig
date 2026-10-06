@@ -92,7 +92,8 @@ pub const NetworkCore = struct {
         counts: Counts = .{ .peers = 0, .application = 0 },
         transport: Transport.Progress,
         readiness: wait.Result = .{},
-        /// Authenticated transport events, borrowed until the next advance, shutdown or deinit.
+        /// Authenticated transport events, borrowed until the next advance,
+        /// beginGracefulClose, shutdown or deinit.
         transport_events: []const Engine.Event = &.{},
         /// Only discovery performed protocol work; transport retirement still ran.
         discovery_only: bool = false,
@@ -200,7 +201,6 @@ pub const NetworkCore = struct {
         if (!self.initialized) return;
         const read = Now.read(io) catch self.last_now;
         self.shutdown(read.floor(self.last_now));
-        self.host_wake = null;
         if (self.discovery) |owned| {
             owned.deinit(io);
             self.allocator.destroy(owned);
@@ -214,32 +214,24 @@ pub const NetworkCore = struct {
         std.debug.assert(self.reservations.bytes == 0);
         self.initialized = false;
     }
-    /// Stops admission and cancels active work. Continue advancing with application output capacity
-    /// to receive terminal results, and release retained serving work, until isClosed returns true.
-    /// Deinit instead discards those obligations and ends all borrows immediately.
+    /// Cancels the network between turns, invalidating borrowed events and releasing the host wake
+    /// descriptor. Do not advance again. The caller completes outstanding operations; deinit ends
+    /// remaining payload borrows and frees storage. Final metrics remain readable until deinit.
     pub fn shutdown(self: *NetworkCore, now: Now) void {
-        self.last_now = now;
         const pm = &self.peer_manager;
-        if (pm.stop()) {
-            self.transport.engine.stopAdmission();
-            self.protocols.shutdown(&self.transport.engine, now);
-            const count = pm.catalog.snapshots(pm.snapshot_scratch);
-            for (pm.snapshot_scratch[0..count]) |snapshot| if (snapshot.connection) |conn| {
-                self.closeConnection(snapshot.peer, conn, .shutdown, now);
-            };
-            var close: [peers.Dialing.attempts_max]t.Handle = undefined;
-            for (pm.shutdownDials(now, &close)) |conn| self.closeDial(conn);
-        }
+        if (!pm.stop()) return;
+        self.last_now = now;
+        self.host_wake = null;
+        self.transport.engine.stopAdmission();
+        self.protocols.shutdown(&self.transport.engine, now);
+        const count = pm.catalog.snapshots(pm.snapshot_scratch);
+        for (pm.snapshot_scratch[0..count]) |snapshot| if (snapshot.connection) |conn| {
+            self.closeConnection(snapshot.peer, conn, .shutdown, now);
+        };
+        var close: [peers.Dialing.attempts_max]t.Handle = undefined;
+        for (pm.shutdownDials(now, &close)) |conn| self.closeDial(conn);
         if (self.discovery) |owned| owned.shutdown();
         self.transport.engine.closeAll();
-    }
-    /// Transport and request/Identify work have retired, including retained request handlers.
-    /// Copied host events and gossip validation tasks have independent lifetimes; deinit frees owner storage.
-    pub fn isClosed(self: *const NetworkCore) bool {
-        return self.phase() == .stopping and self.isDrained();
-    }
-    fn isDrained(self: *const NetworkCore) bool {
-        return self.transport.engine.resourceSnapshot().active == 0 and self.protocols.isDrained();
     }
     pub fn phase(self: *const NetworkCore) manager.PeerManager.Phase {
         return self.peer_manager.phase;
@@ -292,7 +284,7 @@ pub const NetworkCore = struct {
     pub fn closePeer(self: *NetworkCore, identity: *const t.PeerId, now: Now) bool {
         const peer = self.peer_manager.catalog.find(identity) orelse return false;
         const connection = self.peer_manager.catalog.rowFor(peer).?.connection orelse return false;
-        if (self.peer_manager.phase == .stopping) return false;
+        if (self.peer_manager.phase == .stopped) return false;
         self.closeConnection(peer, connection, .host, now);
         if (self.peer_manager.cancelConnect(identity, now)) |conn| self.closeDial(conn);
         return true;
@@ -377,12 +369,13 @@ pub const NetworkCore = struct {
         return self.peer_manager.rememberedPeers(now, out);
     }
     /// Quiesces applications and closes every connection gracefully, sending Goodbye while
-    /// control progress continues.
+    /// control progress continues. Call between turns after consuming borrowed events.
+    /// The owner bounds the grace period, then calls shutdown and deinit without draining results.
     pub fn beginGracefulClose(self: *NetworkCore, now: Now) void {
         const pm = &self.peer_manager;
         if (!pm.quiesce(now)) return;
         self.transport.engine.stopAdmission();
-        self.protocols.quiesceApplications();
+        self.protocols.closeApplications(&self.transport.engine, now);
         var active = self.protocols.router.active_capabilities;
         active.receive = .initEmpty();
         self.protocols.router.setCapabilities(active);
@@ -515,10 +508,9 @@ pub const NetworkCore = struct {
         return changed;
     }
 
-    /// Borrows a readable OS descriptor. The host drains it after a returned
-    /// readiness.host indication and detaches before closing or reusing it.
-    /// Shutdown keeps it attached for host completions. Explicit detach or deinit ends the borrow
-    /// without draining or closing caller storage.
+    /// Borrows a readable OS descriptor; the host drains it after readiness.host.
+    /// Detach, shutdown or deinit ends the borrow without closing the descriptor.
+    /// End the borrow before closing or reusing the descriptor.
     pub fn setHostWake(self: *NetworkCore, descriptor: ?i32) error{ UnsupportedWait, InvalidWakeSource, Stopped }!void {
         if (descriptor) |fd| {
             if (self.peer_manager.phase != .running) return error.Stopped;
@@ -534,11 +526,12 @@ pub const NetworkCore = struct {
 
     /// Scheduling is a snapshot for the supplied output capacities; recompute after mutation.
     pub fn wakeups(self: *const NetworkCore, now: Now, outputs: Outputs) wake_sources.Wakeups {
+        std.debug.assert(self.phase() != .stopped);
         var result: wake_sources.Wakeups = .{};
         const pm = &self.peer_manager;
         result.note(.peer_events, pm.peerSchedule(outputs.peers.len));
         self.protocols.collectWakeups(.{ .application = outputs.application.len, .control = controls_per_turn, .identify = identify_per_turn }, &result);
-        if (pm.phase != .stopping) result.note(.control, pm.controlSchedule(now));
+        result.note(.control, pm.controlSchedule(now));
         if (pm.phase == .running) {
             result.note(.dial, pm.dialing.schedule(&pm.catalog, @min(dials_per_turn, pm.dialRoom())));
             result.note(.dial, .{ .runnable = pm.dialing.selectionNeeded(&pm.catalog), .deadline = time.optionalMilliseconds(pm.dialing.selection_deadline) });
@@ -598,11 +591,13 @@ pub const NetworkCore = struct {
     /// Advances one bounded turn from supplied readiness and time; never waits for readiness.
     /// Receive/expire/collect precede host apply, protocols, discovery, dials and flush. The I/O
     /// provider must complete datagram operations without waiting. Read event arrays before the
-    /// next advance or teardown; request payloads follow the request API's borrow contracts.
+    /// next advance, beginGracefulClose or teardown; request payloads follow the request API's
+    /// borrow contracts. Do not call after shutdown or initiate shutdown from the host callback.
     /// Time must not move backwards.
     /// Counts remain valid on failure.
     pub fn advance(self: *NetworkCore, io: std.Io, input: Input, outputs: Outputs, host: Host) Result {
         std.debug.assert(self.initialized);
+        std.debug.assert(self.phase() != .stopped);
         std.debug.assert(input.now.monotonic.compare(.gte, self.last_now.monotonic));
         const tick = input.now;
         const readiness = input.readiness;
@@ -700,15 +695,6 @@ pub const NetworkCore = struct {
         std.debug.assert(events.len <= limits.events_per_turn_max);
         const pm = &self.peer_manager;
         const quic = &self.transport.engine;
-        if (pm.phase == .stopping) {
-            const counts = self.protocols.process(quic, &.{}, now, .{
-                .application = outputs.application,
-                .control = &self.controls,
-                .identify = &self.identify_results,
-            });
-            self.controlEvents(self.controls[0..counts.control], now);
-            return .{ .peers = pm.catalog.pollEvents(outputs.peers), .application = counts.application };
-        }
         if (pm.phase == .running) {
             var close: [peers.Dialing.attempts_max]t.Handle = undefined;
             for (pm.expireDials(now, &close)) |conn| self.closeDial(conn);

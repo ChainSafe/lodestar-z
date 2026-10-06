@@ -83,7 +83,7 @@ test "a payload release while the owner waits for budget wakes the owner once" {
 }
 
 test "abandon wakes an owner already stopping gracefully" {
-    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
+    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false, .graceful = true };
     runtime.wake = try network_wake.Wake.init();
     defer runtime.wake.?.deinit();
     runtime.requestStop();

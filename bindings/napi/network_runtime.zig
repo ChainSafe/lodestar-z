@@ -370,7 +370,7 @@ pub const Runtime = struct {
         }
         self.lock();
         // Destroy native borrows before the bridge completes its host-owned operations.
-        // Core terminal events are intentionally discarded by this immediate teardown path.
+        // Global shutdown completes bridge operations without draining Core terminal events.
         self.destroyOwner();
         requests_mod.closeLocked(self);
         incoming_mod.closeLocked(self);

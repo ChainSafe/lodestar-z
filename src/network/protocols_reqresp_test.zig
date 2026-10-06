@@ -126,7 +126,7 @@ test "protocol stack control wakeup includes negotiation after application quies
     var setup: Pair = .{};
     try setup.init(.{ .outbound_max = 4, .serving_max = 4 }, .{ .outbound_max = 4, .serving_max = 4 });
     defer setup.deinit();
-    setup.shared.client.quiesceApplications();
+    setup.shared.client.closeApplications(&setup.shared.pair.client, setup.shared.pair.now);
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
     const handle = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .timeouts = .{ .response = .fromMilliseconds(60_000) } }, setup.shared.pair.now);

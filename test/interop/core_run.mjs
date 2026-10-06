@@ -70,6 +70,7 @@ for (const fork of ["phase0", "altair", "fulu"]) {
       await js.command("control", {address, protocol: wire.goodbye});
       await waitFor(() => responder.events.some((event) => event.event === "closed"));
       await responder.command("shutdown");
+      await responder.completion;
     } finally {
       await responder.stop();
     }
