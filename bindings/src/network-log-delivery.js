@@ -8,12 +8,11 @@ const LOG_LOSS_MS = 30000;
 export const LOG_ERRORS_NAME = "lodestar_native_log_delivery_errors_total";
 export const LOG_DRAIN_ERRORS_NAME = "lodestar_native_log_drain_errors_total";
 
-/** Delivers bounded log batches; its timer holds it weakly so it cannot retain a dropped facade. */
+/** Delivers bounded log batches until the pump stops it after native closes. */
 export class LogDelivery {
   #runtime;
   #host;
   #onError;
-  #weak = new WeakRef(this);
   #stopped = false;
   #logTimer = undefined;
   #logErrors = 0;
@@ -34,12 +33,11 @@ export class LogDelivery {
   }
 
   start() {
-    this.#logTimer = setTimeout(LogDelivery.#logFired, LOG_MS, this.#weak).unref();
+    this.#logTimer = setTimeout(LogDelivery.#logFired, LOG_MS, this).unref();
   }
 
-  static #logFired(weak) {
-    const logs = weak.deref();
-    if (!logs || logs.#stopped) return;
+  static #logFired(logs) {
+    if (logs.#stopped) return;
     logs.#deliverLogs(1);
     logs.start();
   }

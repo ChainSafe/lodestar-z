@@ -1,7 +1,6 @@
 import {expect, test, vi} from "vitest";
 import {
   applicationConfig,
-  childTestTimeout,
   exchange,
   gossipAll,
   holdSettling,
@@ -9,7 +8,6 @@ import {
   metricValue,
   peerIdFromHex,
   requestForks,
-  runChild,
   settleOnly,
   startRuntime,
   subscriptions,
@@ -514,20 +512,6 @@ for (const hoodi of [false, true]) {
     20000
   );
 }
-
-test("gossip operation promises and weak notifier permit facade collection", childTestTimeout(), () => {
-  const output = runChild([
-    "--import",
-    "tsx",
-    "--expose-gc",
-    "--force-node-api-uncaught-exceptions-policy",
-    "bindings/test/fixtures/network-gossip-lifecycle.mjs",
-  ]);
-  const result = JSON.parse(output.trim());
-  expect(result).toMatchObject({collected: true});
-  expect(result.accepted).toBeGreaterThan(0);
-  expect(result.accepted).toBe(result.settled);
-});
 
 test("closed runtime rejects a retained verdict", async () => {
   const pair = await gossipPair();

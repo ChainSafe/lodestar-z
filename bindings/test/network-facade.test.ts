@@ -435,11 +435,7 @@ test("the facade validates its host, starts without host callbacks and hides the
   expect(await network.closed).toEqual({reason: "requested"});
 });
 
-test.each([
-  ["a job's report retained elsewhere", "facade-gc"],
-  ["a report reaction that captures the host", "facade-gc-reaction"],
-  ["promises only derived from a report", "facade-gc-derived"],
-])("drops the facade and host without close, with %s", childTestTimeout(), (_, mode) => {
+test.each(["close-reports", "close-batches"])("explicit close lifecycle: %s", childTestTimeout(), (mode) => {
   const output = runChild(["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode]);
-  expect(output).toContain("facade-collected");
+  expect(output).toContain(`${mode}-settled`);
 });

@@ -22,7 +22,6 @@ type NativeCompletion = {
 function owner() {
   const next: {completions: NativeCompletion[]; closed: unknown} = {closed: null, completions: []};
   const native = {
-    abandon: vi.fn(),
     exchange: vi.fn(() => {
       const result = {closed: next.closed, completions: next.completions, more: false};
       next.completions = [];
@@ -32,10 +31,8 @@ function owner() {
     fail: vi.fn((_site: string, reason: string): never => {
       throw new Breached(reason);
     }),
-    getState: () => native.state,
-    state: "running",
   };
-  const completions = new CompletionOwner(native, () => true);
+  const completions = new CompletionOwner(native);
   completions.size({command: 2, incoming: 2, publication: 2, request: 2});
   return {
     completions,
@@ -134,26 +131,6 @@ describe("completion owner", () => {
         return handle(0, 1n);
       })
     ).toThrow(Breached);
-  });
-
-  it("holds itself and the event loop from native's last notification until the close result, never after it", () => {
-    vi.useFakeTimers({toFake: ["setInterval", "clearInterval"]});
-    try {
-      const node = owner();
-      node.completions.notifier();
-      expect(vi.getTimerCount()).toBe(0);
-      node.native.state = "closed";
-      node.completions.notifier();
-      node.completions.notifier();
-      expect(vi.getTimerCount()).toBe(1);
-      node.deliver([], {reason: "requested"});
-      expect(vi.getTimerCount()).toBe(0);
-      // A last notification that arrives after an exchange already delivered the close holds nothing.
-      node.completions.notifier();
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("keeps a request record through its chunks and clears it with the terminal outcome, pull first", async () => {

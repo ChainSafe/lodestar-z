@@ -1,5 +1,4 @@
 import {startPeer} from "../utils/network-peer.js";
-import {requestForks, startRuntime} from "../utils/network.js";
 import {takeIncoming} from "../utils/network-incoming.js";
 import assert from "node:assert/strict";
 import {setTimeout as delay} from "node:timers/promises";
@@ -8,10 +7,12 @@ import {
   applicationConfig,
   localIntent,
   peerIdFromHex,
+  requestForks,
+  startRuntime,
   Settlements,
   topicName,
   unreachableConnect,
-} from "../utils/network.ts";
+} from "../utils/network.js";
 import {Child} from "../../../test/interop/child.mjs";
 
 const mode = process.argv[2];
@@ -155,7 +156,7 @@ try {
 
     await incoming?.closed;
   } else {
-    // Promises held while the facade is collected without close still reach their terminals, closed last.
+    // Pending operations settle before close even after the caller drops its runtime reference.
     const closed = runtime.closed;
     const settlements = new Settlements();
     const unsettled = settlements.unsettledAtClose(closed);
@@ -164,14 +165,10 @@ try {
     settlements.watch(() =>
       runtime.publishGossip(topicName(), new Uint8Array(4000), {allowZeroPeers: true, ignoreDuplicate: true})
     );
-    const weak = new WeakRef(runtime);
+    const closing = runtime.close();
     runtime = null;
-    for (let i = 0; i < 100; i++) {
-      await delay(10);
-      global.gc();
-      if (!weak.deref()) break;
-    }
-    assert.equal(weak.deref(), undefined);
+    global.gc();
+    await closing;
     await settlements.settled();
     assert.deepEqual(await closed, {reason: "requested"});
     assert.deepEqual(await unsettled, []);

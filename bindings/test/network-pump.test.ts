@@ -21,7 +21,6 @@ import type {
   NativeIncomingRequest,
   NativeLogBatch,
 } from "../src/network-runtime.js";
-import {TurnScheduler} from "../src/network-turn-scheduler.js";
 import {childTestTimeout, spawnChild} from "./utils/network.js";
 import {Escalated, immediates, runUntilEscalated} from "./utils/network-turn-scheduler.js";
 
@@ -157,13 +156,8 @@ function fixture() {
     fail: vi.fn((site: string, _reason: string): never => {
       throw new Escalated(site);
     }),
-    get scheduler(): TurnScheduler {
-      return scheduler;
-    },
     state: "running",
   };
-  // The pump outlives every test, so its turns never drain without it.
-  const scheduler = new TurnScheduler(runtime);
   const host = {
     capacity: vi.fn((): {ordinary: boolean; serving: number} | null => ({ordinary: true, serving: 32})),
     checkDependencies: vi.fn((checks: readonly DependencyCheck[]): readonly boolean[] => checks.map(() => true)),
@@ -1157,7 +1151,7 @@ describe("binding pump acknowledgements", () => {
     expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
   });
 
-  it("settles a report's derivatives at native close while the pump lives, though nothing retains the report", async () => {
+  it("settles derived report promises at native close", async () => {
     const node = fixture();
     const outcome = (promise: Promise<unknown>) =>
       promise.then(

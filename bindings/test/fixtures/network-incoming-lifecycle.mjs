@@ -1,7 +1,7 @@
-import {holdSettling, requestForks, runtimeReleased} from "../utils/network.ts";
+import {holdSettling, requestForks, runtimeReleased} from "../utils/network.js";
 import assert from "node:assert/strict";
 import {setTimeout as delay} from "node:timers/promises";
-import {BLOCKS, incomingPair, takeIncoming} from "../utils/network-incoming.ts";
+import {BLOCKS, incomingPair, takeIncoming} from "../utils/network-incoming.js";
 
 const mode = process.argv[2];
 let warnings = 0;
@@ -26,17 +26,7 @@ try {
     console.log("incoming-lifecycle", mode, "ok");
     process.exit(0);
   }
-  if (mode === "facade-gc") {
-    const weak = new WeakRef(right);
-    right = null;
-    for (let i = 0; i < 300; i++) {
-      await delay(10);
-      global.gc();
-      if (!weak.deref()) break;
-    }
-    assert.equal(weak.deref(), undefined);
-    assert.equal(await closed, undefined);
-  } else if (mode === "object-gc") {
+  if (mode === "object-gc") {
     const weak = new WeakRef(incoming);
     incoming = null;
     for (let i = 0; i < 300; i++) {
@@ -46,8 +36,7 @@ try {
     }
     assert.equal(weak.deref(), undefined);
     assert.equal(await closed, undefined);
-  } else if (mode === "ready-gc") {
-    // A runtime collected while its host awaits a permission settles it, refused, after the stream's close.
+  } else if (mode === "ready-close") {
     holdSettling(right, true);
     const permission = incoming.ready();
     const order = [];
@@ -56,14 +45,14 @@ try {
       (error) => order.push(error.code)
     );
     void closed.then(() => order.push("closed"));
-    const weak = new WeakRef(right);
-    right = null;
-    for (let i = 0; i < 300; i++) {
-      await delay(10);
-      global.gc();
-      if (!weak.deref()) break;
+    const closing = right.close();
+    try {
+      for (let i = 0; i < 500 && right.state !== "closed"; i++) await delay(10);
+      assert.equal(right.state, "closed");
+    } finally {
+      holdSettling(right, false);
     }
-    assert.equal(weak.deref(), undefined);
+    await closing;
     await assert.rejects(permission, {code: "NetworkIncomingClosed"});
     assert.equal(await closed, undefined);
     assert.deepEqual(order, ["closed", "NetworkIncomingClosed"]);
@@ -97,8 +86,6 @@ try {
     assert.equal(await closed, undefined);
     assert.equal(incoming.cancel(), closed);
   } else throw Error("unknown lifecycle scenario");
-  // A collected server stops without closing its connection, so its request would otherwise run to its deadline.
-  if (mode === "facade-gc" || mode === "ready-gc") await stream.return();
   await pending;
   console.log("incoming-lifecycle", mode, "ok");
 } finally {

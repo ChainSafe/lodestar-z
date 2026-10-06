@@ -341,18 +341,16 @@ stockTest(
 test.each([
   "iterator-gc",
   "pull-gc",
-  "facade-gc",
+  "close-pending",
   "exit",
   "closed-terminal",
   "closed-facade-gc",
   "closed-facade-gc-early",
-])("request lifecycle settles independently of facade and notifier: %s", childTestTimeout(), (mode) => {
+])("request lifecycle: %s", childTestTimeout(), (mode) => {
   const output = runChild([
     "--import",
     "tsx",
     "--expose-gc",
-    "--import",
-    "tsx",
     "bindings/test/fixtures/network-request-lifecycle.mjs",
     mode,
   ]);

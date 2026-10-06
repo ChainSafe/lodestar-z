@@ -4,7 +4,6 @@
  * @typedef {import("./network-runtime.js").NativeEscalation} NativeEscalation
  * @typedef {"now" | "later" | "idle"} Continuation
  * @typedef {{turn(): Continuation}} Pump
- * @typedef {Pick<NativeNetworkApplicationRuntime, "exchange" | "fail">} Route
  */
 
 const RETRY_MS = 25;
@@ -24,7 +23,7 @@ export const CONTROL = Object.freeze({
 /**
  * Formats `cause` for native `fail`, which terminates the process.
  *
- * @param {Pick<Route, "fail">} runtime
+ * @param {Pick<NativeNetworkApplicationRuntime, "fail">} runtime
  * @param {NativeEscalation} site
  * @param {unknown} cause
  * @returns {never}
@@ -36,32 +35,20 @@ export function escalate(runtime, site, cause) {
 }
 
 /**
- * One runtime's scheduled turns, with its one scheduling flag and one retry timer. A turn is the bound pump's while it
- * lives; once the pump was collected, it is a control-only exchange through the completion owner's `route`, until
- * native reports closed. It holds the pump weakly and the route strongly, so a scheduled turn roots the completion
- * owner but never the pump or its host.
+ * Schedules one pump's bounded turns through shutdown. Referenced immediates keep completion delivery alive after
+ * native releases its notifier; retries waiting for host capacity do not keep the event loop alive.
  */
 export class TurnScheduler {
-  #route;
-  /** @type {WeakRef<Pump> | null} */
-  #pump = null;
+  #pump;
   #scheduled = false;
   #running = false;
   #stopped = false;
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   #retry = undefined;
 
-  /** @param {Route} route */
-  constructor(route) {
-    this.#route = route;
-  }
-
-  /**
-   * Makes each later turn `pump`'s while it lives.
-   * @param {Pump} pump
-   */
-  bind(pump) {
-    this.#pump = new WeakRef(pump);
+  /** @param {Pump} pump */
+  constructor(pump) {
+    this.#pump = pump;
   }
 
   schedule() {
@@ -86,8 +73,7 @@ export class TurnScheduler {
     /** @type {Continuation} */
     let next = "now";
     try {
-      const pump = scheduler.#pump?.deref();
-      next = pump ? pump.turn() : scheduler.#drain();
+      next = scheduler.#pump.turn();
     } finally {
       scheduler.#running = false;
       scheduler.#continue(next);
@@ -111,21 +97,6 @@ export class TurnScheduler {
         throw new Error(`Invalid turn continuation: ${invalid}`);
       }
     }
-  }
-
-  /**
-   * A control-only exchange; the route settles what it delivers. Notifications bring the next.
-   * @returns {Continuation}
-   */
-  #drain() {
-    let result;
-    try {
-      result = this.#route.exchange([], CONTROL);
-    } catch (error) {
-      this.stop();
-      escalate(this.#route, "generated_batch", error);
-    }
-    return result.more ? "now" : "idle";
   }
 
   #retryLater() {

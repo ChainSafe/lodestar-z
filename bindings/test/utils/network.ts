@@ -267,16 +267,19 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
  * with the test, which can also hold the host to take every exchange's results itself.
  */
 function settlingHost(onWorkAvailable: () => void = () => undefined) {
-  // Weak, so a pending retry never keeps the facade alive.
-  let runtime: WeakRef<Pick<NativeNetworkApplicationRuntime, "exchange">> | undefined;
+  let runtime: Pick<NativeNetworkApplicationRuntime, "exchange"> | undefined;
   let scheduled = false;
   let held = false;
   let timer: NodeJS.Timeout | undefined;
   const drain = () => {
     scheduled = false;
     if (held) return;
-    const result = runtime?.deref()?.exchange([], settleOnly);
-    if (result?.more) schedule();
+    const result = runtime?.exchange([], settleOnly);
+    if (result?.closed) {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      runtime = undefined;
+    } else if (result?.more) schedule();
     else if (result?.disabledWaiting && !timer) {
       timer = setTimeout(() => {
         timer = undefined;
@@ -292,7 +295,7 @@ function settlingHost(onWorkAvailable: () => void = () => undefined) {
   };
   return {
     attach(value: Pick<NativeNetworkApplicationRuntime, "exchange">) {
-      runtime = new WeakRef(value);
+      runtime = value;
     },
     hold(value: boolean) {
       held = value;

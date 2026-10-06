@@ -13,7 +13,7 @@ import {
 import {BLOCKS} from "./utils/network-incoming.js";
 import {startPeer} from "./utils/network-peer.js";
 
-test.each(["exit", "facade-gc", "object-gc", "ready-gc", "late-retire", "held-ack", "held-closed", "notifier"])(
+test.each(["exit", "object-gc", "ready-close", "late-retire", "held-ack", "held-closed", "notifier"])(
   "incoming lifecycle subprocess %s",
   childTestTimeout(),
   (mode) => {
@@ -21,8 +21,6 @@ test.each(["exit", "facade-gc", "object-gc", "ready-gc", "late-retire", "held-ac
       "--import",
       "tsx",
       "--expose-gc",
-      "--import",
-      "tsx",
       "bindings/test/fixtures/network-incoming-lifecycle.mjs",
       mode,
     ]);

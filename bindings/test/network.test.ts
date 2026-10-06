@@ -333,11 +333,10 @@ it("refuses a fatal site JavaScript does not raise with an ordinary throw", asyn
 });
 
 it.each([
-  ["gc", "gc-rebound"],
+  ["closed-gc", "closed-gc-rebound"],
   ["exit", "ready-exit"],
   ["promises", "promises-settled"],
   ["await-close", "close-awaited"],
-  ["orphan", "orphan-drained"],
   ["publication-exit", "published-exit"],
   ["command-exit", "commanded-exit"],
   ["request-exit", "requested-exit"],
