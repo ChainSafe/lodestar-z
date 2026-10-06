@@ -26,3 +26,25 @@ test "diagnostics should preserve the error and own its details" {
         try std.fmt.bufPrint(&output, "{f}", .{&diagnostics.detail.?}),
     );
 }
+
+test "diagnostics should record withdrawal length mismatch" {
+    var diagnostics: Diagnostics = .{};
+    try std.testing.expectEqual(
+        error.WithdrawalsLengthMismatch,
+        state_transition.withdrawalsLengthMismatch(&diagnostics, 2, 1),
+    );
+
+    const mismatch = &diagnostics.detail.?.state_transition.withdrawals_length_mismatch;
+    try std.testing.expectEqual(@as(usize, 2), mismatch.expected);
+    try std.testing.expectEqual(@as(usize, 1), mismatch.actual);
+
+    var output: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "WithdrawalsLengthMismatch expected=2 actual=1",
+        try std.fmt.bufPrint(&output, "{f}", .{&diagnostics.detail.?}),
+    );
+    try std.testing.expectEqual(
+        error.WithdrawalsLengthMismatch,
+        state_transition.withdrawalsLengthMismatch(null, 2, 1),
+    );
+}

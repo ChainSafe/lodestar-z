@@ -324,12 +324,11 @@ export declare class BeaconStateView {
     isBlinded: boolean,
     proposerRewards?: ProposerRewards
   ): BlockRewards;
-  // biome-ignore lint/suspicious/noExplicitAny: stub
-  // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
-  computeAttestationsRewards(validatorIds?: (number | string)[]): Promise<any>;
-  // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
-  // biome-ignore lint/suspicious/noExplicitAny: stub
-  computeSyncCommitteeRewards(block: any, validatorIds: (number | string)[]): Promise<any>;
+  computeAttestationsRewards(validatorIds?: (number | string)[]): AttestationsRewards;
+  computeSyncCommitteeRewards(
+    block: SyncCommitteeRewardsBlock,
+    validatorIds?: (number | string)[]
+  ): SyncCommitteeReward[];
   getLatestWeakSubjectivityCheckpointEpoch(): number;
 
   getVoluntaryExitValidity(signedVoluntaryExit: SignedVoluntaryExit, verifySignature: boolean): VoluntaryExitValidity;
@@ -427,3 +426,39 @@ declare const bindings: {
 };
 
 export default bindings;
+
+export interface SyncCommitteeRewardsBlock {
+  slot: number;
+  body: {
+    randaoReveal: Uint8Array;
+    syncAggregate?: {
+      syncCommitteeBits: {uint8Array: Uint8Array; bitLen: number};
+    };
+  };
+}
+
+export interface SyncCommitteeReward {
+  validatorIndex: number;
+  reward: number;
+}
+
+export interface AttestationReward {
+  head: number;
+  target: number;
+  source: number;
+  inclusionDelay: number;
+  inactivity: number;
+}
+
+export interface IdealAttestationsReward extends AttestationReward {
+  effectiveBalance: number;
+}
+
+export interface TotalAttestationsReward extends AttestationReward {
+  validatorIndex: number;
+}
+
+export interface AttestationsRewards {
+  idealRewards: IdealAttestationsReward[];
+  totalRewards: TotalAttestationsReward[];
+}
