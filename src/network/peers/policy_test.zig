@@ -6,6 +6,61 @@ const expect = std.testing.expect;
 const equal = std.testing.expectEqual;
 const options: Catalog.Options = .{ .capacity = 8, .outbound_reserve = 1, .target_peers = 2, .max_peers = 4, .min_outbound = 1 };
 
+test "peer policy repeated equivalent arrivals preserve the healthy incumbent" {
+    const configured: Catalog.Options = .{ .target_peers = 1, .max_peers = 2, .min_outbound = 0 };
+    const incumbent: p.Input = .{ .peer = .{ .index = 1, .generation = 1 }, .connected_at_ms = 10, .coverage = .{ .attnets = 1 }, .score = -0.5 };
+    for (0..32) |round| {
+        const newcomer: p.Input = .{ .peer = .{ .index = 2, .generation = round + 1 }, .connected_at_ms = 100 + round, .coverage = .{ .attnets = 1 }, .score = 0.5, .outbound = true };
+        const inputs = if (round % 2 == 0) [_]p.Input{ incumbent, newcomer } else [_]p.Input{ newcomer, incumbent };
+        const result = p.select(&inputs, &.{ .attnets = 1 }, configured, round);
+        try equal(@as(u16, 1), result.retained_count);
+        try expect(result.retained.isSet(round % 2));
+        try equal(t.DisconnectReason.count_pruning, result.reasons[1 - round % 2].?);
+        try equal(@as(u16, 0), result.deficits.attestation);
+    }
+}
+
+test "peer policy tenure yields to useful coverage healthy service and outbound floor" {
+    var configured: Catalog.Options = .{ .target_peers = 1, .max_peers = 2, .min_outbound = 0 };
+    var inputs = [_]p.Input{
+        .{ .connected_at_ms = 10, .coverage = .{ .attnets = 1 } },
+        .{ .connected_at_ms = 100, .coverage = .{ .attnets = 3 }, .outbound = true },
+    };
+    var result = p.select(&inputs, &.{ .attnets = 3 }, configured, 1);
+    try expect(result.retained.isSet(1));
+    try equal(@as(u16, 0), result.deficits.attestation);
+    inputs[1].coverage.attnets = 1;
+    inputs[0].score = -3;
+    result = p.select(&inputs, &.{ .attnets = 1 }, configured, 1);
+    try expect(result.retained.isSet(1));
+    inputs[0].score = 0;
+    inputs[0].ready = false;
+    result = p.select(&inputs, &.{ .attnets = 1 }, configured, 1);
+    try expect(result.retained.isSet(1));
+    inputs[0].ready = true;
+    configured.min_outbound = 1;
+    result = p.select(&inputs, &.{ .attnets = 1 }, configured, 1);
+    try expect(result.retained.isSet(1));
+    try equal(@as(u16, 0), result.deficits.outbound);
+}
+
+test "peer policy equal admission times break ties independently of snapshot order" {
+    const configured: Catalog.Options = .{ .target_peers = 1, .max_peers = 3, .min_outbound = 0 };
+    const inputs = [_]p.Input{
+        .{ .peer = .{ .index = 100, .generation = 1 }, .connected_at_ms = 10 },
+        .{ .peer = .{ .index = 8, .generation = 2 }, .connected_at_ms = 10 },
+        .{ .peer = .{ .index = 3, .generation = 1 }, .connected_at_ms = 10 },
+    };
+    const baseline = p.select(&inputs, &.{}, configured, 1);
+    const winner = inputs[baseline.retained.findFirstSet().?].peer;
+    for ([_][3]usize{ .{ 0, 2, 1 }, .{ 1, 0, 2 }, .{ 1, 2, 0 }, .{ 2, 0, 1 }, .{ 2, 1, 0 } }) |order| {
+        const reordered = [_]p.Input{ inputs[order[0]], inputs[order[1]], inputs[order[2]] };
+        const result = p.select(&reordered, &.{}, configured, 1);
+        try equal(@as(u16, 1), result.retained_count);
+        try equal(winner, reordered[result.retained.findFirstSet().?].peer);
+    }
+}
+
 test "peer policy separates sampling routes from custody service deficits" {
     var demand: t.Demand = .{};
     var input: p.Input = .{};
@@ -60,6 +115,11 @@ test "peer policy replacement cooldown preserves unmet deficits and independent 
     try equal(@as(u16, 1), replace.dial_budget);
     const refill = p.selectWithPacing(inputs[0..1], &.{}, configured, 1, false);
     try equal(@as(u16, 1), refill.dial_budget);
+    var outbound_options = configured;
+    outbound_options.min_outbound = 1;
+    const outbound = p.selectWithPacing(&inputs, &.{}, outbound_options, 1, false);
+    try equal(@as(u16, 1), outbound.deficits.outbound);
+    try equal(@as(u16, 1), outbound.dial_budget);
 }
 
 test "peer policy does not sacrifice satisfied duties to chase broad publication at the ceiling" {

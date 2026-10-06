@@ -188,11 +188,17 @@ test "core coverage gives initial subscriptions finite grace even after metadata
     const closing = &setup.client.peer_manager.control.connections[snapshots[0].peer.index];
     try expect(closing.closing != null);
     try equal(setup.pair.now.millis() + manager.replacement_interval_ms, setup.client.peer_manager.replacement_after_ms);
-    try equal(@as(u16, 1), setup.client.peer_manager.selection.dial_budget);
+    try equal(@as(u16, 0), setup.client.peer_manager.selection.dial_budget);
     try equal(@as(u16, 2), setup.client.peer_manager.coverageDeficits().attestation);
     const closed = closing.closing.?;
     for (0..10) |_| setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     try std.testing.expectEqualDeep(closed, closing.closing.?);
+    setup.pair.advance(manager.replacement_interval_ms - 1);
+    setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
+    try equal(@as(u16, 0), setup.client.peer_manager.selection.dial_budget);
+    setup.pair.advance(1);
+    setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
+    try equal(@as(u16, 1), setup.client.peer_manager.selection.dial_budget);
 }
 
 fn subscribeServer(setup: *Setup, name: []const u8) !void {

@@ -358,8 +358,12 @@ pub const PeerManager = struct {
             _ = self.disconnect(input.peer, reason, now);
             if (reason == .count_pruning) self.replacement_after_ms = now.millis() +| replacement_interval_ms;
         };
-        if (now.millis() < self.replacement_after_ms)
+        if (now.millis() < self.replacement_after_ms) {
+            // Pruning can start the cooldown after selection computed its dial budget.
+            const refill = @max(self.catalog.options.target_peers -| self.selection.retained_count, self.selection.deficits.outbound);
+            self.selection.dial_budget = @min(self.selection.dial_budget, refill);
             self.selection_deadline = @min(self.selection_deadline orelse self.replacement_after_ms, self.replacement_after_ms);
+        }
     }
 
     fn selectionInput(
@@ -374,6 +378,7 @@ pub const PeerManager = struct {
         const gossip_score = self.gossipScore(gossipsub, snapshot.peer, now) orelse 0;
         var input: policy.Input = .{
             .peer = snapshot.peer,
+            .connected_at_ms = snapshot.connected_at_ms,
             .direct = snapshot.direct,
             .outbound = snapshot.direction == .outbound,
             .relevant = snapshot.relevant,
