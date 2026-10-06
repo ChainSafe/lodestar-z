@@ -4,6 +4,7 @@ const t = @import("types.zig");
 const reputation = @import("reputation.zig");
 pub const Input = struct {
     peer: t.PeerRef = .{ .index = 0, .generation = 0 },
+    connected_at_ms: u64 = 0,
     coverage: t.Coverage = .{},
     stable: t.Coverage = .{},
     direct: bool = false,
@@ -123,6 +124,7 @@ const Rank = struct {
     sampling_loss: u16,
     coverage_loss: u16,
     stable_loss: u16,
+    connected_at_ms: u64,
     outbound: bool,
     tie: u32,
 };
@@ -139,6 +141,8 @@ fn less(a: *const Rank, b: *const Rank) bool {
     if (a.sampling_loss != b.sampling_loss) return a.sampling_loss < b.sampling_loss;
     if (a.coverage_loss != b.coverage_loss) return a.coverage_loss < b.coverage_loss;
     if (a.stable_loss != b.stable_loss) return a.stable_loss < b.stable_loss;
+    // Connection age breaks healthy coverage ties before incidental score differences.
+    if (a.connected_at_ms != b.connected_at_ms) return a.connected_at_ms > b.connected_at_ms;
     if (a.health != b.health) return a.health < b.health;
     if (a.outbound != b.outbound) return !a.outbound;
     return a.tie < b.tie;
@@ -177,6 +181,7 @@ fn removal(
             .sampling_loss = @intCast(input.coverage.groups.intersectWith(sampled).count()),
             .coverage_loss = utility(&input.coverage, &scarce),
             .stable_loss = utility(&input.stable, &wanted),
+            .connected_at_ms = input.connected_at_ms,
             .outbound = input.outbound,
             .tie = ties[i],
         };
@@ -196,9 +201,10 @@ pub fn selectWithPacing(inputs: []const Input, demand: *const t.Demand, options:
     var result: Result = .{};
     var evaluating: u16 = 0;
     var ties: [256]u32 = undefined;
-    var random: std.Random.DefaultPrng = .init(seed);
     for (inputs, 0..) |*input, i| {
-        ties[i] = random.random().int(u32);
+        var hash = std.hash.Wyhash.init(seed);
+        std.hash.autoHash(&hash, input.peer);
+        ties[i] = @truncate(hash.final());
         if (input.reject) |reason| {
             result.reasons[i] = reason;
             continue;
