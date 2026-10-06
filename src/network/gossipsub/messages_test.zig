@@ -6,14 +6,13 @@ const Gossipsub = @import("Gossipsub.zig");
 const support = @import("test_support.zig");
 const topic = @import("topic.zig");
 const constants = @import("constants.zig");
-const limits_mod = @import("../gossip_limits.zig");
 const policy = @import("../gossip_processor/policy.zig");
 const topic_policy = @import("topic_policy.zig");
 const snappy = @import("snappy");
 const validation = @import("validation.zig");
 const turn_mod = @import("turn.zig");
 
-test "message admission retains canonical topic bounds and namespace-free fallbacks" {
+test "message admission retains canonical topic bounds" {
     const Sink = struct {
         canonical: ?topic.Canonical = null,
         maximum: usize = 0,
@@ -37,22 +36,16 @@ test "message admission retains canonical topic bounds and namespace-free fallba
             return true;
         }
     };
-    const Case = enum { namespace, canonical, generic, limited };
-    for (std.meta.tags(Case)) |case| {
-        const name = if (case == .generic) "/eth2/01020304/custom/ssz_snappy" else "/eth2/01020304/beacon_block/ssz_snappy";
+    {
+        const name = "/eth2/01020304/beacon_block/ssz_snappy";
         var boundary: topic_policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
         boundary.rules[0] = .{ .count = 1, .ssz_min = 4, .ssz_max = 6000 };
         var options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8 };
-        if (case == .namespace) options.topic_policy = &.{boundary};
-        if (case == .limited) {
-            const limits: limits_mod.Limits = @splat(.{ .items = 2, .bytes = 4096 });
-            options.payload_limits = limits;
-            options.validation_capacity = limits_mod.items(&limits);
-        }
+        options.topic_policy = &.{boundary};
         var g = try Gossipsub.init(t.allocator, options);
         defer g.deinit();
         const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-        const index = support.intern(&g, name).?;
+        const index = support.activate(&g, name).?;
         g.overlay.rows[index].subscribed = true;
         const context: messages.Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options, .epoch = g.cycle.epoch };
         const source: messages.Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = peer, .connection = g.sessions.rows[peer.index].conn };
@@ -68,13 +61,9 @@ test "message admission retains canonical topic bounds and namespace-free fallba
         try t.expect(received == .admitted);
         try t.expectEqual(index, received.admitted.topic_index);
         try t.expectEqual(sink.id, received.admitted.id);
-        try t.expectEqual(case != .generic, sink.canonical != null);
+        try t.expectEqual(true, sink.canonical != null);
         if (sink.canonical) |canonical| try t.expectEqual(topic.Kind.beacon_block, canonical.name.kind);
-        const maximum = switch (case) {
-            .namespace => constants.maxCompressedLen(6000),
-            .limited => 4096,
-            .canonical, .generic => constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE),
-        };
+        const maximum = constants.maxCompressedLen(6000);
         try t.expectEqual(maximum, sink.maximum);
         try t.expectEqual(validation.Validation.chargedBytes(maximum), sink.source_maximum);
         try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(sink.handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));

@@ -33,7 +33,7 @@ pub fn run(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     std.debug.print("case=recovery_resolve preset={s} optimize={s} promises_cap={} batch_ids={} backing_bytes={} miss_calls={} hit_calls={}\n", .{ @tagName(preset.active_preset), @tagName(@import("builtin").mode), promises_cap, batch_ids, Recovery.backingBytes(), miss_calls, hit_rounds * batch_ids });
-    var peers = try PeerBook.init(allocator, &.{ .retained_score_ms = 10_000, .retained_capacity = 2, .retained_outbound_reserve = 1 });
+    var peers = try PeerBook.init(allocator, &.{ .retained_score_ms = 10_000, .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(allocator);
     const connection: network.Handle = .{ .index = 0, .generation = 1 };
     const peer = peers.admit(connection, &.{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound }, 0).admitted.peer;

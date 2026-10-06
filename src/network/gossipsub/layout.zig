@@ -7,7 +7,6 @@ const PeerIo = @import("peer_io.zig").PeerIo;
 const Gossipsub = @import("Gossipsub.zig");
 const sessions_mod = @import("sessions.zig");
 const overlay = @import("overlay.zig");
-const local_intent = @import("local_intent.zig");
 const messages = @import("messages.zig");
 const recovery = @import("recovery.zig");
 
@@ -59,12 +58,12 @@ pub const Layout = struct {
             .deliveries = delivery.Pool.capacity(options.connected_capacity, options.validation_capacity),
             .receive_arena_bytes = options.receive_arena_bytes,
             .session_buffer_bytes = PeerIo.bufferBytes(options),
-            .namespace_bytes = if (options.topic_policy) |boundaries| policy.Namespace.backingBytes(boundaries, options.connected_capacity) else 0,
+            .namespace_bytes = policy.Namespace.backingBytes(options.topic_policy, options.connected_capacity),
         };
     }
 
     pub fn residentTopics(options: *const Options) u16 {
-        return if (options.topic_policy) |boundaries| policy.validate(boundaries) catch unreachable else constants.topics_cap;
+        return policy.validate(options.topic_policy) catch unreachable;
     }
 
     /// The history must hold every message retained in its six windows, publications included,
@@ -83,7 +82,6 @@ pub const Layout = struct {
             sessions_mod.Sessions.metadataBytes(self) +
             peers.PeerBook.backingBytesForTopics(self.retained, self.topics) +
             @as(usize, self.topics) * @sizeOf(overlay.Row) +
-            local_intent.topicSetBytes(self.topics) +
             messages.Messages.metadataBytes(self) +
             recovery.Recovery.backingBytes() + self.namespace_bytes;
         const frames = self.receive_arena_bytes + constants.GOSSIP_MAX_SIZE;

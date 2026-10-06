@@ -283,7 +283,7 @@ test "core subscriptions use copied startup policy and reject atomically" {
     const revision = owner.peers.scores.revision;
     try std.testing.expectError(error.InvalidTopic, core_test.subscribe(&node, "bad"));
     try std.testing.expectEqual(revision, owner.peers.scores.revision);
-    try std.testing.expectEqual(@as(u64, 1), owner.overlay.rows[0].generation);
+    try std.testing.expectEqual(@as(?u16, 0), owner.overlay.findTopic("/eth2/01020304/beacon_block/ssz_snappy"));
     var name: [topic_mod.topic_max_len]u8 = undefined;
     for (0..constants.topics_cap - 1) |index| {
         const topic = try topic_fixture.churnTopic(index, &name);
@@ -303,7 +303,7 @@ test "core BPO same-fork digest transition updates status and advertisement" {
     const first: ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
     const second: ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
-    const resolved = try configuration.resolve(.{ .profile = .small, .seed = 1, .forks = &.{ first, second }, .admission_policy = policy_fixture.config() });
+    const resolved = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .profile = .small, .seed = 1, .forks = &.{ first, second }, .admission_policy = policy_fixture.config() });
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &resolved, .{
         .host = &key,
@@ -720,7 +720,7 @@ test "core local intent fork BPO announcements remembered peer and event borrows
     for (0..3000) |_| {
         _ = try pair.pump();
         if (pair.a.last_now.millis() - start > 10_000) break;
-        const ns = &gb.overlay.namespace.?;
+        const ns = &gb.overlay.namespace;
         if (pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1 and ns.subscribed(0, ns.lookup(active).?.ordinal) and ns.subscribed(0, ns.lookup(bpo).?.ordinal) and gb.sessions.rows[0].outStream() != null and pair.a.protocols.gossipsub.sessions.rows[0].outStream() != null) {
             connected = true;
             break;

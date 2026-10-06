@@ -6,7 +6,6 @@ function transient(snapshot) {
     snapshot.gossipDescriptors === 0 &&
     snapshot.gossipQueuedBytes === 0 &&
     snapshot.heldFrames === 0 &&
-    snapshot.txRetains === 0 &&
     snapshot.pendingValidations === 0 &&
     snapshot.promises === 0
   );

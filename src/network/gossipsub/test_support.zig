@@ -109,7 +109,7 @@ const Admissions = struct {
 
 pub fn init(allocator: std.mem.Allocator, options: Gossipsub.Options) !Gossipsub {
     var configured = options;
-    configured.topic_policy = options.topic_policy orelse &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })};
+    configured.topic_policy = if (options.topic_policy.len > 0) options.topic_policy else &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })};
     return Gossipsub.init(allocator, configured);
 }
 
@@ -131,8 +131,10 @@ pub fn subscriptionUpdate(g: *const Gossipsub, name: ?[]const u8, subscribed: bo
     return topic_fixture.subscriptionsInto(names[0..count], out);
 }
 
-pub fn intern(g: *Gossipsub, name: []const u8) ?u16 {
-    return g.overlay.internTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), name);
+pub fn activate(g: *Gossipsub, name: []const u8) ?u16 {
+    const topic = (g.overlay.namespace.lookup(name) orelse return null).ordinal;
+    g.overlay.activateTopic(&g.overlayContext(g.last_now_ms), topic);
+    return topic;
 }
 
 pub fn subscribe(g: *Gossipsub, name: []const u8) !void {
@@ -145,8 +147,7 @@ pub fn unsubscribe(g: *Gossipsub, name: []const u8) !void {
 
 fn setSubscription(g: *Gossipsub, name: []const u8, subscribed: bool) !void {
     var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
-    var workspace = try local_intent.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-    defer workspace.deinit(std.testing.allocator);
+    var workspace: local_intent.Workspace = .{};
     _ = try g.prepareSubscriptions(try subscriptionUpdate(g, name, subscribed, &boundaries), &workspace, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }), g.overlay.slot);
     g.commitSubscriptions(&workspace);
 }
@@ -225,7 +226,7 @@ pub fn ageHistory(g: *Gossipsub) void {
 }
 
 pub fn sessions(a: std.mem.Allocator, capacity: u16) !sessions_mod.Sessions {
-    const options: options_mod.Options = .{ .connected_capacity = capacity };
+    const options: options_mod.Options = .{ .connected_capacity = capacity, .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} };
     return sessions_mod.Sessions.init(a, &options, &layout.Layout.init(&options));
 }
 

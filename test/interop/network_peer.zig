@@ -238,8 +238,7 @@ pub const Peer = struct {
             var subscription: Gossip.local_intent.Boundary = .{ .digest = parsed.digest };
             subscription.mask(.beacon_block)[0] = 1;
             subscription.lengths[@intFromEnum(Gossip.topic.Kind.beacon_block)] = 1;
-            var workspace = try Gossip.local_intent.Workspace.init(self.allocator, self.protocols.gossipsub.overlay.rows.len);
-            defer workspace.deinit(self.allocator);
+            var workspace: Gossip.local_intent.Workspace = .{};
             _ = try self.protocols.gossipsub.prepareSubscriptions(&.{subscription}, &workspace, self.now, 0);
             self.protocols.gossipsub.commitSubscriptions(&workspace);
         } else if (std.mem.eql(u8, c.op, "publish")) {

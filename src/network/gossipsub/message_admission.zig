@@ -13,7 +13,7 @@ pub const Admission = struct {
     context: *const messages.Context,
     source: *const messages.Source,
     topic_index: u16,
-    canonical: ?topic.Canonical,
+    canonical: topic.Canonical,
     maximum_compressed: usize,
     compressed: []const u8,
     event: messages.MessageEvent,
@@ -52,7 +52,7 @@ pub const Admission = struct {
     }
 
     fn kind(self: *const Admission) topic.Kind {
-        return if (self.canonical) |canonical| canonical.name.kind else .beacon_block;
+        return self.canonical.name.kind;
     }
 
     pub fn charge(self: *const Admission, cost: usize) bool {
@@ -126,7 +126,7 @@ pub const Admission = struct {
         assert(self.feasible(&resources));
         var reservation = owner.validation.reserve(self.event.id).?;
         const payload = owner.history.admitPayload(&owner.store, self.event.id, self.event.topic, self.compressed).?;
-        self.event.handle = reservation.commit(&owner.store, self.context.peers, payload, self.source.peer, self.context.overlay.ref(self.topic_index), self.event.admitted_ms);
+        self.event.handle = reservation.commit(&owner.store, self.context.peers, payload, self.source.peer, self.topic_index, self.event.admitted_ms);
         owner.validation.attribution(self.event.handle).source_eligible = self.context.overlay.inMesh(self.topic_index, self.source.session.index);
         owner.store.seal(payload);
         _ = owner.seen.add(self.event.id, self.event.admitted_ms);

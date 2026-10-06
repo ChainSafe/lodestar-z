@@ -6,7 +6,7 @@ const prom = @import("../metrics/registry.zig");
 
 pub fn write(g: *const Gossipsub, running: bool, digest: [4]u8, w: *prom.Encoder) prom.Error!void {
     const overlay = g.overlay;
-    const ns = if (overlay.namespace) |*value| value else return;
+    const ns = &overlay.namespace;
     var mesh: [policy.topic_max]u16 = @splat(0);
     var subscribed = std.StaticBitSet(policy.topic_max).empty;
     var visible = std.StaticBitSet(policy.boundary_max).empty;
@@ -14,15 +14,14 @@ pub fn write(g: *const Gossipsub, running: bool, digest: [4]u8, w: *prom.Encoder
         for (ns.boundaries, 0..) |*boundary, index| {
             if (std.mem.eql(u8, &boundary.digest, &digest)) visible.set(index);
         }
-        for (overlay.rows) |*row| {
+        for (overlay.rows, 0..) |*row, ordinal| {
             if (!row.active) continue;
-            const match = ns.lookup(row.string[0..row.string_len]) orelse continue;
-            mesh[match.ordinal] = @intCast(row.mesh.count());
+            mesh[ordinal] = @intCast(row.mesh.count());
             if (!row.subscribed) continue;
-            subscribed.set(match.ordinal);
+            subscribed.set(ordinal);
             for (ns.offsets, ns.boundaries, 0..) |starts, boundary, index| {
                 const last = starts[policy.kind_count - 1] + boundary.rules[policy.kind_count - 1].count;
-                if (match.ordinal >= starts[0] and match.ordinal < last) visible.set(index);
+                if (ordinal >= starts[0] and ordinal < last) visible.set(index);
             }
         }
     }

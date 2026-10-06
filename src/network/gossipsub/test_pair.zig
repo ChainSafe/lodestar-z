@@ -25,9 +25,9 @@ pub const Pair = struct {
         const reqresp: ReqResp.Options = .{ .forks = &.{}, .connections = 128, .outbound_max = 1, .serving_max = 1, .inbound_per_connection_max = 1, .admission = try ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 128, 1) };
         const topics = &.{ topic_fixture.bytes(.{ 1, 2, 3, 4 }), topic_fixture.bytes(.{ 0x6a, 0x95, 0xa1, 0xa9 }) };
         var client_options = client;
-        client_options.topic_policy = client.topic_policy orelse topics;
+        client_options.topic_policy = if (client.topic_policy.len > 0) client.topic_policy else topics;
         var server_options = server;
-        server_options.topic_policy = server.topic_policy orelse topics;
+        server_options.topic_policy = if (server.topic_policy.len > 0) server.topic_policy else topics;
         try self.shared.initWindow(.{ .reqresp = reqresp, .gossipsub = client_options, .router = .{ .negotiations_max = 8 } }, .{ .reqresp = reqresp, .gossipsub = server_options, .router = .{ .negotiations_max = 8 } }, stream_window);
     }
 

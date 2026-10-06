@@ -6,12 +6,11 @@ const PeerId = @import("../wire/peer_id.zig").PeerId;
 const assert = std.debug.assert;
 const score_mod = @import("score.zig");
 const options_mod = @import("options.zig");
-const layout = @import("layout.zig");
 
 pub const capacity = constants.retained_peers_cap;
 pub const outbound_reserve = 32;
 pub const Ref = struct { index: u16, generation: u64 };
-pub const Backoff = struct { until: u64 = 0, topic_generation: u64 = 0 };
+pub const Backoff = struct { until: u64 = 0 };
 pub const Ip = [16]u8;
 pub const Metadata = struct {
     identity: PeerId,
@@ -49,7 +48,7 @@ pub const PeerBook = struct {
     retention_ms: u64,
     reserved: u16,
 
-    pub fn init(a: std.mem.Allocator, options: *const options_mod.Options) !PeerBook {
+    pub fn init(a: std.mem.Allocator, options: *const options_mod.Options, topic_count: u16) !PeerBook {
         const retention_ms = options.retained_score_ms;
         const count = options.retained_capacity;
         const reserved = options.retained_outbound_reserve;
@@ -59,7 +58,6 @@ pub const PeerBook = struct {
         const rows = try a.alloc(Row, count);
         errdefer a.free(rows);
         @memset(rows, .{});
-        const topic_count = layout.Layout.residentTopics(options);
         const backoffs = try a.alloc(Backoff, @as(usize, count) * topic_count);
         errdefer a.free(backoffs);
         @memset(backoffs, .{});
@@ -148,10 +146,9 @@ pub const PeerBook = struct {
         row.disconnected_at = now;
         row.retain_until = now +| self.retention_ms;
         row.negative = self.score(ref, now) < 0;
-        // Topic reclamation cannot reuse a generation while its backoff is live.
         for (self.backoffs[@as(usize, ref.index) * self.scores.topic_params.len ..][0..self.scores.topic_params.len]) |entry| {
             row.retain_until = @max(row.retain_until, entry.until);
-            if (entry.topic_generation != 0 and now < entry.until) row.negative = true;
+            if (now < entry.until) row.negative = true;
         }
     }
 
@@ -231,16 +228,15 @@ pub const PeerBook = struct {
         return &self.backoffs[@as(usize, ref.index) * self.scores.topic_params.len + topic];
     }
 
-    pub fn addBackoff(self: *PeerBook, ref: Ref, topic: u16, generation: u64, now: u64, duration_ms: u64) void {
+    pub fn addBackoff(self: *PeerBook, ref: Ref, topic: u16, now: u64, duration_ms: u64) void {
         const entry = self.backoff(ref, topic);
-        if (entry.topic_generation != generation) entry.* = .{ .topic_generation = generation };
         entry.until = @max(entry.until, now +| @min(duration_ms, 3_600_000));
         self.rows[ref.index].negative = true;
     }
 
-    pub fn backedOff(self: *PeerBook, ref: Ref, topic: u16, generation: u64, now: u64) bool {
+    pub fn backedOff(self: *PeerBook, ref: Ref, topic: u16, now: u64) bool {
         const entry = self.backoff(ref, topic);
-        return entry.topic_generation == generation and now < entry.until;
+        return now < entry.until;
     }
 
     pub fn migrate(self: *PeerBook, conn: Handle, address: types.Address) void {

@@ -244,11 +244,10 @@ fn applyScheduled(g: *gossip.Gossipsub, chain_config: *const chain.Config, epoch
         }
         count += 1;
     }
-    var workspace = try gossip.local_intent.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-    defer workspace.deinit(std.testing.allocator);
+    var workspace: gossip.local_intent.Workspace = .{};
     const slot = epoch * preset.preset.SLOTS_PER_EPOCH;
     if (try g.prepareSubscriptions(desired[0..count], &workspace, Now.fromMilliseconds(.{ .mono_ms = slot * 12_000, .unix_s = 0 }), slot)) g.commitSubscriptions(&workspace);
-    return workspace.len;
+    return workspace.desired.count();
 }
 
 test "network chain exact capacity schedule advances into the supported three digest overlap" {
@@ -280,19 +279,16 @@ test "network chain namespace capacity preserves retired scores and backoffs acr
             try std.testing.expectEqual(@as(usize, 410), try applyScheduled(&g, &chain_config, 8));
             const peer = test_support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
             const logical = g.sessions.rows[peer.index].logical;
-            var generations: [205]u64 = undefined;
-            for (g.overlay.rows[0..205], 0..) |row, i| {
-                generations[i] = row.generation;
+            for (0..205) |i| {
                 g.peers.scores.invalid(logical.index, @intCast(i));
-                g.peers.addBackoff(logical, @intCast(i), row.generation, 1_000_000_000, 60_000);
+                g.peers.addBackoff(logical, @intCast(i), 1_000_000_000, 60_000);
             }
             if (!delayed) try std.testing.expectEqual(@as(usize, if (incoming_epoch == 14) 410 else 205), try applyScheduled(&g, &chain_config, 12));
             try std.testing.expectEqual(@as(usize, 410), try applyScheduled(&g, &chain_config, incoming_epoch - 2));
             for (g.overlay.rows[0..205], 0..) |row, i| {
                 try std.testing.expect(row.active and !row.subscribed);
-                try std.testing.expectEqual(generations[i], row.generation);
                 try std.testing.expectEqual(@as(f64, 1), g.peers.scores.topics[@as(usize, logical.index) * g.overlay.rows.len + i].invalid);
-                try std.testing.expect(g.peers.backedOff(logical, @intCast(i), generations[i], 1_000_000_001));
+                try std.testing.expect(g.peers.backedOff(logical, @intCast(i), 1_000_000_001));
             }
             var live: usize = 0;
             for (g.overlay.rows) |row| {

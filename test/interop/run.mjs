@@ -27,8 +27,7 @@ function quiescent(snapshot) {
     snapshot.reqrespInbound === 0 &&
     snapshot.reqrespOutbound === 0 &&
     snapshot.storeEntries === 0 &&
-    snapshot.storePages === 0 &&
-    snapshot.txRetains === 0
+    snapshot.storePages === 0
   );
 }
 

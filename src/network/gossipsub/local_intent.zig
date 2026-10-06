@@ -1,5 +1,4 @@
 const std = @import("std");
-const constants = @import("constants.zig");
 const topic = @import("topic.zig");
 const policy = @import("topic_policy.zig");
 
@@ -33,40 +32,15 @@ pub const TopicSet = std.DynamicBitSetUnmanaged;
 pub fn topicSetBytes(topics: usize) usize {
     return ((topics + @bitSizeOf(usize) - 1) / @bitSizeOf(usize) + 1) * @sizeOf(usize);
 }
-pub const Pins = struct {
-    validation: TopicSet = .{},
-    outbound: TopicSet = .{},
-};
-pub const Assignment = struct {
-    generation: u64,
-    ordinal: u16,
-    row: u16,
-    existing: bool,
-};
-
 /// Private scratch between preparation and commit in one serialized owner call.
 pub const Workspace = struct {
-    entries: [constants.topics_cap]Assignment = undefined,
-    len: u16 = 0,
     desired: OrdinalSet = .empty,
-    reserved: TopicSet = .{},
-    pins: Pins = .{},
     now_ms: u64 = 0,
     slot: u64 = 0,
     prepared: bool = false,
-
-    pub fn init(a: std.mem.Allocator, topics: usize) !Workspace {
-        std.debug.assert(topics > 0 and topics <= policy.topic_max);
-        return .{ .reserved = try TopicSet.initEmpty(a, topics) };
-    }
-
-    pub fn deinit(self: *Workspace, a: std.mem.Allocator) void {
-        self.reserved.deinit(a);
-        self.* = undefined;
-    }
 };
 
-pub const Error = error{ TopicCapacity, DuplicateBoundary, InvalidTopic, TopicPolicyRequired };
+pub const Error = error{ TopicCapacity, DuplicateBoundary, InvalidTopic };
 
 test {
     _ = @import("local_intent_test.zig");

@@ -5,7 +5,6 @@ const local_intent = @import("local_intent.zig");
 const protobuf = @import("protobuf.zig");
 const topic_mod = @import("topic.zig");
 const peers_mod = @import("peer_book.zig");
-const score_mod = @import("score.zig");
 const Engine = @import("../quic/Engine.zig");
 const Handle = Engine.Handle;
 const Now = @import("../types.zig").Now;
@@ -16,7 +15,6 @@ const peer_id = @import("../wire/peer_id.zig");
 const test_pair = @import("test_pair.zig");
 const test_support = @import("../quic/test_support.zig");
 const topic_fixture = @import("topic_fixture.zig");
-const Reservations = @import("../reservations.zig").Reservations;
 
 test "gossip accepts a full namespace subscription transition in one RPC" {
     const policy = @import("topic_policy.zig");
@@ -93,13 +91,12 @@ test "gossip policy reconnect retains authenticated penalty" {
     const topic_name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, topic_name);
     const topic = g.overlay.findTopic(topic_name).?;
-    const topic_generation = g.overlay.rows[topic].generation;
-    g.peers.addBackoff(original, topic, topic_generation, 1, 60_000);
+    g.peers.addBackoff(original, topic, 1, 60_000);
     g.connectionClosed(.{ .index = 0, .generation = 1 });
     const second = g.addPeer(.{ .index = 0, .generation = 2 }, &metadata, now).admitted;
     try std.testing.expectEqual(original, g.sessions.rows[second.index].logical);
-    try std.testing.expect(g.peers.backedOff(original, topic, topic_generation, 60_000));
-    try std.testing.expect(!g.peers.backedOff(original, topic, topic_generation, 60_001));
+    try std.testing.expect(g.peers.backedOff(original, topic, 60_000));
+    try std.testing.expect(!g.peers.backedOff(original, topic, 60_001));
     try std.testing.expect(g.peers.score(g.sessions.rows[second.index].logical, 1) < 0);
 }
 
@@ -232,7 +229,7 @@ test "gossip policy duplicate connections preserve one logical owner and direct 
     try std.testing.expect(!g.peers.rows[g.sessions.rows[indirect.index].logical.index].direct);
 }
 
-test "gossip policy topic reuse waits for attribution and preserves copied event window" {
+test "gossip policy topic expiry waits for attribution and preserves copied event window" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const conn: Handle = .{ .index = 0, .generation = 1 };
@@ -240,7 +237,6 @@ test "gossip policy topic reuse waits for attribution and preserves copied event
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     const topic = g.overlay.findTopic(name).?;
-    const generation = g.overlay.rows[topic].generation;
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
@@ -254,17 +250,18 @@ test "gossip policy topic reuse waits for attribution and preserves copied event
     try std.testing.expectEqualDeep(copied, g.resourceSnapshot());
     try support.unsubscribe(&g, name);
     g.connectionClosed(conn);
-    g.overlay.reclaimTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), topic);
+    g.overlay.expireTopic(&g.overlayContext(g.last_now_ms), topic, g.messages.validation.retainsTopic(topic));
     try std.testing.expect(g.overlay.rows[topic].active);
     _ = g.report(event.handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     g.messages.validation.expire(&g.messages.store, &g.peers, 30_002);
     g.last_now_ms = 30_002;
-    g.overlay.reclaimTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), topic);
+    g.overlay.expireTopic(&g.overlayContext(g.last_now_ms), topic, g.messages.validation.retainsTopic(topic));
     try std.testing.expect(!g.overlay.rows[topic].active);
     const next_name = "/eth2/01020304/voluntary_exit/ssz_snappy";
     try support.subscribe(&g, next_name);
-    try std.testing.expectEqual(@as(?u16, topic), g.overlay.findTopic(next_name));
-    try std.testing.expect(g.overlay.rows[topic].generation > generation);
+    try std.testing.expect(g.overlay.findTopic(next_name).? != topic);
+    try support.subscribe(&g, name);
+    try std.testing.expectEqual(topic, g.overlay.findTopic(name).?);
     try std.testing.expectEqualStrings(name, event.topic);
     try std.testing.expectEqualStrings("retained", event.bytes);
 }
@@ -281,7 +278,7 @@ test "gossip policy topic retirement bounds arbitrarily slow active score decay"
     g.overlay.flushSubscriptions(&g.sessions.rows[peer.index].io.tx, &g.sessions.control_scratch, g.last_now_ms);
     g.last_now_ms = 11;
     g.peers.scores.refresh(11);
-    g.overlay.reclaimTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), topic);
+    g.overlay.expireTopic(&g.overlayContext(g.last_now_ms), topic, g.messages.validation.retainsTopic(topic));
     try std.testing.expect(!g.overlay.rows[topic].active);
     try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[peer.index].logical, 11));
 }
@@ -301,7 +298,7 @@ test "gossip policy unsent subscriptions cannot pin retired topics indefinitely"
     try std.testing.expect(g.sessions.find(conn) == null);
     try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
     const topic = g.overlay.findTopic(name).?;
-    g.overlay.reclaimTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), topic);
+    g.overlay.expireTopic(&g.overlayContext(g.last_now_ms), topic, g.messages.validation.retainsTopic(topic));
     try std.testing.expect(!g.overlay.rows[topic].active);
 }
 
@@ -320,8 +317,8 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     defer g.deinit();
     const first_name = "/eth2/01020304/beacon_block/ssz_snappy";
     const second_name = "/eth2/01020304/beacon_aggregate_and_proof/ssz_snappy";
-    _ = g.overlay.internTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), first_name).?;
-    const second = g.overlay.internTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), second_name).?;
+    _ = support.activate(&g, first_name).?;
+    const second = support.activate(&g, second_name).?;
     for (0..9) |i| {
         const peer = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
         _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, first_name, true);
@@ -374,74 +371,6 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     try std.testing.expect(!g.overlay.fanoutMembers(second).isSet(live));
 }
 
-test "gossip topic rejection preserves expired scores and retained obligations" {
-    var opts: Gossipsub.Options = .{
-        .topic_policy = &topic_fixture.churn,
-        .random_seed = 1,
-        .connected_capacity = 2,
-        .retained_capacity = 4,
-        .retained_outbound_reserve = 1,
-    };
-    opts.topic_params = @splat(.{});
-    opts.topic_params.?[0].params.weight = 2;
-    var g = try support.init(std.testing.allocator, opts);
-    defer g.deinit();
-    var name: [topic_mod.topic_max_len]u8 = undefined;
-    for (0..constants.topics_cap) |index| {
-        const text = try topic_fixture.churnTopic(index, &name);
-        try support.subscribe(&g, text);
-    }
-    for (g.overlay.rows[constants.topics_cap..]) |*row| row.generation = std.math.maxInt(u64);
-    const first = g.overlay.topicString(0);
-    try support.unsubscribe(&g, first);
-    g.peers.scores.invalid(0, 0);
-    g.last_now_ms = g.overlay.rows[0].retire_after_ms.?;
-    g.peers.backoffs[0] = .{ .topic_generation = g.overlay.rows[0].generation, .until = g.last_now_ms + 100 };
-    const revision = g.peers.scores.revision;
-    const generation = g.overlay.rows[0].generation;
-    const score = g.peers.scores.topics[0];
-    const old_scores = try std.testing.allocator.dupe(@TypeOf(score), g.peers.scores.topics);
-    defer std.testing.allocator.free(old_scores);
-    const old_topics = try std.testing.allocator.dupe(@TypeOf(g.overlay.rows[0]), g.overlay.rows);
-    defer std.testing.allocator.free(old_topics);
-    const old_backoffs = try std.testing.allocator.dupe(@TypeOf(g.peers.backoffs[0]), g.peers.backoffs);
-    defer std.testing.allocator.free(old_backoffs);
-    const old_params = try std.testing.allocator.dupe(score_mod.TopicParams, g.peers.scores.topic_params);
-    defer std.testing.allocator.free(old_params);
-    const old_rows = try std.testing.allocator.dupe(score_mod.PeerScore.PeerState, g.peers.scores.rows);
-    defer std.testing.allocator.free(old_rows);
-    try std.testing.expectEqual(@as(?u16, null), support.intern(&g, "/eth2/090a0b0c/beacon_block/ssz_snappy"));
-    try std.testing.expectEqualDeep(old_scores, g.peers.scores.topics);
-    try std.testing.expectEqualDeep(old_backoffs, g.peers.backoffs);
-    try std.testing.expectEqualDeep(old_params, g.peers.scores.topic_params);
-    try std.testing.expectEqualDeep(old_rows, g.peers.scores.rows);
-    for (old_topics, g.overlay.rows) |*before, *after| {
-        try std.testing.expectEqual(before.active, after.active);
-        try std.testing.expectEqual(before.generation, after.generation);
-        try std.testing.expectEqual(before.subscribed, after.subscribed);
-        try std.testing.expectEqual(before.retire_after_ms, after.retire_after_ms);
-        try std.testing.expectEqualDeep(before.subscribers, after.subscribers);
-        try std.testing.expectEqualDeep(before.mesh, after.mesh);
-        try std.testing.expectEqualDeep(before.fanout, after.fanout);
-        try std.testing.expectEqualStrings(before.string[0..before.string_len], after.string[0..after.string_len]);
-    }
-    try std.testing.expectEqual(revision, g.peers.scores.revision);
-    try std.testing.expectEqual(generation, g.overlay.rows[0].generation);
-    try std.testing.expect(g.overlay.rows[0].active);
-    try std.testing.expectEqual(@as(?u16, null), support.intern(&g, "invalid"));
-    try std.testing.expectEqualDeep(score, g.peers.scores.topics[0]);
-    try std.testing.expectEqual(revision, g.peers.scores.revision);
-    g.last_now_ms += 100;
-    g.overlay.rows[0].generation = std.math.maxInt(u64);
-    try std.testing.expectEqual(@as(?u16, null), support.intern(&g, "/eth2/090a0b0c/beacon_block/ssz_snappy"));
-    try std.testing.expectEqualDeep(score, g.peers.scores.topics[0]);
-    g.overlay.rows[0].generation = generation;
-    _ = support.intern(&g, "/eth2/090a0b0c/beacon_block/ssz_snappy").?;
-    try std.testing.expectEqual(generation + 1, g.overlay.rows[0].generation);
-    try std.testing.expect(!g.peers.scores.retainsTopic(0));
-    try std.testing.expectEqual(@as(f64, 2), g.peers.scores.topic_params[0].weight);
-}
-
 test "gossip topic retirement clears expired scores while backoff remains" {
     var g = try support.init(std.testing.allocator, .{
         .random_seed = 1,
@@ -455,36 +384,11 @@ test "gossip topic retirement clears expired scores while backoff remains" {
     g.peers.scores.invalid(0, 0);
     try support.unsubscribe(&g, name);
     g.last_now_ms = g.overlay.rows[0].retire_after_ms.?;
-    const generation = g.overlay.rows[0].generation;
-    g.peers.backoffs[0] = .{ .topic_generation = generation, .until = g.last_now_ms + 100 };
-    g.overlay.reclaimTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), 0);
+    g.peers.backoffs[0] = .{ .until = g.last_now_ms + 100 };
+    g.overlay.expireTopic(&g.overlayContext(g.last_now_ms), 0, g.messages.validation.retainsTopic(0));
     try std.testing.expect(!g.peers.scores.retainsTopic(0));
     try std.testing.expect(g.overlay.rows[0].active);
-    try std.testing.expectEqual(generation, g.overlay.rows[0].generation);
     try std.testing.expectEqual(g.last_now_ms + 100, g.peers.backoffs[0].until);
-}
-
-test "fanout interning snapshots aliased text under full capacity" {
-    var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var ledger: Reservations = .{ .backing = backing.allocator() };
-    var g = try Gossipsub.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
-    defer g.deinit();
-    const calls = backing.allocations;
-    const original = "/eth2/00000000/a/ssz_snappy/b/ssz_snappy";
-    const shorter = "/eth2/00000000/a/ssz_snappy";
-    _ = support.intern(&g, original).?;
-    var name: [topic_mod.topic_max_len]u8 = undefined;
-    for (1..constants.topics_cap) |index| {
-        const text = try std.fmt.bufPrint(&name, "/eth2/{x:0>8}/custom/ssz_snappy", .{index});
-        _ = support.intern(&g, text).?;
-    }
-    const input = g.overlay.topicString(0)[0..shorter.len];
-    const generation = g.overlay.rows[0].generation;
-    _ = support.intern(&g, input).?;
-    try std.testing.expectEqualStrings(shorter, g.overlay.topicString(0));
-    try std.testing.expectEqual(generation + 1, g.overlay.rows[0].generation);
-    try std.testing.expectEqual(@as(f64, 1), g.peers.scores.topic_params[0].weight);
-    try std.testing.expectEqual(calls, backing.allocations);
 }
 
 test "publication subscribed fanout expires through owner maintenance" {
@@ -531,11 +435,9 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     defer g.deinit();
     const workspace = try std.testing.allocator.create(local_intent.Workspace);
     defer std.testing.allocator.destroy(workspace);
-    workspace.* = try local_intent.Workspace.init(std.testing.allocator, g.overlay.rows.len);
-    defer workspace.deinit(std.testing.allocator);
+    workspace.* = .{};
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     const replacement = "/eth2/01020304/voluntary_exit/ssz_snappy";
-    for (g.overlay.rows[1..]) |*row| row.generation = std.math.maxInt(u64);
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     _ = try g.publish(name, "original payload", now);
     const id = topic_mod.validMessageId(name, "original payload", .{});
@@ -568,14 +470,15 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     var decompressed: [64]u8 = undefined;
     const size = try snappy.raw.uncompress(g.messages.store.segment(message, g.messages.store.cursor(message)), &decompressed);
     try std.testing.expectEqualStrings("original payload", decompressed[0..size]);
-    try std.testing.expectEqualStrings(replacement, g.overlay.topicString(0));
+    try std.testing.expect(g.overlay.findTopic(replacement) != null);
+    try std.testing.expectEqualStrings(name, g.overlay.topicString(0));
 }
 
 test "gossip advertisements sample the whole burst independently for each recipient" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 17 });
     defer g.deinit();
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    const t = g.overlay.internTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), name).?;
+    const t = support.activate(&g, name).?;
     for (0..2) |i| {
         const peer = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
         _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, name, true);

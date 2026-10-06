@@ -1,3 +1,4 @@
+const topic_fixture = @import("gossipsub/topic_fixture.zig");
 const Now = @import("types.zig").Now;
 const schedule_test_support = @import("schedule_test_support.zig");
 const driver = @import("driver.zig");
@@ -215,7 +216,7 @@ test "core flushes a protocol reply in the turn that wrote it" {
 
 test "core beacon idle scans do not manufacture immediate deadlines" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{11}));
-    const resolved = try configuration.resolve(.{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = policy_fixture.config() });
+    const resolved = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = policy_fixture.config() });
     var node: NetworkCore = undefined;
     var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     try node.init(backing_node.allocator(), std.testing.io, &resolved, .{

@@ -1,6 +1,6 @@
 const Profile = @import("configuration.zig").Profile;
 const policy_fixture = @import("reqresp/policy_fixture.zig");
-const resolve = @import("configuration.zig").resolve;
+const topic_fixture = @import("gossipsub/topic_fixture.zig");
 const rr = @import("reqresp/ReqResp.zig");
 const std = @import("std");
 const Transport = @import("transport.zig").Transport;
@@ -278,4 +278,10 @@ test "configuration rejects invalid complete sections" {
         }
         try std.testing.expectError(expected, resolve(request));
     }
+}
+
+fn resolve(options: configuration.Options) !configuration.Resolved {
+    var configured = options;
+    if (configured.gossip.topic_policy == null) configured.gossip.topic_policy = comptime &.{topic_fixture.bytes(@splat(0))};
+    return configuration.resolve(configured);
 }

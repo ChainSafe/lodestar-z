@@ -1,3 +1,4 @@
+const topic_fixture = @import("topic_fixture.zig");
 const Now = @import("../types.zig").Now;
 const support = @import("test_support.zig");
 const std = @import("std");
@@ -14,7 +15,7 @@ const policy_fixture = @import("../reqresp/policy_fixture.zig");
 
 test "gossipsub legal maximum host acceptance forwards retained pages through actual IO" {
     var setup: test_pair.Pair = .{};
-    const small = try configuration.resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
+    const small = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     try setup.initOpts(small.core.protocols.gossipsub, small.core.protocols.gossipsub);
     defer setup.deinit();
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";

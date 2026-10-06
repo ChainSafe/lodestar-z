@@ -6,6 +6,7 @@ const messages_mod = @import("messages.zig");
 const sessions_mod = @import("sessions.zig");
 const peers_mod = @import("peer_book.zig");
 const topic_mod = @import("topic.zig");
+const topic_policy = @import("topic_policy.zig");
 const score_mod = @import("score.zig");
 const Recovery = @import("recovery.zig").Recovery;
 const IwantOutcome = @import("metrics.zig").IwantOutcome;
@@ -103,7 +104,8 @@ fn ihaveWorkBound(body_len: usize, topics: usize, probes: usize, batches: usize,
     const ids: usize = @min(constants.max_ihave_ids_per_heartbeat, body_len / (constants.message_id_length + 2));
     const selected: usize = @min(ids, constants.gossip_ids_max);
     const fields: usize = @min(body_len / 2 + 1, 8193);
-    const header_work = topics * (topic_mod.topic_max_len + @sizeOf(score_mod.TopicParams) + @sizeOf(score_mod.TopicCounters) + @sizeOf(score_mod.TopicWeights)) +
+    const header_work = topic_mod.topic_max_len * topic_policy.kind_count + topic_policy.boundary_max * @sizeOf(topic_mod.ForkDigest) +
+        topics * (@sizeOf(score_mod.TopicParams) + @sizeOf(score_mod.TopicCounters) + @sizeOf(score_mod.TopicWeights)) +
         @as(usize, peers_mod.capacity) * @sizeOf(peers_mod.Row) + @sizeOf(peers_mod.PeerBook);
     // Each protobuf field consumes at least two bytes and at most two
     // ten-byte varints. Include a score refresh, IP population and topic
@@ -248,5 +250,5 @@ fn belowGossip(self: *Gossipsub, index: u16, now_ms: u64) bool {
 test "resident namespace lookup and score scans are included in IWANT work estimates" {
     const low = ihaveWorkBound(128, 512, 4, 1, 1);
     const high = ihaveWorkBound(128, 615, 4, 1, 1);
-    try std.testing.expectEqual(@as(usize, 103) * (topic_mod.topic_max_len + @sizeOf(score_mod.TopicParams) + @sizeOf(score_mod.TopicCounters) + @sizeOf(score_mod.TopicWeights)), high - low);
+    try std.testing.expectEqual(@as(usize, 103) * (@sizeOf(score_mod.TopicParams) + @sizeOf(score_mod.TopicCounters) + @sizeOf(score_mod.TopicWeights)), high - low);
 }

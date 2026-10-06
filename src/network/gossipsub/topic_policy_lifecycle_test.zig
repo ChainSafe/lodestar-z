@@ -44,7 +44,7 @@ test "topic policy remembers real inactive subscriptions without event pressure 
     for (0..20) |_| try pair.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), live(pair.shared.server.gossipsub));
     try std.testing.expectEqual(@as(u64, 0), pair.shared.server.gossipsub.counters.local_pressure_resets);
-    _ = support.intern(pair.shared.server.gossipsub, name).?;
+    _ = support.activate(pair.shared.server.gossipsub, name).?;
     const t = pair.shared.server.gossipsub.overlay.findTopic(name).?;
     try std.testing.expectEqual(@as(usize, 1), pair.shared.server.gossipsub.overlay.subscribers(t).count());
     try support.subscribe(pair.shared.server.gossipsub, name);
@@ -62,7 +62,7 @@ test "topic policy remembers real inactive subscriptions without event pressure 
     try support.unsubscribe(pair.shared.client.gossipsub, name);
     for (0..20) |_| try pair.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), pair.shared.server.gossipsub.overlay.subscribers(t).count());
-    try std.testing.expect(!pair.shared.server.gossipsub.overlay.namespace.?.subscribed(0, 0));
+    try std.testing.expect(!pair.shared.server.gossipsub.overlay.namespace.subscribed(0, 0));
 }
 
 test "gossip accepted mesh membership does not invent a declared subscription across retirement" {
@@ -76,7 +76,7 @@ test "gossip accepted mesh membership does not invent a declared subscription ac
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     support.control(&g, grafted.index, .{ .graft = name }, now);
     support.control(&g, declared.index, .{ .subscription = .{ .topic = name, .subscribe = true } }, now);
-    const ns = &g.overlay.namespace.?;
+    const ns = &g.overlay.namespace;
     try std.testing.expect(g.overlay.inMesh(topic, grafted.index));
     try std.testing.expect(!g.overlay.subscribers(topic).isSet(grafted.index));
     try std.testing.expect(!ns.subscribed(grafted.index, 0));
@@ -97,8 +97,7 @@ test "gossip accepted mesh membership does not invent a declared subscription ac
     g.last_now_ms = 1 + @max(g.options.retained_score_ms, constants.prune_backoff_ms, constants.fanout_ttl_ms);
     context = g.overlayContext(g.last_now_ms);
     _ = g.overlay.maintainFanout(&context, topic, false);
-    const pins = g.messages.topicPins();
-    g.overlay.reclaimTopic(&context, &pins, topic);
+    g.overlay.expireTopic(&context, topic, g.messages.validation.retainsTopic(topic));
     try std.testing.expect(!g.overlay.rows[topic].active);
     try support.subscribe(&g, name);
     const replacement = g.overlay.findTopic(name).?;
@@ -168,7 +167,7 @@ test "topic policy physical close clears bits while same connection stream repla
     try support.subscribe(pair.shared.client.gossipsub, name);
     for (0..20) |_| try pair.pumpOnce();
     const index = pair.shared.server.gossipsub.sessions.find(pair.shared.handles.server).?;
-    const ns = &pair.shared.server.gossipsub.overlay.namespace.?;
+    const ns = &pair.shared.server.gossipsub.overlay.namespace;
     try std.testing.expect(ns.subscribed(index, 0));
     session_io.resetInbound(pair.shared.server.gossipsub, &pair.shared.pair.server, index);
     session_io.resetOutbound(pair.shared.server.gossipsub, &pair.shared.pair.server, index);
@@ -247,11 +246,11 @@ test "topic policy all 784 resident names keep the live subscription limit at 51
                 var short: [topic_mod.name_max_len]u8 = undefined;
                 const part = if (kind.countMax() == 1) field.name else try std.fmt.bufPrint(&short, field.name ++ "_{d}", .{subnet});
                 const topic_name = topic_mod.build(b.digest, part, &buffer);
-                try std.testing.expect(g.overlay.namespace.?.lookup(topic_name) != null);
+                try std.testing.expect(g.overlay.namespace.lookup(topic_name) != null);
                 if (names < 512) {
                     try support.subscribe(&g, topic_name);
                 } else {
-                    try std.testing.expectEqual(@as(?u16, @intCast(names)), support.intern(&g, topic_name));
+                    try std.testing.expectEqual(@as(?u16, @intCast(names)), support.activate(&g, topic_name));
                     try std.testing.expectError(error.TopicCapacity, support.subscribe(&g, topic_name));
                 }
                 names += 1;
@@ -262,7 +261,6 @@ test "topic policy all 784 resident names keep the live subscription limit at 51
     try std.testing.expectEqual(@as(usize, 784), live(&g));
     for (g.overlay.rows, 0..) |row, i| {
         try std.testing.expectEqual(i < 512, row.subscribed);
-        try std.testing.expectEqual(@as(u64, 1), row.generation);
     }
 }
 
@@ -272,76 +270,18 @@ test "topic policy copied startup allocation prefixes and whole owner memory rec
     var boundaries = topic_fixture.hoodi();
     var g = try support.init(ledger.allocator(), options(&boundaries));
     defer g.deinit();
-    const ns = &g.overlay.namespace.?;
+    const ns = &g.overlay.namespace;
     try std.testing.expectEqual(@as(usize, 2 * 13 * 8), ns.subscriptions.len * 8);
     try std.testing.expectEqual(g.memoryPlan().total_bytes - @sizeOf(Gossipsub), ledger.bytes);
-    try std.testing.expect(g.options.topic_policy == null);
+    try std.testing.expect(g.options.topic_policy.len == 0);
     boundaries[0].digest = @splat(0);
     boundaries[0].rules[0].ssz_max = 1;
     try std.testing.expectEqual(@as(u32, 100), ns.lookup("/eth2/d2f1997f/beacon_block/ssz_snappy").?.rule.ssz_max);
-    const configured_bytes = ledger.bytes;
-    var raw_options = options(&boundaries);
-    raw_options.topic_policy = null;
-    var raw_ledger: Reservations = .{ .backing = std.testing.allocator };
-    var raw = try Gossipsub.init(raw_ledger.allocator(), raw_options);
-    defer raw.deinit();
-    try std.testing.expectEqual(raw.memoryPlan().total_bytes - @sizeOf(Gossipsub), raw_ledger.bytes);
-    try std.testing.expectEqual(configured_bytes - raw_ledger.bytes, g.memoryPlan().total_bytes - raw.memoryPlan().total_bytes);
-    try std.testing.expect(ns.allocatedBytes() < configured_bytes - raw_ledger.bytes);
-    std.debug.print("topic namespace memory: boundaries={d} topics={d} peers={d} descriptor_bytes={d} offset_bytes={d} bitmap_bytes={d} delta={d} owner_requested={d}\n", .{ ns.boundaries.len, ns.topic_count, ns.connected_capacity, ns.boundaries.len * @sizeOf(p.Boundary), ns.offsets.len * @sizeOf([p.kind_count]u16), ns.subscriptions.len * 8, ns.allocatedBytes(), configured_bytes });
 }
 
 fn startup(a: std.mem.Allocator) !void {
     const boundaries = topic_fixture.hoodi();
     var g = try support.init(a, options(&boundaries));
     defer g.deinit();
-    try std.testing.expectEqual(@as(u16, 784), g.overlay.namespace.?.topic_count);
-}
-
-test "topic policy remembered ordinals remain independent of retained validation generations" {
-    var boundaries: [4]p.Boundary = undefined;
-    for (&boundaries, 0..) |*b, i| b.* = topic_fixture.full(.{ @intCast(i + 1), 2, 3, 4 });
-    var g = try support.init(std.testing.allocator, options(&boundaries));
-    defer g.deinit();
-    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    g.overlay.namespace.?.setSubscription(peer.index, 0, true);
-    try support.subscribe(&g, name);
-    const old = g.overlay.findTopic(name).?;
-    const generation = g.overlay.rows[old].generation;
-    const context: messages.Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options, .epoch = g.cycle.epoch };
-    const source: messages.Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = g.sessions.ref(peer.index), .connection = g.sessions.rows[peer.index].conn };
-    var work: usize = 10000;
-    var peer_work: usize = g.options.decompress_per_peer_bytes;
-    var large_used = false;
-    var inbox: support.Inbox = .{};
-    defer inbox.deinit();
-    inbox.attach(&g);
-    const workspace: turn.Workspace = .{ .scratch = g.msg_scratch, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .sink = g.message_sink };
-    var compressed: [64]u8 = undefined;
-    const len = try snappy.raw.compress("0123456789", &compressed);
-    try std.testing.expect(g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1) == .admitted);
-    const received = inbox.last();
-    try support.unsubscribe(&g, name);
-    g.sessions.rows[peer.index].io.tx.subscription_dirty.unset(old);
-    var buffer: [topic_mod.topic_max_len]u8 = undefined;
-    for (0..511) |i| {
-        const next = try std.fmt.bufPrint(&buffer, "/eth2/{x:0>2}020304/data_column_sidecar_{d}/ssz_snappy", .{ i / 128 + 1, i % 128 });
-        try support.subscribe(&g, next);
-    }
-    for (g.overlay.rows[512..]) |*row| row.generation = std.math.maxInt(u64);
-    const replacement = "/eth2/04020304/data_column_sidecar_127/ssz_snappy";
-    try std.testing.expectEqual(@as(?u16, null), support.intern(&g, replacement));
-    try std.testing.expectEqual(generation, g.overlay.rows[old].generation);
-    try std.testing.expectEqualStrings(name, received.topic);
-    try std.testing.expectEqualStrings("0123456789", received.bytes);
-    try std.testing.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(received.handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
-    try std.testing.expectEqual(@as(?u16, null), support.intern(&g, replacement));
-    g.messages.validation.expire(&g.messages.store, &g.peers, 100000);
-    _ = support.intern(&g, replacement).?;
-    try std.testing.expectEqual(old, g.overlay.findTopic(replacement).?);
-    try std.testing.expectEqual(generation + 1, g.overlay.rows[old].generation);
-    try std.testing.expectEqual(@as(usize, 0), g.overlay.subscribers(old).count());
-    try std.testing.expect(g.overlay.namespace.?.subscribed(peer.index, 0));
-    try std.testing.expectEqualStrings(name, received.topic);
-    try std.testing.expectEqualStrings("0123456789", received.bytes);
+    try std.testing.expectEqual(@as(u16, 784), g.overlay.namespace.topic_count);
 }

@@ -113,10 +113,6 @@ pub fn deliveryRevision(self: *const Gossipsub) u64 {
     return self.sessions.delivery_revision;
 }
 
-pub fn topicCapacity(self: *const Gossipsub) usize {
-    return self.overlay.rows.len;
-}
-
 pub fn localSubscriptions(self: *const Gossipsub, digest: [4]u8) topic_policy.Subnets {
     return self.overlay.subnetSubscriptions(null, digest);
 }
@@ -141,7 +137,7 @@ pub const CoverageRevision = struct {
 pub fn coverageRevision(self: *const Gossipsub) CoverageRevision {
     return .{
         .subscriptions = self.overlay.subscription_revision,
-        .namespace = if (self.overlay.namespace) |*ns| ns.revision else 0,
+        .namespace = self.overlay.namespace.revision,
         .scores = self.peers.scores.revision,
         .heartbeat = self.cycle.epoch,
     };
@@ -175,12 +171,6 @@ pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
     try options.validate();
     const layout = Layout.init(&options);
     const memory = layout.plan();
-    const namespace: ?topic_policy.Namespace = if (options.topic_policy) |boundaries| try topic_policy.Namespace.init(allocator, boundaries, options.connected_capacity) else null;
-    errdefer if (namespace) |owned| {
-        var ns = owned;
-        ns.deinit(allocator);
-    };
-
     const sessions = try allocator.create(Sessions);
     errdefer allocator.destroy(sessions);
     sessions.* = try Sessions.init(allocator, &options, &layout);
@@ -188,11 +178,11 @@ pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
 
     const overlay = try allocator.create(overlay_mod.Overlay);
     errdefer allocator.destroy(overlay);
-    overlay.* = try overlay_mod.Overlay.init(allocator, options.random_seed.?, layout.topics);
+    overlay.* = try overlay_mod.Overlay.init(allocator, options.random_seed.?, options.topic_policy, options.connected_capacity);
     errdefer overlay.deinit(allocator);
     overlay.slot = options.initial_slot;
 
-    var peers = try peers_mod.PeerBook.init(allocator, &options);
+    var peers = try peers_mod.PeerBook.init(allocator, &options, layout.topics);
     errdefer peers.deinit(allocator);
 
     var messages = try messages_mod.Messages.init(allocator, &options, &layout);
@@ -214,9 +204,8 @@ pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
         .recovery = recovery,
         .overlay = overlay,
     };
-    result.overlay.namespace = namespace;
     result.options.ip_allowlist = &.{};
-    result.options.topic_policy = null;
+    result.options.topic_policy = &.{};
     return result;
 }
 
@@ -235,22 +224,9 @@ pub fn deinit(self: *Gossipsub) void {
 
 // Subscriptions ----------------------------------------------------------
 
-fn internTopic(self: *Gossipsub, name: []const u8) ?u16 {
-    const context = self.overlayContext(self.last_now_ms);
-    const pins = self.messages.topicPins();
-    return self.overlay.internTopic(&context, &pins, name);
-}
-
-fn reclaimTopic(self: *Gossipsub, topic: u16) void {
-    const context = self.overlayContext(self.last_now_ms);
-    const pins = self.messages.topicPins();
-    self.overlay.reclaimTopic(&context, &pins, topic);
-}
-
 pub fn prepareSubscriptions(self: *Gossipsub, subscriptions: []const local_intent.Boundary, workspace: *local_intent.Workspace, now: Now, slot: u64) local_intent.Error!bool {
     const context = self.overlayContext(self.last_now_ms);
-    const pins = self.messages.topicPins();
-    return self.overlay.prepareSubscriptions(&context, &pins, subscriptions, workspace, now.millis(), slot);
+    return self.overlay.prepareSubscriptions(&context, subscriptions, workspace, now.millis(), slot);
 }
 
 pub fn commitSubscriptions(self: *Gossipsub, workspace: *local_intent.Workspace) void {
@@ -271,7 +247,7 @@ pub fn addPeer(self: *Gossipsub, conn: Handle, metadata: *const peers_mod.Metada
         if (self.peers.rows[ref.index].connection != null) return .duplicate;
     }
     const handle = self.sessions.addPeer(conn) orelse return .capacity;
-    if (self.overlay.namespace) |*ns| ns.clearPeer(handle.index);
+    self.overlay.namespace.clearPeer(handle.index);
     const admission_result = self.peers.admit(conn, metadata, now.millis());
     if (admission_result != .admitted) {
         self.sessions.removePeer(handle.index);
@@ -326,18 +302,17 @@ pub fn publishWithOptions(self: *Gossipsub, topic_str: []const u8, ssz: []const 
     self.last_now_ms = @max(self.last_now_ms, now.millis());
     const now_ms = self.last_now_ms;
     if (ssz.len > constants.MAX_PAYLOAD_SIZE) return error.PayloadTooLarge;
-    if (self.overlay.namespace) |*ns| {
-        const rule = (ns.lookup(topic_str) orelse return error.UnknownTopic).rule;
-        if (ssz.len < rule.ssz_min) return error.PayloadTooSmall;
-        if (ssz.len > rule.ssz_max) return error.PayloadTooLarge;
-    } else if (topic_mod.parse(topic_str) == null) return error.UnknownTopic;
+    const match = self.overlay.namespace.lookup(topic_str) orelse return error.UnknownTopic;
+    if (ssz.len < match.rule.ssz_min) return error.PayloadTooSmall;
+    if (ssz.len > match.rule.ssz_max) return error.PayloadTooLarge;
     const id = topic_mod.validMessageId(topic_str, ssz, self.options.message_id_policy);
     if (self.messages.wasSeen(id, now_ms)) {
         if (options.ignore_duplicate) return .{ .duplicate = true };
         return error.Duplicate;
     }
-    const topic = self.internTopic(topic_str) orelse return error.ResourceExhausted;
+    const topic = match.ordinal;
     const context = self.overlayContext(now_ms);
+    self.overlay.activateTopic(&context, topic);
     const recipients = self.overlay.publicationRecipients(&context, topic, options.flood);
     if (recipients.count() == 0 and !options.allow_zero_peers) return error.NoPeersSubscribedToTopic;
     const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return error.CompressFailed;
@@ -367,7 +342,7 @@ pub fn report(self: *Gossipsub, handle: ValidationHandle, verdict: Verdict, now:
         self.validation_time.observe(now.millis() -| applied.admitted_ms);
         if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, applied.id, @tagName(verdict), applied.topicString(), logging.peer(&applied.source), now.millis() -| applied.admitted_ms });
         if (applied.forward) |forward| {
-            if (self.deliver(self.overlay.mesh(forward.topic.index), forward.message, forward.source, now.millis()).queued > 0) counts.forwarded +|= 1;
+            if (self.deliver(self.overlay.mesh(forward.topic), forward.message, forward.source, now.millis()).queued > 0) counts.forwarded +|= 1;
         }
     } else {
         std.log.scoped(.network_gossip).debug("validation_report_refused validation={d}:{d} verdict={s} reason={s}", .{ handle.index, handle.generation, @tagName(verdict), @tagName(result) });
@@ -462,11 +437,10 @@ pub fn resourceSnapshot(self: *const Gossipsub) ResourceSnapshot {
     for (self.overlay.rows) |topic| {
         if (!topic.active) continue;
         for (0..self.sessions.rows.len) |peer| {
-            if (self.overlay.namespace == null and topic.subscribers.isSet(peer)) result.remote_subscriptions += 1;
             if (topic.mesh.isSet(peer)) result.mesh_members += 1;
         }
     }
-    if (self.overlay.namespace) |*ns| result.remote_subscriptions = ns.subscription_count;
+    result.remote_subscriptions = self.overlay.namespace.subscription_count;
     return result;
 }
 
@@ -499,7 +473,7 @@ pub fn maintainTopics(self: *Gossipsub, now: Now) void {
         self.overlay.maintain(&context, index);
         if (self.cycle.opportunistic) self.overlay.opportunistic(&context, index);
         self.emitGossip(index, &context);
-        self.reclaimTopic(index);
+        self.overlay.expireTopic(&context, index, self.messages.validation.retainsTopic(index));
         serviced += 1;
         if (timing.now(self.clock) -| start >= constants.maintenance_slice_target_ns) break;
         if (serviced == self.options.topics_per_pump) break;
