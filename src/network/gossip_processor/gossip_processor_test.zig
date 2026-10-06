@@ -65,13 +65,25 @@ test "gossip processor backing bytes match allocations at page boundaries" {
 }
 
 fn add(table: *p.GossipProcessor, kind: p.limits.Kind, root: ?[32]u8) !p.GossipProcessor.Token {
-    const token = try table.reserve(kind, 1);
-    const cell = table.get(token).?;
-    cell.id = @splat(1);
-    cell.deadline = if (table.expiry.tail == index_list.none) 100 else @max(100, table.cells[table.expiry.tail].deadline);
-    cell.metadata = .{ .root = root, .slot = 1 };
-    table.install(token, "x");
-    return token;
+    const deadline = if (table.expiry.tail == index_list.none) 100 else @max(100, table.cells[table.expiry.tail].deadline);
+    return capture(table, kind, "x", .{ .root = root, .slot = 1 }, 0, deadline);
+}
+
+fn capture(table: *p.GossipProcessor, kind: p.limits.Kind, bytes: []const u8, metadata: p.metadata.Metadata, now: u64, deadline: u64) !p.GossipProcessor.Token {
+    const canonical: topic_mod.Canonical = .{ .digest = @splat(0), .name = .{ .kind = kind } };
+    var topic: [p.GossipProcessor.topic_max]u8 = undefined;
+    try table.capture(&.{
+        .handle = .{ .index = 0, .generation = 1 },
+        .id = @splat(1),
+        .peer = .{ .index = 0, .generation = 1 },
+        .topic = topic_mod.buildCanonical(canonical, &topic),
+        .bytes = bytes,
+        .identity = .{ .bytes = @splat(1) },
+        .admitted_ms = now,
+        .deadline = deadline,
+    }, canonical, &metadata, false, now);
+    const index = table.expiry.tail;
+    return .{ .index = @intCast(index), .generation = table.cells[index].generation };
 }
 
 test "gossip processor isolates kinds and bounds dependency waiting" {
@@ -127,10 +139,7 @@ test "gossip processor copy rollback preserves paged bytes" {
     var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
     defer table.deinit();
     defer table.close();
-    const token = try table.reserve(.beacon_block, payload.len);
-    table.get(token).?.deadline = 100;
-    table.get(token).?.id = @splat(1);
-    table.install(token, &payload);
+    const token = try capture(&table, .beacon_block, &payload, .{}, 0, 100);
     const batch = table.claim(1);
     var bytes: [payload.len]u8 = undefined;
     table.copyPayload(table.get(token).?, &bytes);
@@ -149,10 +158,7 @@ test "gossip processor claims an item larger than the demand bytes alone" {
     defer table.close();
     var blocks: [2]p.GossipProcessor.Token = undefined;
     for (&blocks) |*block| {
-        block.* = try table.reserve(.beacon_block, payload.len);
-        table.get(block.*).?.deadline = 100;
-        table.get(block.*).?.id = @splat(1);
-        table.install(block.*, &payload);
+        block.* = try capture(&table, .beacon_block, &payload, .{}, 0, 100);
     }
     const attestation = try add(&table, .beacon_attestation, null);
     for (blocks) |block| {
@@ -172,16 +178,7 @@ test "gossip processor batches identical attestation data with a bounded wait" {
     var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
     defer table.deinit();
     defer table.close();
-    const first = try table.reserve(.beacon_attestation, 1);
-    const second = try table.reserve(.beacon_attestation, 1);
-    for ([_]p.GossipProcessor.Token{ first, second }) |token| {
-        const cell = table.get(token).?;
-        cell.metadata.group = @splat(3);
-        cell.topic_len = @intCast(topic_mod.buildCanonical(.{ .digest = cell.fork_digest, .name = .{ .kind = .beacon_attestation } }, &cell.topic).len);
-        cell.admitted_ms = 1;
-        cell.deadline = 100;
-        table.install(token, "x");
-    }
+    for (0..2) |_| _ = try capture(&table, .beacon_attestation, "x", .{ .group = @splat(3) }, 1, 100);
     try t.expectEqual(@as(usize, 0), table.claim(49).len);
     try t.expectEqual(@as(?u64, 51), table.deadline());
     table.maintain(51, 0);
@@ -227,16 +224,8 @@ test "gossip processor new attestation groups cannot postpone a mature group" {
     var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
     defer table.deinit();
     defer table.close();
-    const older = try table.reserve(.beacon_attestation, 1);
-    const newer = try table.reserve(.beacon_attestation, 1);
-    for ([_]p.GossipProcessor.Token{ older, newer }, 0..) |token, i| {
-        const cell = table.get(token).?;
-        cell.metadata.group = @splat(@intCast(i));
-        cell.topic_len = @intCast(topic_mod.buildCanonical(.{ .digest = cell.fork_digest, .name = .{ .kind = .beacon_attestation } }, &cell.topic).len);
-        cell.admitted_ms = if (i == 0) 1 else 50;
-        cell.deadline = 100 + cell.admitted_ms;
-        table.install(token, "x");
-    }
+    const older = try capture(&table, .beacon_attestation, "x", .{ .group = @splat(0) }, 1, 101);
+    _ = try capture(&table, .beacon_attestation, "x", .{ .group = @splat(1) }, 50, 150);
     try t.expectEqual(@as(usize, 0), table.claim(50).len);
     try t.expectEqual(@as(?u64, 51), table.deadline());
     table.maintain(51, 0);
@@ -396,10 +385,10 @@ fn blockOptions(block: p.limits.Limit) p.GossipProcessor.Options {
 test "gossip processor skips exhausted generations and rejects stale handles" {
     var table = try p.GossipProcessor.init(std.testing.allocator, blockOptions(.{ .items = 64, .bytes = 64 * 4096 }));
     defer table.deinit();
-    const token = try table.reserve(.beacon_block, 10);
+    const token = try capture(&table, .beacon_block, "0123456789", .{}, 0, 100);
     table.retire(token);
     table.cells[0].generation = std.math.maxInt(u64);
-    const next = try table.reserve(.beacon_block, 10);
+    const next = try capture(&table, .beacon_block, "0123456789", .{}, 0, 100);
     try std.testing.expectEqual(@as(u16, 1), next.index);
     try std.testing.expect(table.get(token) == null);
     table.retire(next);
@@ -411,9 +400,8 @@ test "gossip table and payload allocation prefixes unwind shared reservation" {
 fn allocationPrefix(allocator: std.mem.Allocator) !void {
     var table = try p.GossipProcessor.init(allocator, blockOptions(.{ .items = 1024, .bytes = 64 * 1024 * 1024 }));
     defer table.deinit();
-    const token = try table.reserve(.beacon_block, 10);
+    const token = try capture(&table, .beacon_block, "0123456789", .{}, 0, 100);
     defer table.retire(token);
-    table.install(token, "0123456789");
 }
 
 test "gossip batch bounds, rollback and expiry keep pins until full completion" {
@@ -422,12 +410,8 @@ test "gossip batch bounds, rollback and expiry keep pins until full completion" 
     const data = try std.testing.allocator.alloc(u8, 10 * 1024 * 1024);
     defer std.testing.allocator.free(data);
     @memset(data, 7);
-    const first = try table.reserve(.beacon_block, data.len);
-    table.get(first).?.deadline = 100;
-    table.install(first, data);
-    const second = try table.reserve(.beacon_block, 7 * 1024 * 1024);
-    table.get(second).?.deadline = 100;
-    table.install(second, data[0 .. 7 * 1024 * 1024]);
+    const first = try capture(&table, .beacon_block, data, .{}, 0, 100);
+    _ = try capture(&table, .beacon_block, data[0 .. 7 * 1024 * 1024], .{}, 0, 100);
     var batch = table.claim(99);
     try std.testing.expectEqual(@as(usize, 1), batch.len);
     try std.testing.expectEqual(first, batch.tokens[0]);
@@ -437,9 +421,7 @@ test "gossip batch bounds, rollback and expiry keep pins until full completion" 
     try std.testing.expect(!table.report(first, .accept, 100));
     try std.testing.expectEqual(@as(u64, 2), table.diag.queuedExpired);
     for (0..65) |_| {
-        const token = try table.reserve(.beacon_block, 1);
-        table.get(token).?.deadline = 200;
-        table.install(token, "x");
+        _ = try capture(&table, .beacon_block, "x", .{}, 100, 200);
     }
     batch = table.claim(101);
     try std.testing.expectEqual(@as(usize, 64), batch.len);
@@ -457,11 +439,9 @@ test "gossip processor retains expired verdicts until acknowledgement and reject
     defer table.deinit();
     var handles: [64]p.GossipProcessor.Token = undefined;
     for (&handles) |*token| {
-        token.* = try table.reserve(.beacon_block, 1);
-        table.get(token.*).?.deadline = 100;
-        table.install(token.*, "x");
+        token.* = try capture(&table, .beacon_block, "x", .{}, 0, 100);
     }
-    try std.testing.expectError(error.NetworkGossipFull, table.reserve(.beacon_block, 1));
+    try std.testing.expectError(error.NetworkGossipFull, capture(&table, .beacon_block, "x", .{}, 0, 100));
     const batch = table.claim(1);
     table.finish(&batch, true);
     for (handles) |token| {
@@ -474,13 +454,11 @@ test "gossip processor retains expired verdicts until acknowledgement and reject
     try std.testing.expect(!table.pending(true) and table.deadline() == null);
     // Expiry disposed of every delivered message; each cell returns once an exchange acknowledges it.
     try std.testing.expectEqual(@as(usize, 64), table.snapshot(1).acknowledging);
-    try std.testing.expectError(error.NetworkGossipFull, table.reserve(.beacon_block, 1));
+    try std.testing.expectError(error.NetworkGossipFull, capture(&table, .beacon_block, "x", .{}, 0, 100));
     var acknowledged: [64]p.GossipProcessor.Token = undefined;
     try std.testing.expectEqual(@as(usize, 64), table.acknowledgements(&acknowledged));
     for (acknowledged) |token| table.acknowledge(token);
-    const replacement = try table.reserve(.beacon_block, 1);
-    table.get(replacement).?.deadline = 200;
-    table.install(replacement, "y");
+    _ = try capture(&table, .beacon_block, "y", .{}, 100, 200);
     try std.testing.expect(!table.report(handles[0], .accept, 101));
     table.close();
 }

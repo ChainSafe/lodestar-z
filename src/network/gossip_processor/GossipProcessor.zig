@@ -34,8 +34,6 @@ expiry: lists.List = .{},
 groups: Groups,
 dependencies: Dependencies,
 store: storage.Store,
-staging_pages: usize = 0,
-staging_items: usize = 0,
 limits: limits_mod.Limits,
 execution: limits_mod.Limits,
 slot: u64 = 0,
@@ -67,7 +65,7 @@ victim_handles: [batch_max]native.Gossipsub.ValidationHandle = undefined,
 pub const Token = struct { index: u16, generation: u64 };
 /// `acknowledging`: the owner disposed of a message the host was handed, and the cell keeps its generation until an
 /// exchange hands that acknowledgement to the host.
-pub const State = enum { free, capturing, needs_check, checking, waiting, queued, copying, delivered, verdict_pending, acknowledging };
+pub const State = enum { free, needs_check, checking, waiting, queued, copying, delivered, verdict_pending, acknowledging };
 pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,
@@ -120,12 +118,9 @@ pub const Diagnostics = struct {
     queued: usize = 0,
     pendingVerdicts: usize = 0,
     acknowledging: usize = 0,
-    reservedBytes: usize = 0,
-    reservedBytesHighWater: usize = 0,
     payloadBytes: usize = 0,
     copyingBytes: usize = 0,
     copying: usize = 0,
-    publicationBytes: usize = 0,
     messagesCopied: u64 = 0,
     bytesCopied: u64 = 0,
     capacityRefusals: u64 = 0,
@@ -143,10 +138,6 @@ pub const Diagnostics = struct {
     expiredExecuting: usize = 0,
     oldestExpiredExecutionAgeMs: u64 = 0,
     slotRefusals: u64 = 0,
-    publicationCopies: u64 = 0,
-    publicationQueued: u64 = 0,
-    publicationSelected: u64 = 0,
-    publicationDuplicates: u64 = 0,
 };
 /// Host-visible states exported per kind: queued for the host, waiting for a dependency,
 /// awaiting a host dependency check, and executing on the host.
@@ -207,7 +198,7 @@ pub fn backingBytes(options: *const Options) usize {
     return capacity * @sizeOf(Cell) + Groups.backingBytes(options.limits[@intFromEnum(Kind.beacon_attestation)].items) + Dependencies.backingBytes(capacity) + storage.Store.metadataBytes(capacity, bytes) + bytes / storage.page_bytes * storage.page_bytes;
 }
 pub fn deinit(self: *GossipProcessor) void {
-    assert(self.diag.occupied == 0 and self.diag.reservedBytes == 0);
+    assert(self.diag.occupied == 0);
     if (self.cells.len == 0) return;
     self.backing.free(self.cells);
     self.groups.deinit(self.backing);
@@ -242,7 +233,7 @@ pub fn hasCapacity(self: *const GossipProcessor, kind: Kind, len: usize) bool {
     const k = @intFromEnum(kind);
     const pages = storage.Store.pagesFor(len);
     if (self.used_items[k] >= self.limits[k].items or pages * storage.page_bytes > self.limits[k].bytes - self.used_bytes[k]) return false;
-    return self.queueValue(kind, .free).len > 0 and pages <= self.store.free_pages - self.staging_pages and self.store.used_entries + self.store.retired_entries + self.staging_items < self.store.entries.len;
+    return self.queueValue(kind, .free).len > 0 and pages <= self.store.free_pages and self.store.used_entries + self.store.retired_entries < self.store.entries.len;
 }
 /// Cheap possibility check before decoding. Only admission can jointly reserve
 /// processor and protocol resources; replaceable work does not promise room. Counts a capacity
@@ -278,31 +269,65 @@ pub fn occupancy(self: *const GossipProcessor, kind: Kind) [occupancy_count]u64 
 }
 pub fn capture(self: *GossipProcessor, message: *const native.Gossipsub.MessageEvent, canonical: native.topic.Canonical, metadata: *const metadata_mod.Metadata, deneb: bool, received_at: u64) !void {
     const kind = canonical.name.kind;
-    if (!self.sourceRoom(message.source, kind, message.bytes.len)) return error.NetworkGossipFull;
-    const handle = try self.reserve(kind, message.bytes.len);
-    const cell = self.get(handle).?;
-    cell.metadata = metadata.*;
-    cell.fork_digest = canonical.digest;
-    cell.deneb = deneb;
-    cell.handle = message.handle;
-    cell.identity = message.identity;
-    cell.source = message.source;
+    const len = message.bytes.len;
+    assert(len <= payload_max and message.topic.len <= topic_max);
+    if (self.closed or !self.sourceRoom(message.source, kind, len)) return error.NetworkGossipFull;
+    const k = @intFromEnum(kind);
+    const pages = storage.Store.pagesFor(len);
+    if (self.used_items[k] >= self.limits[k].items or pages * storage.page_bytes > self.limits[k].bytes - self.used_bytes[k]) return error.NetworkGossipFull;
+    const index = self.queueValue(kind, .free).head;
+    if (index == none) {
+        self.diag.capacityRefusals +|= 1;
+        return error.NetworkGossipFull;
+    }
+    if (pages > self.store.free_pages or self.store.used_entries + self.store.retired_entries >= self.store.entries.len) {
+        self.diag.byteRefusals +|= 1;
+        return error.NetworkBridgeFull;
+    }
+    const order = try std.math.add(u64, self.order, 1);
+    const payload = self.store.put(message.id, message.topic, message.bytes).?;
+    self.store.retainValidation(payload);
+    self.store.seal(payload);
+    const cell = &self.cells[index];
+    assert(cell.generation < std.math.maxInt(u64));
+    cell.* = .{
+        .generation = cell.generation + 1,
+        .state_link = cell.state_link,
+        .order = order,
+        .kind = kind,
+        .input = .{ .len = len, .handle = payload },
+        .metadata = metadata.*,
+        .fork_digest = canonical.digest,
+        .deneb = deneb,
+        .handle = message.handle,
+        .identity = message.identity,
+        .source = message.source,
+        .connection = message.peer,
+        .id = message.id,
+        .topic_len = @intCast(message.topic.len),
+        .deadline = message.deadline,
+        .received_at = received_at,
+        .admitted_ms = message.admitted_ms,
+    };
+    @memcpy(cell.topic[0..message.topic.len], message.topic);
     if (message.source) |source| {
         const usage = &self.sources[source.index];
         if (usage.generation != source.generation) usage.* = .{ .generation = source.generation };
-        cell.source_charge = chargedBytes(message.bytes.len);
-        usage.items[@intFromEnum(kind)] += 1;
-        usage.bytes[@intFromEnum(kind)] += cell.source_charge;
+        cell.source_charge = chargedBytes(len);
+        usage.items[k] += 1;
+        usage.bytes[k] += cell.source_charge;
     }
-    cell.connection = message.peer;
-    cell.id = message.id;
-    assert(message.topic.len <= topic_max);
-    @memcpy(cell.topic[0..message.topic.len], message.topic);
-    cell.topic_len = @intCast(message.topic.len);
-    cell.deadline = message.deadline;
-    cell.received_at = received_at;
-    cell.admitted_ms = message.admitted_ms;
-    self.install(handle, message.bytes);
+    self.order = order;
+    self.used_items[k] += 1;
+    self.used_bytes[k] += pages * storage.page_bytes;
+    self.diag.payloadBytes += len;
+    self.diag.occupied += 1;
+    self.diag.highWater = @max(self.diag.highWater, self.diag.occupied);
+    self.last_now = @max(self.last_now, cell.admitted_ms);
+    // All deadlines use the startup timeout and serialized admission clock.
+    if (self.expiry.tail != none) assert(self.cells[self.expiry.tail].deadline <= cell.deadline);
+    self.expiry.append(self.cells, "expiry_link", index);
+    self.transition(index, if (cell.metadata.root != null) .needs_check else .queued);
 }
 fn chargedBytes(len: usize) usize {
     return @max(storage.inline_bytes, storage.Store.pagesFor(len) * storage.page_bytes);
@@ -316,52 +341,6 @@ pub fn sourceRoom(self: *const GossipProcessor, source: ?Source, kind: Kind, len
     const bytes = if (usage.generation == peer.generation) usage.bytes[k] else 0;
     const maximum = chargedBytes(@min(self.source_maximum[k], limits[k].bytes));
     return items < limits_mod.sourceItems(limits[k]) and chargedBytes(len) <= limits_mod.sourceBytes(limits[k], maximum, storage.inline_bytes) -| bytes;
-}
-pub fn reserve(self: *GossipProcessor, kind: Kind, len: usize) !Token {
-    assert(len <= payload_max);
-    if (self.closed) return error.NetworkGossipFull;
-    const k = @intFromEnum(kind);
-    const pages = storage.Store.pagesFor(len);
-    if (self.used_items[k] >= self.limits[k].items or pages * storage.page_bytes > self.limits[k].bytes - self.used_bytes[k]) return error.NetworkGossipFull;
-    const index = self.queueValue(kind, .free).head;
-    if (index == none) {
-        self.diag.capacityRefusals +|= 1;
-        return error.NetworkGossipFull;
-    }
-    if (pages > self.store.free_pages - self.staging_pages or self.store.used_entries + self.store.retired_entries + self.staging_items >= self.store.entries.len) {
-        self.diag.byteRefusals +|= 1;
-        return error.NetworkBridgeFull;
-    }
-    const order = try std.math.add(u64, self.order, 1);
-    self.queue(kind, .free).remove(self.cells, "state_link", index);
-    const generation = self.cells[index].generation;
-    assert(generation < std.math.maxInt(u64));
-    self.cells[index] = .{ .state = .capturing, .generation = generation + 1, .order = order, .kind = kind, .input = .{ .len = len } };
-    self.queue(kind, .capturing).append(self.cells, "state_link", index);
-    self.order = order;
-    self.staging_pages += pages;
-    self.staging_items += 1;
-    self.used_items[k] += 1;
-    self.used_bytes[k] += pages * storage.page_bytes;
-    self.diag.payloadBytes += len;
-    self.diag.occupied += 1;
-    self.diag.highWater = @max(self.diag.highWater, self.diag.occupied);
-    return self.token(index);
-}
-pub fn install(self: *GossipProcessor, handle: Token, copy: []const u8) void {
-    const cell = self.get(handle).?;
-    assert(cell.state == .capturing and cell.input.len == copy.len);
-    const payload = self.store.put(cell.id, cell.topic[0..cell.topic_len], copy).?;
-    self.store.retainValidation(payload);
-    self.store.seal(payload);
-    self.staging_pages -= storage.Store.pagesFor(copy.len);
-    self.staging_items -= 1;
-    cell.input.handle = payload;
-    self.last_now = @max(self.last_now, cell.admitted_ms);
-    // All deadlines use the startup timeout and serialized admission clock.
-    if (self.expiry.tail != none) assert(self.cells[self.expiry.tail].deadline <= cell.deadline);
-    self.expiry.append(self.cells, "expiry_link", handle.index);
-    self.transition(handle.index, if (cell.metadata.root != null) .needs_check else .queued);
 }
 fn transition(self: *GossipProcessor, index: u32, state: State) void {
     const cell = &self.cells[index];
@@ -427,10 +406,7 @@ pub fn copyPayload(self: *const GossipProcessor, cell: *const Cell, destination:
 }
 
 fn releasePayload(self: *GossipProcessor, cell: *Cell) void {
-    if (cell.input.handle) |handle| self.store.releaseValidation(handle) else if (cell.state == .capturing) {
-        self.staging_pages -= storage.Store.pagesFor(cell.input.len);
-        self.staging_items -= 1;
-    }
+    if (cell.input.handle) |handle| self.store.releaseValidation(handle);
     self.used_bytes[@intFromEnum(cell.kind)] -= storage.Store.pagesFor(cell.input.len) * storage.page_bytes;
     self.diag.payloadBytes -= cell.input.len;
     cell.input = .{};
@@ -572,7 +548,7 @@ pub fn close(self: *GossipProcessor) void {
             continue;
         }
         cell.retired = true;
-        if (cell.state != .copying and cell.state != .capturing) self.retire(self.token(@intCast(i)));
+        if (cell.state != .copying) self.retire(self.token(@intCast(i)));
     }
 }
 /// One claim's bounds; `ordinary` admits ordinary kinds besides the urgent ones.

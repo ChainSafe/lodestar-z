@@ -21,7 +21,7 @@ import type {
   NativePeerAction,
   NativePeerObservation,
   NativePeerSnapshot,
-  NativeProtocolId,
+  NativeRequestProtocolId,
   NativeRememberedPeersSnapshot,
   NativeRequestOptions,
   NativeResolvedLimits,
@@ -177,7 +177,7 @@ export interface NativeNetworkApplicationRuntime {
   ): Promise<NativeGossipPublishResult>;
   request(
     peerId: PeerIdStr,
-    protocol: string,
+    protocol: NativeRequestProtocolId,
     data: Uint8Array,
     options?: NativeRequestOptions
   ): AsyncIterableIterator<NativeResponseChunk>;
@@ -246,7 +246,7 @@ export function initializeNativeNetworkRuntime(
 export interface NativeIncomingRequest {
   readonly peerId: PeerIdStr;
   readonly connection: NativeConnection;
-  readonly protocol: NativeProtocolId;
+  readonly protocol: NativeRequestProtocolId;
   readonly data: Uint8Array;
   /** Resolves once the stream and pending responses have retired. Retained host work may still be running. */
   readonly closed: Promise<void>;

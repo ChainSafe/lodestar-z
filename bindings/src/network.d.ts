@@ -290,6 +290,9 @@ export type NativeProtocolId =
   | "/eth2/beacon_chain/req/metadata/1/ssz_snappy"
   | "/eth2/beacon_chain/req/metadata/2/ssz_snappy"
   | "/eth2/beacon_chain/req/metadata/3/ssz_snappy"
+  | NativeRequestProtocolId;
+
+export type NativeRequestProtocolId =
   | "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy"
   | "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy"
   | "/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy"
@@ -359,14 +362,17 @@ export type NativePeerObservation =
 
 export interface NativeRequestOptions {
   expectedChunks?: number;
+  /** Integer milliseconds, 1..60000. Default: 5000. */
   negotiationTimeoutMs?: number;
+  /** Integer milliseconds, 1..60000. Default: 5000. */
   requestTimeoutMs?: number;
+  /** Integer milliseconds, 1..60000. Default: 10000. */
   responseTimeoutMs?: number;
 }
 export interface NativeResponseChunk {
   data: Uint8Array;
   fork: NetworkFork | null;
-  protocol: string;
+  protocol: NativeRequestProtocolId;
 }
 export type NativeRequestPhase = "negotiation" | "request" | "response";
 export type NativeRequestRejection =
@@ -566,7 +572,7 @@ export interface DependencyCheck {
 export interface IncomingRequest {
   readonly peerId: PeerIdStr;
   readonly connection: NativeConnection;
-  readonly protocol: NativeProtocolId;
+  readonly protocol: NativeRequestProtocolId;
   readonly data: Uint8Array;
   /** Stream and response obligations ended; host work may remain. */
   readonly closed: Promise<void>;
@@ -645,7 +651,7 @@ export interface NativeNetwork {
   publish(topic: string, data: Uint8Array, options?: NativeGossipPublishOptions): Promise<NativeGossipPublishResult>;
   request(
     peerId: PeerIdStr,
-    protocol: NativeProtocolId,
+    protocol: NativeRequestProtocolId,
     data: Uint8Array,
     options?: NativeRequestOptions
   ): AsyncIterableIterator<NativeResponseChunk>;

@@ -79,8 +79,8 @@ fn capacityAfter(table: *const processor.GossipProcessor, kind: processor.limits
     if (victims.len == 0) return table.hasCapacity(kind, len);
     const k = @intFromEnum(kind);
     var free_cells: usize = table.queues[k][@intFromEnum(processor.GossipProcessor.State.free)].len;
-    var pages = table.store.free_pages - table.staging_pages;
-    var entries = table.store.entries.len - table.store.used_entries - table.store.retired_entries - table.staging_items;
+    var pages = table.store.free_pages;
+    var entries = table.store.entries.len - table.store.used_entries - table.store.retired_entries;
     var used = table.used_bytes[k];
     for (victims) |token| {
         const cell = &table.cells[token.index];

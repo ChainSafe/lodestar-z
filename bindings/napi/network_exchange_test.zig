@@ -105,13 +105,20 @@ const control: exchange.Demand = .{ .settle = 32, .peers = 0, .checks = 0, .serv
 
 fn admit(runtime: *Runtime, kind: Kind, root: ?[32]u8, payload: []const u8) !g.Token {
     const table = &runtime.gossip.?;
-    const token = try table.reserve(kind, payload.len);
-    const cell = table.get(token).?;
-    cell.id = @splat(1);
-    cell.deadline = 100;
-    cell.metadata = .{ .slot = 1, .root = root };
-    @memset(&cell.topic, 0);
-    table.install(token, payload);
+    const canonical: n.gossipsub.topic.Canonical = .{ .digest = @splat(0), .name = .{ .kind = kind } };
+    var topic: [n.gossip_processor.GossipProcessor.topic_max]u8 = undefined;
+    try table.capture(&.{
+        .handle = .{ .index = 0, .generation = 1 },
+        .id = @splat(1),
+        .peer = .{ .index = 0, .generation = 1 },
+        .topic = n.gossipsub.topic.buildCanonical(canonical, &topic),
+        .bytes = payload,
+        .identity = .{ .bytes = @splat(1) },
+        .admitted_ms = 0,
+        .deadline = 100,
+    }, canonical, &.{ .slot = 1, .root = root }, false, 0);
+    const index = table.expiry.tail;
+    const token: g.Token = .{ .index = @intCast(index), .generation = table.cells[index].generation };
     runtime.lock();
     runtime.recomputeLocked(.checks);
     runtime.recomputeLocked(.gossip);
