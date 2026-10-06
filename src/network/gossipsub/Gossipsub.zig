@@ -313,7 +313,7 @@ pub fn publishWithOptions(self: *Gossipsub, topic_str: []const u8, ssz: []const 
     const recipients = self.overlay.publicationRecipients(&context, topic, options.flood);
     if (recipients.count() == 0 and !options.allow_zero_peers) return error.NoPeersSubscribedToTopic;
     const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return error.CompressFailed;
-    const h = self.messages.publish(id, topic_str, self.msg_scratch[0..clen], now_ms, self.cycle.epoch) orelse return error.ResourceExhausted;
+    const h = self.messages.publish(id, topic, topic_str, self.msg_scratch[0..clen], now_ms, self.cycle.epoch) orelse return error.ResourceExhausted;
     self.topic_metrics.get(topic_str).published +|= 1;
     _ = self.recovery.resolve(&self.peers, id);
     const result = self.deliver(&recipients, h, null, now_ms);
@@ -482,7 +482,7 @@ pub fn maintainTopics(self: *Gossipsub, now: Now) void {
 
 fn emitGossip(self: *Gossipsub, topic: u16, context: *const overlay_mod.Context) void {
     const topic_str = self.overlay.topicString(topic);
-    const ids = self.messages.gossipIds(topic_str, self.cycle.epoch);
+    const ids = self.messages.gossipIds(topic, self.cycle.epoch);
     const count = ids.len;
     if (count == 0) return;
     const n = @min(count, constants.gossip_ids_max);

@@ -237,7 +237,7 @@ test "gossip validation finishes without allocation while shared deliveries are 
     defer g.deinit();
     try support.subscribe(&g, test_topic);
     const topic = g.overlay.findTopic(test_topic).?;
-    const message = g.messages.publish(@splat(1), test_topic, "retained", 0, 0).?;
+    const message = g.messages.publish(@splat(1), topic, test_topic, "retained", 0, 0).?;
     for (0..3) |i| {
         const conn: Handle = .{ .index = @intCast(i), .generation = 1 };
         const session = support.addPeer(&g, conn, .v1_2).?;

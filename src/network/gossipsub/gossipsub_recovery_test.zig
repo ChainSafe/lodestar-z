@@ -236,8 +236,8 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
     g.sessions.setOutbound(first.index, .{ .live = .{ .stream = .{ .conn = g.sessions.rows[first.index].conn, .id = 2, .slot = 0 }, .version = .v1_2 } });
     const logical_peer = g.sessions.rows[first.index].logical;
     const id: MessageId = @splat(9);
-    const message = g.messages.store.put(id, "t", "payload").?;
-    g.messages.history.put(&g.messages.store, message, g.cycle.epoch);
+    const message = g.messages.store.put(id, g.overlay.topicString(0), "payload").?;
+    g.messages.history.put(&g.messages.store, message, 0, g.cycle.epoch);
     g.messages.store.seal(message);
     var bytes: [64]u8 = undefined;
     var writer = protobuf.Writer.init(&bytes);

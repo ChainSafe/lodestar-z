@@ -9,44 +9,45 @@ const PeerRef = @import("peer_book.zig").Ref;
 const storage = @import("message_store.zig");
 const constants = @import("constants.zig");
 const topic = @import("topic.zig");
+const topic_policy = @import("topic_policy.zig");
 
-test "gossip history visits only matching topics and keeps owned keys through eviction and replacement" {
+test "gossip history visits only matching topics through eviction and replacement" {
     const a = std.testing.allocator;
     var store = try storage.Store.init(a, 65, storage.page_bytes);
     defer store.deinit(a);
-    var history = try History.init(a, 64, 1);
+    var history = try History.init(a, 64, 1, 35);
     defer history.deinit(a);
     var names: [32][32]u8 = undefined;
     var lengths: [32]usize = undefined;
     for (&names, &lengths, 0..) |*name, *len, i| len.* = (try std.fmt.bufPrint(name, "topic-{d}", .{i})).len;
     for (0..64) |i| {
         const h = store.put(@splat(@intCast(i)), names[i % 32][0..lengths[i % 32]], "payload").?;
-        history.put(&store, h, 0);
+        history.put(&store, h, @intCast(i % 32), 0);
         store.seal(h);
     }
     var ids: [64]MessageId = undefined;
-    for (names, lengths) |name, len| try std.testing.expectEqual(@as(usize, 2), history.gossip(name[0..len], &ids, 1));
+    for (0..32) |ordinal| try std.testing.expectEqual(@as(usize, 2), history.gossip(@intCast(ordinal), &ids, 1));
     try std.testing.expectEqual(@as(u64, 64), history.gossip_entries_visited);
-    try std.testing.expectEqual(@as(usize, 0), history.gossip("absent", &ids, 1));
+    try std.testing.expectEqual(@as(usize, 0), history.gossip(34, &ids, 1));
     try std.testing.expectEqual(@as(u64, 64), history.gossip_entries_visited);
     const replacement = store.put(@splat(0), "replacement", "new").?;
-    history.put(&store, replacement, 1);
+    history.put(&store, replacement, 32, 1);
     store.seal(replacement);
-    try std.testing.expectEqual(@as(usize, 1), history.gossip("topic-0", &ids, 2));
+    try std.testing.expectEqual(@as(usize, 1), history.gossip(0, &ids, 2));
     try std.testing.expectEqualSlices(u8, &(@as(MessageId, @splat(32))), &ids[0]);
-    try std.testing.expectEqual(@as(usize, 1), history.gossip("replacement", &ids, 2));
+    try std.testing.expectEqual(@as(usize, 1), history.gossip(32, &ids, 2));
     history.age(&store, constants.mcache_len);
     try std.testing.expectEqual(@as(usize, 1), history.count);
-    for (names, lengths) |name, len| try std.testing.expectEqual(@as(usize, 0), history.gossip(name[0..len], &ids, constants.mcache_len));
+    for (0..32) |ordinal| try std.testing.expectEqual(@as(usize, 0), history.gossip(@intCast(ordinal), &ids, constants.mcache_len));
     history.age(&store, constants.mcache_len + 1);
     try std.testing.expectEqual(@as(usize, 0), history.count);
     for (0..64) |i| {
         const h = store.put(@splat(@intCast(i)), "reused", "payload").?;
-        history.put(&store, h, 10);
+        history.put(&store, h, 33, 10);
         store.seal(h);
     }
-    try std.testing.expectEqual(@as(usize, 64), history.gossip("reused", &ids, 11));
-    try std.testing.expectEqual(@as(usize, 0), history.gossip("replacement", &ids, 11));
+    try std.testing.expectEqual(@as(usize, 64), history.gossip(33, &ids, 11));
+    try std.testing.expectEqual(@as(usize, 0), history.gossip(32, &ids, 11));
 }
 
 test "gossip history cleans up every partial index allocation" {
@@ -54,43 +55,39 @@ test "gossip history cleans up every partial index allocation" {
 }
 
 fn initHistory(a: std.mem.Allocator) !void {
-    var history = try History.init(a, 8, 2);
+    var history = try History.init(a, 8, 2, 1);
     defer history.deinit(a);
 }
 
-test "gossip history owned topic keys survive wrapped hash collisions and slot reuse" {
+test "gossip history covers the full namespace independently of message capacity" {
     const a = std.testing.allocator;
-    var store = try storage.Store.init(a, 5, storage.page_bytes);
+    try std.testing.expectError(error.InvalidLimits, History.init(a, 2, 1, 0));
+    try std.testing.expectError(error.InvalidLimits, History.init(a, 2, 1, topic_policy.topic_max + 1));
+    var store = try storage.Store.init(a, 3, storage.page_bytes);
     defer store.deinit(a);
-    var history = try History.init(a, 4, 1);
+    var history = try History.init(a, 2, 1, topic_policy.topic_max);
     defer history.deinit(a);
-    var names: [5][32]u8 = undefined;
-    var lengths: [5]usize = undefined;
-    var count: usize = 0;
-    for (0..4096) |candidate| {
-        const name = try std.fmt.bufPrint(&names[count], "collision-{d}", .{candidate});
-        if (std.hash.Wyhash.hash(history.topic_index.seed, name) & history.topic_index.mask != history.topic_index.mask) continue;
-        lengths[count] = name.len;
-        count += 1;
-        if (count == names.len) break;
-    }
-    try std.testing.expectEqual(names.len, count);
-    for (names, lengths, 0..) |name, len, i| {
-        const h = store.put(@splat(@intCast(i)), name[0..len], "payload").?;
-        history.put(&store, h, 0);
-        store.seal(h);
-    }
-    var ids: [4]MessageId = undefined;
-    try std.testing.expectEqual(@as(usize, 0), history.gossip(names[0][0..lengths[0]], &ids, 1));
-    for (1..5) |i| {
-        try std.testing.expectEqual(@as(usize, 1), history.gossip(names[i][0..lengths[i]], &ids, 1));
-        try std.testing.expectEqual(@as(MessageId, @splat(@intCast(i))), ids[0]);
-    }
-    const h = store.put(@splat(2), names[0][0..lengths[0]], "replacement").?;
-    history.put(&store, h, 0);
-    store.seal(h);
-    try std.testing.expectEqual(@as(usize, 0), history.gossip(names[2][0..lengths[2]], &ids, 1));
-    for ([_]usize{ 0, 1, 3, 4 }) |i| try std.testing.expectEqual(@as(usize, 1), history.gossip(names[i][0..lengths[i]], &ids, 1));
+    const last = topic_policy.topic_max - 1;
+    const high = store.put(@splat(1), "high", "payload").?;
+    history.put(&store, high, last, 0);
+    store.seal(high);
+    const low = store.put(@splat(2), "low", "payload").?;
+    history.put(&store, low, 0, 0);
+    store.seal(low);
+    var ids: [2]MessageId = undefined;
+    try std.testing.expectEqual(@as(usize, 1), history.gossip(last, &ids, 1));
+    try std.testing.expectEqual(@as(MessageId, @splat(1)), ids[0]);
+    const replacement = store.put(@splat(3), "low", "replacement").?;
+    history.put(&store, replacement, 0, 1);
+    store.seal(replacement);
+    try std.testing.expect(store.get(high) == null);
+    try std.testing.expectEqual(@as(usize, 0), history.gossip(last, &ids, 2));
+    try std.testing.expectEqual(@as(usize, 2), history.gossip(0, &ids, 2));
+    try std.testing.expectEqual(@as(MessageId, @splat(2)), ids[0]);
+    try std.testing.expectEqual(@as(MessageId, @splat(3)), ids[1]);
+    try std.testing.expectEqualStrings("low", store.get(low).?.topicString());
+    history.age(&store, constants.mcache_len + 1);
+    try std.testing.expectEqual(@as(usize, 0), store.used_entries);
 }
 
 test "seen cache dedupes, evicts oldest when full, and expires by ttl" {
@@ -126,19 +123,19 @@ test "gossip seen TTL applies to duplicate only traffic" {
 test "gossip history indexed replacement keeps FIFO age and invalidates old handles" {
     var store = try storage.Store.init(std.testing.allocator, 4, 16384);
     defer store.deinit(std.testing.allocator);
-    var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap);
+    var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap, 2);
     defer history.deinit(std.testing.allocator);
     const a = [_]u8{1} ** 20;
     const b = [_]u8{2} ** 20;
     const first = store.put(a, "a", "old").?;
-    history.put(&store, first, 0);
+    history.put(&store, first, 0, 0);
     store.seal(first);
     const second = store.put(b, "b", "other").?;
-    history.put(&store, second, 0);
+    history.put(&store, second, 1, 0);
     store.seal(second);
     history.age(&store, 1);
     const replacement = store.put(a, "a", "new").?;
-    history.put(&store, replacement, 1);
+    history.put(&store, replacement, 0, 1);
     store.seal(replacement);
     try std.testing.expectEqual(@as(usize, 2), history.count);
     try std.testing.expectEqual(replacement, history.message(history.get(&store, a).?));
@@ -186,7 +183,7 @@ test "gossip ID index bounds sparse misses and repairs wrapped collision cluster
 }
 
 test "gossip policy recovery permits more than sixteen distinct recipients" {
-    var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap);
+    var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap, 1);
     defer history.deinit(std.testing.allocator);
     const slot: u32 = 0;
     for (0..32) |i| {
@@ -205,7 +202,7 @@ test "gossip history entries keep peer generations outside message rows" {
 }
 
 test "gossip history stale peer cannot restore retransmission allowance" {
-    var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap);
+    var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap, 1);
     defer history.deinit(std.testing.allocator);
     const slot: u32 = 0;
     const current: PeerRef = .{ .index = 0, .generation = (@as(u64, 1) << 40) + 2 };
@@ -221,17 +218,17 @@ test "gossip history stale peer cannot restore retransmission allowance" {
 test "gossip history replacement resets message retransmission counts" {
     var store = try storage.Store.init(std.testing.allocator, 4, 16384);
     defer store.deinit(std.testing.allocator);
-    var history = try History.init(std.testing.allocator, 1, constants.retained_peers_cap);
+    var history = try History.init(std.testing.allocator, 1, constants.retained_peers_cap, 1);
     defer history.deinit(std.testing.allocator);
     const id: MessageId = @splat(1);
     const first = store.put(id, "t", "first").?;
-    history.put(&store, first, 0);
+    history.put(&store, first, 0, 0);
     store.seal(first);
     const peer: PeerRef = .{ .index = 0, .generation = 1 };
     history.bindPeer(peer);
     for (0..3) |_| history.sent(history.get(&store, id).?, peer);
     const replacement = store.put(id, "t", "replacement").?;
-    history.put(&store, replacement, 0);
+    history.put(&store, replacement, 0, 0);
     store.seal(replacement);
     try std.testing.expect(history.iwantAllowed(history.get(&store, id).?, peer, 3));
     try std.testing.expectEqual(@as(u8, 0), history.countsRow(history.get(&store, id).?)[peer.index]);
@@ -239,7 +236,7 @@ test "gossip history replacement resets message retransmission counts" {
 }
 
 test "gossip history canonical identity replacement clears only its bounded peer column" {
-    var history = try History.init(std.testing.allocator, 3, constants.retained_peers_cap);
+    var history = try History.init(std.testing.allocator, 3, constants.retained_peers_cap, 1);
     defer history.deinit(std.testing.allocator);
     const peer: PeerRef = .{ .index = 0, .generation = (@as(u64, 1) << 40) + 1 };
     const other: PeerRef = .{ .index = 1, .generation = 1 };
@@ -268,7 +265,7 @@ test "gossip history canonical identity replacement clears only its bounded peer
 }
 
 test "history resolved retained capacity bounds counters and stale peers" {
-    var history = try History.init(std.testing.allocator, 2, 4);
+    var history = try History.init(std.testing.allocator, 2, 4, 1);
     defer history.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 4), history.generations.len);
     try std.testing.expectEqual(@as(usize, 8), history.counts.len);
@@ -281,13 +278,13 @@ test "gossip failed admission preserves history borrowed by validation" {
     const a = std.testing.allocator;
     var store = try storage.Store.init(a, 3, storage.page_bytes * 2);
     defer store.deinit(a);
-    var history = try History.init(a, 2, 2);
+    var history = try History.init(a, 2, 2, 1);
     defer history.deinit(a);
     var handles: [2]storage.Handle = undefined;
     for (&handles, 0..) |*handle, i| {
         const id: MessageId = @splat(@intCast(i));
         handle.* = history.admitPayload(&store, id, "topic", &([_]u8{1} ** (storage.inline_bytes + 1))).?;
-        history.put(&store, handle.*, 0);
+        history.put(&store, handle.*, 0, 0);
         store.seal(handle.*);
         store.retainValidation(handle.*);
     }
@@ -302,39 +299,39 @@ test "gossip history emits three windows and defers arrivals during a cycle" {
     const a = std.testing.allocator;
     var store = try storage.Store.init(a, 3, 3 * storage.page_bytes);
     defer store.deinit(a);
-    var history = try History.init(a, 3, 2);
+    var history = try History.init(a, 3, 2, 1);
     defer history.deinit(a);
     const first = store.put(@splat(1), "topic", "first").?;
-    history.put(&store, first, 0);
+    history.put(&store, first, 0, 0);
     store.seal(first);
     var epoch: u64 = 1;
     const second = store.put(@splat(2), "topic", "second").?;
-    history.put(&store, second, epoch);
+    history.put(&store, second, 0, epoch);
     store.seal(second);
     var ids: [3]MessageId = undefined;
-    try std.testing.expectEqual(@as(usize, 1), history.gossip("topic", &ids, epoch));
+    try std.testing.expectEqual(@as(usize, 1), history.gossip(0, &ids, epoch));
     history.age(&store, epoch);
     for (0..2) |_| {
         epoch += 1;
-        try std.testing.expectEqual(@as(usize, 2), history.gossip("topic", &ids, epoch));
+        try std.testing.expectEqual(@as(usize, 2), history.gossip(0, &ids, epoch));
         history.age(&store, epoch);
     }
     epoch += 1;
-    try std.testing.expectEqual(@as(usize, 1), history.gossip("topic", &ids, epoch));
+    try std.testing.expectEqual(@as(usize, 1), history.gossip(0, &ids, epoch));
     try std.testing.expectEqual(@as(MessageId, @splat(2)), ids[0]);
     history.age(&store, epoch);
     epoch += 1;
-    try std.testing.expectEqual(@as(usize, 0), history.gossip("topic", &ids, epoch));
+    try std.testing.expectEqual(@as(usize, 0), history.gossip(0, &ids, epoch));
     history.age(&store, epoch);
 }
 
-fn retainNext(history: *History, store: *storage.Store, index: u32, name: []const u8) bool {
+fn retainNext(history: *History, store: *storage.Store, index: u32, ordinal: u16, name: []const u8) bool {
     var id: MessageId = @splat(0);
     std.mem.writeInt(u32, id[0..4], index, .little);
     const h = store.put(id, name, "x").?;
     defer store.seal(h);
     if (!history.makeRoom(store, h)) return false;
-    history.put(store, h, 0);
+    history.put(store, h, ordinal, 0);
     return true;
 }
 
@@ -352,12 +349,12 @@ test "gossip retention reclaims its own kind's old copies however many other mes
         var store = try storage.Store.init(a, capacity + 2, storage.page_bytes);
         defer store.deinit(a);
         store.limits = limits;
-        var history = try History.init(a, capacity, 1);
+        var history = try History.init(a, capacity, 1, 2);
         defer history.deinit(a);
         var index: u32 = 0;
-        for ([_]struct { []const u8, usize }{ .{ attestation, 64 }, .{ exit, 8 }, .{ attestation, 8192 }, .{ exit, 1 } }) |run| {
+        for ([_]struct { []const u8, usize, u16 }{ .{ attestation, 64, 0 }, .{ exit, 8, 1 }, .{ attestation, 8192, 0 }, .{ exit, 1, 1 } }) |run| {
             for (0..run[1]) |_| {
-                try std.testing.expect(retainNext(&history, &store, index, run[0]));
+                try std.testing.expect(retainNext(&history, &store, index, run[2], run[0]));
                 index += 1;
             }
         }
