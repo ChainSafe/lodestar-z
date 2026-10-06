@@ -313,8 +313,9 @@ pub fn findNodes(
 
     const limit = @min(out.len, types.findnode_result_max);
     var result_length: usize = 0;
+    const local_has_address = local_record.ip4 != null or local_record.ip6 != null;
     if (requested[0] and result_length < limit and
-        recordRelayAllowed(local_record, requester))
+        (!local_has_address or recordRelayAllowed(local_record, requester)))
     {
         out[result_length] = local_record.*;
         result_length += 1;

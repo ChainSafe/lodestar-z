@@ -1,7 +1,9 @@
 const std = @import("std");
 const n = @import("network");
 const rr = n.reqresp;
-const Runtime = @import("network_runtime.zig").Runtime;
+const runtime_mod = @import("network_runtime.zig");
+const Runtime = runtime_mod.Runtime;
+const Wake = @import("network_wake.zig").Wake;
 const incoming = @import("network_incoming.zig");
 const Budget = @import("network_budget.zig").Budget;
 const Table = incoming.Table;
@@ -172,54 +174,123 @@ test "incoming serving start rollback and commit preserve a close while pinned" 
 test "sent responses wait for next-chunk credit and can close while waiting" {
     const Ending = enum { after_next_credit, cancelled, shutdown };
     for ([_]Ending{ .after_next_credit, .cancelled, .shutdown }) |ending| {
-        var runtime: Runtime = .{ .env = undefined };
+        var pair: rr.testing.Pair = .{};
+        var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
+        const owner = try std.testing.allocator.create(runtime_mod.Owner);
+        defer std.testing.allocator.destroy(owner);
+        owner.* = .{};
+        runtime.heavy = owner;
+        const resolved = try n.configuration.resolve(.{
+            .profile = .small,
+            .seed = 1,
+            .forks = &pair.forks,
+            .admission_policy = .{ .deneb_start_slot = 0, .blocks_pre_deneb = 1024, .blocks_deneb = 128, .blob_identifiers_deneb = 768, .blob_identifiers_electra = 1152, .number_of_columns = 128, .column_chunks = 16384, .blob_schedule = &.{.{ .start_slot = 0, .max_blobs = 6 }} },
+        });
+        try pair.shared.pair.init(resolved.limits, resolved.limits);
+        defer pair.shared.pair.deinit();
+        const options = resolved.core.protocols;
+        const client_local = try options.identify.makeLocal(&pair.shared.pair.client.tls.local_peer_id, &pair.shared.pair.client.local);
+        pair.shared.client = try n.Protocols.init(std.testing.allocator, options, &client_local);
+        defer pair.shared.client.deinit();
+        defer pair.shared.client.shutdown(&pair.shared.pair.client, pair.shared.pair.now);
+        const local = try options.identify.makeLocal(&pair.shared.pair.server.tls.local_peer_id, &pair.shared.pair.server.local);
+        owner.core.protocols = try n.Protocols.init(std.testing.allocator, options, &local);
+        defer owner.core.protocols.deinit();
+        defer owner.core.protocols.shutdown(&pair.shared.pair.server, pair.shared.pair.now);
+        _ = try pair.shared.pair.dial();
+        try pair.shared.pair.pump();
+        var connected: [8]n.Event = undefined;
+        pair.shared.handles.client = pair.shared.pair.events(&pair.shared.pair.client, &connected)[0].connected.conn;
+        pair.shared.handles.server = pair.shared.pair.events(&pair.shared.pair.server, &connected)[0].connected.conn;
+        runtime.wake = try Wake.init();
+        defer runtime.wake.?.deinit();
         const response_max = rr.Protocol.blocks_by_root_v2.info().response_max;
+        const sink = try std.testing.allocator.alloc(u8, response_max);
+        defer std.testing.allocator.free(sink);
+        defer pair.shared.client.reqresp.cancelAll(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now);
+        const query = [_]u8{0} ** 64;
+        _ = try pair.shared.client.reqresp.request(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.handles.client, .blocks_by_root_v2, &query, sink, .{}, pair.shared.pair.now);
+        var handle: ?rr.ReqResp.RequestHandle = null;
+        var events: [16]rr.ReqResp.Event = undefined;
+        for (0..20) |_| {
+            for (try pumpIncoming(&pair, &owner.core.protocols, &events)) |event| {
+                if (event == .request) handle = event.request.request;
+            }
+            if (handle != null) break;
+        }
+        try std.testing.expect(handle != null);
         runtime.payload_budget.limit = response_max;
         runtime.incoming = try Table.init(std.testing.allocator, 1, &runtime.payload_budget);
         const table = &runtime.incoming.?;
         defer table.deinit();
-        const token = try table.reserve(.blocks_by_root_v2, 32);
-        try table.allocate(token, &(@as([32]u8, @splat(0))));
+        defer owner.core.protocols.shutdown(&pair.shared.pair.server, pair.shared.pair.now);
+        const token = try table.reserve(.blocks_by_root_v2, query.len);
+        try table.allocate(token, &query);
         const cell = table.get(token).?;
         cell.native = true;
-        cell.handle = .{ .direction = .inbound, .index = 0, .generation = 1 };
+        cell.handle = handle.?;
         _ = table.pinStart().?;
         table.commitStart(token);
         try table.reserveResponse(cell, 4000);
         cell.response = try std.testing.allocator.alloc(u8, 4000);
-        cell.state = .response_native;
+        @memset(cell.response, 0);
+        cell.context = pair.forks[0];
+        cell.state = .response_queued;
         cell.response_awaited = true;
         try runtime.payload_budget.reserve(.publication, response_max - 4000);
-        {
+        _ = try incoming.applyPending(&runtime, pair.shared.pair.now);
+        for (0..20) |_| {
+            const delivered = try pumpIncoming(&pair, &owner.core.protocols, &events);
             runtime.lock();
             defer runtime.unlock();
-            try incoming.captureLocked(&runtime, .{ .chunk_sent = .{ .request = cell.handle, .chunks = 1 } }, n.Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
+            for (delivered) |event| try incoming.captureLocked(&runtime, event, pair.shared.pair.now);
+            if (cell.state == .serving) break;
         }
+        try std.testing.expectEqual(@as(u32, 1), cell.chunks);
         try std.testing.expect(cell.response.len == 0 and cell.response_reservation == 0);
         try std.testing.expect(!table.anyDue() and cell.response_awaited and runtime.host_due);
-        try std.testing.expectError(error.NetworkBridgeFull, table.reserveResponse(cell, response_max));
-        runtime.payload_budget.release(.publication, response_max - 4000);
+        _ = try incoming.applyPending(&runtime, pair.shared.pair.now);
+        try std.testing.expect(runtime.payload_budget.waiting and !table.anyDue());
+        try runtime.wake.?.drain();
         if (ending == .after_next_credit) {
-            try table.reserveResponse(cell, response_max);
-            cell.ack = .sent;
-            table.refresh(cell);
+            runtime.lock();
+            runtime.payload_budget.release(.publication, response_max - 4000);
+            runtime.unlock();
+            try std.testing.expect(runtime.wake.?.pending);
+            _ = try incoming.applyPending(&runtime, pair.shared.pair.now);
             try std.testing.expect(table.anyDue());
             const completion = table.pin(token.index);
             try std.testing.expect(completion.ack.? == .sent and !completion.closed);
             _ = table.commit(completion);
+            try std.testing.expect(!table.anyDue());
             try std.testing.expectEqual(response_max, cell.response_reservation);
         }
-        runtime.lock();
-        if (ending == .cancelled) {
-            try incoming.captureLocked(&runtime, .{ .failed = .{ .request = cell.handle, .reason = .cancelled } }, n.Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
-        } else incoming.closeLocked(&runtime);
-        runtime.unlock();
+        if (ending == .shutdown) runtime.stop = true else cell.action = .cancel;
+        _ = try incoming.applyPending(&runtime, pair.shared.pair.now);
+        for (0..20) |_| {
+            const delivered = try pumpIncoming(&pair, &owner.core.protocols, &events);
+            runtime.lock();
+            defer runtime.unlock();
+            for (delivered) |event| try incoming.captureLocked(&runtime, event, pair.shared.pair.now);
+            if (!cell.native) break;
+        }
+        try std.testing.expect(!cell.native);
         const completion = table.pin(token.index);
         try std.testing.expect(completion.closed);
         if (ending == .cancelled) try std.testing.expectEqual(incoming.Ack{ .failed = .cancelled }, completion.ack.?);
         if (ending == .shutdown) try std.testing.expect(completion.ack.? == .closed);
         _ = table.commit(completion);
+        if (ending != .after_next_credit) runtime.payload_budget.release(.publication, response_max - 4000);
         try std.testing.expectEqual(@as(usize, 0), runtime.payload_budget.used);
         try std.testing.expect(table.get(token) == null);
     }
+}
+
+fn pumpIncoming(pair: *rr.testing.Pair, server: *n.Protocols, events: []rr.ReqResp.Event) ![]const rr.ReqResp.Event {
+    try pair.shared.pair.pump();
+    var transport_events: [n.quic.limits.events_per_turn_max]n.Event = undefined;
+    const count = server.process(&pair.shared.pair.server, pair.shared.pair.events(&pair.shared.pair.server, &transport_events), pair.shared.pair.now, .{ .application = events });
+    _ = pair.shared.processClient(.{});
+    try pair.shared.pair.pump();
+    return events[0..count.application];
 }

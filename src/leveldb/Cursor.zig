@@ -64,44 +64,6 @@ pub fn seek(self: *Cursor, target: []const u8, diagnostics: ?*Diagnostics) !void
     self.positioned = try self.bounds.seekTarget(&self.iterator, target, diagnostics);
 }
 
-/// Keys and values share the byte budget. A row deferred for lack of remaining room is not consumed. Any error
-/// closes the cursor; earlier rows copied during a failing call are not returned as a successful page.
-/// Exhaustion retains the view for seek; callers close the cursor explicitly.
-pub fn readInto(self: *Cursor, destination: []u8, entries: []Entry, value_limit: usize, diagnostics: ?*Diagnostics) !Page {
-    if (self.closed) return error.CursorClosed;
-    errdefer self.close();
-    if (destination.len == 0 or destination.len > leveldb.max_batch_bytes or
-        entries.len == 0 or entries.len > leveldb.max_batch_entries or
-        value_limit == 0 or value_limit > leveldb.max_value_bytes) return error.InvalidReadLimit;
-    var page: Page = .{ .count = 0, .bytes = 0, .done = false };
-    for (0..entries.len) |_| {
-        if (!try self.hasNext(diagnostics)) {
-            page.done = true;
-            break;
-        }
-        try checkKey(self.iterator.key());
-        const key = if (self.keys) self.iterator.key() else "";
-        const value = if (self.values) self.iterator.value() else "";
-        if (value.len > value_limit) return error.ValueTooLarge;
-        const bytes = key.len + value.len;
-        if (bytes > destination.len - page.bytes) {
-            if (page.count == 0) return error.BatchTooLarge;
-            break;
-        }
-        const key_copy = destination[page.bytes..][0..key.len];
-        @memcpy(key_copy, key);
-        const value_copy = destination[page.bytes + key.len ..][0..value.len];
-        @memcpy(value_copy, value);
-        entries[page.count] = .{ .key = key_copy, .value = value_copy };
-        page.count += 1;
-        page.bytes += bytes;
-        self.remaining -= 1;
-        if (self.remaining > 0) try self.bounds.advance(&self.iterator, diagnostics);
-    }
-    if (!page.done) page.done = !try self.hasNext(diagnostics);
-    return page;
-}
-
 /// Caller frees each selected slice in entries[0..page.count] with Database.allocator.
 /// Entries must contain no live allocations. Errors free partial entries and close the cursor.
 /// The soft watermark includes the crossing row. Exhaustion preserves the view for seek until explicit close.

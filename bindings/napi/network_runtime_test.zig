@@ -106,11 +106,17 @@ test "a requested stop removes queued gossip from host delivery" {
         runtime.gossip.?.deinit();
     }
     const table = &runtime.gossip.?;
-    const token = try table.reserve(.beacon_block, 1);
-    const cell = table.get(token).?;
-    cell.admitted_ms = 1;
-    cell.deadline = 101;
-    table.install(token, "x");
+    const topic = "/eth2/00000000/beacon_block/ssz_snappy";
+    try table.capture(&.{
+        .handle = .{ .index = 0, .generation = 1 },
+        .id = @splat(1),
+        .peer = .{ .index = 0, .generation = 1 },
+        .topic = topic,
+        .bytes = "x",
+        .identity = .{ .bytes = @splat(1) },
+        .admitted_ms = 1,
+        .deadline = 101,
+    }, n.gossipsub.topic.parseCanonical(topic).?, &.{}, false, 1);
     try std.testing.expectEqual(.payload, runtime.wantLocked(.gossip));
     runtime.requestStop();
     try std.testing.expectEqual(.none, runtime.wantLocked(.gossip));

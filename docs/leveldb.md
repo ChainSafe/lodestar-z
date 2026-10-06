@@ -146,11 +146,10 @@ bounds do not bound LevelDB's engine workspace.
 
 ## Zig use and validation
 
-`src/leveldb/root.zig` exports the bounded API. Zig callers provide destination
-buffers to `getInto`, `getManyInto`, and `Cursor.readInto`, or use
-`getManyOwned` and `Cursor.readOwned` for exact-sized allocated results.
-`Cursor.readOwned` accepts the soft watermark. Both cursor read methods keep
-exhausted cursors seekable until explicit close. Callers
+`src/leveldb/root.zig` exports the bounded API. Zig callers use `getManyOwned`
+and `Cursor.readOwned` for exact-sized allocated results, and `writeWithLimits`
+for atomic writes with explicit byte and entry limits. `Cursor.readOwned` accepts
+a soft watermark and keeps exhausted cursors seekable until explicit close. Callers
 free each owned result with the database allocator. Database operations may run
 concurrently with a thread-safe allocator; each cursor requires serialized access.
 Callers keep the database address stable and retire all operations and cursors
@@ -217,8 +216,8 @@ environment, logger, batch callback, and repair wrappers.
 `DB.get` checks and frees the C error before interpreting a null result as a missing
 key. Successful results are C-owned and require the raw module's `free(value.ptr)`,
 including empty values. `DB.propertyValue` results require the same cleanup.
-`DB.get` allocates the complete value; the bounded API's `getInto` uses an iterator
-to inspect the value length before copying it.
+`DB.get` allocates the complete value; the bounded API's `getManyOwned` uses an
+iterator to inspect each value's length before allocating and copying it.
 
 Iterator `key()` and `value()` return borrowed bytes valid only until that iterator
 moves or is destroyed. Inspect lengths and copy into caller-owned memory before

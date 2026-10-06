@@ -20,6 +20,22 @@ pub const Fixture = struct {
         self.closed = false;
     }
 
+    pub fn put(self: *Fixture, key: []const u8, value: []const u8, sync: bool) !void {
+        try self.write(&.{.{ .key = key, .value = value }}, sync);
+    }
+
+    pub fn delete(self: *Fixture, key: []const u8) !void {
+        try self.write(&.{.{ .key = key, .value = null }}, false);
+    }
+
+    pub fn write(self: *Fixture, operations: []const leveldb.Operation, sync: bool) !void {
+        try self.db.writeWithLimits(operations, sync, .{
+            .max_value_bytes = leveldb.max_owned_value_bytes,
+            .max_total_bytes = leveldb.max_owned_batch_bytes,
+            .max_entries = leveldb.max_bulk_entries,
+        }, null);
+    }
+
     pub fn close(self: *Fixture) !void {
         try self.db.close();
         self.closed = true;
@@ -50,17 +66,14 @@ pub fn freeValues(db_allocator: std.mem.Allocator, values: []const ?[]const u8) 
 }
 
 pub fn expectValue(db: *leveldb.Database, key: []const u8, expected: ?[]const u8) !void {
-    var destination: [128]u8 = @splat(0xa5);
-    const actual = try db.getInto(key, &destination, null);
+    var results: [1]?[]const u8 = undefined;
+    const limit = if (expected) |value| value.len else 0;
+    try db.getManyOwned(&.{key}, &results, limit, limit, true, null);
+    defer freeValues(db.allocator, &results);
     if (expected) |value| {
-        try testing.expect(actual != null);
-        try testing.expectEqualSlices(u8, value, actual.?);
-        try testing.expectEqual(@intFromPtr(&destination), @intFromPtr(actual.?.ptr));
-        for (destination[value.len..]) |byte| try testing.expectEqual(@as(u8, 0xa5), byte);
-    } else {
-        try testing.expectEqual(null, actual);
-        try testing.expectEqualSlices(u8, &(@as([128]u8, @splat(0xa5))), &destination);
-    }
+        try testing.expect(results[0] != null);
+        try testing.expectEqualSlices(u8, value, results[0].?);
+    } else try testing.expectEqual(null, results[0]);
 }
 
 pub fn expectEntry(entry: *const leveldb.Entry, key: []const u8, value: []const u8) !void {

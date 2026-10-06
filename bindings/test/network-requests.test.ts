@@ -20,6 +20,7 @@ test("application request rejects control protocols at the exported boundary", a
     const identity = await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     expect(() =>
+      // @ts-expect-error Control protocols are native-owned; also check JavaScript callers.
       runtime.request(identity.peerId, "/eth2/beacon_chain/req/ping/1/ssz_snappy", new Uint8Array(8))
     ).toThrow("ControlProtocol");
   } finally {

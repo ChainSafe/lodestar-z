@@ -1,5 +1,6 @@
 const std = @import("std");
 const enr = @import("identity/enr.zig");
+const crypto = @import("identity/crypto.zig");
 const RoutingTable = @import("RoutingTable.zig");
 const types = @import("types.zig");
 const test_support = @import("test_support.zig");
@@ -564,6 +565,25 @@ test "routing FINDNODE does not relay special-scope addresses" {
     );
     try std.testing.expectEqual(@as(usize, 1), selected.len);
     try std.testing.expectEqual(public_id, selected[0].node_id);
+}
+
+test "routing FINDNODE returns the local record before endpoint discovery" {
+    const key = try test_support.keyPair(1);
+    const public_key = crypto.compressedPublicKey(&key);
+    const local = try enr.Record.createFields(&key, 7, &.{
+        .{ .key = "id", .value = .{ .bytes = "v4" } },
+        .{ .key = "secp256k1", .value = .{ .bytes = &public_key } },
+    });
+    var table: RoutingTable = undefined;
+    try table.init(std.testing.allocator, local.node_id);
+    defer table.deinit(std.testing.allocator);
+    var out: [1]enr.Record = undefined;
+    const requester = address4(203, 0, 113, 2, 9000);
+    const selected = try table.findNodes(&local, requester, &.{0}, &out);
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+    try std.testing.expectEqualDeep(local, selected[0]);
+    try std.testing.expectEqual(@as(usize, 0), (try table.findNodes(&local, requester, &.{1}, &out)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try table.findNodes(&local, requester, &.{0}, out[0..0])).len);
 }
 
 test "routing table rejects inconsistent records and unusable endpoints" {

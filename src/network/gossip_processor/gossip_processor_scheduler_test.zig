@@ -7,16 +7,20 @@ const Kind = p.limits.Kind;
 const Gossipsub = @import("../gossipsub/root.zig").Gossipsub;
 
 fn add(table: *p.GossipProcessor, kind: Kind, now: u64, metadata: p.metadata.Metadata) !p.GossipProcessor.Token {
-    const token = try table.reserve(kind, 4);
-    const cell = table.get(token).?;
-    cell.id = @splat(1);
-    cell.deadline = now + 100;
-    cell.admitted_ms = now;
-    cell.metadata = metadata;
-    const canonical: topic_mod.Canonical = .{ .digest = cell.fork_digest, .name = .{ .kind = kind } };
-    cell.topic_len = @intCast(topic_mod.buildCanonical(canonical, &cell.topic).len);
-    table.install(token, "data");
-    return token;
+    const canonical: topic_mod.Canonical = .{ .digest = @splat(0), .name = .{ .kind = kind } };
+    var topic: [p.GossipProcessor.topic_max]u8 = undefined;
+    try table.capture(&.{
+        .handle = .{ .index = 0, .generation = 1 },
+        .id = @splat(1),
+        .peer = .{ .index = 0, .generation = 1 },
+        .topic = topic_mod.buildCanonical(canonical, &topic),
+        .bytes = "data",
+        .identity = .{ .bytes = @splat(1) },
+        .admitted_ms = now,
+        .deadline = now + 100,
+    }, canonical, &metadata, false, now);
+    const index = table.expiry.tail;
+    return .{ .index = @intCast(index), .generation = table.cells[index].generation };
 }
 
 fn verify(table: *const p.GossipProcessor) !void {

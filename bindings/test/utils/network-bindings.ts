@@ -1,5 +1,5 @@
 import bindings from "../../src/bindings.js";
-import type {NativeIdentity, NativeProtocolId, NativeRequestOptions} from "../../src/network.js";
+import type {NativeIdentity, NativeRequestOptions, NativeRequestProtocolId} from "../../src/network.js";
 import type {
   NativeCompletion,
   NativeExchange,
@@ -22,7 +22,7 @@ interface NativeBridge {
   initialize(config: unknown, onWorkAvailable: () => void): {identity: NativeIdentity};
   requestStart(
     peer: string,
-    protocol: NativeProtocolId,
+    protocol: NativeRequestProtocolId,
     data: Uint8Array,
     options: NativeRequestOptions | undefined
   ): RequestHandle;

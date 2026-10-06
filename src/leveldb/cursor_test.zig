@@ -11,18 +11,11 @@ fn expectKeys(db: *leveldb.Database, options: leveldb.RangeOptions, expected: []
     var cursor = try db.cursor(options, null);
     defer cursor.close();
     var entries: [8]leveldb.Entry = undefined;
-    var buffer: [128]u8 = undefined;
-    const page = try cursor.readInto(&buffer, &entries, 16, null);
+    const page = try cursor.readOwned(&entries, 16, 128, std.math.maxInt(u32), null);
+    defer helpers.freeEntries(db.allocator, entries[0..page.count]);
     try testing.expectEqual(expected.len, page.count);
     try testing.expect(page.done);
     for (entries[0..page.count], expected) |entry, key| try testing.expectEqualStrings(key, entry.key);
-    var owned_cursor = try db.cursor(options, null);
-    defer owned_cursor.close();
-    const owned_page = try owned_cursor.readOwned(&entries, 16, buffer.len, std.math.maxInt(u32), null);
-    defer helpers.freeEntries(allocator, entries[0..owned_page.count]);
-    try testing.expectEqual(expected.len, owned_page.count);
-    try testing.expect(owned_page.done);
-    for (entries[0..owned_page.count], expected) |entry, key| try testing.expectEqualStrings(key, entry.key);
 }
 
 test "cursor keeps its creation snapshot across updates deletes and inserts" {
@@ -30,40 +23,41 @@ test "cursor keeps its creation snapshot across updates deletes and inserts" {
     try fixture.init(allocator);
     defer fixture.deinit();
 
-    try fixture.db.write(&.{
+    try fixture.write(&.{
         .{ .key = "a", .value = "old a" },
         .{ .key = "c", .value = "old c" },
         .{ .key = "e", .value = "old e" },
-    }, false, null);
+    }, false);
     try fixture.db.compactRange(null, null);
     var cursor = try fixture.db.cursor(.{}, null);
     defer cursor.close();
 
-    try fixture.db.put("a", "new a", false, null);
-    try fixture.db.put("b", "new b", false, null);
-    var destination: [32]u8 = undefined;
+    try fixture.put("a", "new a", false);
+    try fixture.put("b", "new b", false);
     var entries: [1]leveldb.Entry = undefined;
-    var page = try cursor.readInto(&destination, &entries, 16, null);
-    try testing.expectEqual(@as(usize, 1), page.count);
+    const first = try cursor.readOwned(&entries, 16, 32, 32, null);
+    try testing.expectEqual(@as(usize, 1), first.count);
     try expectEntry(&entries[0], "a", "old a");
+    helpers.freeEntries(allocator, entries[0..first.count]);
 
-    try fixture.db.delete("c", false, null);
-    try fixture.db.put("d", "new d", false, null);
-    try fixture.db.put("e", "new e", false, null);
+    try fixture.delete("c");
+    try fixture.put("d", "new d", false);
+    try fixture.put("e", "new e", false);
     try fixture.db.compactRange(null, null);
-    page = try cursor.readInto(&destination, &entries, 16, null);
-    try testing.expectEqual(@as(usize, 1), page.count);
-    try expectEntry(&entries[0], "c", "old c");
-    page = try cursor.readInto(&destination, &entries, 16, null);
-    try testing.expectEqual(@as(usize, 1), page.count);
-    try expectEntry(&entries[0], "e", "old e");
-    try testing.expect(page.done);
-    try testing.expect((try cursor.readInto(&destination, &entries, 16, null)).done);
+    for ([_][]const u8{ "c", "e" }, [_][]const u8{ "old c", "old e" }, 0..) |key, value, i| {
+        const page = try cursor.readOwned(&entries, 16, 32, 32, null);
+        defer helpers.freeEntries(allocator, entries[0..page.count]);
+        try testing.expectEqual(@as(usize, 1), page.count);
+        try expectEntry(&entries[0], key, value);
+        try testing.expectEqual(i == 1, page.done);
+    }
+    try testing.expect((try cursor.readOwned(&entries, 16, 32, 32, null)).done);
     try cursor.seek("a", null);
-    _ = try cursor.readInto(&destination, &entries, 16, null);
+    const again = try cursor.readOwned(&entries, 16, 32, 32, null);
     try expectEntry(&entries[0], "a", "old a");
+    helpers.freeEntries(allocator, entries[0..again.count]);
     cursor.close();
-    try testing.expectError(error.CursorClosed, cursor.readInto(&destination, &entries, 16, null));
+    try testing.expectError(error.CursorClosed, cursor.readOwned(&entries, 16, 32, 32, null));
     try expectValue(&fixture.db, "a", "new a");
     try expectValue(&fixture.db, "c", null);
     try expectValue(&fixture.db, "e", "new e");
@@ -75,7 +69,7 @@ test "cursor owns range bounds and applies inclusive gte exclusive lt and total 
     defer fixture.deinit();
 
     for ([_][]const u8{ "a", "b", "c", "d", "e" }) |key| {
-        try fixture.db.put(key, key, false, null);
+        try fixture.put(key, key, false);
     }
     var lower = [_]u8{'b'};
     var upper = [_]u8{'e'};
@@ -84,21 +78,20 @@ test "cursor owns range bounds and applies inclusive gte exclusive lt and total 
     lower[0] = 'z';
     upper[0] = 'a';
 
-    var destination: [16]u8 = undefined;
     var entries: [1]leveldb.Entry = undefined;
-    var page = try cursor.readInto(&destination, &entries, 1, null);
-    try testing.expectEqual(@as(usize, 1), page.count);
-    try testing.expect(!page.done);
-    try expectEntry(&entries[0], "b", "b");
-    page = try cursor.readInto(&destination, &entries, 1, null);
-    try testing.expectEqual(@as(usize, 1), page.count);
-    try testing.expect(page.done);
-    try expectEntry(&entries[0], "c", "c");
+    for ([_][]const u8{ "b", "c" }, 0..) |key, i| {
+        const page = try cursor.readOwned(&entries, 1, 16, 16, null);
+        defer helpers.freeEntries(allocator, entries[0..page.count]);
+        try testing.expectEqual(@as(usize, 1), page.count);
+        try testing.expectEqual(i == 1, page.done);
+        try expectEntry(&entries[0], key, key);
+    }
 
     var range = try fixture.db.cursor(.{ .gte = "bb", .lt = "e" }, null);
     defer range.close();
     var range_entries: [4]leveldb.Entry = undefined;
-    page = try range.readInto(&destination, &range_entries, 1, null);
+    const page = try range.readOwned(&range_entries, 1, 16, 16, null);
+    defer helpers.freeEntries(allocator, range_entries[0..page.count]);
     try testing.expectEqual(@as(usize, 2), page.count);
     try testing.expect(page.done);
     try expectEntry(&range_entries[0], "c", "c");
@@ -110,16 +103,15 @@ test "cursor handles empty database zero limit and empty ranges" {
     try fixture.init(allocator);
     defer fixture.deinit();
 
-    var destination: [8]u8 = @splat(0xa5);
     var entries: [1]leveldb.Entry = undefined;
     var empty = try fixture.db.cursor(.{}, null);
     defer empty.close();
-    const empty_page = try empty.readInto(&destination, &entries, 1, null);
+    const empty_page = try empty.readOwned(&entries, 1, 8, 8, null);
     try testing.expectEqual(@as(usize, 0), empty_page.count);
     try testing.expectEqual(@as(usize, 0), empty_page.bytes);
     try testing.expect(empty_page.done);
 
-    try fixture.db.put("b", "v", false, null);
+    try fixture.put("b", "v", false);
     for ([_]leveldb.RangeOptions{
         .{ .limit = 0 },
         .{ .gte = "b", .lt = "b" },
@@ -129,103 +121,11 @@ test "cursor handles empty database zero limit and empty ranges" {
     }) |options| {
         var cursor = try fixture.db.cursor(options, null);
         defer cursor.close();
-        const page = try cursor.readInto(&destination, &entries, 1, null);
+        const page = try cursor.readOwned(&entries, 1, 8, 8, null);
         try testing.expectEqual(@as(usize, 0), page.count);
         try testing.expectEqual(@as(usize, 0), page.bytes);
         try testing.expect(page.done);
     }
-    try testing.expectEqualSlices(u8, &(@as([8]u8, @splat(0xa5))), &destination);
-}
-
-test "cursor counts keys and defers a row that does not fit without advancing" {
-    var fixture: Fixture = undefined;
-    try fixture.init(allocator);
-    defer fixture.deinit();
-
-    try fixture.db.write(&.{
-        .{ .key = "aa", .value = "123" },
-        .{ .key = "bbb", .value = "45" },
-        .{ .key = "c", .value = "" },
-    }, false, null);
-    var cursor = try fixture.db.cursor(.{}, null);
-    defer cursor.close();
-
-    var guarded: [12]u8 = @splat(0xa5);
-    var entries: [3]leveldb.Entry = undefined;
-    const first = try cursor.readInto(guarded[1..10], &entries, 3, null);
-    try testing.expectEqual(@as(usize, 1), first.count);
-    try testing.expectEqual(@as(usize, 5), first.bytes);
-    try testing.expect(!first.done);
-    try expectEntry(&entries[0], "aa", "123");
-    try testing.expectEqual(@intFromPtr(&guarded[1]), @intFromPtr(entries[0].key.ptr));
-    try testing.expectEqual(@intFromPtr(&guarded[3]), @intFromPtr(entries[0].value.ptr));
-    try testing.expectEqual(@as(u8, 0xa5), guarded[0]);
-    for (guarded[6..]) |byte| try testing.expectEqual(@as(u8, 0xa5), byte);
-
-    var second_destination: [6]u8 = undefined;
-    var second_entries: [3]leveldb.Entry = undefined;
-    const second = try cursor.readInto(&second_destination, &second_entries, 3, null);
-    try testing.expectEqual(@as(usize, 2), second.count);
-    try testing.expectEqual(@as(usize, 6), second.bytes);
-    try testing.expect(second.done);
-    try expectEntry(&second_entries[0], "bbb", "45");
-    try expectEntry(&second_entries[1], "c", "");
-    try expectEntry(&entries[0], "aa", "123");
-    try testing.expectEqualStrings("bbb45c", &second_destination);
-}
-
-test "memory_safety: cursor oversized row errors are terminal and release database" {
-    var fixture: Fixture = undefined;
-    try fixture.init(allocator);
-    defer fixture.deinit();
-
-    try fixture.db.put("key", "12345", false, null);
-    var destination: [16]u8 = @splat(0xa5);
-    var entries: [1]leveldb.Entry = undefined;
-    var cursor = try fixture.db.cursor(.{}, null);
-    defer cursor.close();
-
-    try testing.expectError(error.ValueTooLarge, cursor.readInto(&destination, &entries, 4, null));
-    try testing.expectEqualSlices(u8, &(@as([16]u8, @splat(0xa5))), &destination);
-    try testing.expectError(error.CursorClosed, cursor.readInto(&destination, &entries, 5, null));
-    try fixture.close();
-    cursor.close();
-    cursor.close();
-}
-
-test "memory_safety: cursor rejects first row when key and value exceed page capacity" {
-    var fixture: Fixture = undefined;
-    try fixture.init(allocator);
-    defer fixture.deinit();
-
-    try fixture.db.put("long-key", "v", false, null);
-    var destination: [8]u8 = @splat(0xa5);
-    var entries: [1]leveldb.Entry = undefined;
-    var cursor = try fixture.db.cursor(.{}, null);
-    defer cursor.close();
-
-    try testing.expectError(error.BatchTooLarge, cursor.readInto(&destination, &entries, 1, null));
-    try testing.expectEqualSlices(u8, &(@as([8]u8, @splat(0xa5))), &destination);
-    try testing.expectError(error.CursorClosed, cursor.readInto(&destination, &entries, 1, null));
-    try fixture.close();
-    cursor.close();
-}
-
-test "cursor oversized later row fails the entire page and releases snapshot" {
-    var fixture: Fixture = undefined;
-    try fixture.init(allocator);
-    defer fixture.deinit();
-
-    try fixture.db.put("a", "v", false, null);
-    try fixture.db.put("b", "too big", false, null);
-    var cursor = try fixture.db.cursor(.{ .lt = "z" }, null);
-    defer cursor.close();
-
-    var destination: [32]u8 = undefined;
-    var entries: [2]leveldb.Entry = undefined;
-    try testing.expectError(error.ValueTooLarge, cursor.readInto(&destination, &entries, 1, null));
-    try testing.expectError(error.CursorClosed, cursor.readInto(&destination, &entries, 7, null));
-    try fixture.close();
 }
 
 test "cursor advances an empty key and value even when its byte count is zero" {
@@ -233,25 +133,25 @@ test "cursor advances an empty key and value even when its byte count is zero" {
     try fixture.init(allocator);
     defer fixture.deinit();
 
-    try fixture.db.put("", "", false, null);
-    try fixture.db.put("a", "", false, null);
+    try fixture.put("", "", false);
+    try fixture.put("a", "", false);
     var cursor = try fixture.db.cursor(.{}, null);
     defer cursor.close();
 
-    var destination: [1]u8 = .{0xa5};
     var entries: [1]leveldb.Entry = undefined;
-    const first = try cursor.readInto(&destination, &entries, 1, null);
+    const first = try cursor.readOwned(&entries, 1, 8, 8, null);
     try testing.expectEqual(@as(usize, 1), first.count);
     try testing.expectEqual(@as(usize, 0), first.bytes);
     try testing.expect(!first.done);
     try expectEntry(&entries[0], "", "");
-    try testing.expectEqual(@as(u8, 0xa5), destination[0]);
+    helpers.freeEntries(allocator, entries[0..first.count]);
 
-    const second = try cursor.readInto(&destination, &entries, 1, null);
+    const second = try cursor.readOwned(&entries, 1, 8, 8, null);
     try testing.expectEqual(@as(usize, 1), second.count);
     try testing.expectEqual(@as(usize, 1), second.bytes);
     try testing.expect(second.done);
     try expectEntry(&entries[0], "a", "");
+    helpers.freeEntries(allocator, entries[0..second.count]);
     cursor.close();
     try fixture.close();
 }
@@ -261,7 +161,7 @@ test "close rejects live cursors and remains usable until all cursors close" {
     try fixture.init(allocator);
     defer fixture.deinit();
 
-    try fixture.db.put("key", "value", false, null);
+    try fixture.put("key", "value", false);
     var first = try fixture.db.cursor(.{}, null);
     defer first.close();
     var second = try fixture.db.cursor(.{}, null);
@@ -273,21 +173,21 @@ test "close rejects live cursors and remains usable until all cursors close" {
     first.close();
     try testing.expectError(error.CursorsOpen, fixture.db.close());
 
-    var destination: [16]u8 = undefined;
     var entries: [1]leveldb.Entry = undefined;
-    const page = try second.readInto(&destination, &entries, 5, null);
+    const page = try second.readOwned(&entries, 5, 16, 16, null);
     try testing.expect(page.done);
     try testing.expectEqual(@as(usize, 1), page.count);
     try expectEntry(&entries[0], "key", "value");
+    helpers.freeEntries(allocator, entries[0..page.count]);
     try testing.expectError(error.CursorsOpen, fixture.db.close());
     second.close();
     try fixture.close();
     try fixture.db.close();
-    try testing.expectError(error.CursorClosed, second.readInto(&destination, &entries, 5, null));
-    try testing.expectError(error.DatabaseClosed, fixture.db.getInto("key", &destination, null));
-    try testing.expectError(error.DatabaseClosed, fixture.db.put("key", "new", false, null));
-    try testing.expectError(error.DatabaseClosed, fixture.db.delete("key", false, null));
-    try testing.expectError(error.DatabaseClosed, fixture.db.write(&.{}, false, null));
+    try testing.expectError(error.CursorClosed, second.readOwned(&entries, 5, 16, 16, null));
+    try testing.expectError(error.DatabaseClosed, expectValue(&fixture.db, "key", "value"));
+    try testing.expectError(error.DatabaseClosed, fixture.put("key", "new", false));
+    try testing.expectError(error.DatabaseClosed, fixture.delete("key"));
+    try testing.expectError(error.DatabaseClosed, fixture.write(&.{}, false));
     try testing.expectError(error.DatabaseClosed, fixture.db.cursor(.{}, null));
 }
 
@@ -315,7 +215,7 @@ test "cursor allocation failure leaves database usable without retaining a live 
     var fixture: Fixture = undefined;
     try fixture.init(allocator);
     defer fixture.deinit();
-    try fixture.db.put("key", "value", false, null);
+    try fixture.put("key", "value", false);
     try fixture.close();
 
     var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
@@ -325,55 +225,19 @@ test "cursor allocation failure leaves database usable without retaining a live 
     fixture.closed = false;
     try testing.expectError(error.OutOfMemory, fixture.db.cursor(.{ .lt = "z" }, null));
     try testing.expect(failing.has_induced_failure);
-    try expectValue(&fixture.db, "key", "value");
-
     failing.fail_index = std.math.maxInt(usize);
+    try expectValue(&fixture.db, "key", "value");
     var cursor = try fixture.db.cursor(.{ .lt = "z" }, null);
     defer cursor.close();
-    var destination: [8]u8 = undefined;
     var entries: [1]leveldb.Entry = undefined;
-    const page = try cursor.readInto(&destination, &entries, 5, null);
+    const page = try cursor.readOwned(&entries, 5, 8, 8, null);
     try testing.expectEqual(@as(usize, 1), page.count);
     try testing.expect(page.done);
     try expectEntry(&entries[0], "key", "value");
+    helpers.freeEntries(failing.allocator(), entries[0..page.count]);
     try testing.expect(failing.allocated_bytes > 0);
     cursor.close();
     try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-    try fixture.close();
-}
-
-test "invalid cursor read limits close the cursor without writing output" {
-    var fixture: Fixture = undefined;
-    try fixture.init(allocator);
-    defer fixture.deinit();
-
-    try fixture.db.put("key", "value", false, null);
-    var destination: [16]u8 = @splat(0xa5);
-    var entries: [leveldb.max_batch_entries + 1]leveldb.Entry = undefined;
-    const Case = struct { bytes: usize, entries: usize, value_limit: usize };
-    for ([_]Case{
-        .{ .bytes = 0, .entries = 1, .value_limit = 5 },
-        .{ .bytes = 16, .entries = 0, .value_limit = 5 },
-        .{ .bytes = 16, .entries = entries.len, .value_limit = 5 },
-        .{ .bytes = 16, .entries = 1, .value_limit = 0 },
-        .{ .bytes = 16, .entries = 1, .value_limit = leveldb.max_value_bytes + 1 },
-    }) |case| {
-        var cursor = try fixture.db.cursor(.{}, null);
-        defer cursor.close();
-        try testing.expectError(error.InvalidReadLimit, cursor.readInto(
-            destination[0..case.bytes],
-            entries[0..case.entries],
-            case.value_limit,
-            null,
-        ));
-        try testing.expectEqualSlices(u8, &(@as([16]u8, @splat(0xa5))), &destination);
-        try testing.expectError(error.CursorClosed, cursor.readInto(
-            &destination,
-            entries[0..1],
-            5,
-            null,
-        ));
-    }
     try fixture.close();
 }
 
@@ -381,7 +245,7 @@ test "four range bounds match inclusive precedence in both directions" {
     var fixture: helpers.Fixture = undefined;
     try fixture.init(allocator);
     defer fixture.deinit();
-    for ([_][]const u8{ "", "a", "b", "c", "d" }) |key| try fixture.db.put(key, "v", false, null);
+    for ([_][]const u8{ "", "a", "b", "c", "d" }) |key| try fixture.put(key, "v", false);
     const Case = struct { options: leveldb.RangeOptions, keys: []const []const u8 };
     const cases = [_]Case{
         .{ .options = .{}, .keys = &.{ "", "a", "b", "c", "d" } },
@@ -414,21 +278,22 @@ test "reverse range owns bounds and keeps its snapshot across pages" {
     var fixture: helpers.Fixture = undefined;
     try fixture.init(allocator);
     defer fixture.deinit();
-    for ([_][]const u8{ "a\x00", "a\xff", "b" }) |key| try fixture.db.put(key, key, false, null);
+    for ([_][]const u8{ "a\x00", "a\xff", "b" }) |key| try fixture.put(key, key, false);
     var lower = [_]u8{ 'a', 0 };
     var upper = [_]u8{'b'};
     var cursor = try fixture.db.cursor(.{ .gte = &lower, .lte = &upper, .reverse = true, .limit = 2 }, null);
     defer cursor.close();
     @memset(&lower, 'z');
     @memset(&upper, 0);
-    try fixture.db.delete("b", false, null);
-    try fixture.db.put("a\xff", "changed", false, null);
+    try fixture.delete("b");
+    try fixture.put("a\xff", "changed", false);
     var entries: [1]leveldb.Entry = undefined;
-    var buffer: [16]u8 = undefined;
-    const first = try cursor.readInto(&buffer, &entries, 16, null);
+    const first = try cursor.readOwned(&entries, 16, 16, 16, null);
     try testing.expect(!first.done);
     try testing.expectEqualStrings("b", entries[0].key);
-    const second = try cursor.readInto(&buffer, &entries, 16, null);
+    helpers.freeEntries(allocator, entries[0..first.count]);
+    const second = try cursor.readOwned(&entries, 16, 16, 16, null);
+    defer helpers.freeEntries(allocator, entries[0..second.count]);
     try testing.expect(second.done);
     try testing.expectEqualStrings("a\xff", entries[0].key);
     try testing.expectEqualStrings("a\xff", entries[0].value);
@@ -438,7 +303,7 @@ test "projection charges only requested bytes and ignores omitted value limits" 
     var fixture: helpers.Fixture = undefined;
     try fixture.init(allocator);
     defer fixture.deinit();
-    try fixture.db.put("key", "1234567890", false, null);
+    try fixture.put("key", "1234567890", false);
     for ([_]bool{ false, true }) |reverse| {
         var keys = try fixture.db.cursor(.{ .values = false, .reverse = reverse, .fill_cache = true }, null);
         defer keys.close();
@@ -483,7 +348,7 @@ test "seek honors original exclusive bounds and byte order in both directions" {
     var fixture: helpers.Fixture = undefined;
     try fixture.init(allocator);
     defer fixture.deinit();
-    for ([_][]const u8{ "a", "c", "e" }) |key| try fixture.db.put(key, key, false, null);
+    for ([_][]const u8{ "a", "c", "e" }) |key| try fixture.put(key, key, false);
     for ([_]bool{ false, true }) |reverse| {
         var cursor = try fixture.db.cursor(.{ .gt = "a", .lte = "e", .reverse = reverse }, null);
         defer cursor.close();
@@ -520,11 +385,11 @@ test "seek retains snapshot and consumed limit across repositions and exhaustion
     var fixture: helpers.Fixture = undefined;
     try fixture.init(allocator);
     defer fixture.deinit();
-    try fixture.db.put("a", "A", false, null);
-    try fixture.db.put("b", "B", false, null);
+    try fixture.put("a", "A", false);
+    try fixture.put("b", "B", false);
     var cursor = try fixture.db.cursor(.{ .limit = 2 }, null);
     defer cursor.close();
-    try fixture.db.put("a", "new", false, null);
+    try fixture.put("a", "new", false);
     var entries: [1]leveldb.Entry = undefined;
     for (0..2) |_| {
         try cursor.seek("a", null);
@@ -549,8 +414,8 @@ test "owned pages allocate actual bytes and defer rows without losing iterator p
     var fixture: helpers.Fixture = undefined;
     try fixture.init(failing.allocator());
     defer fixture.deinit();
-    try fixture.db.put("a", "AA", false, null);
-    try fixture.db.put("b", "BB", false, null);
+    try fixture.put("a", "AA", false);
+    try fixture.put("b", "BB", false);
     var cursor = try fixture.db.cursor(.{}, null);
     defer cursor.close();
     var entries: [2]leveldb.Entry = undefined;
@@ -577,8 +442,8 @@ test "memory_safety: owned pages clean up partial copies on allocation or row li
         var fixture: helpers.Fixture = undefined;
         try fixture.init(failing.allocator());
         defer fixture.deinit();
-        try fixture.db.put("a", "A", false, null);
-        try fixture.db.put("b", "B", false, null);
+        try fixture.put("a", "A", false);
+        try fixture.put("b", "B", false);
         var cursor = try fixture.db.cursor(.{}, null);
         defer cursor.close();
         var entries: [2]leveldb.Entry = undefined;
@@ -593,8 +458,8 @@ test "memory_safety: owned pages clean up partial copies on allocation or row li
     var fixture: helpers.Fixture = undefined;
     try fixture.init(allocator);
     defer fixture.deinit();
-    try fixture.db.put("a", "A", false, null);
-    try fixture.db.put("b", "BB", false, null);
+    try fixture.put("a", "A", false);
+    try fixture.put("b", "BB", false);
     var cursor = try fixture.db.cursor(.{}, null);
     defer cursor.close();
     var entries: [2]leveldb.Entry = undefined;
@@ -607,7 +472,7 @@ test "owned pages reject first row aggregate overflow and invalid metadata count
     var fixture: helpers.Fixture = undefined;
     try fixture.init(allocator);
     defer fixture.deinit();
-    try fixture.db.put("key", "value", false, null);
+    try fixture.put("key", "value", false);
     var entries: [1]leveldb.Entry = undefined;
     var first = try fixture.db.cursor(.{}, null);
     defer first.close();
@@ -622,7 +487,7 @@ test "owned batch soft watermark includes the crossing row and keeps exhausted s
     var fixture: helpers.Fixture = undefined;
     try fixture.init(allocator);
     defer fixture.deinit();
-    for ([_][]const u8{ "a", "b", "c" }) |key| try fixture.db.put(key, "123", false, null);
+    for ([_][]const u8{ "a", "b", "c" }) |key| try fixture.put(key, "123", false);
     var cursor = try fixture.db.cursor(.{}, null);
     defer cursor.close();
     var entries: [4]leveldb.Entry = undefined;
@@ -650,7 +515,7 @@ test "owned batch projection charges only copied components and hard limits rema
     var fixture: helpers.Fixture = undefined;
     try fixture.init(allocator);
     defer fixture.deinit();
-    for ([_][]const u8{ "a", "b", "c" }) |key| try fixture.db.put(key, "12345", false, null);
+    for ([_][]const u8{ "a", "b", "c" }) |key| try fixture.put(key, "12345", false);
     var entries: [3]leveldb.Entry = undefined;
     var keys = try fixture.db.cursor(.{ .values = false }, null);
     defer keys.close();
@@ -685,15 +550,15 @@ test "owned batch projection charges only copied components and hard limits rema
     try testing.expectEqualStrings("b", entries[0].key);
 }
 
-test "owned pages accept more entries than a fixed-buffer page" {
+test "owned pages return a large batch in byte order" {
     var fixture: helpers.Fixture = undefined;
     try fixture.init(allocator);
     defer fixture.deinit();
-    const count = leveldb.max_batch_entries + 1;
+    const count = 1025;
     for (0..count) |i| {
         var key: [2]u8 = undefined;
         std.mem.writeInt(u16, &key, @intCast(i), .big);
-        try fixture.db.put(&key, "", false, null);
+        try fixture.put(&key, "", false);
     }
     var cursor = try fixture.db.cursor(.{}, null);
     defer cursor.close();
@@ -710,7 +575,7 @@ test "owned page limits reject oversized budgets and clear output metadata" {
     var fixture: Fixture = undefined;
     try fixture.init(allocator);
     defer fixture.deinit();
-    try fixture.db.put("a", "A", false, null);
+    try fixture.put("a", "A", false);
     const budgets = [_][2]usize{
         .{ leveldb.max_owned_value_bytes + 1, leveldb.max_owned_batch_bytes },
         .{ leveldb.max_owned_value_bytes, leveldb.max_owned_batch_bytes + 1 },
