@@ -93,6 +93,7 @@ const {parentPort, workerData} = require("node:worker_threads");
   const pending = [];
   for (let index = 0; index < 16; index++) {
     pending.push(db.put(Uint8Array.of(100 + index), new Uint8Array(1024 * 1024)));
+    pending.push(db.getMany([Uint8Array.of(1), Uint8Array.of(3)], {maxValueBytes: 1, maxTotalBytes: 2}));
   }
   Promise.all(pending).catch((error) => { throw error; });
   parentPort.postMessage("queued");
@@ -103,7 +104,7 @@ const {parentPort, workerData} = require("node:worker_threads");
 });
 `;
 
-it("terminates a worker with pending writes and a live snapshot, then reuses its database lock", async () => {
+it("terminates a worker with concurrent reads, pending writes and a live snapshot, then reuses its database lock", async () => {
   await withPath(async (path) => {
     runChild(
       `
