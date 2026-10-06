@@ -4,6 +4,8 @@ const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const rewards_and_penalties = @import("../epoch/get_rewards_and_penalties.zig");
 const status = @import("../utils/attester_status.zig");
+const processJustificationAndFinalization = @import("../epoch/process_justification_and_finalization.zig").processJustificationAndFinalization;
+const processInactivityUpdates = @import("../epoch/process_inactivity_updates.zig").processInactivityUpdates;
 const isInInactivityLeak = @import("../epoch/inactivity_leak.zig").isInInactivityLeak;
 
 pub const IdealAttestationsReward = struct {
@@ -40,15 +42,32 @@ const AttestationsPenalty = struct {
 /// while an empty slice selects none. Serialize with other EpochTransitionCache borrowers.
 pub fn computeAttestationsRewards(
     allocator: std.mem.Allocator,
-    state: *CachedBeaconState,
+    pre_state: *CachedBeaconState,
     validator_indices: ?[]const u64,
 ) !AttestationsRewards {
-    const fork = state.state.forkSeq();
+    const fork = pre_state.state.forkSeq();
     if (fork == .phase0) return error.AttestationsRewardsUnsupportedFork;
     if (validator_indices) |indices| std.debug.assert(std.sort.isSorted(u64, indices, {}, std.sort.asc(u64)));
 
+    try pre_state.state.commit();
+    var state = try pre_state.clone(allocator, .{ .transfer_cache = false });
+    defer {
+        state.deinit();
+        allocator.destroy(state);
+    }
+
     var cache = try EpochTransitionCache.init(allocator, state.config, state.epoch_cache, state.state);
     defer cache.deinit();
+
+    // Epoch rewards use the finality and inactivity scores after these updates.
+    switch (state.state.*) {
+        .phase0 => unreachable,
+        inline else => |_, state_fork| {
+            const fork_state = state.state.castToFork(state_fork);
+            try processJustificationAndFinalization(state_fork, fork_state, &cache);
+            try processInactivityUpdates(state_fork, allocator, state.config, state.epoch_cache, fork_state, &cache);
+        },
+    }
 
     const max_balance: u64 = if (fork.gte(.electra)) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
     const ideal_rewards = try allocator.alloc(IdealAttestationsReward, max_balance / preset.EFFECTIVE_BALANCE_INCREMENT + 1);
