@@ -80,8 +80,7 @@ test "core native host wake validates rollback stays attached through shutdown a
     try std.testing.expect(!detached.readiness.host);
     try node.setHostWake(host.handle);
     node.shutdown(node.last_now);
-    const stopped = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(time.optionalMilliseconds(node.last_now.millis() +| 100)));
-    try std.testing.expect(stopped.readiness.host);
+    try std.testing.expect(node.host_wake == null);
     try std.testing.expectError(error.Stopped, node.setHostWake(host.handle));
     try node.setHostWake(null);
     var buffer: [8]u8 = undefined;

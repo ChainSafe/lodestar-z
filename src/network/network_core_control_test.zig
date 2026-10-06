@@ -563,7 +563,7 @@ test "core control native Fulu serves older schemas but old Status cannot establ
             .{},
             setup.pair.now,
         );
-        defer setup.client.shutdown(setup.pair.now);
+        defer setup.client.deinit(setup.pair.io());
         var chunks: usize = 0;
         var terminal = false;
         var goodbye_writer = false;
@@ -671,7 +671,7 @@ test "core native inbound application per connection cap protects control from e
     const size = rr.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, size * 9);
     defer std.testing.allocator.free(sinks);
-    defer setup.client.shutdown(setup.pair.now);
+    defer setup.client.deinit(setup.pair.io());
     const protocols = [_]rr.Protocol{
         .blocks_by_range_v2,
         .blocks_by_root_v2,

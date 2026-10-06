@@ -318,14 +318,6 @@ pub fn setRequestFork(self: *ReqResp, fork: config.ForkSeq) void {
     self.request_fork = fork;
 }
 
-/// Includes reported slots and serving capacity retained by asynchronous host work.
-pub fn isDrained(self: *const ReqResp) bool {
-    for (self.outbound) |*slot| if (slot.request.occupied()) return false;
-    for (self.inbound) |*slot| if (slot.request.occupied()) return false;
-    for (self.serving.entries) |entry| if (entry.request != null) return false;
-    return true;
-}
-
 pub fn pendingCounts(self: *const ReqResp) struct { outbound: u16, inbound: u16 } {
     var out: u16 = 0;
     for (self.outbound) |*slot| {

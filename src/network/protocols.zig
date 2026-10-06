@@ -10,7 +10,7 @@ const wake_sources = @import("wake_sources.zig");
 
 pub const Protocols = struct {
     identify: identify_mod.Handler,
-    applications: enum { active, quiescing, closed } = .active,
+    applications_open: bool = true,
     stopped: bool = false,
     router: Router,
     reqresp: reqresp_mod.ReqResp,
@@ -58,7 +58,7 @@ pub const Protocols = struct {
         };
     }
 
-    /// Stops admission permanently and cancels streams. Process drains promised results afterwards.
+    /// Cancels all streams before deinit. No further process calls are allowed.
     pub fn shutdown(self: *Protocols, engine: *Engine, now: types.Now) void {
         if (self.stopped) return;
         self.stopped = true;
@@ -66,11 +66,7 @@ pub const Protocols = struct {
         self.reqresp.cancelAll(engine, &self.router, now);
         self.gossipsub.closeSessions(&self.router, engine);
         self.router.negotiator.cancelAll(engine);
-        self.applications = .closed;
-    }
-
-    pub fn isDrained(self: *const Protocols) bool {
-        return self.reqresp.isDrained() and self.identify.isDrained();
+        self.applications_open = false;
     }
 
     /// Ends all borrows and discards results that the caller has not drained.
@@ -94,7 +90,7 @@ pub const Protocols = struct {
         options: reqresp_mod.ReqResp.RequestOptions,
         now: types.Now,
     ) reqresp_mod.ReqResp.RequestError!reqresp_mod.ReqResp.RequestHandle {
-        if (self.stopped or (self.applications != .active and !protocol.isControl())) return error.ProtocolDisabled;
+        if (self.stopped or (!self.applications_open and !protocol.isControl())) return error.ProtocolDisabled;
         return self.reqresp.request(
             engine,
             &self.router,
@@ -114,31 +110,32 @@ pub const Protocols = struct {
     }
 
     pub fn collectWakeups(self: *const Protocols, capacities: Capacities, wakeups: *wake_sources.Wakeups) void {
+        std.debug.assert(!self.stopped);
         wakeups.note(.reqresp, self.reqresp.schedule(.{ .application = capacities.application, .control = capacities.control }));
-        switch (self.applications) {
-            .active => wakeups.note(.gossip, self.gossipsub.schedule()),
-            .quiescing => wakeups.note(.gossip, .{ .runnable = true }),
-            .closed => {},
-        }
+        if (self.applications_open) wakeups.note(.gossip, self.gossipsub.schedule());
         wakeups.note(.identify, self.identify.schedule(capacities.identify));
         wakeups.note(.negotiation, self.router.schedule(Router.outcomes_per_pump));
     }
 
     /// Delivers one turn of engine events, then pumps each owner's ready work and due deadlines.
     pub fn process(self: *Protocols, engine: *Engine, events: []const Engine.Event, now: types.Now, outputs: Outputs) OutputCounts {
-        if (!self.stopped) self.dispatch(engine, events, now);
+        std.debug.assert(!self.stopped);
+        self.dispatch(engine, events, now);
         const counts = self.reqresp.pump(engine, &self.router, now, .{ .application = outputs.application, .control = outputs.control });
-        if (self.applications == .active) self.gossipsub.pump(&self.router, engine, now);
+        if (self.applications_open) self.gossipsub.pump(&self.router, engine, now);
         return .{ .application = counts.application, .control = counts.control, .identify = self.identify.pump(&self.router, engine, now, outputs.identify) };
     }
 
-    /// Defer stream cleanup until the next process call, preserving the current event borrows.
-    pub fn quiesceApplications(self: *Protocols) void {
-        if (self.applications == .active) self.applications = .quiescing;
+    /// Cancels application streams. Consume the previous process call's borrowed events first.
+    pub fn closeApplications(self: *Protocols, engine: *Engine, now: types.Now) void {
+        if (!self.applications_open) return;
+        self.applications_open = false;
+        self.reqresp.cancelApplications(engine, &self.router, now);
+        self.gossipsub.closeSessions(&self.router, engine);
     }
 
     fn rejectApplication(self: *const Protocols, outcome: *const Router.Outcome) bool {
-        if (self.applications == .active) return false;
+        if (self.applications_open) return false;
         return switch (outcome.result) {
             .ready => |selection| switch (selection.protocol) {
                 .reqresp => |which| !which.isControl(),
@@ -158,11 +155,6 @@ pub const Protocols = struct {
         events: []const Engine.Event,
         now: types.Now,
     ) void {
-        if (self.applications == .quiescing) {
-            self.reqresp.cancelApplications(engine, &self.router, now);
-            self.gossipsub.closeSessions(&self.router, engine);
-            self.applications = .closed;
-        }
         self.routeReadiness(engine, events);
         // Cancellation must detach stream I/O before the router can advance or reuse its buffers.
         self.reqresp.cleanupPending(engine, &self.router);
@@ -174,7 +166,7 @@ pub const Protocols = struct {
         };
         self.identify.transportEvents(engine, events);
         for (events) |event| {
-            if (self.applications != .active or event == .connected) continue;
+            if (!self.applications_open or event == .connected) continue;
             self.gossipsub.transportEvents(&self.router, engine, &.{event}, now);
         }
         self.reqresp.cleanupPending(engine, &self.router);
@@ -192,7 +184,7 @@ pub const Protocols = struct {
                 .negotiation => self.router.negotiator.streamReady(route.row, ready.stream),
                 .identify => self.identify.streamReady(route.row, ready.stream),
                 .reqresp_outbound, .reqresp_inbound => self.reqresp.streamReady(route, ready.stream),
-                .gossip_inbound, .gossip_outbound => if (self.applications == .active) self.gossipsub.streamReady(engine, route, ready.stream, ready.ready),
+                .gossip_inbound, .gossip_outbound => if (self.applications_open) self.gossipsub.streamReady(engine, route, ready.stream, ready.ready),
                 .none => {},
             }
         }

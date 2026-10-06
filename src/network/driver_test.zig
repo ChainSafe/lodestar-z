@@ -478,13 +478,11 @@ test "network owner progresses and shuts down while UDP sends are under local pr
     const progress = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
     try std.testing.expect(progress.failure == null);
     try std.testing.expect(faults.send_calls > 0 and faults.send_calls <= transport.Transport.send_burst_max);
-    try std.testing.expect(node.phase() != .stopping);
+    try std.testing.expect(node.phase() == .running);
     try std.testing.expect(node.transport.send_drops.datagrams[@intFromEnum(Sockets.SendDrops.Reason.system_resources)] > 0);
     node.shutdown(node.last_now);
-    for (0..4) |_| {
-        const stopped = driver.step(&node, faults.io(), node.last_now, .{}, .deadlineOnly(time.optionalMilliseconds(node.last_now.millis())));
-        try std.testing.expect(stopped.failure == null);
-        if (node.isClosed()) break;
-    }
-    try std.testing.expect(node.isClosed());
+    const sends = faults.send_calls;
+    node.deinit(faults.io());
+    try std.testing.expectEqual(sends, faults.send_calls);
+    try std.testing.expect(!node.initialized);
 }

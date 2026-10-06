@@ -9,6 +9,7 @@ const Budget = @import("network_budget.zig").Budget;
 const Table = incoming.Table;
 const Cell = incoming.Cell;
 const network_requests = @import("network_requests.zig");
+const test_support = @import("network_test_support.zig");
 
 test "incoming reservation shares exact aggregate credits and rolls back allocation failure" {
     const amount: usize = 64;
@@ -183,6 +184,7 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
         const resolved = try n.configuration.resolve(.{
             .profile = .small,
             .seed = 1,
+            .gossip = .{ .topic_policy = &test_support.topic_policy },
             .forks = &pair.forks,
             .admission_policy = .{ .deneb_start_slot = 0, .blocks_pre_deneb = 1024, .blocks_deneb = 128, .blob_identifiers_deneb = 768, .blob_identifiers_electra = 1152, .number_of_columns = 128, .column_chunks = 16384, .blob_schedule = &.{.{ .start_slot = 0, .max_blobs = 6 }} },
         });

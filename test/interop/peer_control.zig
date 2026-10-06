@@ -58,6 +58,7 @@ pub fn run(peer: anytype) !void {
                 if (parsed.value.id <= last_id) return error.DuplicateId;
                 last_id = parsed.value.id;
                 peer.command(parsed.value) catch |err| try emit(peer.allocator, .{ .id = last_id, .ok = false, .err = @errorName(err) });
+                if (peer.quit) return;
             }
         }
         if (!peer.paused) try peer.pump();

@@ -368,9 +368,7 @@ test "metrics follow demand replacement and owner shutdown" {
     try std.testing.expect(result.failure == null);
     try contains(try f.render(f.node.phase() == .running), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 4\n");
     f.node.shutdown(f.node.last_now);
-    result = f.node.advance(std.testing.io, .{ .now = f.node.last_now, .readiness = .{} }, .{}, .{});
-    try std.testing.expect(result.failure == null);
-    try std.testing.expect(f.node.isClosed());
+    try std.testing.expectEqual(.stopped, f.node.phase());
     try contains(try f.render(f.node.phase() == .running), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
 }
 

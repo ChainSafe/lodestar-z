@@ -1,5 +1,12 @@
 const std = @import("std");
 const napi = @import("zapi:zapi").napi;
+const n = @import("network");
+
+pub const topic_policy = blk: {
+    var boundary: n.gossipsub.topic_policy.Boundary = .{ .digest = @splat(0) };
+    boundary.rules[@intFromEnum(n.gossipsub.topic.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 100 };
+    break :blk [_]n.gossipsub.topic_policy.Boundary{boundary};
+};
 
 /// The test executable links no Node runtime, so a notification only counts here, and returns `status`.
 pub var notifications = std.atomic.Value(u32).init(0);

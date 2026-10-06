@@ -70,7 +70,7 @@ pub const PeerManager = struct {
     phase: Phase = .running,
     counters: Counters = .{},
 
-    pub const Phase = enum { running, quiescing, stopping };
+    pub const Phase = enum { running, quiescing, stopped };
 
     /// Uncached selection work, which the caching and bounded-work tests and the network bench read.
     pub const Counters = struct {
@@ -177,8 +177,8 @@ pub const PeerManager = struct {
     }
     /// Stops selecting new work once, while the core releases existing I/O.
     pub fn stop(self: *PeerManager) bool {
-        if (self.phase == .stopping) return false;
-        self.phase = .stopping;
+        if (self.phase == .stopped) return false;
+        self.phase = .stopped;
         self.selection = .{};
         self.discovery_need = .{};
         return true;
@@ -454,7 +454,7 @@ pub const PeerManager = struct {
         self.selection_revision = null;
     }
     pub fn reStatusPeer(self: *PeerManager, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
-        if (self.phase == .stopping) return false;
+        if (self.phase == .stopped) return false;
         return self.control.reStatusPeer(&self.catalog, peer, connection, now);
     }
     pub fn reStatusPeers(self: *PeerManager, now: Now) void {

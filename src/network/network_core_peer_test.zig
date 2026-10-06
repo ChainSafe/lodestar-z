@@ -303,7 +303,7 @@ test "core native saturated app requests retain partitioned borrows while contro
     const sink_size = rr.Protocol.blocks_by_range_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, sink_size * 8);
     defer std.testing.allocator.free(sinks);
-    defer setup.client.shutdown(setup.pair.now);
+    defer setup.client.deinit(setup.pair.io());
     const protocols = [_]rr.Protocol{
         .blocks_by_range_v2,
         .blocks_by_root_v2,
