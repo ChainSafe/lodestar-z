@@ -17,7 +17,6 @@ pub const DisconnectReason = enum {
     host,
     shutdown,
     transport_closed,
-    duplicate,
     capacity,
     incompatible_fork,
     future_head,

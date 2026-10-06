@@ -259,7 +259,7 @@ pub const Control = struct {
     }
     fn goodbyeReason(reason: t.DisconnectReason) u64 {
         return switch (reason) {
-            .host, .shutdown, .duplicate, .remote_goodbye, .gossip_unavailable => 1,
+            .host, .shutdown, .remote_goodbye, .gossip_unavailable => 1,
             .capacity, .count_pruning => 129,
             .reputation => 250,
             .banned => 251,

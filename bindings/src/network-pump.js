@@ -410,7 +410,7 @@ export class NativePump {
       deliveryFailed = true;
     }
     // Ordinary work the time budget left unclaimed waits for the next turn, as held jobs do.
-    const budgetEnded = demand !== null && demand.messages > 0 && !demand.claimOrdinary;
+    const budgetEnded = demand !== null && !demand.claimOrdinary;
     /** @type {Continuation} */
     let next = "idle";
     if (result.more || held || (budgetEnded && result.disabledWaiting)) next = "now";
@@ -511,14 +511,15 @@ export class NativePump {
   }
 
   /**
-   * Starts the held and delivered serving starts in that order, unless the budget is spent: they then wait for the
-   * next turn. Returns whether starts wait.
+   * Starts held requests before newly delivered ones, within the time budget. At least one held request starts per
+   * turn. Returns whether starts wait.
    *
    * @param {Start[]} starts
    * @param {number} deadline
    */
   #start(starts, deadline) {
     const pending = this.#heldStarts;
+    const progress = pending.length > 0 || performance.now() < deadline;
     this.#heldStarts = [];
     for (const start of starts) {
       start.adopted = true;
@@ -528,7 +529,7 @@ export class NativePump {
     for (const [index, incoming] of pending.entries()) {
       if (this.#closing) void incoming.cancel().catch(noop);
       else {
-        if (performance.now() >= deadline) {
+        if ((index > 0 || !progress) && performance.now() >= deadline) {
           this.#heldStarts = pending.slice(index);
           return true;
         }

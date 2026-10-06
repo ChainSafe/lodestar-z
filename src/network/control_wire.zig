@@ -29,11 +29,6 @@ pub const Error = t.ValidationError || error{
     BufferTooSmall,
 };
 
-// Compatibility exports for existing raw callers. Values own the validation contract.
-pub const validateMetadata = t.validateMetadata;
-pub const copyLocal = t.copyLocal;
-pub const copyServingLocal = t.copyServingLocal;
-
 /// Ping sequence numbers and Goodbye codes use the same fixed SSZ uint64 layout.
 pub fn encodeScalar(value: u64, out: []u8) Error!usize {
     if (out.len < 8) return error.BufferTooSmall;

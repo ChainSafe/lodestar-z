@@ -156,9 +156,6 @@ fn removal(
     var essential = scarce;
     essential.groups = .empty;
     const sampled = scarce.groups.intersectWith(wanted.custody_groups);
-    const missing = result.coverage.deficits(demand, options.min_outbound);
-    const essential_missing = missing.outbound > 0 or missing.attestation > 0 or missing.sync > 0 or missing.custody_groups > 0;
-    const sampling_missing = missing.missing.groups.intersectWith(wanted.custody_groups).count() > 0;
     const hard = result.retained_count > options.max_peers;
     var best: ?Rank = null;
     for (inputs, 0..) |*input, i| {
@@ -183,8 +180,6 @@ fn removal(
             .outbound = input.outbound,
             .tie = ties[i],
         };
-        if (result.retained_count <= options.target_peers and !essential_missing and
-            (rank.essential_loss > 0 or (!sampling_missing and rank.sampling_loss > 0))) continue;
         if (best == null or less(&rank, &best.?)) best = rank;
     }
     return if (best) |rank| rank.index else null;

@@ -1,6 +1,6 @@
-//! The binding's one process-fatal path, for a bridge contract failure that no promise or host callback can report
-//! reliably. It terminates at once: it calls no host code and attempts no shutdown. Every other failure is an ordinary
-//! throw or rejection, a retired operation, a local shutdown or a failed close.
+//! Reports bridge contract failures that no promise or host callback can report reliably. It terminates at once,
+//! calling no host code and attempting no shutdown. Internal invariant violations can also panic in ReleaseSafe;
+//! they are not part of this catalogue.
 //!
 //! Each site, with the invariant it guards and its caller:
 //! - `exchange_build`: an exchange that applied its actions and selected a delivery builds the result it promised.

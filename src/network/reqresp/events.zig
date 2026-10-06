@@ -22,7 +22,6 @@ pub const Failure = union(enum) {
     negotiation_rejected,
     negotiation_failed: Negotiator.Failure,
     invalid_response: (codec.Error || error{InvalidResponseContext}),
-    invalid_request: codec.Error,
     too_many_chunks,
     empty_response,
     unknown_context: [constants.context_bytes_length]u8,

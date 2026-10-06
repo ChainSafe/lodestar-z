@@ -134,7 +134,10 @@ test("gossip lifecycle, strict representations and canonical publication refusal
       code: "NetworkGossipPublishFailed",
       reason: "payload_too_small",
     });
-    await expect(runtime.publishGossip(TOPIC, new Uint8Array(10 * 1024 * 1024 + 1))).rejects.toThrow("PayloadTooLarge");
+    await expect(runtime.publishGossip(TOPIC, new Uint8Array(10 * 1024 * 1024 + 1))).rejects.toMatchObject({
+      code: "NetworkGossipPublishFailed",
+      reason: "payload_too_large",
+    });
     await expect(runtime.publishGossip(TOPIC, new Uint8Array(4000), {allowZeroPeers: false})).rejects.toMatchObject({
       code: "NetworkGossipPublishFailed",
       reason: "no_peers_subscribed_to_topic",
