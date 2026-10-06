@@ -26,17 +26,17 @@ test "gossip shared deliveries preserve every peer reserve under global pressure
     }
     try std.testing.expectEqual(@as(usize, 0), pool.available);
     try std.testing.expectEqual(@as(usize, 0), pool.protected);
-    queues[1].reset(&store);
+    queues[1].reset();
     try std.testing.expectError(error.PoolFull, queues[2].append(&store, message, .forward, .{ .bytes = 8192 }, 5));
     for (0..per_peer_reserve) |_| try queues[1].append(&store, message, .forward, .{ .bytes = 8192 }, 6);
     store.releaseHistory(message);
-    for (&queues) |*queue| queue.reset(&store);
+    for (&queues) |*queue| queue.reset();
     try std.testing.expectEqual(@as(usize, 3 * per_peer_reserve), pool.protected);
     try std.testing.expectEqual(pool.slots.len, pool.available);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
 }
 
-test "gossip delivery byte refusal acquires no descriptor or payload retain" {
+test "gossip delivery byte refusal acquires no descriptor" {
     const a = std.testing.allocator;
     var pool = try Pool.init(a, 1, Pool.capacity(1, 1));
     defer pool.deinit(a);
@@ -48,7 +48,6 @@ test "gossip delivery byte refusal acquires no descriptor or payload retain" {
     var queue: Queue = .{ .pool = &pool };
     try std.testing.expectError(error.Bytes, queue.append(&store, message, .forward, .{ .bytes = 6 }, 0));
     try std.testing.expectEqual(pool.slots.len, pool.available);
-    try std.testing.expectEqual(@as(u32, 0), store.get(message).?.tx);
     store.releaseHistory(message);
 }
 
@@ -67,17 +66,15 @@ test "gossip delivery resumes a frame cut by a short write and releases a cut fr
     var queue: Queue = .{ .pool = &pool };
     try queue.append(&store, first, .publication, .{ .bytes = 8192 }, 5);
     try queue.append(&store, second, .iwant, .{ .bytes = 8192 }, 6);
-    const frame_len = queue.next(&store).?.segment(&store).len;
+    const frame_len = (try queue.next(&store)).?.segment(&store).len;
     try std.testing.expectEqual(store.get(first).?.frameLen(), frame_len);
     try std.testing.expect(queue.advance(&store, 3) == null);
-    try std.testing.expectEqual(first, queue.next(&store).?.message);
-    try std.testing.expectEqual(frame_len - 3, queue.next(&store).?.segment(&store).len);
+    try std.testing.expectEqual(first, (try queue.next(&store)).?.message);
+    try std.testing.expectEqual(frame_len - 3, (try queue.next(&store)).?.segment(&store).len);
     try std.testing.expectEqual(Receipt{ .origin = .publication }, queue.advance(&store, frame_len - 3).?);
-    try std.testing.expectEqual(@as(u32, 0), store.get(first).?.tx);
-    try std.testing.expectEqual(second, queue.next(&store).?.message);
+    try std.testing.expectEqual(second, (try queue.next(&store)).?.message);
     try std.testing.expect(queue.advance(&store, 1) == null);
-    queue.reset(&store);
-    try std.testing.expectEqual(@as(u32, 0), store.get(second).?.tx);
+    queue.reset();
     try std.testing.expectEqual(pool.slots.len, pool.available);
     try std.testing.expectEqual(@as(usize, per_peer_reserve), pool.protected);
     for ([_]storage.Handle{ first, second }) |h| store.releaseHistory(h);
@@ -105,12 +102,12 @@ test "gossip delivery keeps the local reserve from ordinary frames and pressures
     try std.testing.expectError(error.Descriptors, queue.append(&store, message, .publication, descriptors, 3));
     try std.testing.expectEqual(@as(usize, 4), queue.classCount(.local));
     // Sending a local frame frees no ordinary room; sending an ordinary one does.
-    try std.testing.expectEqual(Origin.publication, queue.advance(&store, queue.next(&store).?.segment(&store).len).?.origin);
+    try std.testing.expectEqual(Origin.publication, queue.advance(&store, (try queue.next(&store)).?.segment(&store).len).?.origin);
     try std.testing.expect(queue.full());
     queue.current = .ordinary;
-    try std.testing.expectEqual(Origin.forward, queue.advance(&store, queue.next(&store).?.segment(&store).len).?.origin);
+    try std.testing.expectEqual(Origin.forward, queue.advance(&store, (try queue.next(&store)).?.segment(&store).len).?.origin);
     try std.testing.expect(!queue.full());
-    queue.reset(&store);
+    queue.reset();
     pool.local_descriptors = 0;
 
     // Seven-byte frames: ordinary ones stop 14 bytes short of the limit, which two local ones fill.
@@ -119,11 +116,11 @@ test "gossip delivery keeps the local reserve from ordinary frames and pressures
     try std.testing.expectError(error.Bytes, queue.append(&store, message, .forward, bytes, 4));
     for (0..2) |_| try queue.append(&store, message, .publication, bytes, 5);
     try std.testing.expectError(error.Bytes, queue.append(&store, message, .publication, bytes, 5));
-    queue.reset(&store);
+    queue.reset();
     // Without ordinary frames, local publications may use all the room.
     for (0..10) |_| try queue.append(&store, message, .publication, bytes, 6);
     try std.testing.expectError(error.Bytes, queue.append(&store, message, .publication, bytes, 6));
-    queue.reset(&store);
+    queue.reset();
     try std.testing.expectEqual(pool.slots.len, pool.available);
     store.releaseHistory(message);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
@@ -152,16 +149,16 @@ test "gossip delivery prefers local frames for a bounded run and never interleav
     // queue, so it spans any number of turns.
     const expected = [_]Origin{ .publication, .publication, .publication, .publication, .forward, .publication, .publication, .publication, .publication, .forward, .publication, .publication, .iwant };
     for (expected, 0..) |origin, i| {
-        const segment = queue.next(&store).?.segment(&store);
+        const segment = (try queue.next(&store)).?.segment(&store);
         // A frame cut by a short write stays chosen even when the other class has frames waiting.
         if (i == 5) {
             try std.testing.expect(queue.advance(&store, 1) == null);
             try queue.append(&store, other, .forward, limits, 3);
-            try std.testing.expectEqual(small, queue.next(&store).?.message);
+            try std.testing.expectEqual(small, (try queue.next(&store)).?.message);
             try std.testing.expectEqual(origin, queue.advance(&store, segment.len - 1).?.origin);
         } else try std.testing.expectEqual(origin, queue.advance(&store, segment.len).?.origin);
     }
-    try std.testing.expectEqual(Origin.forward, queue.advance(&store, queue.next(&store).?.segment(&store).len).?.origin);
+    try std.testing.expectEqual(Origin.forward, queue.advance(&store, (try queue.next(&store)).?.segment(&store).len).?.origin);
     try std.testing.expectEqual(@as(usize, 0), queue.count);
 
     // One local frame at or above the byte run hands the next turn to a waiting ordinary frame.
@@ -170,7 +167,7 @@ test "gossip delivery prefers local frames for a bounded run and never interleav
     try queue.append(&store, other, .forward, limits, 4);
     for ([_]Origin{ .publication, .forward, .publication }) |origin| {
         for (0..32) |_| {
-            const segment = queue.next(&store).?.segment(&store);
+            const segment = (try queue.next(&store)).?.segment(&store);
             if (queue.advance(&store, segment.len)) |receipt| {
                 try std.testing.expectEqual(origin, receipt.origin);
                 break;
@@ -209,7 +206,7 @@ test "gossip pool protects each peer's first descriptors by the combined count o
     // Draining in class order returns every descriptor and protected unit.
     for (&queues) |*queue| {
         for (0..per_peer_limit) |_| {
-            const segment = (queue.next(&store) orelse break).segment(&store);
+            const segment = ((try queue.next(&store)) orelse break).segment(&store);
             _ = queue.advance(&store, segment.len).?;
         }
         try std.testing.expectEqual(@as(usize, 0), queue.count);
@@ -217,4 +214,79 @@ test "gossip pool protects each peer's first descriptors by the combined count o
     try std.testing.expectEqual(pool.slots.len, pool.available);
     try std.testing.expectEqual(@as(usize, 2 * per_peer_reserve), pool.protected);
     store.releaseHistory(message);
+}
+
+test "memory_safety: gossip queued handles survive payload and page reuse without retaining them" {
+    const a = std.testing.allocator;
+    var pool = try Pool.init(a, 1, Pool.capacity(1, 1));
+    defer pool.deinit(a);
+    var store = try storage.Store.init(a, 1, storage.page_bytes);
+    defer store.deinit(a);
+    var queue: Queue = .{ .pool = &pool };
+    defer queue.reset();
+    const old = store.put(@splat(1), "topic", &([_]u8{7} ** 600)).?;
+    store.retainHistory(old);
+    store.seal(old);
+    try queue.append(&store, old, .publication, .{ .bytes = 8192 }, 1);
+    _ = try queue.next(&store);
+    store.releaseHistory(old);
+    try std.testing.expectEqual(@as(usize, 0), store.used_entries);
+    try std.testing.expectEqual(store.next.len, store.free_pages);
+
+    const fresh = store.put(@splat(2), "topic", &([_]u8{9} ** 700)).?;
+    store.retainHistory(fresh);
+    store.seal(fresh);
+    try std.testing.expectEqual(old.index, fresh.index);
+    try std.testing.expect(old.generation != fresh.generation);
+    try queue.append(&store, fresh, .forward, .{ .bytes = 8192 }, 2);
+    try std.testing.expectEqual(fresh, (try queue.next(&store)).?.message);
+    try std.testing.expectEqual(@as(usize, 1), queue.count);
+    try std.testing.expectEqual(@as(usize, 700), queue.bytes);
+    try std.testing.expectEqual(@as(usize, 0), queue.local_bytes);
+    try std.testing.expectEqual(@as(usize, 1), queue.kind_entries[@intFromEnum(store.get(fresh).?.kind)]);
+    try std.testing.expectEqual(@as(usize, 700), queue.kind_bytes[@intFromEnum(store.get(fresh).?.kind)]);
+    for (0..3) |_| {
+        const segment = (try queue.next(&store)).?.segment(&store);
+        if (queue.advance(&store, segment.len)) |receipt| {
+            try std.testing.expectEqual(Origin.forward, receipt.origin);
+            break;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), queue.count);
+    try std.testing.expectEqual(pool.slots.len, pool.available);
+    store.releaseHistory(fresh);
+}
+
+test "memory_safety: gossip evicted partial frames require reset before reading reused storage" {
+    const a = std.testing.allocator;
+    var pool = try Pool.init(a, 1, Pool.capacity(1, 1));
+    defer pool.deinit(a);
+    var store = try storage.Store.init(a, 1, storage.page_bytes);
+    defer store.deinit(a);
+    var queue: Queue = .{ .pool = &pool };
+    defer queue.reset();
+    for ([_]usize{ 0, 1, 2 }) |segments| {
+        const old = store.put(@splat(1), "topic", &([_]u8{7} ** 600)).?;
+        store.retainHistory(old);
+        store.seal(old);
+        try queue.append(&store, old, .forward, .{ .bytes = 8192 }, 1);
+        for (0..segments) |_| {
+            const bytes = (try queue.next(&store)).?.segment(&store);
+            try std.testing.expect(queue.advance(&store, bytes.len) == null);
+        }
+        _ = try queue.next(&store);
+        try std.testing.expect(queue.advance(&store, 1) == null);
+        store.releaseHistory(old);
+        const fresh = store.put(@splat(2), "topic", "replacement").?;
+        store.retainHistory(fresh);
+        store.seal(fresh);
+        try queue.append(&store, fresh, .publication, .{ .bytes = 8192 }, 2);
+        try std.testing.expectError(error.PartialFrameEvicted, queue.next(&store));
+        try std.testing.expectEqual(@as(usize, 2), queue.count);
+        try std.testing.expectEqual(@as(usize, 1), store.used_entries);
+        queue.reset();
+        try std.testing.expectEqual(pool.slots.len, pool.available);
+        try std.testing.expectEqual(@as(usize, 0), queue.bytes);
+        store.releaseHistory(fresh);
+    }
 }

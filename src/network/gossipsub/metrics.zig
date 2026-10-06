@@ -12,7 +12,7 @@ pub const ValidationTime = histogram.Duration(&.{ 10, 30, 100, 300, 1000, 3000, 
 
 /// Data frame recipients by delivery origin: selected, then queued, pressured or unavailable;
 /// queued frames later complete when QUIC accepts their last byte, which is not delivery, or are
-/// cancelled by a stream reset.
+/// cancelled by cache eviction or a stream reset.
 pub const Delivery = struct {
     const delivery = @import("delivery.zig");
     pub const Outcome = enum { selected, queued, pressured, unavailable, completed, cancelled };
@@ -29,7 +29,7 @@ pub const Delivery = struct {
     }
 
     pub fn write(self: *const Delivery, w: *prom.Encoder) prom.Error!void {
-        const recipients = try w.family(.{ .name = "lodestar_native_gossip_data_recipients_total", .kind = .counter, .help = "Data frame recipients by delivery origin: selected, then queued, pressured or unavailable; queued frames later complete when QUIC accepts their last byte, which is not delivery, or are cancelled by a stream reset", .labels = &.{ "origin", "outcome" } });
+        const recipients = try w.family(.{ .name = "lodestar_native_gossip_data_recipients_total", .kind = .counter, .help = "Data frame recipients by delivery origin: selected, then queued, pressured or unavailable; queued frames later complete when QUIC accepts their last byte, which is not delivery, or are cancelled by cache eviction or a stream reset", .labels = &.{ "origin", "outcome" } });
         inline for (@typeInfo(delivery.Origin).@"enum".fields) |origin| {
             inline for (@typeInfo(Outcome).@"enum".fields) |outcome| try recipients.sample(.{ origin.name, outcome.name }, self.recipients[origin.value][outcome.value]);
         }

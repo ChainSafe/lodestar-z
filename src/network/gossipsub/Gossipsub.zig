@@ -87,7 +87,6 @@ pub const ResourceSnapshot = struct {
     queued_descriptors: usize = 0,
     queued_bytes: usize = 0,
     held_frames: usize = 0,
-    held_tx_retains: usize = 0,
     store_entries: usize = 0,
     store_pages: usize = 0,
     pending_validations: usize = 0,
@@ -305,7 +304,7 @@ pub fn cancelWrites(self: *Gossipsub, session: sessions_mod.SessionRef) void {
     if (!self.sessions.matches(session)) return;
     const tx = &self.sessions.rows[session.index].io.tx;
     self.delivery_metrics.cancelled(&tx.data.origins);
-    tx.cancelStream(&self.messages.store);
+    tx.cancelStream();
     _ = self.cancelPromises(session.index, false);
 }
 
@@ -468,7 +467,6 @@ pub fn resourceSnapshot(self: *const Gossipsub) ResourceSnapshot {
         }
     }
     if (self.overlay.namespace) |*ns| result.remote_subscriptions = ns.subscription_count;
-    for (self.messages.store.entries) |entry| result.held_tx_retains += entry.tx;
     return result;
 }
 
@@ -511,11 +509,6 @@ pub fn maintainTopics(self: *Gossipsub, now: Now) void {
             if (session.active and session.io.tx.finishGossip(now.millis())) self.settle(@intCast(index));
         }
         self.messages.history.age(&self.messages.store, epoch);
-        for (self.sessions.rows, 0..) |*session, index| {
-            if (!session.active or !session.io.tx.data.hasExpiredHistory(&self.messages.store)) continue;
-            session.io.tx.history_expired = true;
-            self.settle(@intCast(index));
-        }
     }
 }
 
@@ -540,10 +533,18 @@ pub fn cancelPromises(self: *Gossipsub, peer: u16, local_pressure: bool) usize {
     return self.recovery.cancel(&self.peers, self.sessions.rows[peer].conn, local_pressure).work;
 }
 
-pub fn writeSegment(self: *Gossipsub, session: sessions_mod.SessionRef) []const u8 {
+/// Borrows a segment for one transport write. Complete or abandon the borrow before any
+/// operation that can change message storage; advanceWrite must follow a successful write.
+pub fn writeSegment(self: *Gossipsub, session: sessions_mod.SessionRef) error{PartialFrameEvicted}![]const u8 {
     assert(self.sessions.matches(session));
     const outbox = &self.sessions.rows[session.index].io.tx;
     self.overlay.flushSubscriptions(outbox, &self.sessions.control_scratch, self.last_now_ms);
+    const before = outbox.data.origins;
+    defer {
+        var cancelled: [delivery.origin_count]usize = undefined;
+        for (&cancelled, before, outbox.data.origins) |*count, previous, remaining| count.* = previous - remaining;
+        self.delivery_metrics.cancelled(&cancelled);
+    }
     return outbox.segment(&self.messages.store);
 }
 

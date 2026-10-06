@@ -142,7 +142,7 @@ pub const PeerIo = struct {
                 since +| options.pressure_timeout_ms;
         }
         if (self.tx.oldest()) |since| {
-            result.values[@intFromEnum(TimeoutReason.send_queue)] = if (self.tx.history_expired) 0 else since +| options.tx_timeout_ms;
+            result.values[@intFromEnum(TimeoutReason.send_queue)] = since +| options.tx_timeout_ms;
             if (self.tx.progress_ms) |progress| result.values[@intFromEnum(TimeoutReason.send_progress)] = progress +| options.large_frame_timeout_ms;
         }
         return result;

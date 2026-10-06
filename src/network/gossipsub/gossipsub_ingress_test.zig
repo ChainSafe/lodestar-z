@@ -396,7 +396,7 @@ const IwantFixture = struct {
     fn flush(self: *IwantFixture, source: u16) !void {
         const session = self.g.sessions.ref(source);
         for (0..64) |_| {
-            const bytes = self.g.writeSegment(session);
+            const bytes = try self.g.writeSegment(session);
             if (bytes.len == 0) return;
             self.g.advanceWrite(session, bytes.len, self.now);
         }
@@ -579,7 +579,7 @@ test "gossip refused receipt before IWANT write completion cannot rearm its ID o
     try f.request(0, @splat(0xee));
     try f.request(1, x);
     const p = f.g.sessions.ref(0);
-    const segment = f.g.writeSegment(p);
+    const segment = try f.g.writeSegment(p);
     try t.expect(segment.len > 1);
     f.g.advanceWrite(p, 1, 250);
     f.now = 250;

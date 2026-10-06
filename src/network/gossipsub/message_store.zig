@@ -27,14 +27,12 @@ pub const Cursor = struct { page: u32, offset: u32 = 0, remaining: u32 };
 pub const FrameCursor = struct { sent: u32 = 0, page: u32 };
 pub const Entry = struct {
     kind: topic.Kind = .beacon_block,
-    retention_charged: bool = false,
     generation: u64 = 0,
     active: bool = false,
     free_next: u32 = none,
     provisional: bool = false,
     validation: bool = false,
     history: bool = false,
-    tx: u32 = 0,
     first: u32 = none,
     len: u32 = 0,
     id: topic.MessageId = undefined,
@@ -122,6 +120,7 @@ pub const Store = struct {
         self.* = undefined;
     }
 
+    /// Borrows an entry until the next store mutation in this owner call.
     pub fn get(self: *const Store, handle: Handle) ?*const Entry {
         if (handle.index >= self.entries.len) return null;
         const entry = &self.entries[handle.index];
@@ -156,7 +155,7 @@ pub const Store = struct {
     pub fn retentionShortfall(self: *const Store, handle: Handle) struct { pages: usize, entries: usize } {
         const limits = self.limits orelse return .{ .pages = 0, .entries = 0 };
         const entry = self.get(handle).?;
-        if (entry.retention_charged) return .{ .pages = 0, .entries = 0 };
+        if (entry.history) return .{ .pages = 0, .entries = 0 };
         const k = @intFromEnum(entry.kind);
         return .{
             .pages = (self.retained_by_kind[k] + pagesFor(entry.len)) -| limits[k].bytes / page_bytes,
@@ -242,6 +241,7 @@ pub const Store = struct {
 
     /// The unsent frame bytes that are contiguous from `at`: the whole rest of an inline frame, or
     /// for a paged payload the rest of the prefix, of the current page, or of the trailer.
+    /// The caller must keep the store unchanged until it consumes the borrowed segment.
     pub fn frameSegment(self: *const Store, handle: Handle, at: FrameCursor) []const u8 {
         const entry = self.get(handle).?;
         assert(!entry.provisional and at.sent <= entry.frameLen());
@@ -286,28 +286,16 @@ pub const Store = struct {
     pub fn retainHistory(self: *Store, h: Handle) void {
         const e = self.mutable(h);
         assert(!e.history and self.canRetain(h));
-        if (!e.retention_charged) {
-            self.retained_by_kind[@intFromEnum(e.kind)] += pagesFor(e.len);
-            self.retained_entries_by_kind[@intFromEnum(e.kind)] += 1;
-            e.retention_charged = true;
-        }
+        self.retained_by_kind[@intFromEnum(e.kind)] += pagesFor(e.len);
+        self.retained_entries_by_kind[@intFromEnum(e.kind)] += 1;
         e.history = true;
     }
     pub fn releaseHistory(self: *Store, h: Handle) void {
         const e = self.mutable(h);
         assert(e.history);
         e.history = false;
-        self.collect(h);
-    }
-    pub fn retainTx(self: *Store, h: Handle) void {
-        const e = self.mutable(h);
-        assert(!e.provisional and e.tx < std.math.maxInt(u32));
-        e.tx += 1;
-    }
-    pub fn releaseTx(self: *Store, h: Handle) void {
-        const e = self.mutable(h);
-        assert(e.tx > 0);
-        e.tx -= 1;
+        self.retained_by_kind[@intFromEnum(e.kind)] -= pagesFor(e.len);
+        self.retained_entries_by_kind[@intFromEnum(e.kind)] -= 1;
         self.collect(h);
     }
     fn mutable(self: *Store, h: Handle) *Entry {
@@ -316,7 +304,7 @@ pub const Store = struct {
     }
     fn collect(self: *Store, h: Handle) void {
         const e = self.mutable(h);
-        if (e.provisional or e.validation or e.history or e.tx != 0) return;
+        if (e.provisional or e.validation or e.history) return;
         var page = e.first;
         for (0..pagesFor(e.len)) |_| {
             assert(page != none);
@@ -329,10 +317,6 @@ pub const Store = struct {
         assert(page == none);
         self.used_by_kind[@intFromEnum(e.kind)] -= pagesFor(e.len);
         self.entries_by_kind[@intFromEnum(e.kind)] -= 1;
-        if (e.retention_charged) {
-            self.retained_by_kind[@intFromEnum(e.kind)] -= pagesFor(e.len);
-            self.retained_entries_by_kind[@intFromEnum(e.kind)] -= 1;
-        }
         e.active = false;
         self.used_entries -= 1;
         if (e.generation == std.math.maxInt(u64)) self.retired_entries += 1 else {

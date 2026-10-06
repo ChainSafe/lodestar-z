@@ -348,7 +348,16 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
     const now = turn.now;
     const stream = self.sessions.rows[index].outStream() orelse return;
     for (0..self.options.calls_per_peer) |_| {
-        const segment = self.writeSegment(self.sessions.ref(index));
+        const segment = self.writeSegment(self.sessions.ref(index)) catch {
+            // Resetting can discard IWANTs already buffered by QUIC, before the peer sees them.
+            const work = self.cancelPromises(index, true);
+            turn.budget.work -|= work;
+            peer.work -|= work;
+            const retry_direct = self.peers.rows[self.sessions.rows[index].logical.index].direct;
+            resetOutbound(self, engine, index);
+            if (retry_direct) self.sessions.setOutbound(index, .{ .retry_at = now.millis() +| direct_retry_delay_ms });
+            return;
+        };
         if (segment.len == 0) {
             io.tx.progress_ms = null;
             return;

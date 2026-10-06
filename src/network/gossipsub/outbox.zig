@@ -135,7 +135,6 @@ pub const Outbox = struct {
     gossip: []u8 = &.{},
     gossip_len: usize = 0,
     gossip_ids: usize = 0,
-    history_expired: bool = false,
     critical: FrameQueue(critical_frames),
     data: delivery.Queue,
     active: enum { none, critical, control, data } = .none,
@@ -271,7 +270,7 @@ pub const Outbox = struct {
     }
 
     /// A refusal leaves its reason in `last_drop`.
-    pub fn queueData(self: *Outbox, store: *storage.Store, h: storage.Handle, origin: delivery.Origin, limits: delivery.Limits, now_ms: u64) QueueResult {
+    pub fn queueData(self: *Outbox, store: *const storage.Store, h: storage.Handle, origin: delivery.Origin, limits: delivery.Limits, now_ms: u64) QueueResult {
         self.data.append(store, h, origin, limits, now_ms) catch |err| {
             self.dropped(switch (err) {
                 error.Descriptors => .data_descriptors,
@@ -290,26 +289,35 @@ pub const Outbox = struct {
     pub fn pending(self: *const Outbox) bool {
         return self.data.count != 0 or self.control.count != 0 or self.critical.count != 0;
     }
-    pub fn segment(self: *Outbox, store: *const storage.Store) []const u8 {
-        if (self.active == .none) {
-            if (self.data.count > 0 and self.control_burst >= 4) {
-                self.active = .data;
-            } else if (self.critical.count > 0) {
-                self.active = .critical;
-            } else if (self.control.count > 0) {
-                self.active = .control;
-            } else if (self.data.count > 0) {
-                self.active = .data;
+    /// Borrows bytes until the next store mutation. An evicted partial frame requires a reset.
+    pub fn segment(self: *Outbox, store: *const storage.Store) error{PartialFrameEvicted}![]const u8 {
+        for (0..2) |_| {
+            if (self.active == .none) {
+                if (self.data.count > 0 and self.control_burst >= 4) {
+                    self.active = .data;
+                } else if (self.critical.count > 0) {
+                    self.active = .critical;
+                } else if (self.control.count > 0) {
+                    self.active = .control;
+                } else if (self.data.count > 0) {
+                    self.active = .data;
+                }
+            }
+            switch (self.active) {
+                .none => return &.{},
+                .critical => return self.critical.segment(),
+                .control => return self.control.segment(),
+                .data => if (try self.data.next(store)) |tx| {
+                    return tx.segment(store);
+                } else {
+                    self.active = .none;
+                    self.progress_ms = null;
+                },
             }
         }
-        return switch (self.active) {
-            .none => &.{},
-            .critical => self.critical.segment(),
-            .control => self.control.segment(),
-            .data => self.data.next(store).?.segment(store),
-        };
+        unreachable;
     }
-    pub fn advance(self: *Outbox, store: *storage.Store, len: usize) ?Completion {
+    pub fn advance(self: *Outbox, store: *const storage.Store, len: usize) ?Completion {
         switch (self.active) {
             .none => unreachable,
             .critical, .control => {
@@ -361,19 +369,18 @@ pub const Outbox = struct {
         self.gossip_ids = 0;
     }
 
-    pub fn cancelStream(self: *Outbox, store: *storage.Store) void {
+    pub fn cancelStream(self: *Outbox) void {
         self.subscription_dirty.setRangeValue(.{ .start = 0, .end = self.subscription_dirty.bit_length }, false);
         self.subscription_since = null;
         self.subscription_cursor = 0;
         self.control_burst = 0;
-        self.data.reset(store);
+        self.data.reset();
         self.pressure_pending = false;
         self.active = .none;
         self.control.reset();
         self.critical.reset();
         self.gossip_len = 0;
         self.gossip_ids = 0;
-        self.history_expired = false;
         self.progress_ms = null;
         self.ready = false;
         self.blocked_since = null;
@@ -399,7 +406,7 @@ test "gossip segmented prefix agrees with independent JS varint oracles" {
     }
 }
 
-test "gossip transmit retains pages and never interleaves control into partial data" {
+test "gossip transmit never interleaves control into partial data" {
     var store = try storage.Store.init(std.testing.allocator, 2, 8192);
     defer store.deinit(std.testing.allocator);
     var normal: [64]u8 = undefined;
@@ -411,24 +418,24 @@ test "gossip transmit retains pages and never interleaves control into partial d
     store.retainHistory(h);
     store.seal(h);
     try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, .forward, .{ .bytes = 8192 }, 0));
-    store.releaseHistory(h);
     var out: [128]u8 = undefined;
     var n: usize = 0;
-    out[n] = io.segment(&store)[0];
+    out[n] = (try io.segment(&store))[0];
     n += 1;
     _ = io.advance(&store, 1);
     const token = io.appendControl("\x01x", true, 0).?;
     for (0..127) |_| {
-        const segment = io.segment(&store);
+        const segment = try io.segment(&store);
         if (segment.len == 0) break;
         out[n] = segment[0];
         n += 1;
         if (io.advance(&store, 1)) |done| switch (done) {
             .control => |receipt| try std.testing.expectEqual(token, receipt.token),
-            .data => try std.testing.expectEqual(@as(usize, 0), store.used_entries),
+            .data => try std.testing.expectEqual(@as(usize, 1), store.used_entries),
         };
     }
     try std.testing.expect(!io.pending());
+    store.releaseHistory(h);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
     var expected: [128]u8 = undefined;
     var writer = protobuf.Writer.init(&expected);
@@ -455,7 +462,7 @@ test "gossip critical capacity and data queue pressure are independent and relea
     try std.testing.expect(!io.inject("x", 0));
     try std.testing.expect(io.appendControl("critical", true, 0) != null);
     store.releaseHistory(h);
-    io.cancelStream(&store);
+    io.cancelStream();
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
     try std.testing.expectEqual(@as(usize, 1), store.free_pages);
     try std.testing.expectEqual(@as(u64, 1), io.drops[@intFromEnum(DropReason.data_descriptors)]);
@@ -472,7 +479,7 @@ test "gossip queues a full validation burst in order and preserves byte bounds" 
     var deliveries = try delivery.Pool.init(std.testing.allocator, 1, data_capacity);
     defer deliveries.deinit(std.testing.allocator);
     var io: Outbox = .{ .data = .{ .pool = &deliveries }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
-    defer io.cancelStream(&store);
+    defer io.cancelStream();
     var expected: [4096]u8 = undefined;
     var writer = protobuf.Writer.init(&expected);
     for (0..burst) |i| {
@@ -484,12 +491,11 @@ test "gossip queues a full validation burst in order and preserves byte bounds" 
         writer.varint(protobuf.messageSize(&payload, "topic"));
         protobuf.writeMessage(&writer, &payload, "topic");
         if (i == burst - 1) try std.testing.expectEqual(QueueResult.full, io.queueData(&store, h, .forward, .{ .bytes = burst }, 0));
-        store.releaseHistory(h);
     }
     var actual: [4096]u8 = undefined;
     var used: usize = 0;
     for (0..burst * 3) |_| {
-        const segment = io.segment(&store);
+        const segment = try io.segment(&store);
         if (segment.len == 0) break;
         @memcpy(actual[used..][0..segment.len], segment);
         used += segment.len;
@@ -497,7 +503,7 @@ test "gossip queues a full validation burst in order and preserves byte bounds" 
     }
     try std.testing.expect(!io.pending());
     try std.testing.expectEqualSlices(u8, writer.written(), actual[0..used]);
-    try std.testing.expectEqual(@as(usize, 0), store.used_entries);
+    try std.testing.expectEqual(@as(usize, burst), store.used_entries);
     try std.testing.expectEqual(@as(usize, burst), store.free_pages);
     try std.testing.expectEqual(@as(u64, 1), io.drops[@intFromEnum(DropReason.data_bytes)]);
     try std.testing.expectEqual(@as(u64, 0), io.drops[@intFromEnum(DropReason.data_descriptors)]);
@@ -515,15 +521,15 @@ test "gossip control receipts survive partial writes ring reuse and refused fram
         const token = io.appendControl("abc", false, 1).?;
         try std.testing.expect(io.appendControl("ab", false, 1) == null);
         for (0..3) |byte| {
-            _ = io.segment(&store);
+            _ = try io.segment(&store);
             const receipt = io.advance(&store, 1);
             if (byte < 2) try std.testing.expect(receipt == null) else try std.testing.expectEqual(token, receipt.?.control.token);
         }
     }
     _ = io.appendControl("abc", false, 1).?;
-    _ = io.segment(&store);
+    _ = try io.segment(&store);
     try std.testing.expect(io.advance(&store, 1) == null);
-    io.cancelStream(&store);
+    io.cancelStream();
     try std.testing.expect(!io.pending());
 }
 
@@ -552,7 +558,7 @@ test "gossip typed controls preserve maximum ID lists and completion kinds" {
         var received: ?[]const u8 = null;
         var completion: ?Completion = null;
         for (0..2) |_| {
-            const segment = outbox.segment(&store);
+            const segment = try outbox.segment(&store);
             if (segment.len == 0) break;
             const parsed = try reader.feed(segment, &body);
             received = parsed.frame;
@@ -618,4 +624,32 @@ test "gossip critical queue holds a full subscription snapshot and full PRUNE bu
         try std.testing.expect(tx.critical.advance(rest.len) != null);
     }
     try std.testing.expectEqual(@as(usize, 0), tx.critical.used);
+}
+
+test "gossip full stale delivery queue yields to waiting control and returns every descriptor" {
+    const a = std.testing.allocator;
+    var pool = try delivery.Pool.init(a, 1, delivery.Pool.capacity(1, 1));
+    defer pool.deinit(a);
+    var store = try storage.Store.init(a, 1, storage.page_bytes);
+    defer store.deinit(a);
+    var normal: [32]u8 = undefined;
+    var critical: [32]u8 = undefined;
+    var outbox: Outbox = .{ .data = .{ .pool = &pool }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
+    defer outbox.cancelStream();
+    const message = store.put(@splat(1), "topic", "payload").?;
+    store.retainHistory(message);
+    store.seal(message);
+    for (0..data_capacity) |i| try outbox.data.append(&store, message, if (i % 2 == 0) .publication else .iwant, .{ .bytes = 8192 }, 1);
+    const token = outbox.appendControl("control", false, 2).?;
+    outbox.control_burst = 4;
+    store.releaseHistory(message);
+    try std.testing.expectEqualStrings("control", try outbox.segment(&store));
+    try std.testing.expectEqual(@as(usize, 0), outbox.data.count);
+    try std.testing.expectEqual(@as(usize, 0), outbox.data.bytes);
+    try std.testing.expectEqual(@as(usize, 0), outbox.data.local_bytes);
+    for (outbox.data.origins) |count| try std.testing.expectEqual(@as(usize, 0), count);
+    try std.testing.expectEqual(pool.slots.len, pool.available);
+    try std.testing.expectEqual(@as(usize, delivery.per_peer_reserve), pool.protected);
+    try std.testing.expectEqual(token, outbox.advance(&store, 7).?.control.token);
+    try std.testing.expect(!outbox.pending());
 }

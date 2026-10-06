@@ -89,11 +89,11 @@ pub const Admission = struct {
             records += 1;
             const payload = store.get(entry.state.pending.message).?;
             if (payload.kind == incoming_kind) kind_pending -= 1;
-            if (payload.provisional or payload.history or payload.tx != 0) continue;
+            if (payload.provisional or payload.history) continue;
             const released = storage.Store.pagesFor(payload.len);
             pages += released;
             entries += @intFromBool(payload.generation != std.math.maxInt(u64));
-            if (payload.kind == incoming_kind and !payload.retention_charged) {
+            if (payload.kind == incoming_kind) {
                 kind_pages -= released;
                 kind_entries -= 1;
             }
