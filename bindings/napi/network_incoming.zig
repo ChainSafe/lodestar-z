@@ -343,10 +343,14 @@ pub fn settleable(cell: *const Cell) bool {
 pub fn releasable(cell: *const Cell) bool {
     return cell.serving != null and cell.release_requested and !cell.native and !cell.copying and !awaited(cell);
 }
+fn needsPermission(cell: *const Cell) bool {
+    return cell.state == .serving and !cell.permission_ready and
+        (cell.permission_awaited or (cell.response_awaited and cell.ack == null));
+}
 /// Work the owner does for a cell at its next host apply: a release or a response permission.
 fn ownerWork(cell: *const Cell) bool {
     if (cell.state == .free) return false;
-    return releasable(cell) or (cell.native and cell.permission_awaited and !cell.permission_ready);
+    return releasable(cell) or (cell.native and needsPermission(cell));
 }
 /// Applies releases, cancels, response permissions, queued responses and terminal actions.
 /// Returns whether the per-turn response cap left queued responses for the next turn.
@@ -375,13 +379,13 @@ pub fn applyPending(runtime: *Runtime, now: n.Now) !bool {
             _ = core.cancelRequest(cell.handle, now);
             continue;
         }
-        if (cell.permission_awaited and !cell.permission_ready and core.responseReadiness(cell.handle) == .ready) {
+        if (needsPermission(cell) and core.responseReadiness(cell.handle) == .ready) {
             table.reserveResponse(cell, cell.protocol.info().response_max) catch {
                 // A payload release wakes the owner to retry.
                 table.budget.waiting = true;
                 continue;
             };
-            cell.permission_ready = true;
+            if (cell.permission_awaited) cell.permission_ready = true else cell.ack = .sent;
         }
         if (cell.state == .response_queued and submissions == 4) more = true;
         if (cell.state == .response_queued and submissions < 4) {
@@ -436,8 +440,9 @@ pub fn captureLocked(runtime: *Runtime, event: rr.ReqResp.Event, now: n.Now) !vo
             .chunk_sent => |sent| {
                 if (cell.state != .response_native) return error.InvalidIncomingAcknowledgement;
                 if (sent.chunks != cell.chunks + 1) return error.InvalidIncomingAcknowledgement;
+                std.debug.assert(cell.response_awaited and cell.ack == null);
                 cell.chunks = sent.chunks;
-                cell.ack = .sent;
+                // Complete respond only after the next chunk's capacity is reserved in applyPending.
                 table.diag.chunksWritten +|= 1;
                 table.diag.bytesWritten +|= cell.response.len;
                 table.releaseResponse(cell);

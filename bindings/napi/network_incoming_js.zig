@@ -49,8 +49,7 @@ fn viewLength(value: Value, max: usize) !usize {
     if (len > max) return error.ChunkTooLarge;
     return len;
 }
-/// Queues a copy of `data` as the next response chunk, whose acknowledgement an exchange delivers once the server no
-/// longer borrows it.
+/// Copies a response chunk. Completion ends its borrow and reserves capacity for the next chunk.
 pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Value) !void {
     const handle = try decode.handle(incoming.Token, value, incoming.capacity_max);
     const context = try contextFor(context_value);
@@ -142,6 +141,7 @@ pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_val
             cell.error_status = status;
             cell.error_len = @intCast(len);
             @memcpy(cell.error_message[0..len], message[0..len]);
+            if (cell.state == .serving) runtime.incoming.?.releaseResponse(cell);
         }
     }
     runtime.unlock();
@@ -159,7 +159,7 @@ pub fn release(runtime: *Runtime, value: Value) !void {
     runtime.signalLocked();
 }
 
-/// Asks for a response permission, which an exchange delivers once the owner reserved the response's quota.
+/// Reserves bridge capacity for the first maximum-sized chunk before the host produces it.
 pub fn ready(runtime: *Runtime, value: Value) !void {
     const handle = try decode.handle(incoming.Token, value, incoming.capacity_max);
     runtime.lock();

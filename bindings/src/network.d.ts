@@ -564,8 +564,9 @@ export interface IncomingRequest {
   readonly data: Uint8Array;
   /** Stream and response obligations ended; host work may remain. */
   readonly closed: Promise<void>;
-  /** Wait for response quota and capacity for one maximum chunk before producing it. */
+  /** Before producing the first chunk, wait for native readiness and bridge capacity for a maximum-sized chunk. */
   ready(): Promise<void>;
+  /** Copies the chunk. Resolves when native stops borrowing it and reserves capacity for the next chunk. */
   respond(data: Uint8Array, context: NativeForkEntry | null): Promise<void>;
   finish(): Promise<void>;
   /** Accepts standard error codes 1–3 or custom codes 128–255, with at most 256 message bytes. */

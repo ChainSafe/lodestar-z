@@ -50,7 +50,7 @@ test("incoming cancellation retains execution until host work retires", async ()
   }
 }, 15000);
 
-test("incoming response permission reserves quota before payload production", async () => {
+test("incoming response permission precedes payload production", async () => {
   const pair = await incomingPair();
   try {
     const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
@@ -449,7 +449,7 @@ test("an acknowledgement due with the stream's close arrives in one completion a
     const data = new Uint8Array(4000).fill(23);
     const responded = incoming.respond(data, requestForks[0]);
     const order = settlementOrder(incoming.closed, responded);
-    // The client took the chunk, so native acknowledged it, and then ends the stream before any exchange.
+    // End the stream before an exchange delivers the response acknowledgement.
     expect((await first).value?.data).toEqual(data);
     await stream.return?.();
     await expect
