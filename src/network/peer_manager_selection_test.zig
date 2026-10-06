@@ -131,7 +131,7 @@ test "peer manager wakeups preserve dial bookkeeping and expiry without output c
     try std.testing.expectEqualDeep(counters, owner.counters);
 
     owner.reconcile(&fixture.gossip, now);
-    owner.dialing.refresh(&owner.catalog, now.millis());
+    owner.finishDialBatch(now);
     const deferred = fixture.wakeups(now, blocked).sources[@intFromEnum(Source.dial)];
     try std.testing.expectEqualDeep(Schedule{ .deadline = time.milliseconds(4000) }, deferred);
     try std.testing.expect(fixture.wakeups(now, .{ .peers = 0, .dials = 1 }).sources[@intFromEnum(Source.dial)].due(now.monotonic));
@@ -154,7 +154,7 @@ test "peer manager quiescence preserves control and peer delivery wakeups" {
     const admission = owner.admit(&.{ .peer_id = identity, .conn = conn, .direction = .outbound }, quic_test_support.server_address, now) orelse return error.AdmissionRefused;
     try std.testing.expect(owner.catalog.updateStatus(admission.peer, conn, &owner.local.status, now.millis()));
     var event: [1]t.Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), owner.catalog.pollEvents(&event));
+    try std.testing.expectEqual(@as(usize, 1), owner.pollEvents(&event));
     try std.testing.expect(event[0] == .ready);
     try owner.connectUntil(&.{ .bytes = @splat(2) }, &.{quic_test_support.client_address}, now, 4000);
     try std.testing.expect(owner.quiesce(now));
@@ -165,7 +165,7 @@ test "peer manager quiescence preserves control and peer delivery wakeups" {
     try std.testing.expectEqualDeep(Schedule{}, blocked.sources[@intFromEnum(Source.peer_policy)]);
     try std.testing.expectEqualDeep(Schedule{}, blocked.sources[@intFromEnum(Source.peer_events)]);
     try std.testing.expect(fixture.wakeups(now, .{ .peers = 1, .dials = 1 }).sources[@intFromEnum(Source.peer_events)].runnable);
-    try std.testing.expectEqual(@as(usize, 1), owner.catalog.pollEvents(&event));
+    try std.testing.expectEqual(@as(usize, 1), owner.pollEvents(&event));
     try std.testing.expect(event[0] == .updated);
     try std.testing.expect(!event[0].updated.relevant);
     try std.testing.expectEqualDeep(Schedule{}, fixture.wakeups(now, .{ .peers = 1, .dials = 1 }).sources[@intFromEnum(Source.peer_events)]);

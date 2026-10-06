@@ -224,10 +224,8 @@ pub const NetworkCore = struct {
         self.host_wake = null;
         self.transport.engine.stopAdmission();
         self.protocols.shutdown(&self.transport.engine, now);
-        const count = pm.catalog.snapshots(pm.snapshot_scratch);
-        for (pm.snapshot_scratch[0..count]) |snapshot| if (snapshot.connection) |conn| {
-            self.closeConnection(snapshot.peer, conn, .shutdown, now);
-        };
+        var cursor: usize = 0;
+        while (pm.retireNextConnection(&cursor, now)) |retired| self.releaseConnection(retired, now);
         var close: [peers.Dialing.attempts_max]t.Handle = undefined;
         for (pm.shutdownDials(now, &close)) |conn| self.closeDial(conn);
         if (self.discovery) |owned| owned.shutdown();
@@ -674,7 +672,7 @@ pub const NetworkCore = struct {
             std.log.scoped(.network_core).debug("dial_started peer={f} endpoint={any} connection={d}:{d}", .{ logging.peer(&attempt.peer), attempt.address, handle.index, handle.generation });
             result.dial_started += 1;
         }
-        self.peer_manager.dialing.refresh(&self.peer_manager.catalog, tick.millis());
+        self.peer_manager.finishDialBatch(tick);
         self.counters.dial_started +|= result.dial_started;
         self.counters.dial_deferred +|= result.dial_deferred;
     }
@@ -704,12 +702,12 @@ pub const NetworkCore = struct {
         pm.identified(identify_results[0..counts.identify]);
         self.controlEvents(controls[0..counts.control], now);
         self.maintainControl(now);
-        if (pm.phase == .quiescing) return .{ .peers = pm.catalog.pollEvents(outputs.peers), .application = counts.application };
+        if (pm.phase == .quiescing) return .{ .peers = pm.pollEvents(outputs.peers), .application = counts.application };
         pm.advanceCustody(now);
         pm.reconcile(self.protocols.gossipsub, now);
         pm.transportProgress(quic);
         return .{
-            .peers = pm.catalog.pollEvents(outputs.peers),
+            .peers = pm.pollEvents(outputs.peers),
             .application = counts.application,
         };
     }
@@ -732,7 +730,7 @@ pub const NetworkCore = struct {
                 if (admission.displaced) |old| {
                     self.releaseConnection(.{ .peer = admission.peer, .conn = old }, now);
                 }
-                _ = self.protocols.gossipsub.peerConnected(quic, connected.conn, pm.catalog.rowFor(admission.peer).?.direct, now);
+                _ = self.protocols.gossipsub.peerConnected(quic, connected.conn, admission.direct, now);
             },
             .closed => |*closed| {
                 const goodbye = if (pm.catalog.findConnection(closed.conn) != null)
@@ -742,9 +740,7 @@ pub const NetworkCore = struct {
                 const retired = pm.transportClosed(closed, goodbye, now) orelse return;
                 self.releaseConnection(retired, now);
             },
-            .path_changed => |*changed| if (pm.catalog.findConnection(changed.conn)) |peer| {
-                _ = pm.catalog.updateEndpoint(peer, changed.conn, &changed.peer);
-            },
+            .path_changed => |*changed| pm.endpointChanged(changed.conn, &changed.peer),
             else => {},
         }
     }

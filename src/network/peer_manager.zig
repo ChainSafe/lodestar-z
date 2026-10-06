@@ -83,6 +83,7 @@ pub const PeerManager = struct {
     };
     pub const PeerCounts = struct { connected: u16, relevant: u16, outbound_relevant: u16 };
     pub const Capacities = struct { peers: usize, dials: usize };
+    pub const Admission = struct { peer: t.PeerRef, displaced: ?t.Handle, direct: bool };
 
     pub fn validateOptions(options: Options) !void {
         try options.peers.validate();
@@ -135,14 +136,14 @@ pub const PeerManager = struct {
         self.* = undefined;
     }
     /// After transportProgress, admits an authenticated connection and starts qualification, or
-    /// refuses it and defers its dial. The owner closes a
-    /// refused connection and, for an admitted one, the connection it displaced.
+    /// refuses it and defers its dial. The owner closes a refused connection and, for an admitted
+    /// one, the connection it displaced.
     pub fn admit(
         self: *PeerManager,
         event: *const @FieldType(Engine.Event, "connected"),
         endpoint: t.Address,
         now: Now,
-    ) ?@FieldType(peers.Catalog.Admission, "admitted") {
+    ) ?Admission {
         if (self.phase != .running) return null;
         const identity = event.peer_id;
         const decision = self.catalog.admit(
@@ -162,7 +163,11 @@ pub const PeerManager = struct {
             .admitted => |admission| {
                 if (admission.displaced) |old| self.control.retire(admission.peer, old);
                 self.connected(admission.peer, event.conn, event.direction, now);
-                return admission;
+                return .{
+                    .peer = admission.peer,
+                    .displaced = admission.displaced,
+                    .direct = self.catalog.rowFor(admission.peer).?.direct,
+                };
             },
             else => {
                 std.log.scoped(.network_peers).debug("peer_admission_refused peer={f} connection={d}:{d} reason={s}", .{ logging.peer(&identity), event.conn.index, event.conn.generation, @tagName(decision) });
@@ -218,6 +223,24 @@ pub const PeerManager = struct {
         const disconnected = self.catalog.disconnect(peer, conn, reason, now.millis());
         std.debug.assert(disconnected);
         return .{ .peer = peer, .conn = conn };
+    }
+    /// After stop, retires connections in catalog order. Start the cursor at zero; the caller
+    /// releases each returned connection's I/O before continuing.
+    pub fn retireNextConnection(self: *PeerManager, cursor: *usize, now: Now) ?Retired {
+        std.debug.assert(self.phase == .stopped);
+        while (cursor.* < self.catalog.rows.len) {
+            const index = cursor.*;
+            cursor.* += 1;
+            const row = &self.catalog.rows[index];
+            if (!row.occupied) continue;
+            const conn = row.connection orelse continue;
+            if (self.retireConnection(self.catalog.reference(index), conn, .shutdown, now)) |retired| return retired;
+        }
+        return null;
+    }
+    pub fn endpointChanged(self: *PeerManager, conn: t.Handle, endpoint: *const t.Address) void {
+        const peer = self.catalog.findConnection(conn) orelse return;
+        _ = self.catalog.updateEndpoint(peer, conn, endpoint);
     }
     /// Starts one bounded qualification/health maintenance pass. Its outcomes must be reported
     /// before taking more work so the scheduling quota, resource reservation and deadlines agree.
@@ -595,6 +618,14 @@ pub const PeerManager = struct {
     }
     pub fn dialFailed(self: *PeerManager, token: peers.Dialing.Token, now: Now) bool {
         return self.dialing.dialFailed(&self.catalog, token, now.millis());
+    }
+    /// Call after reporting every selected dial as started, deferred or failed.
+    pub fn finishDialBatch(self: *PeerManager, now: Now) void {
+        std.debug.assert(self.dialing.attempts().unstarted == 0);
+        self.dialing.refresh(&self.catalog, now.millis());
+    }
+    pub fn pollEvents(self: *PeerManager, out: []t.Event) usize {
+        return self.catalog.pollEvents(out);
     }
     pub fn snapshots(self: *const PeerManager, out: []t.Snapshot) usize {
         return self.catalog.snapshots(out);
