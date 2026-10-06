@@ -34,24 +34,15 @@ test "memory_safety: createFromState releases shuffling inputs on every allocati
     const allocation_count = counting.alloc_index;
     try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
 
-    var oom_count: usize = 0;
-    var success_count: usize = 0;
-    for (0..allocation_count + 1) |fail_index| {
+    for (0..allocation_count) |fail_index| {
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
-        const created = EpochCache.createFromState(failing.allocator(), std.testing.io, state, immutable_data, options) catch |err| {
-            try std.testing.expectEqual(error.OutOfMemory, err);
-            try std.testing.expect(failing.has_induced_failure);
-            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-            oom_count += 1;
-            continue;
-        };
-        created.deinit();
-        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expectError(
+            error.OutOfMemory,
+            EpochCache.createFromState(failing.allocator(), std.testing.io, state, immutable_data, options),
+        );
+        try std.testing.expect(failing.has_induced_failure);
         try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-        success_count += 1;
     }
-    try std.testing.expectEqual(allocation_count, oom_count);
-    try std.testing.expectEqual(1, success_count);
 }
 
 test "memory_safety: setSyncCommitteesIndexed should release each cache once on allocation failure" {

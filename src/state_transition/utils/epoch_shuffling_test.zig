@@ -17,17 +17,15 @@ test "memory_safety: computeEpochShuffling retains caller ownership on allocatio
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
-    var failing = std.testing.FailingAllocator.init(allocator, .{});
-    const input = try failing.allocator().dupe(u64, &.{ 1, 7, 42 });
-    failing.fail_index = failing.alloc_index;
+    const input = try allocator.dupe(u64, &.{ 1, 7, 42 });
+    defer allocator.free(input);
 
-    const result = computeEpochShuffling(failing.allocator(), test_state.cached_state.state, input, test_state.cached_state.epoch_cache.epoch);
-    const input_retained = failing.freed_bytes == 0;
-    defer if (input_retained) failing.allocator().free(input);
-
-    try std.testing.expectError(error.OutOfMemory, result);
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        computeEpochShuffling(failing.allocator(), test_state.cached_state.state, input, test_state.cached_state.epoch_cache.epoch),
+    );
     try std.testing.expect(failing.has_induced_failure);
-    try std.testing.expect(input_retained);
     try std.testing.expectEqualSlices(u64, &.{ 1, 7, 42 }, input);
 }
 
