@@ -119,7 +119,7 @@ pub const Messages = struct {
         var store = try storage.Store.init(a, layout.payload_entries, layout.payload_bytes);
         errdefer store.deinit(a);
         store.limits = options.payload_limits;
-        var history = try mcache.History.init(a, layout.history, layout.retained);
+        var history = try mcache.History.init(a, layout.history, layout.retained, layout.topics);
         errdefer history.deinit(a);
         var seen = try mcache.SeenCache.init(a, layout.seen, options.seen_ttl_ms);
         errdefer seen.deinit(a);
@@ -131,7 +131,6 @@ pub const Messages = struct {
         var pending = try validation.Validation.initForTopics(a, layout.validations, options.validation_timeout_ms, options.validation_tombstone_ms, layout.topics);
         seen.index.seed = options.random_seed.?;
         history.index.seed = options.random_seed.? ^ 1;
-        history.topic_index.seed = options.random_seed.? ^ 2;
         pending.index.seed = options.random_seed.? ^ 2;
         return .{ .store = store, .history = history, .seen = seen, .validation = pending, .gossip_ids = gossip_ids, .fast = fast };
     }
@@ -149,7 +148,7 @@ pub const Messages = struct {
     pub fn metadataBytes(layout: *const layout_mod.Layout) usize {
         return storage.Store.metadataBytes(layout.payload_entries, layout.payload_bytes) +
             Validation.backingBytesForTopics(layout.validations, layout.topics) + layout.fingerprints * @sizeOf(FastEntry) +
-            mcache.History.backingBytes(layout.history, layout.retained) + layout.history * @sizeOf(MessageId) +
+            mcache.History.backingBytes(layout.history, layout.retained, layout.topics) + layout.history * @sizeOf(MessageId) +
             mcache.SeenCache.backingBytes(layout.seen);
     }
 
@@ -179,7 +178,7 @@ pub const Messages = struct {
         return self.history.get(&self.store, id) != null;
     }
 
-    pub fn gossipIds(self: *Messages, topic: []const u8, epoch: u64) []MessageId {
+    pub fn gossipIds(self: *Messages, topic: u16, epoch: u64) []MessageId {
         const count = self.history.gossip(topic, self.gossip_ids, epoch);
         return self.gossip_ids[0..count];
     }
@@ -198,13 +197,13 @@ pub const Messages = struct {
         return .{ .known = if (queued) .queued else .pressured };
     }
 
-    pub fn publish(self: *Messages, id: MessageId, name: []const u8, compressed: []const u8, now: u64, epoch: u64) ?storage.Handle {
+    pub fn publish(self: *Messages, id: MessageId, topic: u16, name: []const u8, compressed: []const u8, now: u64, epoch: u64) ?storage.Handle {
         const handle = self.history.admitPayload(&self.store, id, name, compressed) orelse return null;
         if (!self.retain(handle)) {
             self.store.seal(handle);
             return null;
         }
-        self.history.put(&self.store, handle, epoch);
+        self.history.put(&self.store, handle, topic, epoch);
         self.store.seal(handle);
         std.debug.assert(self.seen.add(id, now));
         return handle;
@@ -317,7 +316,7 @@ pub const Messages = struct {
         var result: Applied = .{ .verdict = verdict, .id = entry.id, .source = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .topic_bytes = undefined, .topic_len = @intCast(name.len) };
         @memcpy(result.topic_bytes[0..name.len], name);
         if (verdict == .accept and self.retain(message)) {
-            self.history.put(&self.store, message, context.epoch);
+            self.history.put(&self.store, message, entry.topic, context.epoch);
             if (context.overlay.subscribed(entry.topic)) result.forward = .{ .message = message, .source = entry.source, .topic = entry.topic };
         }
         if (verdict != .ignore) {

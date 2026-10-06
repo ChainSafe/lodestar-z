@@ -1,6 +1,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const topic_mod = @import("topic.zig");
+const topic_policy = @import("topic_policy.zig");
 const peer_book = @import("peer_book.zig");
 
 const assert = std.debug.assert;
@@ -17,10 +18,6 @@ pub fn indexCapacity(capacity: usize) usize {
 /// Remove membership before overwriting a key. Backward-shift deletion can only
 /// reduce displacement, so the insertion high-water bound also bounds misses.
 pub fn IdIndex(comptime Entry: type) type {
-    return KeyIndex(Entry, MessageId, if (Entry == MessageId) null else "id");
-}
-
-fn KeyIndex(comptime Entry: type, comptime Key: type, comptime field: ?[]const u8) type {
     return struct {
         const Self = @This();
         slots: []u32,
@@ -45,31 +42,26 @@ fn KeyIndex(comptime Entry: type, comptime Key: type, comptime field: ?[]const u
             self.probe_limit = 0;
         }
 
-        fn key(self: *const Self, entry: u32) *const Key {
-            if (field) |name| return &@field(self.entries[entry], name);
-            return &self.entries[entry];
+        fn key(self: *const Self, entry: u32) *const MessageId {
+            return if (Entry == MessageId) &self.entries[entry] else &self.entries[entry].id;
         }
 
-        fn bytes(value: *const Key) []const u8 {
-            return if (Key == MessageId) value else value.*;
+        fn hash(self: *const Self, id: MessageId) usize {
+            return @truncate(std.hash.Wyhash.hash(self.seed, &id));
         }
 
-        fn hash(self: *const Self, id: Key) usize {
-            return @truncate(std.hash.Wyhash.hash(self.seed, bytes(&id)));
-        }
-
-        pub fn find(self: *const Self, id: Key) ?u32 {
+        pub fn find(self: *const Self, id: MessageId) ?u32 {
             var pos = self.hash(id) & self.mask;
             for (0..self.probe_limit) |_| {
                 if (self.slots[pos] == empty_slot) return null;
-                if (std.mem.eql(u8, bytes(self.key(self.slots[pos])), bytes(&id))) return self.slots[pos];
+                if (std.mem.eql(u8, self.key(self.slots[pos]), &id)) return self.slots[pos];
                 pos = (pos + 1) & self.mask;
             }
             return null;
         }
 
-        pub fn insert(self: *Self, id: Key, entry: u32) void {
-            assert(entry < self.entries.len and std.mem.eql(u8, bytes(self.key(entry)), bytes(&id)));
+        pub fn insert(self: *Self, id: MessageId, entry: u32) void {
+            assert(entry < self.entries.len and std.mem.eql(u8, self.key(entry), &id));
             var pos = self.hash(id) & self.mask;
             for (0..self.slots.len) |distance| {
                 if (self.slots[pos] == empty_slot) {
@@ -82,12 +74,12 @@ fn KeyIndex(comptime Entry: type, comptime Key: type, comptime field: ?[]const u
             unreachable;
         }
 
-        pub fn remove(self: *Self, id: Key) void {
+        pub fn remove(self: *Self, id: MessageId) void {
             var pos = self.hash(id) & self.mask;
             var found = false;
             for (0..self.probe_limit) |_| {
                 if (self.slots[pos] == empty_slot) return;
-                if (std.mem.eql(u8, bytes(self.key(self.slots[pos])), bytes(&id))) {
+                if (std.mem.eql(u8, self.key(self.slots[pos]), &id)) {
                     found = true;
                     break;
                 }
@@ -194,20 +186,13 @@ pub const HistoryEntry = struct {
     prev: u32 = empty_slot,
     message: storage.Handle = undefined,
     born_epoch: u64 = 0,
-    topic: u32 = empty_slot,
+    topic: u16 = undefined,
     topic_prev: u32 = empty_slot,
     topic_next: u32 = empty_slot,
     kind_prev: u32 = empty_slot,
     kind_next: u32 = empty_slot,
 };
-const KindList = struct { head: u32 = empty_slot, tail: u32 = empty_slot };
-const HistoryTopic = struct {
-    bytes: [topic_mod.topic_max_len]u8 = undefined,
-    name: []const u8 = undefined,
-    head: u32 = empty_slot,
-    tail: u32 = empty_slot,
-    next_free: u32 = empty_slot,
-};
+const List = struct { head: u32 = empty_slot, tail: u32 = empty_slot };
 
 pub const History = struct {
     /// The hard ceiling on entries: retransmission counts cost `capacity × retained` bytes.
@@ -220,11 +205,9 @@ pub const History = struct {
     entries: []HistoryEntry,
     ids: []MessageId,
     index: Index,
-    topics: []HistoryTopic,
-    topic_index: KeyIndex(HistoryTopic, []const u8, "name"),
+    topics: []List,
     /// Each kind's entries, oldest first.
-    kinds: [@typeInfo(topic_mod.Kind).@"enum".fields.len]KindList = @splat(.{}),
-    free_topic: u32 = 0,
+    kinds: [@typeInfo(topic_mod.Kind).@"enum".fields.len]List = @splat(.{}),
     /// Entries `gossip` examined, which the bounded-work test reads.
     gossip_entries_visited: u64 = 0,
     head: u32 = empty_slot,
@@ -232,9 +215,10 @@ pub const History = struct {
     free: u32 = 0,
     count: usize = 0,
 
-    pub fn init(a: Allocator, capacity: usize, retained: u16) !History {
+    pub fn init(a: Allocator, capacity: usize, retained: u16, topic_count: u16) !History {
         if (retained == 0 or retained > peer_book.capacity) return error.InvalidLimits;
         if (capacity == 0 or capacity > capacity_max) return error.InvalidLimits;
+        if (topic_count == 0 or topic_count > topic_policy.topic_max) return error.InvalidLimits;
         const entries = try a.alloc(HistoryEntry, capacity);
         errdefer a.free(entries);
         const ids = try a.alloc(MessageId, capacity);
@@ -247,21 +231,19 @@ pub const History = struct {
         @memset(counts, 0);
         var index = try Index.init(a, ids);
         errdefer index.deinit(a);
-        const topics = try a.alloc(HistoryTopic, capacity);
+        const topics = try a.alloc(List, topic_count);
         errdefer a.free(topics);
-        const topic_index = try KeyIndex(HistoryTopic, []const u8, "name").init(a, topics);
-        for (topics, 0..) |*t, i| t.* = .{ .next_free = if (i + 1 == capacity) empty_slot else @intCast(i + 1) };
+        @memset(topics, .{});
         for (entries, 0..) |*e, i| e.* = .{ .next = if (i + 1 == capacity) empty_slot else @intCast(i + 1) };
-        return .{ .entries = entries, .ids = ids, .index = index, .generations = generations, .counts = counts, .topics = topics, .topic_index = topic_index };
+        return .{ .entries = entries, .ids = ids, .index = index, .generations = generations, .counts = counts, .topics = topics };
     }
-    pub fn backingBytes(capacity: usize, retained: usize) usize {
-        return capacity * (@sizeOf(HistoryEntry) + @sizeOf(HistoryTopic) + @sizeOf(MessageId) + retained) +
-            retained * @sizeOf(u64) + 2 * indexCapacity(capacity) * @sizeOf(u32);
+    pub fn backingBytes(capacity: usize, retained: usize, topic_count: usize) usize {
+        return capacity * (@sizeOf(HistoryEntry) + @sizeOf(MessageId) + retained) +
+            retained * @sizeOf(u64) + indexCapacity(capacity) * @sizeOf(u32) + topic_count * @sizeOf(List);
     }
 
     /// Frees backing storage during joint History/Store destruction. Live eviction uses remove.
     pub fn deinit(self: *History, a: Allocator) void {
-        self.topic_index.deinit(a);
         a.free(self.topics);
         a.free(self.counts);
         a.free(self.generations);
@@ -305,24 +287,15 @@ pub const History = struct {
     fn reclaimable(e: *const storage.Entry) bool {
         return e.history and !e.provisional and !e.validation;
     }
-    pub fn put(self: *History, store: *storage.Store, h: storage.Handle, epoch: u64) void {
+    /// `topic` is the namespace ordinal of the stored payload's wire topic.
+    pub fn put(self: *History, store: *storage.Store, h: storage.Handle, topic: u16, epoch: u64) void {
+        assert(topic < self.topics.len);
         if (self.tail != empty_slot) assert(self.entries[self.tail].born_epoch <= epoch);
         const payload = store.get(h).?;
         if (payload.history) return;
         const id = payload.id;
         if (self.index.find(id)) |old| self.remove(store, old);
         if (self.count == self.entries.len) self.remove(store, self.head);
-        const topic = self.topic_index.find(payload.topicString()) orelse blk: {
-            const index = self.free_topic;
-            assert(index != empty_slot);
-            const t = &self.topics[index];
-            self.free_topic = t.next_free;
-            t.* = .{};
-            @memcpy(t.bytes[0..payload.topic_len], payload.topicString());
-            t.name = t.bytes[0..payload.topic_len];
-            self.topic_index.insert(t.name, index);
-            break :blk index;
-        };
         const topic_list = &self.topics[topic];
         const kind_list = &self.kinds[@intFromEnum(payload.kind)];
         const slot = self.free;
@@ -412,12 +385,7 @@ pub const History = struct {
         const kind_list = &self.kinds[@intFromEnum(store.get(e.message).?.kind)];
         if (e.kind_prev != empty_slot) self.entries[e.kind_prev].kind_next = e.kind_next else kind_list.head = e.kind_next;
         if (e.kind_next != empty_slot) self.entries[e.kind_next].kind_prev = e.kind_prev else kind_list.tail = e.kind_prev;
-        if (t.head == empty_slot) {
-            assert(t.tail == empty_slot);
-            self.topic_index.remove(t.name);
-            t.next_free = self.free_topic;
-            self.free_topic = e.topic;
-        }
+        if (t.head == empty_slot) assert(t.tail == empty_slot);
         if (e.prev != empty_slot) self.entries[e.prev].next = e.next else self.head = e.next;
         if (e.next != empty_slot) self.entries[e.next].prev = e.prev else self.tail = e.prev;
         self.index.remove(self.ids[slot]);
@@ -434,8 +402,8 @@ pub const History = struct {
             self.remove(store, self.head);
         }
     }
-    pub fn gossip(self: *History, name: []const u8, out: []MessageId, epoch: u64) usize {
-        const topic = self.topic_index.find(name) orelse return 0;
+    pub fn gossip(self: *History, topic: u16, out: []MessageId, epoch: u64) usize {
+        assert(topic < self.topics.len);
         var count: usize = 0;
         var slot = self.topics[topic].head;
         for (0..self.count) |_| {

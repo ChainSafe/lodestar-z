@@ -15,9 +15,11 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     var memory: [384 * 1024]u8 = undefined;
     var arena = std.heap.FixedBufferAllocator.init(&memory);
     const a = arena.allocator();
-    var peers = Peers.init(a, &.{ .retained_score_ms = 20, .retained_capacity = 4, .retained_outbound_reserve = 1 }) catch unreachable;
+    var peers = Peers.init(a, &.{ .retained_score_ms = 20, .retained_capacity = 4, .retained_outbound_reserve = 1 }, 1) catch unreachable;
     defer peers.deinit(a);
-    const options: gossip.Gossipsub.Options = .{ .random_seed = 1, .mcache_capacity = 4, .validation_capacity = 2, .seen_capacity = 8, .retained_capacity = 4, .mcache_arena_bytes = 12288, .validation_timeout_ms = 10, .validation_tombstone_ms = 20 };
+    var boundary: gossip.topic_policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+    boundary.rules[@intFromEnum(gossip.topic.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 16384 };
+    const options: gossip.Gossipsub.Options = .{ .topic_policy = &.{boundary}, .random_seed = 1, .mcache_capacity = 4, .validation_capacity = 2, .seen_capacity = 8, .retained_capacity = 4, .mcache_arena_bytes = 12288, .validation_timeout_ms = 10, .validation_tombstone_ms = 20 };
     const layout = Layout.init(&options);
     var messages = Messages.init(a, &options, &layout) catch unreachable;
     defer messages.deinit(a, &peers);
@@ -27,7 +29,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     var deliveries = gossip.delivery.Pool.init(a, 3, gossip.delivery.Pool.capacity(3, 1)) catch unreachable;
     defer deliveries.deinit(a);
     var queues: [3]gossip.delivery.Queue = @splat(.{ .pool = &deliveries });
-    defer for (&queues) |*queue| queue.reset(&messages.store);
+    defer for (&queues) |*queue| queue.reset();
     var now: u64 = 1;
     var epoch: u64 = 0;
     var payload: [16384]u8 = @splat(9);
@@ -43,14 +45,14 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
                     var reservation = reserved;
                     defer reservation.cancel();
                     if (messages.history.admitPayload(store, id, "/eth2/01020304/beacon_block/ssz_snappy", payload[0 .. 1 + @as(usize, at) * 1024])) |message| {
-                        handles[at] = reservation.commit(store, &peers, message, source, .{ .index = 0, .generation = 1 }, now);
+                        handles[at] = reservation.commit(store, &peers, message, source, 0, now);
                         store.seal(message);
                     }
                 }
             },
             2, 3 => if (validation.inspect(store, &peers, handles[at], now) == null) {
                 const handle = handles[at];
-                if (byte % 10 == 2) messages.history.put(store, validation.entries[handle.index].state.pending.message, epoch);
+                if (byte % 10 == 2) messages.history.put(store, validation.entries[handle.index].state.pending.message, 0, epoch);
                 validation.finish(store, handle, if (byte % 10 == 2) .accept else .ignore, now);
             },
             4 => {
@@ -64,7 +66,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
             6 => {
                 const index = at % store.entries.len;
                 const entry = &store.entries[index];
-                if (entry.active) {
+                if (entry.active and entry.history) {
                     const handle: Handle = .{ .index = @intCast(index), .generation = entry.generation };
                     queues[at % queues.len].append(store, handle, .forward, .{ .bytes = 65536 }, now) catch {};
                 }
@@ -72,8 +74,11 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
             7 => {
                 const queue = &queues[at % queues.len];
                 if (byte < 128) {
-                    queue.reset(store);
-                } else if (queue.next(store)) |tx| {
+                    queue.reset();
+                } else if (queue.next(store) catch blk: {
+                    queue.reset();
+                    break :blk null;
+                }) |tx| {
                     _ = queue.advance(store, @min(1 + at, tx.segment(store).len));
                 }
             },
@@ -93,13 +98,10 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
         var history: usize = 0;
         var pending: usize = 0;
         var pins: [4]u32 = @splat(0);
-        for (store.entries, 0..) |entry, i| {
-            var retains: usize = 0;
-            for (&queues) |*queue| retains += queue.retains(.{ .index = @intCast(i), .generation = entry.generation });
-            assert(entry.tx == retains);
+        for (store.entries) |entry| {
             if (!entry.active) continue;
             assert(!entry.provisional);
-            assert(entry.validation or entry.history or entry.tx > 0);
+            assert(entry.validation or entry.history);
             pages += Store.pagesFor(entry.len);
             entries += 1;
             history += @intFromBool(entry.history);
@@ -131,7 +133,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
         for (peers.rows, pins) |peer, expected| assert(peer.pins == expected);
     }
     messages.validation.clear(&messages.store, &peers);
-    for (&queues) |*queue| queue.reset(&messages.store);
+    for (&queues) |*queue| queue.reset();
     messages.history.age(&messages.store, epoch + gossip.constants.mcache_len);
     assert(messages.store.used_entries == 0);
     assert(messages.store.free_pages == messages.store.next.len);
