@@ -332,7 +332,6 @@ fn ProcessProposerLookaheadBench(comptime fork: ForkSeq) type {
 const Step = enum {
     epoch_total,
     before_process_epoch,
-    start_shuffling,
     justification_finalization,
     inactivity_updates,
     rewards_and_penalties,
@@ -435,23 +434,11 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
-                null,
+                io,
             ) catch unreachable;
             defer cache_val.deinit();
             const cache = &cache_val;
             recordSegment(.before_process_epoch, @as(u64, @intCast(time.since(io, before_start).nanoseconds)));
-
-            if (comptime fork.gte(.fulu)) {
-                const start_shuffling_timer = time.start(io);
-                state_transition.startProposerLookaheadShuffling(
-                    fork,
-                    io,
-                    BenchState.cloned_cached_state.epoch_cache,
-                    BenchState.cloned_cached_state.state.castToFork(fork),
-                    cache,
-                ) catch unreachable;
-                recordSegment(.start_shuffling, @as(u64, @intCast(time.since(io, start_shuffling_timer).nanoseconds)));
-            }
 
             const fork_state = BenchState.cloned_cached_state.state.castToFork(fork);
             const epoch_cache = BenchState.cloned_cached_state.epoch_cache;
