@@ -6,7 +6,7 @@ const std = @import("std");
 const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
-const Verifier = @import("ere").Verifier;
+const Verifier = @import("ere_verifier").Verifier;
 
 /// Mirrors `ere_verifier_new`'s discriminants.
 ///

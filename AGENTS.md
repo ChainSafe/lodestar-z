@@ -55,7 +55,7 @@ src/
   consensus_types/         # Fork-specific Ethereum consensus types
   constants/               # Protocol constants
   era/                     # ERA file handling
-  ere/                     # EIP-8025 execution proof verification through ere.zig
+  ere_verifier/            # EIP-8025 execution proof verification through ere.zig
   fork_choice/             # Fork-choice implementation
   fork_types/              # Type-erased, fork-aware wrappers
   hashing/                 # SHA-256 and Merkleization

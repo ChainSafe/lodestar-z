@@ -119,9 +119,9 @@ jobs:
       - name: Run beacon-node tests
         run: |
           zig build test:beacon_node
-      - name: Run ere tests
+      - name: Run ere_verifier tests
         run: |
-          zig build test:ere
+          zig build test:ere_verifier
 
       - name: Build benchmarks
         run: |
