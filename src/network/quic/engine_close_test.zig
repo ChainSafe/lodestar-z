@@ -199,6 +199,7 @@ test "engine sends an inbound close requested in the turn the connection establi
 
     // The server's first flush carries the close without waiting on its own flight.
     try pair.flush(&pair.server);
+    pair.settle(&pair.client);
     const client_events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), client_events.len);
     const reason = try expectClosed(client_events[0], handle, .outbound, &pair.server_ctx);

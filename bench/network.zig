@@ -66,7 +66,7 @@ const Samples = struct {
     fn print(self: *Samples, node: *const network.NetworkCore, name: []const u8) void {
         std.mem.sort(u64, &self.ns, {}, std.sort.asc(u64));
         const visits = node.transport.engine.visits;
-        std.debug.print("case={s} turns={} wait_max_ms=0 p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} backlog_turns={} immediate_deadlines={} visits_timer={} visits_collect={} visits_flush={} uncapped_backlog_due={} uncapped_events_due={}\n", .{ name, turns, self.ns[turns / 2], self.ns[turns * 95 / 100], self.ns[turns * 99 / 100], self.ns[turns - 1], self.received, self.sent, self.backlog, self.immediate, visits.timer - self.visits_start.timer, visits.collect - self.visits_start.collect, visits.flush - self.visits_start.flush, self.uncapped_backlog, self.uncapped_events });
+        std.debug.print("case={s} turns={} wait_max_ms=0 p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} backlog_turns={} immediate_deadlines={} visits_timer={} visits_advance={} visits_flush={} uncapped_backlog_due={} uncapped_events_due={}\n", .{ name, turns, self.ns[turns / 2], self.ns[turns * 95 / 100], self.ns[turns * 99 / 100], self.ns[turns - 1], self.received, self.sent, self.backlog, self.immediate, visits.timer - self.visits_start.timer, visits.advance - self.visits_start.advance, visits.flush - self.visits_start.flush, self.uncapped_backlog, self.uncapped_events });
         std.debug.print("case={s} visits_reqresp={} visits_negotiation={} visits_gossip={} visits_control={} visits_dial={}\n", .{ name, node.protocols.reqresp.visits - self.reqresp_visits_start, node.protocols.router.negotiator.visits - self.negotiation_visits_start, node.protocols.gossipsub.sessions.visits - self.gossip_visits_start, node.peer_manager.control.visits - self.control_visits_start, node.peer_manager.dialing.visits - self.dial_visits_start });
         std.debug.print("case={s} due_now", .{name});
         inline for (std.meta.fields(Source)) |field| {
@@ -78,7 +78,7 @@ const Samples = struct {
     /// Connection, slot, session and row visits by the engine and every owner since begin.
     fn visited(self: *const Samples, node: *const network.NetworkCore) u64 {
         const visits = node.transport.engine.visits;
-        return (visits.timer - self.visits_start.timer) + (visits.collect - self.visits_start.collect) + (visits.flush - self.visits_start.flush) +
+        return (visits.timer - self.visits_start.timer) + (visits.advance - self.visits_start.advance) + (visits.flush - self.visits_start.flush) +
             (node.protocols.reqresp.visits - self.reqresp_visits_start) + (node.protocols.router.negotiator.visits - self.negotiation_visits_start) +
             (node.protocols.gossipsub.sessions.visits - self.gossip_visits_start) + (node.peer_manager.control.visits - self.control_visits_start) +
             (node.peer_manager.dialing.visits - self.dial_visits_start);
@@ -430,8 +430,8 @@ const idle_transport_spokes = 200;
 const idle_transport_p50_budget_ns = 15_000;
 
 /// A hub Transport holding established loopback connections from spoke Transports, measured over
-/// turns with no traffic. Each turn runs the transport phases of an owner turn: receive, expire,
-/// collect and flush. An idle connection must cost no visit.
+/// turns with no traffic. Each turn runs the transport phases of an owner turn: receive, process
+/// and flush. An idle connection must cost no visit.
 fn idleTransport(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
@@ -508,8 +508,7 @@ fn idleTransport(init: std.process.Init) !void {
         const start = timestamp(io);
         var result: network.Transport.Progress = .{ .now = try network.Now.read(io) };
         try hub.receive(io, &result, @splat(true));
-        hub.expire(result.now);
-        _ = hub.collect(result.now, &events);
+        _ = hub.process(result.now, &events);
         try hub.flush(io, result.now, &result);
         elapsed.* = timestamp(io) - start;
         received += result.datagrams_received;
@@ -517,8 +516,8 @@ fn idleTransport(init: std.process.Init) !void {
     }
     std.mem.sort(u64, &ns, {}, std.sort.asc(u64));
     const after = hub.engine.visits;
-    const visited = (after.timer - visits.timer) + (after.collect - visits.collect) + (after.flush - visits.flush);
-    std.debug.print("case=idle_transport connections={} turns={} p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} visits_timer={} visits_collect={} visits_flush={} timeouts_fired={} p50_budget_ns={}\n", .{ idle_transport_spokes, turns, ns[turns / 2], ns[turns * 95 / 100], ns[turns * 99 / 100], ns[turns - 1], received, sent, after.timer - visits.timer, after.collect - visits.collect, after.flush - visits.flush, after.timeouts - visits.timeouts, idle_transport_p50_budget_ns });
+    const visited = (after.timer - visits.timer) + (after.advance - visits.advance) + (after.flush - visits.flush);
+    std.debug.print("case=idle_transport connections={} turns={} p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} visits_timer={} visits_advance={} visits_flush={} timeouts_fired={} p50_budget_ns={}\n", .{ idle_transport_spokes, turns, ns[turns / 2], ns[turns * 95 / 100], ns[turns * 99 / 100], ns[turns - 1], received, sent, after.timer - visits.timer, after.advance - visits.advance, after.flush - visits.flush, after.timeouts - visits.timeouts, idle_transport_p50_budget_ns });
     if (visited != 0) return error.IdleConnectionVisited;
     if (ns[turns / 2] > idle_transport_p50_budget_ns) return error.IdleTransportBudget;
 }

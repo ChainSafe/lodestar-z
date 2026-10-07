@@ -196,8 +196,7 @@ pub const Link = struct {
             moved = self.transfer(self.client, self.server, self.client_source, self.drop_to_server) or moved;
             moved = self.transfer(self.server, self.client, self.server_source, false) or moved;
             for ([_]*Engine{ self.client, self.server }) |engine| {
-                engine.expire(self.now);
-                engine.collect(self.now);
+                engine.advance(self.now);
             }
             if (!moved and !self.client.backlog() and !self.server.backlog()) return;
         }
