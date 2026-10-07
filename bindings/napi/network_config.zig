@@ -136,8 +136,6 @@ fn parseGossip(value: Value, out: *Config) !void {
         try limits_mod.validate(&limits);
         out.processor_limits = limits;
         out.gossip.payload_limits = limits;
-        out.gossip.validation_capacity = limits_mod.items(&limits);
-        out.gossip.mcache_arena_bytes = @max(2 * limits_mod.bytes(&limits), n.gossipsub.constants.maxCompressedLen(n.gossipsub.constants.MAX_PAYLOAD_SIZE) + 4096);
     }
     const execution = try decode.get(policy, "execution");
     if (try execution.typeof() != .undefined) {

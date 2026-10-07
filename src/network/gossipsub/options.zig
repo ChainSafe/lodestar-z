@@ -12,6 +12,8 @@ const preset = @import("preset");
 const mcache = @import("mcache.zig");
 const delivery = @import("delivery.zig");
 
+pub const mcache_arena_bytes_min = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + storage.page_bytes;
+
 pub const Options = struct {
     /// Required startup namespace. The owner copies it during initialization.
     topic_policy: []const topic_policy_mod.Boundary = &.{},
@@ -75,6 +77,14 @@ pub const Options = struct {
     /// Required independent host entropy. Initialization rejects null; tests seed explicitly.
     random_seed: ?u64 = null,
 
+    pub fn setPayloadLimits(o: *Options, limits: *const gossip_limits.Limits) error{InvalidLimits}!void {
+        gossip_limits.validate(limits) catch return error.InvalidLimits;
+        o.payload_limits = limits.*;
+        o.validation_capacity = gossip_limits.items(limits);
+        // Pending validation and retained history each receive the configured byte allowance.
+        o.mcache_arena_bytes = @max(2 * gossip_limits.bytes(limits), mcache_arena_bytes_min);
+    }
+
     pub fn validate(o: *const Options) (error{InvalidLimits} || topic_policy_mod.Error)!void {
         _ = try topic_policy_mod.validate(o.topic_policy);
         try score_mod.validateParams(o.score_params);
@@ -99,7 +109,7 @@ pub const Options = struct {
         }
         try range(o.seen_capacity, 1, 1_048_576);
         try range(o.mcache_capacity, 1, mcache.History.capacity_max);
-        try range(o.mcache_arena_bytes, compressed + storage.page_bytes, 1024 * 1024 * 1024);
+        try range(o.mcache_arena_bytes, mcache_arena_bytes_min, 1024 * 1024 * 1024);
         const page = @import("receive_pool.zig").page_bytes;
         const receive_min = @max(page, std.mem.alignForward(usize, constants.GOSSIP_MAX_SIZE - @min(o.body_buffer_bytes, constants.GOSSIP_MAX_SIZE), page));
         try range(o.receive_arena_bytes, receive_min, 1024 * 1024 * 1024);

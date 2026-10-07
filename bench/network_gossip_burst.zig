@@ -313,7 +313,6 @@ fn processorLimits(chain: *const Chain, options: *const Options) network.gossip_
 
 /// The feat4 sas owner: 210 peers and Lodestar's gossip policy and processor limits.
 fn hubResolved(chain: *const Chain, options: *const Options) !network.configuration.Resolved {
-    const limits_mod = network.gossip_processor.limits;
     const limits = processorLimits(chain, options);
     return network.configuration.resolve(.{
         .profile = .beacon_node,
@@ -328,8 +327,6 @@ fn hubResolved(chain: *const Chain, options: *const Options) !network.configurat
             .topic_policy = chain.network_config.topics[0..chain.network_config.boundary_count],
             .message_id_policy = .{ .phase0_digest = chain.network_config.phase0_digest },
             .payload_limits = limits,
-            .validation_capacity = limits_mod.items(&limits),
-            .mcache_arena_bytes = 2 * limits_mod.bytes(&limits),
             .iwant_followup_ms = 12_000,
             .large_frame_timeout_ms = 30_000,
             .opportunistic_graft_interval_ms = 42_000,
