@@ -162,7 +162,7 @@ test "memory_safety: fixed compounding flag tail does not allocate for sequentia
     }
 }
 
-test "memory_safety: early shuffling is reclaimed when cache initialization fails" {
+test "memory_safety: EpochTransitionCache.init should reclaim early shuffling on init failure" {
     const allocator = std.testing.allocator;
     inline for (.{ false, true }) |scheduled| {
         var threaded: std.Io.Threaded = .init(allocator, .{ .async_limit = if (scheduled) .limited(1) else .nothing });
@@ -225,7 +225,7 @@ test "memory_safety: early shuffling is reclaimed when cache initialization fail
     }
 }
 
-test "memory_safety: early shuffling releases its inputs on every epoch cache OOM" {
+test "memory_safety: early shuffling should release its inputs on every epoch cache OOM" {
     const allocator = std.testing.allocator;
     var threaded: std.Io.Threaded = .init(allocator, .{ .async_limit = .nothing });
     defer threaded.deinit();

@@ -10,7 +10,7 @@ const computeEpochShufflingForFork = @import("../utils/epoch_shuffling.zig").com
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const processProposerLookahead = @import("process_proposer_lookahead.zig").processProposerLookahead;
 
-test "memory_safety: proposer lookahead shuffling belongs to the epoch cache allocator" {
+test "memory_safety: proposer lookahead shuffling should belong to the epoch cache allocator" {
     const allocator = std.testing.allocator;
     inline for (.{ true, false }) |start_async| {
         const pool_size = 375_000;
@@ -69,7 +69,7 @@ test "memory_safety: proposer lookahead shuffling belongs to the epoch cache all
     }
 }
 
-test "memory_safety: proposer lookahead releases shuffling on proposer and wrapper OOM" {
+test "memory_safety: processProposerLookahead should release shuffling on proposer and wrapper OOM" {
     const allocator = std.testing.allocator;
     var threaded: std.Io.Threaded = .init(allocator, .{ .async_limit = .nothing });
     defer threaded.deinit();
