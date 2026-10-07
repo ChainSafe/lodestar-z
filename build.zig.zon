@@ -61,7 +61,6 @@
             .url = "git+https://github.com/lalinsky/zio?ref=v0.14.0#aa860381beb42bc077e24ef304827cbdc23fcef9",
             .hash = "zio-0.14.0-xHbVVPxFHgBCop4CvfF4u360kzWlHD4FS8Ud-RIkPcZ7",
         },
-        // ere's prebuilt EIP-8025 execution proof verifier, packaged for Zig by ChainSafe/ere.zig.
         .ere = .{
             .url = "git+https://github.com/ChainSafe/ere.zig#644efebbe501801d2f6a643affb0029b4bf18648",
             .hash = "ere_zig-0.1.0-UBcsLY02AACvO3q1mTXI97rWKWElKKCOHi803qo13jln",
