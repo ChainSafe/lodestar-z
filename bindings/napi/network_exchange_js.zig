@@ -17,9 +17,7 @@ const Selection = exchange_mod.Selection;
 const Outcome = exchange_mod.Outcome;
 const Closed = exchange_mod.Closed;
 const action_max = exchange_mod.action_max;
-const peers_max = exchange_mod.peers_max;
 const serving_max = exchange_mod.serving_max;
-const settle_max = publications.capacity_max;
 const bytes = @import("network_js.zig").bytes;
 const network_peer_reports = @import("network_peer_reports.zig");
 const network_incoming_js = @import("network_incoming_js.zig");
@@ -31,22 +29,17 @@ const network_gossip_js = @import("network_gossip_js.zig");
 
 pub fn parseDemand(value: Value) !Demand {
     _ = try object(value);
-    const capacity = try decode.get(value, "capacity");
-    const demand: Demand = .{
-        .settle = @intCast(try decode.integer(try decode.get(value, "settleCells"), settle_max)),
-        .peers = @intCast(try decode.integer(try decode.get(value, "peers"), peers_max)),
-        .checks = @intCast(try decode.integer(try decode.get(value, "checks"), g.batch_max)),
-        .serving = @intCast(try decode.integer(try decode.get(value, "servingStarts"), serving_max)),
-        .messages = @intCast(try decode.integer(try decode.get(value, "messages"), g.batch_max)),
-        .bytes = @intCast(try decode.integer(try decode.get(value, "bytes"), g.batch_bytes)),
-        .claim_ordinary = try decode.boolean(try decode.get(value, "claimOrdinary")),
-        .capacity = if (try capacity.typeof() == .null) null else .{
-            .serving = @intCast(try decode.integer(try decode.get(try object(capacity), "serving"), incoming.capacity_max)),
-            .ordinary = try decode.boolean(try decode.get(capacity, "ordinary")),
+    const mode = try name(enum { control, delivery }, try decode.get(value, "mode"), error.InvalidNetworkConfig);
+    if (mode == .control) return .control;
+    const capacity = try object(try decode.get(value, "capacity"));
+    return .{ .delivery = .{
+        .serving_starts = @intCast(try decode.integer(try decode.get(value, "servingStarts"), serving_max)),
+        .claim_non_urgent_gossip = try decode.boolean(try decode.get(value, "claimNonUrgentGossip")),
+        .capacity = .{
+            .incoming_request_slots = @intCast(try decode.integer(try decode.get(capacity, "incomingRequestSlots"), incoming.capacity_max)),
+            .gossip_validation = try name(@FieldType(r.Capacity, "gossip_validation"), try decode.get(capacity, "gossipValidation"), error.InvalidNetworkConfig),
         },
-    };
-    if (demand.settle == 0) return error.InvalidNetworkInteger;
-    return demand;
+    } };
 }
 
 fn object(value: Value) !Value {
@@ -119,10 +112,10 @@ pub const Host = struct {
         return finishResult(self.env, self.runtime, output, outcome);
     }
     pub fn keepAlive(self: *Host) void {
-        self.runtime.notify.ref(self.env) catch {};
+        self.runtime.bridge.notify.ref(self.env) catch {};
     }
     pub fn idle(self: *Host) void {
-        self.runtime.notify.unref(self.env) catch {};
+        self.runtime.bridge.notify.unref(self.env) catch {};
     }
     /// An exception that clears means the bridge broke its contract. One that will not clear means JavaScript cannot
     /// run, as does a pending-exception status with none pending, which N-API returns for cannot_run_js to this
@@ -142,7 +135,7 @@ pub const Host = struct {
 /// Results created once, one per combination of the scheduling fields, so an exchange that delivers nothing
 /// allocates nothing.
 pub const Results = struct {
-    idle: [16]?napi.Ref = @splat(null),
+    idle: [2]?napi.Ref = @splat(null),
 
     pub fn prepare(self: *Results, env: napi.Env) !void {
         const empty = try env.createArrayWithLength(0);
@@ -152,8 +145,7 @@ pub const Results = struct {
             inline for (.{ "peers", "serving", "checks", "acknowledged", "completions" }) |field| try result.setNamedProperty(field, empty);
             try result.setNamedProperty("gossip", try env.getNull());
             try result.setNamedProperty("closed", try env.getNull());
-            try schedule(env, result, @bitCast(@as(u4, @intCast(i))));
-            try (try result.getNamedProperty("parked")).objectFreeze();
+            try schedule(env, result, .{ .needs_another_exchange = i != 0 });
             try result.objectFreeze();
             slot.* = try napi.Ref.create(env.env, result, 1);
         }
@@ -168,12 +160,7 @@ pub const Results = struct {
 };
 
 fn schedule(env: napi.Env, result: Value, outcome: Outcome) !void {
-    try result.setNamedProperty("more", try env.getBoolean(outcome.more));
-    try result.setNamedProperty("disabledWaiting", try env.getBoolean(outcome.disabled));
-    const parked = try env.createObject();
-    try parked.setNamedProperty("serving", try env.getBoolean(outcome.parked_serving));
-    try parked.setNamedProperty("ordinary", try env.getBoolean(outcome.parked_ordinary));
-    try result.setNamedProperty("parked", parked);
+    try result.setNamedProperty("needsAnotherExchange", try env.getBoolean(outcome.needs_another_exchange));
 }
 
 /// Builds a fresh result for a selection that delivers something.
@@ -184,7 +171,7 @@ fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     try result.setNamedProperty("peers", peers);
     const serving = try env.createArrayWithLength(selection.serving_count);
     for (selection.serving[0..selection.serving_count], 0..) |token, i| {
-        const cell = &runtime.incoming.?.cells[token.index];
+        const cell = &runtime.bridge.incoming.?.cells[token.index];
         try serving.setElement(@intCast(i), try network_incoming_js.descriptorValue(runtime, token, cell));
     }
     try result.setNamedProperty("serving", serving);
@@ -209,7 +196,7 @@ fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     try result.setNamedProperty("acknowledged", acknowledged);
     const completions = try env.createArrayWithLength(@intCast(selection.publication_count + selection.command_count + selection.request_count + selection.incoming_count));
     for (selection.publications[0..selection.publication_count], 0..) |token, i| {
-        try completions.setElement(@intCast(i), try network_publication_js.completion(env, token, runtime.publications.?.get(token).?));
+        try completions.setElement(@intCast(i), try network_publication_js.completion(env, token, runtime.bridge.publications.?.get(token).?));
     }
     for (selection.commands[0..selection.command_count], selection.publication_count..) |token, i| {
         try completions.setElement(@intCast(i), try network_command_js.completion(env, runtime, token));
@@ -235,13 +222,13 @@ fn closedValue(env: napi.Env, closed: Closed) !Value {
 
 /// Sets a fresh result's scheduling fields, or returns the prepared result when nothing was built.
 fn finishResult(env: napi.Env, runtime: *Runtime, output: ?Value, outcome: Outcome) !Value {
-    const result = output orelse return runtime.results.idle[@as(u4, @bitCast(outcome))].?.getValue();
+    const result = output orelse return runtime.results.idle[@intFromBool(outcome.needs_another_exchange)].?.getValue();
     try schedule(env, result, outcome);
     return result;
 }
 
 fn jobs(env: napi.Env, runtime: *Runtime, batch: *const g.Batch) !Value {
-    const table = &runtime.gossip.?;
+    const table = &runtime.bridge.gossip.?;
     const messages = try env.createArrayWithLength(batch.len);
     for (batch.tokens[0..batch.len], 0..) |token, i| {
         try messages.setElement(@intCast(i), try network_gossip_js.descriptor(runtime, token, &table.cells[token.index]));

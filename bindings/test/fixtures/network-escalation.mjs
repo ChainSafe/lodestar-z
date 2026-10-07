@@ -24,21 +24,22 @@ if (site === "completion_contract") {
 let capacityReads = 0;
 let capacityErrors = 0;
 let identitySettled = false;
-let recovered;
-const recovery = new Promise((resolve) => {recovered = resolve;});
+let failed;
+const failure = new Promise((resolve) => {failed = resolve;});
 const host = {
+  subscribeCapacity: () => () => {},
   capacity: () => {
-    if (site === "capacity_recovery") {
-      if (++capacityReads <= 5 || !identitySettled) throw Error("capacity failed");
-      recovered();
+    if (site === "capacity_failure") {
+      capacityReads++;
+      throw Error("capacity failed");
     }
-    return {ordinary: true, serving: 32};
+    return {gossipValidation: "ready", incomingRequestSlots: 32};
   },
   validate: (job) => Promise.resolve(job.messages.map(() => "ignore")),
   checkDependencies: (checks) => checks.map(() => false),
   serve: (request) => request.cancel(),
   peers: () => undefined,
-  failed: () => undefined,
+  failed: () => failed?.(),
   logs: () => undefined,
   error: () => {capacityErrors++;},
 };
@@ -55,7 +56,7 @@ pump.attach({
   drainLogs: (max) => native.drainLogs(max),
   exchange: (actions, demand) => {
     if (site === "uncoded_exchange") throw Error("exchange failed");
-    return native.exchange(actions, site === "generated_batch" ? {...demand, settleCells: 0} : demand);
+    return native.exchange(actions, site === "generated_batch" ? {...demand, servingStarts: 9} : demand);
   },
   fail: (raised, reason) => native.fail(raised, reason),
 });
@@ -67,13 +68,13 @@ if (site === "close_missing") {
   void native.close();
 }
 
-if (site === "capacity_recovery") {
+if (site === "capacity_failure") {
   await native.getIdentity();
   identitySettled = true;
-  await recovery;
-  if (capacityErrors < 5) throw Error(`Unexpected capacity errors: ${capacityErrors}`);
-  pump.close();
+  await failure;
+  if (capacityReads !== 1 || !identitySettled) throw Error("Unexpected capacity failure behavior");
+  pump.stopDelivery();
   await native.close();
   clearTimeout(deadline);
-  console.log("capacity recovered; identity settled; closed");
+  console.log("capacity failed; identity settled; closed");
 }

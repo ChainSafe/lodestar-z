@@ -10,6 +10,7 @@ import {
   configureChain,
   discoveryConfig,
   exchange,
+  gossipAll,
   localIntent,
   runChild,
   settleOnly,
@@ -245,7 +246,7 @@ test("complete getters, membership and command results survive a throwing notifi
     expect(await runtime.removeDirectPeer(ready.peerId)).toBe(false);
     await runtime.disconnect(ready.peerId);
     await runtime.reStatusPeers([]);
-    expect(exchange(runtime, {...settleOnly, peers: 64}).peers).toEqual([]);
+    expect(exchange(runtime, {...gossipAll}).peers).toEqual([]);
     const remoteIdentity = await remote.identity;
     await remote.applyIntent(localIntent(other), 100n);
     const connected = runtime.connect(remoteIdentity.peerId, [remoteIdentity.localEndpoint], 5000n);
@@ -341,7 +342,7 @@ test("real authenticated connect, direct membership and generation-preserving im
     expect((await a.getDirectPeers()).identities).toEqual([identityB.peerId]);
     expect(await a.removeDirectPeer(identityB.peerId)).toBe(true);
     expect(await a.removeDirectPeer(identityB.peerId)).toBe(false);
-    const events = exchange(a, {...settleOnly, peers: 64}).peers;
+    const events = exchange(a, {...gossipAll}).peers;
     const closed = events.filter((event) => event.type === "closed");
     expect(closed).toHaveLength(1);
     expect(closed[0].connection).toEqual(before.peers[0].connection);

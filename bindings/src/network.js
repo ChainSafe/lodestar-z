@@ -1,7 +1,16 @@
 import {NativePump, closeResult} from "./network-pump.js";
 import {NativeRuntime, registerRuntime} from "./network-runtime.js";
 
-const HOST_METHODS = ["capacity", "validate", "checkDependencies", "serve", "peers", "failed", "logs"];
+const HOST_METHODS = [
+  "capacity",
+  "subscribeCapacity",
+  "validate",
+  "checkDependencies",
+  "serve",
+  "peers",
+  "failed",
+  "logs",
+];
 const CONNECT_TIMEOUT_MS = 10000n;
 
 class NativeNetwork {
@@ -22,10 +31,10 @@ class NativeNetwork {
     registerRuntime(this, runtime);
   }
 
-  applyIntent(intent, slot) {
+  async applyIntent(intent, slot) {
     return this.#runtime.applyIntent(intent, slot);
   }
-  updateStatus(status) {
+  async updateStatus(status) {
     return this.#runtime.updateStatus(status);
   }
   blockImported(root) {
@@ -39,40 +48,40 @@ class NativeNetwork {
   dropQueuedGossip() {
     this.#pump.dropQueued();
   }
-  notifyCapacity() {
-    this.#pump.request();
+  stopDelivery() {
+    this.#pump.stopDelivery();
   }
-  publish(topic, data, options) {
+  async publish(topic, data, options) {
     return this.#runtime.publishGossip(topic, data, options);
   }
   request(peerId, protocol, data, options) {
     return this.#runtime.request(peerId, protocol, data, options);
   }
-  connect(peerId, endpoints, timeoutMs = CONNECT_TIMEOUT_MS) {
+  async connect(peerId, endpoints, timeoutMs = CONNECT_TIMEOUT_MS) {
     return this.#runtime.connect(peerId, endpoints, timeoutMs);
   }
-  disconnect(peerId) {
+  async disconnect(peerId) {
     return this.#runtime.disconnect(peerId);
   }
-  setDirectPeer(peerId, endpoints) {
+  async setDirectPeer(peerId, endpoints) {
     return endpoints === null ? this.#runtime.removeDirectPeer(peerId) : this.#runtime.addDirectPeer(peerId, endpoints);
   }
-  reStatus(peerIds) {
+  async reStatus(peerIds) {
     return this.#runtime.reStatusPeers(peerIds);
   }
-  getIdentity() {
+  async getIdentity() {
     return this.#runtime.getIdentity();
   }
-  getPeers() {
+  async getPeers() {
     return this.#runtime.getPeers();
   }
-  getDirectPeers() {
+  async getDirectPeers() {
     return this.#runtime.getDirectPeers();
   }
-  getGossipDiagnostics(cursor) {
+  async getGossipDiagnostics(cursor) {
     return this.#runtime.getGossipDiagnostics(cursor);
   }
-  getRememberedPeers() {
+  async getRememberedPeers() {
     return this.#runtime.getRememberedPeers();
   }
   metrics() {
@@ -82,7 +91,7 @@ class NativeNetwork {
     this.#runtime.setLogLevel(level);
   }
   close() {
-    this.#pump.close();
+    this.#pump.stopDelivery();
     this.#runtime.close();
     return this.closed;
   }
@@ -90,7 +99,7 @@ class NativeNetwork {
 
 /**
  * Starts a runtime whose binding-owned pump drives `host`. Invokes no host callback synchronously; the first turn
- * follows the first native notification.
+ * subscribes to host capacity and reads its initial value.
  */
 export function createNativeNetwork(config, host) {
   return new NativeNetwork(config, host);

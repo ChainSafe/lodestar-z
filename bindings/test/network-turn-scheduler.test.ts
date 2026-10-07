@@ -8,9 +8,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-it.each(["now", "later", "idle"] as const)("schedules the pump's %s continuation", (next) => {
-  vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-  const timers = vi.spyOn(globalThis, "setTimeout");
+it.each(["now", "idle"] as const)("schedules the pump's %s continuation", (next) => {
   const queued = immediates();
   const pump = {turn: vi.fn(() => next)};
   const scheduler = new TurnScheduler(pump);
@@ -20,13 +18,22 @@ it.each(["now", "later", "idle"] as const)("schedules the pump's %s continuation
   queued.shift()?.();
   expect(pump.turn).toHaveBeenCalledOnce();
   expect(queued.length).toBe(next === "now" ? 1 : 0);
-  expect(timers).toHaveBeenCalledTimes(next === "later" ? 1 : 0);
-  if (next === "later") {
-    expect(timers.mock.results[0].value.hasRef()).toBe(false);
-    vi.advanceTimersByTime(25);
-    expect(queued).toHaveLength(1);
-  }
   scheduler.stop();
   queued.shift()?.();
   expect(pump.turn).toHaveBeenCalledOnce();
+});
+
+it("keeps a wake that arrives during a running turn", () => {
+  const queued = immediates();
+  const scheduler = new TurnScheduler({
+    turn() {
+      scheduler.schedule();
+      scheduler.schedule();
+      return "idle";
+    },
+  });
+  scheduler.schedule();
+  queued.shift()?.();
+  expect(queued).toHaveLength(1);
+  scheduler.stop();
 });

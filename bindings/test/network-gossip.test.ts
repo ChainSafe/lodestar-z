@@ -583,11 +583,11 @@ test("gossip diagnostics paginate retained peers and peer drains expose remainin
     expect(second.ownerSequence).toBeGreaterThanOrEqual(first.ownerSequence);
     expect(new Set([...first.peers, ...second.peers].map((peer) => peer.identity))).toEqual(identities);
     expect([...first.peers, ...second.peers].every((peer) => !peer.connected)).toBe(true);
-    const head = exchange(runtime, {...settleOnly, peers: 1});
-    expect(head.peers).toHaveLength(1);
-    expect(head.more).toBe(true);
-    const remaining = exchange(runtime, {...settleOnly, peers: 64}).peers;
-    expect(remaining.length).toBeGreaterThan(0);
+    const head = exchange(runtime, {...gossipAll});
+    expect(head.peers.length).toBeLessThanOrEqual(32);
+    expect(head.peers.length).toBeGreaterThan(0);
+    const remaining = exchange(runtime, {...gossipAll}).peers;
+    expect(head.needsAnotherExchange).toBe(remaining.length > 0);
     const closed = [...head.peers, ...remaining].filter((event) => event.type === "closed");
     expect(closed).toHaveLength(identities.size);
     expect(new Set(closed.map((event) => event.identity))).toEqual(identities);

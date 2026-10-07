@@ -6,7 +6,8 @@ const deadline = setTimeout(() => {
   throw Error("Block import did not settle");
 }, 5000);
 const network = createNativeNetwork(applicationConfig(), {
-  capacity: () => null,
+  subscribeCapacity: () => () => {},
+  capacity: () => ({gossipValidation: "backpressured", incomingRequestSlots: 0}),
   checkDependencies: (checks) => checks.map(() => false),
   failed: () => undefined,
   logs: () => undefined,
@@ -14,6 +15,7 @@ const network = createNativeNetwork(applicationConfig(), {
   serve: (request) => request.cancel(),
   validate: (job) => Promise.resolve(job.messages.map(() => "ignore")),
 });
+network.stopDelivery();
 try {
   const root = new Uint8Array(32).fill(1);
   network.blockImported(root);

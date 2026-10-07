@@ -11,16 +11,16 @@ const network = @import("network");
 const bytes = @import("network_js.zig").bytes;
 const errorValue = @import("network_js.zig").errorValue;
 fn cellFor(runtime: *Runtime, token: incoming.Token) !*incoming.Cell {
-    const table = if (runtime.incoming) |*table| table else return error.InvalidIncomingHandle;
+    const table = if (runtime.bridge.incoming) |*table| table else return error.InvalidIncomingHandle;
     return table.get(token) orelse error.NetworkIncomingClosed;
 }
 /// Wakes the owner for the host's change and keeps the event loop alive for the promises it awaits.
 fn refNotify(runtime: *Runtime) void {
     runtime.lock();
-    const live = runtime.notify_live;
-    runtime.signalLocked();
+    const live = runtime.bridge.notify_live;
+    runtime.wakeOwnerLocked();
     runtime.unlock();
-    if (live) runtime.notify.ref(runtime.env) catch {};
+    if (live) runtime.bridge.notify.ref(runtime.env) catch {};
 }
 /// A serving start's descriptor, whose stream the binding's record owns from here.
 pub fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const incoming.Cell) !Value {
@@ -60,8 +60,8 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
         runtime.unlock();
         return err;
     };
-    if (runtime.stop or !cell.native or cell.action != .none) {
-        const err = if (runtime.stop) error.NetworkClosed else error.NetworkIncomingClosed;
+    if (runtime.bridge.stop or !cell.native or cell.action != .none) {
+        const err = if (runtime.bridge.stop) error.NetworkClosed else error.NetworkIncomingClosed;
         runtime.unlock();
         return err;
     }
@@ -74,28 +74,28 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
         if (err == error.ChunkTooLarge) return rejectInput(runtime.env, .chunk_too_large);
         return err;
     };
-    runtime.incoming.?.reserveResponse(cell, len) catch |err| {
-        runtime.incoming.?.diag.byteRefusals +|= 1;
+    runtime.bridge.incoming.?.reserveResponse(cell, len) catch |err| {
+        runtime.bridge.incoming.?.diag.byteRefusals +|= 1;
         runtime.unlock();
         return err;
     };
     cell.state = .response_preparing;
-    runtime.incoming.?.refresh(cell);
+    runtime.bridge.incoming.?.refresh(cell);
     runtime.unlock();
     errdefer {
         runtime.lock();
         cell.state = if (cell.native) .serving else .terminal;
-        runtime.incoming.?.releasePayload(cell);
-        runtime.incoming.?.refresh(cell);
-        runtime.recomputeLocked(.completions);
+        runtime.bridge.incoming.?.releasePayload(cell);
+        runtime.bridge.incoming.?.refresh(cell);
+        runtime.notifyIfReadyLocked();
         runtime.unlock();
     }
     const copy = try r.allocator.alloc(u8, len);
     errdefer r.allocator.free(copy);
     try decode.bytes(data, copy);
     runtime.lock();
-    if (runtime.stop or !cell.native or cell.action != .none) {
-        const err = if (runtime.stop) error.NetworkClosed else error.NetworkIncomingClosed;
+    if (runtime.bridge.stop or !cell.native or cell.action != .none) {
+        const err = if (runtime.bridge.stop) error.NetworkClosed else error.NetworkIncomingClosed;
         runtime.unlock();
         return err;
     }
@@ -104,8 +104,8 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
     cell.response_awaited = true;
     cell.ack = null;
     cell.state = .response_queued;
-    runtime.incoming.?.refresh(cell);
-    runtime.incoming.?.diag.responseBytesCopied +|= len;
+    runtime.bridge.incoming.?.refresh(cell);
+    runtime.bridge.incoming.?.diag.responseBytesCopied +|= len;
     runtime.unlock();
     refNotify(runtime);
 }
@@ -141,7 +141,7 @@ pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_val
             cell.error_status = status;
             cell.error_len = @intCast(len);
             @memcpy(cell.error_message[0..len], message[0..len]);
-            if (cell.state == .serving) runtime.incoming.?.releaseResponse(cell);
+            if (cell.state == .serving) runtime.bridge.incoming.?.releaseResponse(cell);
         }
     }
     runtime.unlock();
@@ -156,7 +156,7 @@ pub fn release(runtime: *Runtime, value: Value) !void {
     defer runtime.unlock();
     const cell = try cellFor(runtime, handle);
     cell.release_requested = true;
-    runtime.signalLocked();
+    runtime.wakeOwnerLocked();
 }
 
 /// Reserves bridge capacity for the first maximum-sized chunk before the host produces it.
@@ -167,7 +167,7 @@ pub fn ready(runtime: *Runtime, value: Value) !void {
         runtime.unlock();
         return err;
     };
-    if (!cell.native or cell.action != .none or runtime.stop) {
+    if (!cell.native or cell.action != .none or runtime.bridge.stop) {
         runtime.unlock();
         return error.NetworkIncomingClosed;
     }
@@ -177,7 +177,7 @@ pub fn ready(runtime: *Runtime, value: Value) !void {
     }
     cell.permission_awaited = true;
     cell.permission_ready = false;
-    runtime.incoming.?.refresh(cell);
+    runtime.bridge.incoming.?.refresh(cell);
     runtime.unlock();
     refNotify(runtime);
 }

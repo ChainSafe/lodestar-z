@@ -28,7 +28,7 @@ pub const Table = struct {
     /// The terminal cells, whose completions an exchange delivers. `transition` keeps it current.
     terminal: std.StaticBitSet(capacity) = .empty,
     /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
-    settle_cursor: usize = 0,
+    completion_cursor: usize = 0,
     stores: [3][2]bool = @splat(@splat(false)),
     connects: u8 = 0,
     occupied: u8 = 0,
@@ -145,7 +145,7 @@ pub const Input = struct {
 
 const Runtime = @import("network_runtime.zig").Runtime;
 pub fn execute(self: *Runtime, token: Token, timestamp: n.Now) void {
-    const cell = self.table.get(token);
+    const cell = self.bridge.commands.get(token);
     executeOne(self, token.index, timestamp) catch |err| {
         std.log.scoped(.network_bridge).debug("command_failed command={s} operation={d}:{d} reason={s}", .{ @tagName(cell.input.command), token.index, token.generation, @errorName(err) });
         cell.failure = err;
@@ -153,21 +153,21 @@ pub fn execute(self: *Runtime, token: Token, timestamp: n.Now) void {
     self.lock();
     defer self.unlock();
     if (cell.state == .executing) {
-        if (self.stop) cell.failure = self.terminal_error orelse error.NetworkClosed;
-        self.table.transition(cell, .terminal);
+        if (self.bridge.stop) cell.failure = self.bridge.terminal_error orelse error.NetworkClosed;
+        self.bridge.commands.transition(cell, .terminal);
     }
-    if (cell.state == .terminal) self.recomputeLocked(.completions);
+    if (cell.state == .terminal) self.notifyIfReadyLocked();
 }
 fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
-    const operation = &self.table.cells[index];
+    const operation = &self.bridge.commands.cells[index];
     const input = &operation.input;
-    const core = &self.heavy.?.core;
-    const store = self.table.cells[index].store;
+    const core = &self.owner.?.core;
+    const store = self.bridge.commands.cells[index].store;
     switch (input.command) {
         .applyIntent => {
             if (input.slot < core.current_slot) return error.ClockRegression;
-            const intent = &self.stores.?.intents[store.?].value;
-            intent.update = try self.heavy.?.config.chain.update(intent.update.local, core.advertisementEndpoints(), input.slot);
+            const intent = &self.bridge.stores.?.intents[store.?].value;
+            intent.update = try self.owner.?.config.chain.update(intent.update.local, core.advertisementEndpoints(), input.slot);
             intent.slot = input.slot;
             operation.boolean = try core.applyIntent(intent, timestamp);
         },
@@ -176,16 +176,16 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             status.fork_digest = core.localState().status.fork_digest;
             try core.updateStatus(&status);
         },
-        .getIdentity => operation.identity = try self.heavy.?.readIdentity(),
+        .getIdentity => operation.identity = try self.owner.?.readIdentity(),
         .getPeers => {
-            operation.count = try core.completeSnapshots(self.stores.?.snapshots[store.?]);
+            operation.count = try core.completeSnapshots(self.bridge.stores.?.snapshots[store.?]);
             operation.counts = core.peerCounts();
         },
-        .getGossipDiagnostics => try n.gossipsub.diagnostics.capture(core.protocols.gossipsub, input.diagnostics_cursor, timestamp, &self.stores.?.gossip_diagnostics[store.?]),
-        .getDirectPeers => operation.count = try core.directPeers(&self.stores.?.direct[store.?]),
+        .getGossipDiagnostics => try n.gossipsub.diagnostics.capture(core.protocols.gossipsub, input.diagnostics_cursor, timestamp, &self.bridge.stores.?.gossip_diagnostics[store.?]),
+        .getDirectPeers => operation.count = try core.directPeers(&self.bridge.stores.?.direct[store.?]),
         .getRememberedPeers => {
-            const page = &self.stores.?.remembered[store.?];
-            page.genesis_root = self.heavy.?.application.genesis_root;
+            const page = &self.bridge.stores.?.remembered[store.?];
+            page.genesis_root = self.owner.?.application.genesis_root;
             operation.count = try core.rememberedPeers(timestamp, &page.records);
         },
         .removeDirectPeer => operation.boolean = core.removeDirectPeer(&input.peer),
@@ -195,21 +195,21 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             operation.deadline = timestamp.millis() +| input.timeout_ms;
             try core.connectUntil(&input.peer, input.addresses[0..input.address_count], timestamp, n.time.milliseconds(operation.deadline));
             self.lock();
-            self.table.transition(operation, .waiting);
+            self.bridge.commands.transition(operation, .waiting);
             self.unlock();
         },
         .disconnect => {
             core.cancelConnect(&input.peer, timestamp);
             self.lock();
-            for (&self.table.cells, 0..) |*cell, i| {
-                if (cell.state != .waiting or !self.table.cells[i].input.peer.eql(&input.peer)) continue;
-                self.table.cells[i].failure = error.NetworkConnectCancelled;
-                self.table.transition(cell, .terminal);
+            for (&self.bridge.commands.cells, 0..) |*cell, i| {
+                if (cell.state != .waiting or !self.bridge.commands.cells[i].input.peer.eql(&input.peer)) continue;
+                self.bridge.commands.cells[i].failure = error.NetworkConnectCancelled;
+                self.bridge.commands.transition(cell, .terminal);
             }
             self.unlock();
             _ = core.closePeer(&input.peer, timestamp);
         },
-        .reStatusPeers => for (self.stores.?.targets[store.?][0..input.target_count]) |*identity| {
+        .reStatusPeers => for (self.bridge.stores.?.targets[store.?][0..input.target_count]) |*identity| {
             _ = core.reStatusPeer(identity, timestamp);
         },
     }
@@ -217,8 +217,8 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
 pub fn completeConnects(self: *Runtime, events: []const n.Event, timestamp: n.Now) void {
     self.lock();
     defer self.unlock();
-    if (self.stop) return;
-    if (latchConnects(&self.table, events, timestamp)) self.recomputeLocked(.completions);
+    if (self.bridge.stop) return;
+    if (latchConnects(&self.bridge.commands, events, timestamp)) self.notifyIfReadyLocked();
 }
 
 pub fn latchConnects(table: *Table, events: []const n.Event, timestamp: n.Now) bool {

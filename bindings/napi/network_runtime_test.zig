@@ -13,47 +13,47 @@ const exchange = @import("network_exchange.zig");
 const network_wake = @import("network_wake.zig");
 
 test "stop preserves latched success and cancels accepted nonterminal commands" {
-    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
-    const success = try runtime.table.reserve(.getIdentity);
-    const waiting = try runtime.table.reserve(.connect);
-    const queued = try runtime.table.reserve(.getIdentity);
-    const preparing = try runtime.table.reserve(.applyIntent);
-    runtime.table.transition(runtime.table.get(success), .terminal);
-    runtime.table.transition(runtime.table.get(waiting), .waiting);
-    runtime.table.transition(runtime.table.get(queued), .queued);
+    var runtime: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false, .env_alive = false } };
+    const success = try runtime.bridge.commands.reserve(.getIdentity);
+    const waiting = try runtime.bridge.commands.reserve(.connect);
+    const queued = try runtime.bridge.commands.reserve(.getIdentity);
+    const preparing = try runtime.bridge.commands.reserve(.applyIntent);
+    runtime.bridge.commands.transition(runtime.bridge.commands.get(success), .terminal);
+    runtime.bridge.commands.transition(runtime.bridge.commands.get(waiting), .waiting);
+    runtime.bridge.commands.transition(runtime.bridge.commands.get(queued), .queued);
     runtime.cancelCommandsLocked();
-    try std.testing.expect(runtime.table.cells[success.index].failure == null);
-    try std.testing.expectEqual(error.NetworkClosed, runtime.table.cells[waiting.index].failure.?);
-    try std.testing.expectEqual(error.NetworkClosed, runtime.table.cells[queued.index].failure.?);
-    try std.testing.expectEqual(commands.State.preparing, runtime.table.get(preparing).state);
-    for ([_]commands.Token{ success, waiting, queued, preparing }) |token| runtime.table.retire(token);
-    try std.testing.expectEqual(@as(u8, 0), runtime.table.occupied);
+    try std.testing.expect(runtime.bridge.commands.cells[success.index].failure == null);
+    try std.testing.expectEqual(error.NetworkClosed, runtime.bridge.commands.cells[waiting.index].failure.?);
+    try std.testing.expectEqual(error.NetworkClosed, runtime.bridge.commands.cells[queued.index].failure.?);
+    try std.testing.expectEqual(commands.State.preparing, runtime.bridge.commands.get(preparing).state);
+    for ([_]commands.Token{ success, waiting, queued, preparing }) |token| runtime.bridge.commands.retire(token);
+    try std.testing.expectEqual(@as(u8, 0), runtime.bridge.commands.occupied);
 }
 
 test "request table storage retires only after physical quiescence and final pins" {
     var runtime: Runtime = .{ .env = undefined };
-    runtime.payload_budget.limit = 32 + 2 * n.reqresp.Protocol.blocks_by_root_v2.info().response_max;
-    runtime.requests = try requests_mod.Table.init(std.testing.allocator, 1, &runtime.payload_budget);
-    defer runtime.requests.?.deinit();
+    runtime.bridge.payload_budget.limit = 32 + 2 * n.reqresp.Protocol.blocks_by_root_v2.info().response_max;
+    runtime.bridge.requests = try requests_mod.Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget);
+    defer runtime.bridge.requests.?.deinit();
     runtime.retireRequestStorageLocked();
-    try std.testing.expectEqual(@as(usize, 1), runtime.requests.?.cells.len);
-    const token = try runtime.requests.?.reserve(.blocks_by_root_v2, 32);
-    try runtime.requests.?.allocate(token, 32);
-    const cell = runtime.requests.?.get(token).?;
+    try std.testing.expectEqual(@as(usize, 1), runtime.bridge.requests.?.cells.len);
+    const token = try runtime.bridge.requests.?.reserve(.blocks_by_root_v2, 32);
+    try runtime.bridge.requests.?.allocate(token, 32);
+    const cell = runtime.bridge.requests.?.get(token).?;
     cell.state = .native;
     cell.copying = true;
     cell.chunk = .{ .len = 4, .fork = null };
-    runtime.quiescent = true;
+    runtime.bridge.quiescent = true;
     requests_mod.closeLocked(&runtime);
     runtime.retireRequestStorageLocked();
-    try std.testing.expectEqual(@as(usize, 1), runtime.requests.?.cells.len);
+    try std.testing.expectEqual(@as(usize, 1), runtime.bridge.requests.?.cells.len);
     try std.testing.expect(cell.sink.len > 0);
     cell.copying = false;
-    runtime.requests.?.retire(token);
+    runtime.bridge.requests.?.retire(token);
     runtime.retireRequestStorageLocked();
-    try std.testing.expectEqual(@as(usize, 0), runtime.requests.?.cells.len);
-    try std.testing.expectEqual(@as(usize, 1), runtime.requests.?.diag.capacity);
-    try std.testing.expect(runtime.requests.?.get(token) == null);
+    try std.testing.expectEqual(@as(usize, 0), runtime.bridge.requests.?.cells.len);
+    try std.testing.expectEqual(@as(usize, 1), runtime.bridge.requests.?.diag.capacity);
+    try std.testing.expect(runtime.bridge.requests.?.get(token) == null);
 }
 
 test "one runtime is live per process until its last release" {
@@ -65,47 +65,47 @@ test "one runtime is live per process until its last release" {
 }
 
 test "a payload release while the owner waits for budget wakes the owner once" {
-    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
-    runtime.wake = try network_wake.Wake.init();
-    defer runtime.wake.?.deinit();
-    runtime.payload_budget.limit = 64;
-    var readable = [_]std.c.pollfd{.{ .fd = runtime.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
+    var runtime: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false, .env_alive = false } };
+    runtime.bridge.wake = try network_wake.Wake.init();
+    defer runtime.bridge.wake.?.deinit();
+    runtime.bridge.payload_budget.limit = 64;
+    var readable = [_]std.c.pollfd{.{ .fd = runtime.bridge.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
     for ([_]bool{ false, true }) |waiting| {
-        try runtime.payload_budget.reserve(.incoming, 32);
+        try runtime.bridge.payload_budget.reserve(.incoming, 32);
         runtime.lock();
-        runtime.payload_budget.waiting = waiting;
-        runtime.payload_budget.release(.incoming, 32);
+        runtime.bridge.payload_budget.waiting = waiting;
+        runtime.bridge.payload_budget.release(.incoming, 32);
         runtime.unlock();
         try std.testing.expectEqual(@as(c_int, @intFromBool(waiting)), std.c.poll(&readable, 1, 0));
-        try std.testing.expect(!runtime.payload_budget.waiting and !runtime.payload_budget.released);
+        try std.testing.expect(!runtime.bridge.payload_budget.waiting and !runtime.bridge.payload_budget.released);
     }
-    try runtime.wake.?.drain();
+    try runtime.bridge.wake.?.drain();
 }
 
 test "forced teardown wakes an owner already stopping gracefully" {
-    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false, .graceful = true };
-    runtime.wake = try network_wake.Wake.init();
-    defer runtime.wake.?.deinit();
+    var runtime: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false, .env_alive = false, .graceful = true } };
+    runtime.bridge.wake = try network_wake.Wake.init();
+    defer runtime.bridge.wake.?.deinit();
     runtime.requestStop();
-    try runtime.wake.?.drain();
-    var readable = [_]std.c.pollfd{.{ .fd = runtime.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
+    try runtime.bridge.wake.?.drain();
+    var readable = [_]std.c.pollfd{.{ .fd = runtime.bridge.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
     try std.testing.expectEqual(@as(c_int, 0), std.c.poll(&readable, 1, 0));
     runtime.forceStop(false);
-    try std.testing.expect(runtime.disposed and !runtime.graceful);
+    try std.testing.expect(runtime.disposed and !runtime.bridge.graceful);
     try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&readable, 1, 0));
-    try runtime.wake.?.drain();
+    try runtime.bridge.wake.?.drain();
 }
 
 test "a requested stop removes queued gossip from host delivery" {
-    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
-    runtime.gossip = try n.gossip_processor.GossipProcessor.init(std.testing.allocator, .{
+    var runtime: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false, .env_alive = false } };
+    runtime.bridge.gossip = try n.gossip_processor.GossipProcessor.init(std.testing.allocator, .{
         .limits = @splat(.{ .items = 4, .bytes = 4096 }),
     });
     defer {
-        runtime.gossip.?.close();
-        runtime.gossip.?.deinit();
+        runtime.bridge.gossip.?.close();
+        runtime.bridge.gossip.?.deinit();
     }
-    const table = &runtime.gossip.?;
+    const table = &runtime.bridge.gossip.?;
     const topic = "/eth2/00000000/beacon_block/ssz_snappy";
     try table.capture(&.{
         .handle = .{ .index = 0, .generation = 1 },
@@ -117,35 +117,35 @@ test "a requested stop removes queued gossip from host delivery" {
         .admitted_ms = 1,
         .deadline = 101,
     }, n.gossipsub.topic.parseCanonical(topic).?, &.{}, false, 1);
-    try std.testing.expectEqual(.payload, runtime.wantLocked(.gossip));
+    runtime.bridge.capacity = .{};
+    try std.testing.expect(runtime.deliverableLocked(.gossip));
     runtime.requestStop();
-    try std.testing.expectEqual(.none, runtime.wantLocked(.gossip));
-    try std.testing.expect(!runtime.quiescent);
+    try std.testing.expect(!runtime.deliverableLocked(.gossip));
+    try std.testing.expect(!runtime.bridge.quiescent);
 }
 
 test "an owner completion notifies once while armed and leaves settlement to the exchange" {
     var runtime: Runtime = .{ .env = undefined };
     const before = support.notifications.load(.acquire);
-    const token = try runtime.table.reserve(.getIdentity);
-    runtime.table.transition(runtime.table.get(token), .terminal);
+    const token = try runtime.bridge.commands.reserve(.getIdentity);
+    runtime.bridge.commands.transition(runtime.bridge.commands.get(token), .terminal);
     runtime.lock();
-    runtime.recomputeLocked(.completions);
-    runtime.recomputeLocked(.completions);
+    runtime.notifyIfReadyLocked();
     runtime.unlock();
     try std.testing.expectEqual(before + 1, support.notifications.load(.acquire));
-    try std.testing.expect(!runtime.readiness.armed);
-    try std.testing.expectEqual(commands.State.terminal, runtime.table.get(token).state);
-    // Disarmed, a second completion adds to the queued row without another notification.
-    const second = try runtime.table.reserve(.getIdentity);
+    try std.testing.expect(!runtime.bridge.notification_armed);
+    try std.testing.expectEqual(commands.State.terminal, runtime.bridge.commands.get(token).state);
+    // Disarmed, a second completion does not send another notification.
+    const second = try runtime.bridge.commands.reserve(.getIdentity);
     runtime.lock();
-    runtime.table.transition(runtime.table.get(second), .terminal);
-    runtime.recomputeLocked(.completions);
-    try std.testing.expect(!runtime.readiness.arm());
+    runtime.bridge.commands.transition(runtime.bridge.commands.get(second), .terminal);
+    runtime.notifyIfReadyLocked();
+    try std.testing.expect(!!runtime.hasDeliveryLocked());
     runtime.unlock();
-    for ([_]commands.Token{ token, second }) |settled| runtime.table.retire(settled);
+    for ([_]commands.Token{ token, second }) |settled| runtime.bridge.commands.retire(settled);
     runtime.lock();
-    runtime.refreshLocked();
-    try std.testing.expect(runtime.readiness.arm());
+    runtime.notifyIfReadyLocked();
+    try std.testing.expect(!runtime.hasDeliveryLocked());
     runtime.unlock();
     try std.testing.expectEqual(before + 1, support.notifications.load(.acquire));
 }
@@ -153,30 +153,30 @@ test "an owner completion notifies once while armed and leaves settlement to the
 test "the first terminal failure is the close result's, also after a requested stop" {
     var runtime: Runtime = .{ .env = undefined };
     runtime.requestStop();
-    try std.testing.expectEqual(r.Reason.requested, runtime.reason);
+    try std.testing.expectEqual(r.Reason.requested, runtime.bridge.reason);
     // A notification the host cannot receive fails the stopping owner; a later failure keeps the first.
     support.status = 9;
     defer support.status = 0;
     runtime.lock();
-    runtime.notifyLocked();
-    const first = runtime.terminal_error.?;
+    runtime.notifyHostLocked();
+    const first = runtime.bridge.terminal_error.?;
     runtime.failLocked(error.NetworkWakeFailed);
     runtime.unlock();
     runtime.requestStop();
-    try std.testing.expectEqual(r.Reason.failed, runtime.reason);
+    try std.testing.expectEqual(r.Reason.failed, runtime.bridge.reason);
     try std.testing.expect(first != error.NetworkWakeFailed);
-    try std.testing.expectEqual(first, runtime.terminal_error.?);
-    try std.testing.expect(runtime.state == .failed);
+    try std.testing.expectEqual(first, runtime.bridge.terminal_error.?);
+    try std.testing.expect(runtime.bridge.state == .failed);
 }
 
 /// An exchange host that builds only the peer count.
 const PeerHost = struct {
-    pub const Result = struct { peers: usize, more: bool };
+    pub const Result = struct { peers: usize, needs_another_exchange: bool };
     pub fn build(_: *PeerHost, selection: *exchange.Selection) !usize {
         return selection.peer_count;
     }
     pub fn finish(_: *PeerHost, peers: usize, outcome: exchange.Outcome) !Result {
-        return .{ .peers = peers, .more = outcome.more };
+        return .{ .peers = peers, .needs_another_exchange = outcome.needs_another_exchange };
     }
     pub fn keepAlive(_: *PeerHost) void {}
     pub fn idle(_: *PeerHost) void {}
@@ -188,7 +188,7 @@ const PeerHost = struct {
 test "owner work that races an exchange's check and arm always reaches a later exchange" {
     var runtime: Runtime = .{ .env = undefined };
     var lane: projection.Lane = .{};
-    runtime.lane = &lane;
+    runtime.bridge.peer_updates = &lane;
     const Producer = struct {
         produced: u32 = 0,
         done: std.atomic.Value(bool) = .init(false),
@@ -198,10 +198,10 @@ test "owner work that races an exchange's check and arm always reaches a later e
             for (0..100_000_000) |_| {
                 if (self.stop.load(.acquire)) break;
                 target.lock();
-                if (self.produced < 5_000 and target.lane.?.len < 64) {
-                    target.lane.?.publish(&.{.{ .closed = undefined }}, self.produced);
+                if (self.produced < 5_000 and target.bridge.peer_updates.?.len < 64) {
+                    target.bridge.peer_updates.?.publish(&.{.{ .closed = undefined }}, self.produced);
                     self.produced += 1;
-                    target.recomputeLocked(.peers);
+                    target.notifyIfReadyLocked();
                     if (self.produced == 5_000) self.done.store(true, .release);
                 }
                 target.unlock();
@@ -214,10 +214,10 @@ test "owner work that races an exchange's check and arm always reaches a later e
     const thread = try std.Thread.spawn(.{}, Producer.run, .{ &producer, &runtime });
     defer thread.join();
     defer producer.stop.store(true, .release);
-    const demand: exchange.Demand = .{ .settle = 32, .peers = 64, .checks = 0, .serving = 0, .messages = 0, .bytes = 0, .claim_ordinary = false, .capacity = null };
+    const demand: exchange.Demand = .{ .delivery = .{ .capacity = .{}, .serving_starts = 0, .claim_non_urgent_gossip = false } };
     var host: PeerHost = .{};
     var consumed: usize = 0;
-    var again = false;
+    var again = true;
     var exchanges: usize = 0;
     for (0..10_000_000) |_| {
         const notified = support.notifications.load(.acquire) != delivered;
@@ -225,62 +225,62 @@ test "owner work that races an exchange's check and arm always reaches a later e
         if (notified or again) {
             const output = try exchange.run(&runtime, &.{}, &demand, 0, &host);
             consumed += output.peers;
-            again = output.more;
+            again = output.needs_another_exchange;
             exchanges += 1;
         } else if (producer.done.load(.acquire) and consumed == 5_000) break;
         std.Thread.yield() catch {};
     }
     try std.testing.expectEqual(@as(usize, 5_000), consumed);
-    try std.testing.expect(runtime.readiness.armed);
+    try std.testing.expect(runtime.bridge.notification_armed);
     try std.testing.expect(exchanges > 0);
 }
 
 test "a pull that makes a completion due notifies once while armed, and only an exchange delivers it" {
     var runtime: Runtime = .{ .env = undefined };
-    runtime.payload_budget.limit = 32 + 2 * n.reqresp.Protocol.blocks_by_root_v2.info().response_max;
-    runtime.requests = try requests_mod.Table.init(std.testing.allocator, 1, &runtime.payload_budget);
-    defer runtime.requests.?.deinit();
-    const token = try runtime.requests.?.reserve(.blocks_by_root_v2, 32);
-    try runtime.requests.?.allocate(token, 32);
-    const cell = runtime.requests.?.get(token).?;
+    runtime.bridge.payload_budget.limit = 32 + 2 * n.reqresp.Protocol.blocks_by_root_v2.info().response_max;
+    runtime.bridge.requests = try requests_mod.Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget);
+    defer runtime.bridge.requests.?.deinit();
+    const token = try runtime.bridge.requests.?.reserve(.blocks_by_root_v2, 32);
+    try runtime.bridge.requests.?.allocate(token, 32);
+    const cell = runtime.bridge.requests.?.get(token).?;
     cell.state = .native;
     cell.native = .{ .index = 0, .generation = 1, .direction = .outbound };
     cell.chunk = .{ .len = 4, .fork = null };
     const before = support.notifications.load(.acquire);
     runtime.lock();
-    try std.testing.expect(!runtime.settleableLocked());
+    try std.testing.expect(!runtime.completionsReadyLocked());
     requests_mod.armPull(&runtime, cell);
-    try std.testing.expect(runtime.settleableLocked());
+    try std.testing.expect(runtime.completionsReadyLocked());
     runtime.unlock();
     try std.testing.expect(cell.pulling and cell.chunk != null and !cell.delivered);
     try std.testing.expectEqual(before + 1, support.notifications.load(.acquire));
-    try std.testing.expect(!runtime.readiness.armed);
+    try std.testing.expect(!runtime.bridge.notification_armed);
     // Disarmed, a retirement adds no notification. It wins over the undelivered chunk: the pull waits for the
     // cancellation's terminal outcome.
     runtime.lock();
     requests_mod.armRetirement(&runtime, cell, true);
-    try std.testing.expect(!runtime.settleableLocked());
+    try std.testing.expect(!runtime.completionsReadyLocked());
     runtime.unlock();
     try std.testing.expect(cell.retiring and cell.cancel and cell.retirement_awaited and cell.pulling);
     try std.testing.expectEqual(before + 1, support.notifications.load(.acquire));
     cell.native = null;
     cell.chunk = null;
-    runtime.requests.?.retire(token);
+    runtime.bridge.requests.?.retire(token);
 }
 
-/// Checks each table's settle-able set against a scan of its cells, and the O(1) check against
+/// Checks each table's completion-ready set against a scan of its cells, and the O(1) check against
 /// the scan under every stop and quiescent flag.
 fn expectDueMatchesScan(runtime: *Runtime) !void {
     runtime.lock();
     defer runtime.unlock();
     var next: usize = 0;
-    for (&runtime.table.cells, 0..) |*cell, i| if (cell.state == .terminal) {
-        try std.testing.expectEqual(@as(?usize, i), runtime.table.nextTerminal(next));
+    for (&runtime.bridge.commands.cells, 0..) |*cell, i| if (cell.state == .terminal) {
+        try std.testing.expectEqual(@as(?usize, i), runtime.bridge.commands.nextTerminal(next));
         next = i + 1;
     };
-    try std.testing.expectEqual(@as(?usize, null), runtime.table.nextTerminal(next));
+    try std.testing.expectEqual(@as(?usize, null), runtime.bridge.commands.nextTerminal(next));
     var any = next != 0;
-    if (runtime.publications) |*table| {
+    if (runtime.bridge.publications) |*table| {
         next = 0;
         for (table.cells, 0..) |*cell, i| if (cell.state == .terminal) {
             try std.testing.expectEqual(@as(?usize, i), table.nextTerminal(next));
@@ -290,69 +290,69 @@ fn expectDueMatchesScan(runtime: *Runtime) !void {
         any = any or next != 0;
     }
     var incoming_any = false;
-    if (runtime.incoming) |*table| {
+    if (runtime.bridge.incoming) |*table| {
         next = 0;
-        for (table.cells, 0..) |*cell, i| if (incoming_mod.settleable(cell)) {
+        for (table.cells, 0..) |*cell, i| if (incoming_mod.completionReady(cell)) {
             try std.testing.expectEqual(@as(?usize, i), table.nextDue(next));
             next = i + 1;
         };
         try std.testing.expectEqual(@as(?usize, null), table.nextDue(next));
         incoming_any = next != 0;
     }
-    const stop = runtime.stop;
-    const quiescent = runtime.quiescent;
+    const stop = runtime.bridge.stop;
+    const quiescent = runtime.bridge.quiescent;
     defer {
-        runtime.stop = stop;
-        runtime.quiescent = quiescent;
+        runtime.bridge.stop = stop;
+        runtime.bridge.quiescent = quiescent;
     }
     for ([_]bool{ false, true }) |stopped| for ([_]bool{ false, true }) |quiesced| {
         var requests_any = false;
-        if (runtime.requests) |*table| {
+        if (runtime.bridge.requests) |*table| {
             next = 0;
-            for (table.cells, 0..) |*cell, i| if (requests_mod.settleable(cell, stopped, quiesced)) {
+            for (table.cells, 0..) |*cell, i| if (requests_mod.completionReady(cell, stopped, quiesced)) {
                 try std.testing.expectEqual(@as(?usize, i), table.nextDue(next, stopped, quiesced));
                 next = i + 1;
             };
             try std.testing.expectEqual(@as(?usize, null), table.nextDue(next, stopped, quiesced));
             requests_any = next != 0;
         }
-        runtime.stop = stopped;
-        runtime.quiescent = quiesced;
-        try std.testing.expectEqual(any or incoming_any or requests_any, runtime.settleableLocked());
+        runtime.bridge.stop = stopped;
+        runtime.bridge.quiescent = quiesced;
+        try std.testing.expectEqual(any or incoming_any or requests_any, runtime.completionsReadyLocked());
     };
 }
 
-test "the O(1) settle-able state matches a full scan across state transitions" {
-    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
-    runtime.payload_budget.limit = 1 << 30;
-    runtime.publications = try publications_mod.Table.init(std.testing.allocator, 4, &runtime.payload_budget);
-    defer runtime.publications.?.deinit();
-    runtime.requests = try requests_mod.Table.init(std.testing.allocator, 2, &runtime.payload_budget);
-    defer runtime.requests.?.deinit();
-    runtime.incoming = try incoming_mod.Table.init(std.testing.allocator, 2, &runtime.payload_budget);
-    defer runtime.incoming.?.deinit();
+test "the O(1) completion-ready state matches a full scan across state transitions" {
+    var runtime: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false, .env_alive = false } };
+    runtime.bridge.payload_budget.limit = 1 << 30;
+    runtime.bridge.publications = try publications_mod.Table.init(std.testing.allocator, 4, &runtime.bridge.payload_budget);
+    defer runtime.bridge.publications.?.deinit();
+    runtime.bridge.requests = try requests_mod.Table.init(std.testing.allocator, 2, &runtime.bridge.payload_budget);
+    defer runtime.bridge.requests.?.deinit();
+    runtime.bridge.incoming = try incoming_mod.Table.init(std.testing.allocator, 2, &runtime.bridge.payload_budget);
+    defer runtime.bridge.incoming.?.deinit();
     try expectDueMatchesScan(&runtime);
 
     // Commands: queued, executing, waiting and terminal through the owner's transitions.
-    const connect = try runtime.table.reserve(.connect);
-    const identity = try runtime.table.reserve(.getIdentity);
+    const connect = try runtime.bridge.commands.reserve(.connect);
+    const identity = try runtime.bridge.commands.reserve(.getIdentity);
     try runtime.queueCommand(connect);
     try runtime.queueCommand(identity);
-    runtime.table.transition(runtime.table.get(connect), .waiting);
-    runtime.table.get(connect).deadline = 5;
+    runtime.bridge.commands.transition(runtime.bridge.commands.get(connect), .waiting);
+    runtime.bridge.commands.get(connect).deadline = 5;
     try expectDueMatchesScan(&runtime);
-    try std.testing.expect(commands.latchConnects(&runtime.table, &.{}, Now.fromMilliseconds(.{ .mono_ms = 5, .unix_s = 0 })));
+    try std.testing.expect(commands.latchConnects(&runtime.bridge.commands, &.{}, Now.fromMilliseconds(.{ .mono_ms = 5, .unix_s = 0 })));
     try expectDueMatchesScan(&runtime);
     runtime.cancelCommandsLocked();
     try expectDueMatchesScan(&runtime);
-    runtime.table.transition(runtime.table.get(connect), .copying);
+    runtime.bridge.commands.transition(runtime.bridge.commands.get(connect), .copying);
     try expectDueMatchesScan(&runtime);
-    runtime.table.retire(connect);
-    runtime.table.retire(identity);
+    runtime.bridge.commands.retire(connect);
+    runtime.bridge.commands.retire(identity);
     try expectDueMatchesScan(&runtime);
 
     // Publications: a queued publication turns terminal when the owner closes the table.
-    const publications = &runtime.publications.?;
+    const publications = &runtime.bridge.publications.?;
     const publication = try publications.reserve(.beacon_block, 8);
     publications.transition(publications.get(publication).?, .queued);
     try expectDueMatchesScan(&runtime);
@@ -364,7 +364,7 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
     try expectDueMatchesScan(&runtime);
 
     // Requests: a pulled chunk, its copy, a retirement and the owner's close.
-    const requests = &runtime.requests.?;
+    const requests = &runtime.bridge.requests.?;
     const request = try requests.reserve(.blocks_by_root_v2, 32);
     try requests.allocate(request, 32);
     const cell = requests.get(request).?;
@@ -391,19 +391,19 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
     requests_mod.armRetirement(&runtime, cell, true);
     runtime.unlock();
     try expectDueMatchesScan(&runtime);
-    runtime.stop = true;
+    runtime.bridge.stop = true;
     try expectDueMatchesScan(&runtime);
     requests_mod.closeLocked(&runtime);
     try expectDueMatchesScan(&runtime);
-    runtime.quiescent = true;
+    runtime.bridge.quiescent = true;
     try expectDueMatchesScan(&runtime);
     requests.retire(request);
     try expectDueMatchesScan(&runtime);
-    runtime.stop = false;
-    runtime.quiescent = false;
+    runtime.bridge.stop = false;
+    runtime.bridge.quiescent = false;
 
     // Incoming: a taken request whose permission, acknowledgement and close are delivered.
-    const incoming = &runtime.incoming.?;
+    const incoming = &runtime.bridge.incoming.?;
     const served = try incoming.reserve(.blocks_by_root_v2, 32);
     const inbound = incoming.get(served).?;
     inbound.native = true;
@@ -436,13 +436,13 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
     inbound.ack = null;
     incoming.refresh(inbound);
     try expectDueMatchesScan(&runtime);
-    runtime.quiescent = true;
+    runtime.bridge.quiescent = true;
     incoming_mod.closeLocked(&runtime);
     try expectDueMatchesScan(&runtime);
     inbound.closed_awaited = false;
     incoming.retire(served);
     try expectDueMatchesScan(&runtime);
-    runtime.quiescent = false;
+    runtime.bridge.quiescent = false;
 
     // Arbitrary interleavings of the fields the predicates read keep every set exact.
     var prng = std.Random.DefaultPrng.init(0x5e771e);
@@ -478,12 +478,12 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
         }
         if (inbound_cell.state == .free) inbound_cell.state = .serving;
         incoming.refresh(inbound_cell);
-        runtime.stop = random.boolean();
-        runtime.quiescent = random.boolean();
+        runtime.bridge.stop = random.boolean();
+        runtime.bridge.quiescent = random.boolean();
         try expectDueMatchesScan(&runtime);
     }
-    runtime.stop = false;
-    runtime.quiescent = false;
+    runtime.bridge.stop = false;
+    runtime.bridge.quiescent = false;
     for (requested) |token| {
         const outbound = requests.get(token).?;
         outbound.* = .{ .state = .terminal, .generation = outbound.generation, .reservation = outbound.reservation };

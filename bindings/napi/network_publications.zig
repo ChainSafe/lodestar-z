@@ -50,7 +50,7 @@ pub const Table = struct {
     /// The terminal cells, whose completions an exchange delivers. `transition` keeps it current.
     terminal: std.StaticBitSet(capacity_max) = .empty,
     /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
-    settle_cursor: usize = 0,
+    completion_cursor: usize = 0,
     backing: std.mem.Allocator,
     budget: *Budget,
     ordinary: usize = 0,
@@ -189,7 +189,7 @@ pub const Table = struct {
 /// Queue latency uses the actual execution time: a publication can arrive after the core's turn began.
 pub fn execute(runtime: *Runtime, token: Token, now: n.Now, executed_ms: u64) void {
     runtime.lock();
-    const table = &runtime.publications.?;
+    const table = &runtime.bridge.publications.?;
     const cell = table.get(token).?;
     std.debug.assert(cell.state == .queued);
     table.transition(cell, .executing);
@@ -198,7 +198,7 @@ pub fn execute(runtime: *Runtime, token: Token, now: n.Now, executed_ms: u64) vo
     table.latency.observe(latency);
     runtime.unlock();
 
-    const outcome = runtime.heavy.?.core.publishGossipWithOptions(cell.topic[0..cell.topic_len], cell.payload, cell.options, now);
+    const outcome = runtime.owner.?.core.publishGossipWithOptions(cell.topic[0..cell.topic_len], cell.payload, cell.options, now);
     runtime.lock();
     defer runtime.unlock();
     if (outcome) |result| {
@@ -211,7 +211,7 @@ pub fn execute(runtime: *Runtime, token: Token, now: n.Now, executed_ms: u64) vo
     } else |err| cell.failure = err;
     table.releasePayload(cell);
     table.transition(cell, .terminal);
-    runtime.recomputeLocked(.completions);
+    runtime.notifyIfReadyLocked();
 }
 
 test {

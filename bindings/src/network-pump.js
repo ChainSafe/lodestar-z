@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import {ActionQueue} from "./network-action-queue.js";
 import {LogDelivery} from "./network-log-delivery.js";
-import {CONTROL, SETTLE_CELLS, TurnScheduler, escalate} from "./network-turn-scheduler.js";
+import {CONTROL, TurnScheduler, escalate} from "./network-turn-scheduler.js";
 
 /**
  * @typedef {import("./network-turn-scheduler.js").Continuation} Continuation
@@ -35,8 +35,8 @@ import {CONTROL, SETTLE_CELLS, TurnScheduler, escalate} from "./network-turn-sch
 export const BUDGET_MS = 8;
 /** Serving capacity native accepts. */
 const SERVING_MAX = 32;
-/** Per-turn quotas of each payload source. */
-export const QUOTAS = Object.freeze({bytes: 8 * 1024 * 1024, checks: 64, messages: 64, peers: 32, servingStarts: 8});
+/** Maximum serving starts handed to the host per turn. */
+const SERVING_STARTS = 8;
 export const BURST_NAME = "lodestar_native_drain_burst_seconds";
 export const BURST_BUCKETS = Object.freeze([0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2]);
 const VERDICTS = new Set(["accept", "reject", "ignore"]);
@@ -115,10 +115,8 @@ class IncomingRequest {
 /**
  * Drains one runtime for one host: native exchanges in bounded macrotasks, each sending queued obligations first,
  * then coalesced requests, and handing peers, serving starts, dependency checks and gossip jobs to the host in that
- * order. It turns again at once while native reports more, actions or held deliveries remain, or the time budget left
- * ordinary work, and after the retry timer while work waits for external capacity or a disabled service.
- * A null host capacity, or a closing facade, leaves settlement and acknowledgements only, until native
- * reports closed. A broken bridge contract escalates through native `fail`, which terminates the process.
+ * order. Native notifications, host capacity recovery and unfinished deliveries schedule further turns.
+ * Stopping delivery leaves settlement and acknowledgements only, until native reports closed. A broken bridge contract escalates through native `fail`, which terminates the process.
  *
  * Native notifications and scheduled turns retain the pump until close finishes. Host tasks that can outlive close
  * hold it weakly.
@@ -131,14 +129,16 @@ export class NativePump {
   /** Terminal bookkeeping the facade shares; it holds no host reference. */
   #terminal;
   #weak = new WeakRef(this);
-  #closing = false;
+  #deliveryStopped = false;
+  /** @type {(() => void) | null} */
+  #unsubscribeCapacity = null;
   #stopped = false;
   /** A delivery failure was arbitrated, and the host's `failed` received the first. */
   #arbitrated = false;
   #notified = false;
   #actions = new ActionQueue();
   /**
-   * Delivered ordinary jobs a spent time budget left for the next turn, at most one batch.
+   * Delivered nonurgent jobs a spent time budget left for the next turn, at most one batch.
    * @type {Job[]}
    */
   #heldJobs = [];
@@ -179,6 +179,7 @@ export class NativePump {
     runtime.closed.then(stop, stop);
     this.#logs = new LogDelivery(runtime, this.#host, /** @param {unknown} error */ (error) => this.#error(error));
     this.#logs.start();
+    this.#schedule();
   }
 
   /** A native notification, or capacity the host released. */
@@ -203,9 +204,17 @@ export class NativePump {
    * Leaves settlement only: held serving starts are cancelled and held jobs ignored. Turns continue until native
    * reports closed. From a host callback, it also ends the delivery in progress.
    */
-  close() {
-    if (this.#closing) return;
-    this.#closing = true;
+  stopDelivery() {
+    if (this.#deliveryStopped) return;
+    this.#deliveryStopped = true;
+    const unsubscribe = this.#unsubscribeCapacity;
+    this.#unsubscribeCapacity = null;
+    try {
+      unsubscribe?.();
+    } catch (error) {
+      this.#error(error);
+    }
+    this.#schedule();
     const starts = this.#heldStarts;
     const jobs = this.#heldJobs;
     this.#heldStarts = [];
@@ -240,7 +249,7 @@ export class NativePump {
    */
   #fail() {
     if (this.#stopped) return;
-    this.close();
+    this.stopDelivery();
     const failure = this.#terminal.failure;
     if (failure === null || this.#notified) return;
     this.#notified = true;
@@ -284,7 +293,7 @@ export class NativePump {
     if (this.#stopped) return;
     this.#stopped = true;
     this.#scheduler.stop();
-    this.close();
+    this.stopDelivery();
     for (const settler of new Set(this.#reported.values())) settler.reject(closedError());
     this.#reported.clear();
     // Native keeps its records past close, so the last ones, the shutdown's included, still reach the host.
@@ -303,7 +312,7 @@ export class NativePump {
   }
 
   /**
-   * One of the runtime's turns. Returns when the next is due: now, later, or idle.
+   * One of the runtime's turns. Returns when the next is due: now or idle.
    * @returns {Continuation}
    */
   turn() {
@@ -318,32 +327,37 @@ export class NativePump {
     }
   }
 
-  /**
-   * The host's demand for this turn, or null for settlement only. Throws what the host's capacity read threw.
-   * @param {number} deadline
-   */
+  /** @param {number} deadline */
   #demand(deadline) {
-    if (this.#closing) return null;
+    if (this.#deliveryStopped) return null;
+    if (this.#unsubscribeCapacity === null) {
+      // Subscribe before reading: recovery during the read must schedule another turn.
+      const unsubscribe = this.#host.subscribeCapacity(this.request);
+      if (typeof unsubscribe !== "function") throw contractError("subscribeCapacity");
+      if (this.#deliveryStopped) {
+        unsubscribe();
+        return null;
+      }
+      this.#unsubscribeCapacity = unsubscribe;
+    }
     const capacity = this.#host.capacity();
-    // The host may close the network from its capacity read.
-    if (capacity === null || this.#closing) return null;
-    const serving = capacity?.serving;
-    if (typeof serving !== "number" || !Number.isFinite(serving) || typeof capacity.ordinary !== "boolean")
+    if (this.#deliveryStopped) return null;
+    const slots = capacity?.incomingRequestSlots;
+    if (
+      typeof slots !== "number" ||
+      !Number.isFinite(slots) ||
+      (capacity.gossipValidation !== "ready" && capacity.gossipValidation !== "backpressured")
+    )
       throw contractError("capacity");
     return {
-      bytes: QUOTAS.bytes,
       capacity: {
-        ordinary: capacity.ordinary,
-        // Held starts are delivered but not started, so they count once against the host's free capacity.
-        serving: Math.min(SERVING_MAX, Math.max(0, Math.floor(serving) - this.#heldStarts.length)),
+        gossipValidation: capacity.gossipValidation,
+        // Held starts have left native but have not consumed host capacity yet.
+        incomingRequestSlots: Math.min(SERVING_MAX, Math.max(0, Math.floor(slots) - this.#heldStarts.length)),
       },
-      checks: QUOTAS.checks,
-      // Ordinary work is claimed only while no delivered job waits and the budget lasts.
-      claimOrdinary: this.#heldJobs.length === 0 && performance.now() < deadline,
-      messages: QUOTAS.messages,
-      peers: QUOTAS.peers,
-      servingStarts: Math.max(0, QUOTAS.servingStarts - this.#heldStarts.length),
-      settleCells: SETTLE_CELLS,
+      claimNonUrgentGossip: this.#heldJobs.length === 0 && performance.now() < deadline,
+      mode: /** @type {const} */ ("delivery"),
+      servingStarts: Math.max(0, SERVING_STARTS - this.#heldStarts.length),
     };
   }
 
@@ -354,13 +368,11 @@ export class NativePump {
   #turn(deadline) {
     assert(this.#runtime !== null);
     let demand = null;
-    let capacityFailed = false;
     try {
       demand = this.#demand(deadline);
     } catch (error) {
-      // The turn still settles control; the capacity read retries on the timer.
-      capacityFailed = true;
-      this.#error(error);
+      this.#arbitrate(error);
+      this.#fail();
     }
     const batch = this.#actions.take();
     let result;
@@ -371,22 +383,13 @@ export class NativePump {
     }
     this.#acknowledge(result.acknowledged);
     let held = false;
-    let deliveryFailed = false;
     try {
       if (demand !== null) held = this.#deliver(result, deadline);
     } catch {
       // The delivery arbitrated it before its cleanup.
-      deliveryFailed = true;
+      this.#fail();
     }
-    // Ordinary work the time budget left unclaimed waits for the next turn, as held jobs do.
-    const budgetEnded = demand !== null && !demand.claimOrdinary;
-    /** @type {Continuation} */
-    let next = "idle";
-    if (result.more || held || (budgetEnded && result.disabledWaiting)) next = "now";
-    else if (capacityFailed || result.parked.serving || result.parked.ordinary || result.disabledWaiting)
-      next = "later";
-    if (deliveryFailed) this.#fail();
-    return next;
+    return result.needsAnotherExchange || held ? "now" : "idle";
   }
 
   /**
@@ -420,14 +423,14 @@ export class NativePump {
     let checked = checks.length === 0;
     try {
       // Host code may already have run within the exchange's settlements.
-      if (this.#closing) return false;
+      if (this.#deliveryStopped) return false;
       if (result.peers.length > 0) this.#host.peers(result.peers);
-      if (this.#closing) return false;
+      if (this.#deliveryStopped) return false;
       const heldStarts = this.#start(starts, deadline);
-      if (this.#closing) return false;
+      if (this.#deliveryStopped) return false;
       this.#check(checks);
       checked = true;
-      if (this.#closing) return false;
+      if (this.#deliveryStopped) return false;
       return this.#dispatch(jobs, deadline) || heldStarts;
     } catch (error) {
       // Decided before the cleanup below, whose cancellations reach native and could record a later owner failure.
@@ -492,7 +495,7 @@ export class NativePump {
     }
     // Starts after a serve that closed the network are cancelled instead.
     for (const [index, incoming] of pending.entries()) {
-      if (this.#closing) void incoming.cancel().catch(noop);
+      if (this.#deliveryStopped) void incoming.cancel().catch(noop);
       else {
         if ((index > 0 || !progress) && performance.now() >= deadline) {
           this.#heldStarts = pending.slice(index);
@@ -577,25 +580,25 @@ export class NativePump {
   }
 
   /**
-   * Starts every urgent job now, whatever the budget, and queues ordinary jobs, which start until `deadline`: at least
+   * Starts every urgent job now, whatever the budget, and queues nonurgent jobs, which start until `deadline`: at least
    * one per turn unless the budget was spent before this delivery and no job was held. Returns whether jobs wait.
    *
    * @param {Job[]} jobs
    * @param {number} deadline
    */
   #dispatch(jobs, deadline) {
-    // Ordinary work delivered at the turn's start is new work, which a spent budget defers like the claim it replaced.
+    // Nonurgent work delivered at the turn's start is new work, which a spent budget defers like the claim it replaced.
     const progress = this.#heldJobs.length > 0 || performance.now() < deadline;
     // Jobs arrive in priority order, so urgent jobs start first and none waits for the budget. A validation that
     // closes the network leaves the rest to the delivery's cleanup, and held jobs to close.
     for (const job of jobs) {
-      if (this.#closing) break;
+      if (this.#deliveryStopped) break;
       job.adopted = true;
       if (job.urgent) this.#validate(job);
       else this.#heldJobs.push(job);
     }
     let started = 0;
-    while (this.#heldJobs.length > 0 && !this.#closing) {
+    while (this.#heldJobs.length > 0 && !this.#deliveryStopped) {
       if ((started > 0 || !progress) && performance.now() >= deadline) break;
       started++;
       const job = this.#heldJobs.shift();

@@ -47,14 +47,14 @@ pub const Owner = struct {
 };
 
 pub fn prepareConfiguration(self: *Runtime) !void {
-    self.heavy.?.threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
-    self.heavy.?.threaded_live = true;
-    const io = self.heavy.?.threaded.io();
+    self.owner.?.threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
+    self.owner.?.threaded_live = true;
+    const io = self.owner.?.threaded.io();
     var seed: u64 = undefined;
     try io.randomSecure(std.mem.asBytes(&seed));
-    self.reports.seed = seed;
-    const options = try self.heavy.?.application.buildOptions(&self.heavy.?.config, seed);
-    self.heavy.?.resolved = n.configuration.resolve(options) catch |err| switch (err) {
+    self.bridge.reports.seed = seed;
+    const options = try self.owner.?.application.buildOptions(&self.owner.?.config, seed);
+    self.owner.?.resolved = n.configuration.resolve(options) catch |err| switch (err) {
         error.InvalidLimits => return error.InvalidNetworkConfig,
         else => return err,
     };
@@ -65,27 +65,27 @@ pub fn initialize(self: *Runtime) !void {
     const previous_log = n.logging.bind(&self.logs);
     defer _ = n.logging.bind(previous_log);
     std.log.scoped(.network_runtime).info("owner_initializing", .{});
-    const io = self.heavy.?.threaded.io();
-    self.heavy.?.key = try n.KeyPair.fromSecretKey(&self.heavy.?.config.secret);
+    const io = self.owner.?.threaded.io();
+    self.owner.?.key = try n.KeyPair.fromSecretKey(&self.owner.?.config.secret);
 
-    self.heavy.?.config.wipe();
-    for (0..self.heavy.?.config.bootstrap_count) |i| {
-        self.heavy.?.records[i] = try d.identity.enr.Record.init(self.heavy.?.config.bootstrap[i].bytes[0..self.heavy.?.config.bootstrap[i].len]);
+    self.owner.?.config.wipe();
+    for (0..self.owner.?.config.bootstrap_count) |i| {
+        self.owner.?.records[i] = try d.identity.enr.Record.init(self.owner.?.config.bootstrap[i].bytes[0..self.owner.?.config.bootstrap[i].len]);
     }
-    try self.heavy.?.core.init(allocator, io, &self.heavy.?.resolved, .{
-        .host = &self.heavy.?.key,
-        .bind = self.heavy.?.config.bind,
-        .local = self.heavy.?.config.local,
-        .schedule = self.heavy.?.config.schedule,
-        .slot = self.heavy.?.config.slot,
-        .remembered = self.heavy.?.application.remembered[0..self.heavy.?.application.remembered_count],
-        .discovery = if (self.heavy.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.heavy.?.config.discovery_sequence, .advertisement = self.heavy.?.config.advertisement, .fixed = self.heavy.?.config.fixed, .bootstrap = self.heavy.?.records[0..self.heavy.?.config.bootstrap_count] } else null,
+    try self.owner.?.core.init(allocator, io, &self.owner.?.resolved, .{
+        .host = &self.owner.?.key,
+        .bind = self.owner.?.config.bind,
+        .local = self.owner.?.config.local,
+        .schedule = self.owner.?.config.schedule,
+        .slot = self.owner.?.config.slot,
+        .remembered = self.owner.?.application.remembered[0..self.owner.?.application.remembered_count],
+        .discovery = if (self.owner.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.owner.?.config.discovery_sequence, .advertisement = self.owner.?.config.advertisement, .fixed = self.owner.?.config.fixed, .bootstrap = self.owner.?.records[0..self.owner.?.config.bootstrap_count] } else null,
     });
-    self.heavy.?.core_live = true;
-    try self.heavy.?.core.setHostWake(self.wake.?.read_fd);
+    self.owner.?.core_live = true;
+    try self.owner.?.core.setHostWake(self.bridge.wake.?.read_fd);
 
     try publishMetrics(self, try Now.read(io));
-    std.log.scoped(.network_runtime).info("owner_initialized target_peers={d} max_peers={d}", .{ self.heavy.?.resolved.core.peers.target_peers, self.heavy.?.resolved.core.peers.max_peers });
+    std.log.scoped(.network_runtime).info("owner_initialized target_peers={d} max_peers={d}", .{ self.owner.?.resolved.core.peers.target_peers, self.owner.?.resolved.core.peers.max_peers });
 }
 pub fn run(self: *Runtime) void {
     defer self.release();
@@ -99,12 +99,12 @@ pub fn run(self: *Runtime) void {
 }
 
 fn serve(self: *Runtime) !void {
-    std.debug.assert(self.heavy.?.core_live);
-    const io = self.heavy.?.threaded.io();
+    std.debug.assert(self.owner.?.core_live);
+    const io = self.owner.?.threaded.io();
     var ingress: gossip_mod.Ingress = .{ .runtime = self, .io = io };
     const sink = ingress.sink();
-    self.heavy.?.core.protocols.gossipsub.message_sink = &sink;
-    defer self.heavy.?.core.protocols.gossipsub.message_sink = null;
+    self.owner.?.core.protocols.gossipsub.message_sink = &sink;
+    defer self.owner.?.core.protocols.gossipsub.message_sink = null;
     var host: Host = .{ .runtime = self, .io = io };
     while (try turn(self, io, &host, &ingress)) |result| {
         if (result.cancelled) return error.Canceled;
@@ -116,35 +116,35 @@ fn serve(self: *Runtime) !void {
 /// once the owner stops.
 fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingress) !?n.NetworkCore.Result {
     self.lock();
-    const stop = self.stop;
-    const graceful = self.graceful and self.reason == .requested;
+    const stop = self.bridge.stop;
+    const graceful = self.bridge.graceful and self.bridge.reason == .requested;
     self.unlock();
     if (stop and !graceful) return null;
     const timestamp = try Now.read(io);
     if (stop) {
         if (self.closing_deadline == null) {
-            std.log.scoped(.network_runtime).info("owner_stopping mode=graceful peers={d}", .{self.heavy.?.core.peerCounts().connected});
+            std.log.scoped(.network_runtime).info("owner_stopping mode=graceful peers={d}", .{self.owner.?.core.peerCounts().connected});
             self.lock();
             self.cancelCommandsLocked();
-            self.publications.?.close(self.terminal_error orelse error.NetworkClosed);
-            self.refreshLocked();
+            self.bridge.publications.?.close(self.bridge.terminal_error orelse error.NetworkClosed);
+            self.notifyIfReadyLocked();
             self.unlock();
             self.closing_deadline = timestamp.millis() +| 2000;
-            self.heavy.?.core.beginGracefulClose(timestamp);
+            self.owner.?.core.beginGracefulClose(timestamp);
         }
-        if (timestamp.millis() >= self.closing_deadline.? or self.heavy.?.core.peerCounts().connected == 0) return null;
+        if (timestamp.millis() >= self.closing_deadline.? or self.owner.?.core.peerCounts().connected == 0) return null;
     }
     self.lock();
-    const peer_room: usize = if (self.lane) |lane| 64 - @as(usize, lane.len) else self.heavy.?.outputs.len;
+    const peer_room: usize = if (self.bridge.peer_updates) |lane| 64 - @as(usize, lane.len) else self.owner.?.outputs.len;
     const deadline = hostDeadline(self, timestamp);
     self.unlock();
     const sequence = try self.advanceSequence();
-    const result = n.driver.step(&self.heavy.?.core, io, timestamp, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, .{ .handler = .{ .context = host, .apply = Host.apply }, .deadline = n.time.optionalMilliseconds(deadline) });
+    const result = n.driver.step(&self.owner.?.core, io, timestamp, .{ .peers = self.owner.?.outputs[0..@min(peer_room, self.owner.?.outputs.len)], .application = &self.owner.?.application_outputs }, .{ .handler = .{ .context = host, .apply = Host.apply }, .deadline = n.time.optionalMilliseconds(deadline) });
     if (host.failure) |err| return err;
     if (ingress.failure) |err| return err;
     // The step's clock was read after its poll, so deadlines that ended the wait are due.
     const tick = result.transport.now;
-    try requests_mod.capture(self, self.heavy.?.application_outputs[0..result.counts.application], tick);
+    try requests_mod.capture(self, self.owner.?.application_outputs[0..result.counts.application], tick);
     commands.completeConnects(self, result.transport_events, tick);
     publishTurn(self, &result, tick, sequence);
     return result;
@@ -156,9 +156,9 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
 fn hostDeadline(self: *Runtime, timestamp: n.Now) u64 {
     if (self.host_due) return timestamp.millis();
     var deadline = @min(self.metrics_due_ms, self.health_log_due_ms);
-    if (commands.connectDeadline(&self.table)) |value| deadline = @min(deadline, value);
+    if (commands.connectDeadline(&self.bridge.commands)) |value| deadline = @min(deadline, value);
     if (self.closing_deadline) |value| deadline = @min(deadline, value);
-    if (self.gossip) |*table| if (table.deadline()) |value| {
+    if (self.bridge.gossip) |*table| if (table.deadline()) |value| {
         deadline = @min(deadline, value);
     };
     return deadline;
@@ -172,7 +172,7 @@ const Host = struct {
 
     fn apply(context: *anyopaque, core: *n.NetworkCore, tick: n.Now) n.NetworkCore.HostProgress {
         const self: *Host = @ptrCast(@alignCast(context));
-        std.debug.assert(core == &self.runtime.heavy.?.core);
+        std.debug.assert(core == &self.runtime.owner.?.core);
         if (self.failure != null) return .{};
         return applyWork(self.runtime, self.io, tick) catch |err| {
             self.failure = err;
@@ -186,10 +186,10 @@ const Host = struct {
 /// order, gossip verdicts and processor maintenance, and pending request and response actions.
 fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.NetworkCore.HostProgress {
     self.lock();
-    self.wake.?.drain() catch self.failLocked(error.NetworkWakeFailed);
+    self.bridge.wake.?.drain() catch self.failLocked(error.NetworkWakeFailed);
     self.host_due = false;
-    const stop = self.stop;
-    const stopped = self.stop and !(self.graceful and self.reason == .requested);
+    const stop = self.bridge.stop;
+    const stopped = self.bridge.stop and !(self.bridge.graceful and self.bridge.reason == .requested);
     self.unlock();
     if (stopped) return .{};
     var more = false;
@@ -207,18 +207,18 @@ fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.NetworkCore.HostProgres
 fn applyReports(self: *Runtime, tick: n.Now) bool {
     for (0..32) |_| {
         self.lock();
-        const report = self.reports.next();
+        const report = self.bridge.reports.next();
         self.unlock();
         const item = report orelse return false;
-        if (self.heavy.?.core.reportPeer(&item.identity, item.action, tick) == null) {
+        if (self.owner.?.core.reportPeer(&item.identity, item.action, tick) == null) {
             self.lock();
-            self.reports.ignored +|= 1;
+            self.bridge.reports.ignored +|= 1;
             self.unlock();
         }
     }
     self.lock();
     defer self.unlock();
-    return self.reports.pending != 0;
+    return self.bridge.reports.pending != 0;
 }
 
 /// Executes queued commands, publications and requests in admission order under their per-turn
@@ -230,16 +230,16 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
     var bytes: usize = 0;
     for (0..commands.turn_max + publications.turn_max + requests_mod.turn_max) |_| {
         self.lock();
-        if (self.stop or self.operations_held) {
+        if (self.bridge.stop or self.bridge.operations_held) {
             self.unlock();
             return false;
         }
-        const command = self.table.nextQueued();
-        const publication = self.publications.?.oldest();
-        const request = self.requests.?.oldest();
-        const control_order = if (command) |token| self.table.get(token).order else std.math.maxInt(u64);
-        const publish_order = if (publication) |token| self.publications.?.get(token).?.order else std.math.maxInt(u64);
-        const request_order = if (request) |token| self.requests.?.get(token).?.order else std.math.maxInt(u64);
+        const command = self.bridge.commands.nextQueued();
+        const publication = self.bridge.publications.?.oldest();
+        const request = self.bridge.requests.?.oldest();
+        const control_order = if (command) |token| self.bridge.commands.get(token).order else std.math.maxInt(u64);
+        const publish_order = if (publication) |token| self.bridge.publications.?.get(token).?.order else std.math.maxInt(u64);
+        const request_order = if (request) |token| self.bridge.requests.?.get(token).?.order else std.math.maxInt(u64);
         const order = @min(control_order, publish_order, request_order);
         if (order == std.math.maxInt(u64)) {
             self.unlock();
@@ -250,22 +250,22 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
                 self.unlock();
                 return true;
             }
-            const cell = self.table.get(command.?);
-            cell.sequence = self.table.advance() catch |err| {
+            const cell = self.bridge.commands.get(command.?);
+            cell.sequence = self.bridge.commands.advance() catch |err| {
                 self.unlock();
                 return err;
             };
-            self.table.transition(cell, .executing);
+            self.bridge.commands.transition(cell, .executing);
             self.unlock();
             commands.execute(self, command.?, tick);
             controls += 1;
         } else if (order == publish_order) {
-            const len = self.publications.?.get(publication.?).?.payload.len;
+            const len = self.bridge.publications.?.get(publication.?).?.payload.len;
             if (publishes == publications.turn_max or (publishes != 0 and len > publications.turn_bytes -| bytes)) {
                 self.unlock();
                 return true;
             }
-            _ = self.table.advance() catch |err| {
+            _ = self.bridge.commands.advance() catch |err| {
                 self.unlock();
                 return err;
             };
@@ -278,7 +278,7 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
                 self.unlock();
                 return true;
             }
-            _ = self.table.advance() catch |err| {
+            _ = self.bridge.commands.advance() catch |err| {
                 self.unlock();
                 return err;
             };
@@ -301,13 +301,13 @@ fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n
     }
     self.lock();
     if (timestamp.millis() >= self.health_log_due_ms) {
-        const counts = self.heavy.?.core.peerCounts();
-        const active_requests = self.heavy.?.core.protocols.reqresp.pendingCounts();
-        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.heavy.?.resolved.core.peers.target_peers, active_requests.outbound, active_requests.inbound, self.heavy.?.core.counters.dial_started, self.heavy.?.core.counters.dial_deferred, if (self.heavy.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.heavy.?.core.protocols.gossipsub.counters.local_pressure_resets, self.heavy.?.core.transport.counters.received_bytes, self.heavy.?.core.transport.counters.sent_bytes });
+        const counts = self.owner.?.core.peerCounts();
+        const active_requests = self.owner.?.core.protocols.reqresp.pendingCounts();
+        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.owner.?.resolved.core.peers.target_peers, active_requests.outbound, active_requests.inbound, self.owner.?.core.counters.dial_started, self.owner.?.core.counters.dial_deferred, if (self.owner.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.owner.?.core.protocols.gossipsub.counters.local_pressure_resets, self.owner.?.core.transport.counters.received_bytes, self.owner.?.core.transport.counters.sent_bytes });
         self.health_log_due_ms = timestamp.millis() +| 30000;
     }
-    if (self.lane) |lane| lane.publish(self.heavy.?.outputs[0..result.counts.peers], sequence);
-    self.recomputeLocked(.peers);
+    if (self.bridge.peer_updates) |lane| lane.publish(self.owner.?.outputs[0..result.counts.peers], sequence);
+    self.notifyIfReadyLocked();
     if (result.failure) |err| {
         std.log.scoped(.network_runtime).debug("owner_turn_failed reason={s} fatal={any}", .{ @errorName(err), result.readiness.failure != null });
         self.operational_failures +|= 1;
@@ -318,15 +318,15 @@ fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n
 }
 
 fn publishMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!void {
-    var context = n.metrics.Context.init(&self.heavy.?.core, timestamp, true);
+    var context = n.metrics.Context.init(&self.owner.?.core, timestamp, true);
     self.lock();
-    if (self.gossip) |*table| {
+    if (self.bridge.gossip) |*table| {
         const state = table.snapshot(timestamp.millis());
         context.expired_executing = state.expiredExecuting;
     }
-    self.captureProcessorLocked(&self.heavy.?.processor_metrics);
+    self.captureProcessorLocked(&self.owner.?.processor_metrics);
     self.unlock();
-    context.processor = &self.heavy.?.processor_metrics;
+    context.processor = &self.owner.?.processor_metrics;
     const index = try self.metrics.render(&context);
     self.lock();
     self.metrics.published = index;
@@ -337,14 +337,14 @@ fn publishMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!voi
 test "a command queued after wait planning executes in the turn whose poll observes the wake" {
     if (!n.NetworkCore.wait.supported) return error.SkipZigTest;
     const testing = std.testing.allocator;
-    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
+    var runtime: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false, .env_alive = false } };
     const owner = try testing.create(Owner);
     defer testing.destroy(owner);
     owner.* = .{};
     owner.threaded = std.Io.Threaded.init(testing, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
     defer owner.threaded.deinit();
     const io = owner.threaded.io();
-    runtime.heavy = owner;
+    runtime.owner = owner;
     const key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{71}));
     const resolved = try n.configuration.resolve(.{
         .profile = .small,
@@ -359,14 +359,14 @@ test "a command queued after wait planning executes in the turn whose poll obser
         .local = .{ .metadata = .{ .custody_group_count = 1 }, .status = .{ .earliest_available_slot = 0 } },
     });
     defer owner.core.deinit(io);
-    runtime.wake = try network_wake.Wake.init();
-    defer runtime.wake.?.deinit();
-    try owner.core.setHostWake(runtime.wake.?.read_fd);
-    runtime.payload_budget.limit = 1 << 20;
-    runtime.publications = try publications.Table.init(testing, 1, &runtime.payload_budget);
-    defer runtime.publications.?.deinit();
-    runtime.requests = try requests_mod.Table.init(testing, 1, &runtime.payload_budget);
-    defer runtime.requests.?.deinit();
+    runtime.bridge.wake = try network_wake.Wake.init();
+    defer runtime.bridge.wake.?.deinit();
+    try owner.core.setHostWake(runtime.bridge.wake.?.read_fd);
+    runtime.bridge.payload_budget.limit = 1 << 20;
+    runtime.bridge.publications = try publications.Table.init(testing, 1, &runtime.bridge.payload_budget);
+    defer runtime.bridge.publications.?.deinit();
+    runtime.bridge.requests = try requests_mod.Table.init(testing, 1, &runtime.bridge.payload_budget);
+    defer runtime.bridge.requests.?.deinit();
     var host: Host = .{ .runtime = &runtime, .io = io };
     const ingress: gossip_mod.Ingress = .{ .runtime = &runtime, .io = io };
     // The first turns render metrics and write the health log, then only deadlines remain.
@@ -408,19 +408,19 @@ test "a command queued after wait planning executes in the turn whose poll obser
     try std.testing.expect(result.failure == null);
     try std.testing.expect(result.readiness.host);
     const token = SubmitAtPoll.token orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(.terminal, runtime.table.get(token).state);
-    try std.testing.expect(runtime.table.get(token).failure == null);
+    try std.testing.expectEqual(.terminal, runtime.bridge.commands.get(token).state);
+    try std.testing.expect(runtime.bridge.commands.get(token).failure == null);
     runtime.abortCommand(token);
-    runtime.heavy = null;
+    runtime.owner = null;
 }
 
 test "queued request and disconnect share the protocol turn clock while latency uses execution time" {
     const testing = std.testing.allocator;
-    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
+    var runtime: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false, .env_alive = false } };
     const owner = try testing.create(Owner);
     defer testing.destroy(owner);
     owner.* = .{};
-    runtime.heavy = owner;
+    runtime.owner = owner;
     const key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{71}));
     const resolved = try n.configuration.resolve(.{
         .profile = .small,
@@ -465,54 +465,54 @@ test "queued request and disconnect share the protocol turn clock while latency 
     var vtable = std.testing.io.vtable.*;
     vtable.now = Clock.read;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    runtime.payload_budget.limit = 64 << 20;
-    runtime.publications = try publications.Table.init(testing, 1, &runtime.payload_budget);
-    defer runtime.publications.?.deinit();
-    runtime.requests = try requests_mod.Table.init(testing, 1, &runtime.payload_budget);
-    defer runtime.requests.?.deinit();
+    runtime.bridge.payload_budget.limit = 64 << 20;
+    runtime.bridge.publications = try publications.Table.init(testing, 1, &runtime.bridge.payload_budget);
+    defer runtime.bridge.publications.?.deinit();
+    runtime.bridge.requests = try requests_mod.Table.init(testing, 1, &runtime.bridge.payload_budget);
+    defer runtime.bridge.requests.?.deinit();
 
     const peer_key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{72}));
-    const connect = try runtime.table.reserve(.connect);
-    defer runtime.table.retire(connect);
-    const command = runtime.table.get(connect);
+    const connect = try runtime.bridge.commands.reserve(.connect);
+    defer runtime.bridge.commands.retire(connect);
+    const command = runtime.bridge.commands.get(connect);
     command.input.peer = n.PeerId.fromPublicKey(&peer_key.publicKey());
     command.input.addresses[0] = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9000 } };
     command.input.address_count = 1;
     command.input.timeout_ms = 1000;
-    runtime.table.transition(command, .queued);
+    runtime.bridge.commands.transition(command, .queued);
 
-    const publication = try runtime.publications.?.reserve(.beacon_block, 0);
-    defer runtime.publications.?.retire(publication);
-    const cell = runtime.publications.?.get(publication).?;
-    cell.order = try runtime.table.nextOrder();
+    const publication = try runtime.bridge.publications.?.reserve(.beacon_block, 0);
+    defer runtime.bridge.publications.?.retire(publication);
+    const cell = runtime.bridge.publications.?.get(publication).?;
+    cell.order = try runtime.bridge.commands.nextOrder();
     cell.queued_ms = tick.millis() + 50;
-    runtime.publications.?.transition(cell, .queued);
+    runtime.bridge.publications.?.transition(cell, .queued);
 
-    const request = try runtime.requests.?.reserve(.blocks_by_root_v2, 32);
+    const request = try runtime.bridge.requests.?.reserve(.blocks_by_root_v2, 32);
     defer {
         owner.core.deinit(io);
         requests_mod.closeLocked(&runtime);
-        runtime.requests.?.retire(request);
+        runtime.bridge.requests.?.retire(request);
     }
-    try runtime.requests.?.allocate(request, 32);
-    const request_cell = runtime.requests.?.get(request).?;
+    try runtime.bridge.requests.?.allocate(request, 32);
+    const request_cell = runtime.bridge.requests.?.get(request).?;
     request_cell.peer = remote_id;
     @memset(request_cell.input, 0);
-    request_cell.order = try runtime.table.nextOrder();
+    request_cell.order = try runtime.bridge.commands.nextOrder();
     request_cell.state = .queued;
-    runtime.requests.?.refresh(request_cell);
+    runtime.bridge.requests.?.refresh(request_cell);
 
-    const disconnect = try runtime.table.reserve(.disconnect);
-    defer runtime.table.retire(disconnect);
-    runtime.table.get(disconnect).input.peer = remote_id;
-    runtime.table.transition(runtime.table.get(disconnect), .queued);
+    const disconnect = try runtime.bridge.commands.reserve(.disconnect);
+    defer runtime.bridge.commands.retire(disconnect);
+    runtime.bridge.commands.get(disconnect).input.peer = remote_id;
+    runtime.bridge.commands.transition(runtime.bridge.commands.get(disconnect), .queued);
     try std.testing.expect(!try executeWork(&runtime, io, tick));
     try std.testing.expect(command.failure == null);
     try std.testing.expectEqual(tick.millis() + 1000, command.deadline);
     try std.testing.expectEqual(error.UnknownTopic, cell.failure.?);
     try std.testing.expectEqual(tick.millis(), owner.core.protocols.gossipsub.last_now_ms);
-    try std.testing.expectEqual(@as(u128, 50), runtime.publications.?.latency.sum);
-    try std.testing.expect(runtime.table.get(disconnect).failure == null);
+    try std.testing.expectEqual(@as(u128, 50), runtime.bridge.publications.?.latency.sum);
+    try std.testing.expect(runtime.bridge.commands.get(disconnect).failure == null);
     try std.testing.expect(!owner.core.isConnected(&remote_id));
     try std.testing.expect(request_cell.native != null);
 

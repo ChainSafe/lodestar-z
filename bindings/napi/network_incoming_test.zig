@@ -126,9 +126,9 @@ test "incoming serving start rollback and commit preserve a close while pinned" 
     for ([_]bool{ false, true }) |commit| {
         for ([_]bool{ false, true }) |retained| {
             var runtime: Runtime = .{ .env = undefined };
-            runtime.payload_budget.limit = 64;
-            runtime.incoming = try Table.init(std.testing.allocator, 1, &runtime.payload_budget);
-            const table = &runtime.incoming.?;
+            runtime.bridge.payload_budget.limit = 64;
+            runtime.bridge.incoming = try Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget);
+            const table = &runtime.bridge.incoming.?;
             defer table.deinit();
             const token = try table.reserve(.blocks_by_root_v2, 32);
             try table.allocate(token, &(@as([32]u8, @splat(7))));
@@ -161,7 +161,7 @@ test "incoming serving start rollback and commit preserve a close while pinned" 
                 try std.testing.expectEqual(@as(u64, 0), table.diag.requestsTaken);
                 if (retained) try std.testing.expect(incoming.releasable(cell));
             }
-            try std.testing.expectEqual(@as(usize, 0), runtime.payload_budget.used);
+            try std.testing.expectEqual(@as(usize, 0), runtime.bridge.payload_budget.used);
             if (retained) {
                 try std.testing.expect(table.get(token) != null);
                 cell.serving = null;
@@ -176,11 +176,11 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
     const Ending = enum { after_next_credit, cancelled, shutdown };
     for ([_]Ending{ .after_next_credit, .cancelled, .shutdown }) |ending| {
         var pair: rr.testing.Pair = .{};
-        var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
+        var runtime: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false, .env_alive = false } };
         const owner = try std.testing.allocator.create(runtime_mod.Owner);
         defer std.testing.allocator.destroy(owner);
         owner.* = .{};
-        runtime.heavy = owner;
+        runtime.owner = owner;
         const resolved = try n.configuration.resolve(.{
             .profile = .small,
             .seed = 1,
@@ -203,8 +203,8 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
         var connected: [8]n.Event = undefined;
         pair.shared.handles.client = pair.shared.pair.events(&pair.shared.pair.client, &connected)[0].connected.conn;
         pair.shared.handles.server = pair.shared.pair.events(&pair.shared.pair.server, &connected)[0].connected.conn;
-        runtime.wake = try Wake.init();
-        defer runtime.wake.?.deinit();
+        runtime.bridge.wake = try Wake.init();
+        defer runtime.bridge.wake.?.deinit();
         const response_max = rr.Protocol.blocks_by_root_v2.info().response_max;
         const sink = try std.testing.allocator.alloc(u8, response_max);
         defer std.testing.allocator.free(sink);
@@ -220,9 +220,9 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
             if (handle != null) break;
         }
         try std.testing.expect(handle != null);
-        runtime.payload_budget.limit = response_max;
-        runtime.incoming = try Table.init(std.testing.allocator, 1, &runtime.payload_budget);
-        const table = &runtime.incoming.?;
+        runtime.bridge.payload_budget.limit = response_max;
+        runtime.bridge.incoming = try Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget);
+        const table = &runtime.bridge.incoming.?;
         defer table.deinit();
         defer owner.core.protocols.shutdown(&pair.shared.pair.server, pair.shared.pair.now);
         const token = try table.reserve(.blocks_by_root_v2, query.len);
@@ -238,7 +238,7 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
         cell.context = pair.forks[0];
         cell.state = .response_queued;
         cell.response_awaited = true;
-        try runtime.payload_budget.reserve(.publication, response_max - 4000);
+        try runtime.bridge.payload_budget.reserve(.publication, response_max - 4000);
         _ = try incoming.applyPending(&runtime, pair.shared.pair.now);
         for (0..20) |_| {
             const delivered = try pumpIncoming(&pair, &owner.core.protocols, &events);
@@ -251,13 +251,13 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
         try std.testing.expect(cell.response.len == 0 and cell.response_reservation == 0);
         try std.testing.expect(!table.anyDue() and cell.response_awaited and runtime.host_due);
         _ = try incoming.applyPending(&runtime, pair.shared.pair.now);
-        try std.testing.expect(runtime.payload_budget.waiting and !table.anyDue());
-        try runtime.wake.?.drain();
+        try std.testing.expect(runtime.bridge.payload_budget.waiting and !table.anyDue());
+        try runtime.bridge.wake.?.drain();
         if (ending == .after_next_credit) {
             runtime.lock();
-            runtime.payload_budget.release(.publication, response_max - 4000);
+            runtime.bridge.payload_budget.release(.publication, response_max - 4000);
             runtime.unlock();
-            try std.testing.expect(runtime.wake.?.pending);
+            try std.testing.expect(runtime.bridge.wake.?.pending);
             _ = try incoming.applyPending(&runtime, pair.shared.pair.now);
             try std.testing.expect(table.anyDue());
             const completion = table.pin(token.index);
@@ -266,7 +266,7 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
             try std.testing.expect(!table.anyDue());
             try std.testing.expectEqual(response_max, cell.response_reservation);
         }
-        if (ending == .shutdown) runtime.stop = true else cell.action = .cancel;
+        if (ending == .shutdown) runtime.bridge.stop = true else cell.action = .cancel;
         _ = try incoming.applyPending(&runtime, pair.shared.pair.now);
         for (0..20) |_| {
             const delivered = try pumpIncoming(&pair, &owner.core.protocols, &events);
@@ -281,8 +281,8 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
         if (ending == .cancelled) try std.testing.expectEqual(incoming.Ack{ .failed = .cancelled }, completion.ack.?);
         if (ending == .shutdown) try std.testing.expect(completion.ack.? == .closed);
         _ = table.commit(completion);
-        if (ending != .after_next_credit) runtime.payload_budget.release(.publication, response_max - 4000);
-        try std.testing.expectEqual(@as(usize, 0), runtime.payload_budget.used);
+        if (ending != .after_next_credit) runtime.bridge.payload_budget.release(.publication, response_max - 4000);
+        try std.testing.expectEqual(@as(usize, 0), runtime.bridge.payload_budget.used);
         try std.testing.expect(table.get(token) == null);
     }
 }

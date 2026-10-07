@@ -41,30 +41,30 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     const runtime = try r.create(js.env());
     errdefer runtime.release();
     errdefer runtime.disposeJsReferences();
-    runtime.heavy = try r.allocator.create(r.Owner);
-    runtime.heavy.?.* = .{};
+    runtime.owner = try r.allocator.create(r.Owner);
+    runtime.owner.?.* = .{};
     const beacon_value = try decode.get(config.val, "beaconConfig");
     if (try beacon_value.typeof() != .object) return error.TypeMismatch;
     const beacon_config = try js.convertArg(*const BeaconConfig, AddonIdentity, beacon_value.value, beacon_value.env);
-    try application_cfg.parse(config.val, &beacon_config.config_rc.instance.config, &runtime.heavy.?.config, &runtime.heavy.?.application);
-    runtime.logs.configure(runtime.heavy.?.application.log_level);
+    try application_cfg.parse(config.val, &beacon_config.config_rc.instance.config, &runtime.owner.?.config, &runtime.owner.?.application);
+    runtime.logs.configure(runtime.owner.?.application.log_level);
     try network_owner.prepareConfiguration(runtime);
-    try network_storage.initialize(runtime, &runtime.heavy.?.application);
-    runtime.wake = try network_wake.Wake.init();
+    try network_storage.initialize(runtime, &runtime.owner.?.application);
+    runtime.bridge.wake = try network_wake.Wake.init();
     errdefer {
-        if (runtime.heavy.?.core_live) runtime.heavy.?.core.setHostWake(null) catch unreachable;
-        if (runtime.wake) |*wake| wake.deinit();
-        runtime.wake = null;
+        if (runtime.owner.?.core_live) runtime.owner.?.core.setHostWake(null) catch unreachable;
+        if (runtime.bridge.wake) |*wake| wake.deinit();
+        runtime.bridge.wake = null;
     }
     try network_owner.initialize(runtime);
-    const identity = try runtime.heavy.?.readIdentity();
+    const identity = try runtime.owner.?.readIdentity();
 
     const env = js.env();
     const name = try env.createStringUtf8("NativeNetworkRuntime");
-    runtime.notify = try r.Notify.create(env, callback.val, null, name, 1, 1, runtime, Runtime.finalize, onNotify);
+    runtime.bridge.notify = try r.Notify.create(env, callback.val, null, name, 1, 1, runtime, Runtime.finalize, onNotify);
     runtime.retain();
-    errdefer runtime.notify.release(.abort) catch unreachable;
-    try runtime.notify.unref(env);
+    errdefer runtime.bridge.notify.release(.abort) catch unreachable;
+    try runtime.bridge.notify.unref(env);
     try env.addEnvCleanupHook(Runtime, runtime, Runtime.cleanup);
     runtime.hook_live = true;
     runtime.retain();
@@ -104,13 +104,13 @@ fn jsStopped(err: anyerror) bool {
 /// The notification callback only schedules: the host runs an exchange, which arms again once nothing is queued.
 fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     runtime.lock();
-    const alive = runtime.env_alive;
+    const alive = runtime.bridge.env_alive;
     runtime.unlock();
     if (!alive) return;
     _ = env.callFunction(callback, try env.getUndefined(), .{}) catch {
         // A throwing host may not have scheduled an exchange, so owner activity can notify again.
         runtime.lock();
-        runtime.readiness.forget();
+        runtime.bridge.notification_armed = true;
         runtime.unlock();
     };
 }
@@ -148,8 +148,8 @@ pub fn holdVerdicts(self: *@This(), held: js.Value) !void {
     const value = try decode.boolean(held.val);
     runtime.lock();
     defer runtime.unlock();
-    runtime.verdicts_held = value;
-    if (!value) runtime.signalLocked();
+    runtime.bridge.verdicts_held = value;
+    if (!value) runtime.wakeOwnerLocked();
 }
 
 /// A private control for binding ownership tests: while held, the owner starts no admitted command, publication or
@@ -159,8 +159,8 @@ pub fn holdOperations(self: *@This(), held: js.Value) !void {
     const value = try decode.boolean(held.val);
     runtime.lock();
     defer runtime.unlock();
-    runtime.operations_held = value;
-    if (!value) runtime.signalLocked();
+    runtime.bridge.operations_held = value;
+    if (!value) runtime.wakeOwnerLocked();
 }
 
 /// Terminates the process at a fatal site JavaScript raises (network_fatal.zig). `reason` is at most 64 printable ASCII
@@ -185,7 +185,7 @@ fn owner(self: *@This()) !*Runtime {
 pub fn getState(self: *@This()) !js.Value {
     const runtime = try self.owner();
     runtime.lock();
-    const state = runtime.state;
+    const state = runtime.bridge.state;
     runtime.unlock();
     return .{ .val = try js.env().createStringUtf8(@tagName(state)) };
 }
@@ -193,11 +193,11 @@ pub fn close(self: *@This()) void {
     self.stopped = true;
     if (self.runtime) |runtime| {
         runtime.lock();
-        const ref_notify = runtime.env_alive and runtime.notify_live;
+        const ref_notify = runtime.bridge.env_alive and runtime.bridge.notify_live;
         runtime.unlock();
-        if (ref_notify) runtime.notify.ref(runtime.env) catch {};
+        if (ref_notify) runtime.bridge.notify.ref(runtime.env) catch {};
         runtime.lock();
-        runtime.graceful = !runtime.disposed;
+        runtime.bridge.graceful = !runtime.disposed;
         runtime.unlock();
         runtime.requestStop();
     }
@@ -207,17 +207,17 @@ pub fn close(self: *@This()) void {
 fn resolvedLimits(env: napi.Env, runtime: *const Runtime) !Value {
     const object = try env.createObject();
     try object.setNamedProperty("peerCapacity", try env.createUint32(runtime.peer_capacity));
-    try object.setNamedProperty("incomingCapacity", try env.createUint32(@intCast(runtime.incoming.?.diag.capacity)));
+    try object.setNamedProperty("incomingCapacity", try env.createUint32(@intCast(runtime.bridge.incoming.?.diag.capacity)));
     return object;
 }
 
 /// Each operation family's cells, which size the completion owner's records.
 fn capacities(env: napi.Env, runtime: *const Runtime) !Value {
     const object = try env.createObject();
-    try object.setNamedProperty("publication", try env.createUint32(@intCast(runtime.publications.?.diag.capacity)));
+    try object.setNamedProperty("publication", try env.createUint32(@intCast(runtime.bridge.publications.?.diag.capacity)));
     try object.setNamedProperty("command", try env.createUint32(commands.capacity));
-    try object.setNamedProperty("request", try env.createUint32(@intCast(runtime.requests.?.diag.capacity)));
-    try object.setNamedProperty("incoming", try env.createUint32(@intCast(runtime.incoming.?.diag.capacity)));
+    try object.setNamedProperty("request", try env.createUint32(@intCast(runtime.bridge.requests.?.diag.capacity)));
+    try object.setNamedProperty("incoming", try env.createUint32(@intCast(runtime.bridge.incoming.?.diag.capacity)));
     return object;
 }
 
@@ -318,7 +318,7 @@ test "a notification JavaScript cannot run stops locally" {
     const shim = @import("network_test_support.zig");
     shim.undefined_status = napi.c.napi_cannot_run_js;
     defer shim.undefined_status = napi.c.napi_ok;
-    var notified: Runtime = .{ .env = undefined, .notify_live = false };
+    var notified: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false } };
     onNotify(undefined, undefined, &notified, undefined);
-    try std.testing.expect(notified.disposed and notified.stop and !notified.env_alive);
+    try std.testing.expect(notified.disposed and notified.bridge.stop and !notified.bridge.env_alive);
 }
