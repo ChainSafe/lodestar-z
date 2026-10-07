@@ -32,6 +32,7 @@ test "processSlashings stores a high-index penalty compactly" {
         test_state.cached_state.config,
         epoch_cache,
         test_state.cached_state.state,
+        null,
     );
     epoch_cache.total_slashings_by_increment = 32;
 

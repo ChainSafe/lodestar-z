@@ -2,6 +2,8 @@ const std = @import("std");
 const types = @import("consensus_types");
 const metrics = @import("../metrics.zig");
 const time = @import("time");
+const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
+const getSeed = @import("../utils/seed.zig").getSeed;
 
 const Allocator = std.mem.Allocator;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
@@ -104,7 +106,13 @@ const ShufflingJob = struct {
         return .{ .shuffling = shuffling, .duration = time.since(io, timer) };
     }
 
-    fn start(allocator: Allocator, io: std.Io, seed: [32]u8, epoch: Epoch, active_indices: []ValidatorIndex) @This() {
+    fn start(allocator: Allocator, io: std.Io, state: *AnyBeaconState, indices: []const ValidatorIndex) !ShufflingJob {
+        const epoch = computeEpochAtSlot(try state.slot()) + preset.MIN_SEED_LOOKAHEAD + 1;
+        var seed: [32]u8 = undefined;
+        switch (state.forkSeq()) {
+            inline else => |fork| try getSeed(fork, state.castToFork(fork), epoch, c.DOMAIN_BEACON_ATTESTER, &seed),
+        }
+        const active_indices = try allocator.dupe(ValidatorIndex, indices);
         return .{
             .io = io,
             .future = std.Io.async(io, worker, .{ allocator, io, seed, epoch, active_indices }),
@@ -290,6 +298,9 @@ pub const EpochTransitionCache = struct {
         config: *const BeaconConfig,
         epoch_cache: *EpochCache,
         state: *AnyBeaconState,
+        /// Non-null starts the Fulu shuffling job. Pass it only when the caller runs
+        /// `processProposerLookahead`, which joins the job. Otherwise `deinit` waits for an unused shuffle.
+        shuffling_io: ?std.Io,
     ) !EpochTransitionCache {
         const fork_seq = state.forkSeq();
         const current_epoch = epoch_cache.epoch;
@@ -432,11 +443,17 @@ pub const EpochTransitionCache = struct {
             }
         } // end validator loop
 
-        // no need to trigger async build as zig should be fast enough
-
         // typescript: only the first `activeValidatorCount` elements are copied to `activeIndices`
         // here in zig we simply return a slice, consumer only borrows this slice and need to allocate a separate array for the next shuffling computation
         const next_shuffling_active_indices = reused_cache.next_epoch_shuffling_active_validator_indices.items[0..next_epoch_shuffling_active_indices_length];
+
+        var shuffling_job: ?ShufflingJob = null;
+        errdefer if (shuffling_job) |*job| job.cancel();
+        if (shuffling_io) |io| {
+            if (fork_seq.gte(.fulu)) {
+                shuffling_job = try ShufflingJob.start(epoch_cache.allocator, io, state, next_shuffling_active_indices);
+            }
+        }
 
         if (total_active_stake_by_increment < 1) {
             total_active_stake_by_increment = 1;
@@ -614,7 +631,7 @@ pub const EpochTransitionCache = struct {
             .indices_to_eject = indices_to_eject,
             .next_shuffling_active_indices = next_shuffling_active_indices,
             .next_shuffling = null,
-            .shuffling_job = null,
+            .shuffling_job = shuffling_job,
             // to be updated in processEffectiveBalanceUpdates
             .next_epoch_total_active_balance_by_increment = 0,
             .is_active_prev_epoch = reused_cache.is_active_prev_epoch.items,
@@ -630,13 +647,6 @@ pub const EpochTransitionCache = struct {
             // Will be assigned in processRewardsAndPenalties()
             .balances = null,
         };
-    }
-
-    pub fn startShuffling(self: *EpochTransitionCache, allocator: Allocator, io: std.Io, seed: [32]u8, epoch: Epoch) !void {
-        std.debug.assert(self.shuffling_job == null);
-        const active_indices = try allocator.alloc(ValidatorIndex, self.next_shuffling_active_indices.len);
-        std.mem.copyForwards(ValidatorIndex, active_indices, self.next_shuffling_active_indices);
-        self.shuffling_job = ShufflingJob.start(allocator, io, seed, epoch, active_indices);
     }
 
     pub fn joinShuffling(self: *EpochTransitionCache) !*EpochShuffling {

@@ -107,6 +107,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
                 config,
                 epoch_cache,
                 state,
+                null,
             );
             defer epoch_transition_cache.deinit();
 
