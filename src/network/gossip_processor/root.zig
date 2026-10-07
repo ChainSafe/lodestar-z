@@ -1,6 +1,5 @@
 pub const GossipProcessor = @import("GossipProcessor.zig");
 pub const limits = @import("../gossip_limits.zig");
-pub const policy = @import("policy.zig");
 pub const metadata = @import("metadata.zig");
 
 test {

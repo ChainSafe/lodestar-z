@@ -442,7 +442,7 @@ const Host = struct {
 
     fn admit(context: *anyopaque, candidate: *gossip.Gossipsub.MessageAdmission) bool {
         const self: *Host = @ptrCast(@alignCast(context));
-        if (self.len == self.ring.len or !network.gossip_processor.policy.sourceRoom(candidate) or !network.gossip_processor.policy.feasible(candidate, &.{})) {
+        if (self.len == self.ring.len or !candidate.sourceRoom() or !candidate.feasible(&.{})) {
             self.refused += 1;
             return false;
         }

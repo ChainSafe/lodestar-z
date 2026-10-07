@@ -15,7 +15,7 @@ const layout = @import("layout.zig");
 const router_mod = @import("../router.zig");
 const session_io = @import("session_io.zig");
 
-/// Commits physically feasible candidates and copies messages until `clear`.
+/// Admits candidates within protocol limits and copies messages until `clear`.
 pub const Inbox = struct {
     pub const capacity = 64;
     sink: Gossipsub.MessageSink = undefined,
@@ -58,7 +58,7 @@ pub const Inbox = struct {
 
     fn admit(context: *anyopaque, candidate: *Gossipsub.MessageAdmission) bool {
         const self: *Inbox = @ptrCast(@alignCast(context));
-        if (self.full or self.count == capacity or !candidate.feasible(&candidate.usage(&.{}))) return false;
+        if (self.full or self.count == capacity or !candidate.sourceRoom() or !candidate.feasible(&.{})) return false;
         const topic = std.testing.allocator.dupe(u8, candidate.event.topic) catch return false;
         const bytes = std.testing.allocator.dupe(u8, candidate.event.bytes) catch {
             std.testing.allocator.free(topic);
