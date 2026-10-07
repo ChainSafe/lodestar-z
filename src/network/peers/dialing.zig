@@ -14,7 +14,7 @@ const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
 const histogram = @import("../metrics/histogram.zig");
 
-const history_retention_ms = Catalog.history_retention_ms;
+const replacement_grace_ms = Catalog.replacement_grace_ms;
 const hint_freshness_ms = Catalog.hint_freshness_ms;
 
 const Attempt = struct {
@@ -132,7 +132,7 @@ pub const Dialing = struct {
         const hints = candidate.hints;
         if (!hints.validFor(context)) return error.InvalidCandidate;
         for (candidate.addresses[0..candidate.address_count]) |address| if (address.port() == 0) return error.InvalidCandidate;
-        var incoming: Row = .{ .identity = candidate.peer, .node_id = candidate.node_id, .dial = .{ .automatic = true, .eligible_at_ms = now_ms, .history_until_ms = now_ms +| history_retention_ms, .hints = hints, .hints_at_ms = now_ms } };
+        var incoming: Row = .{ .identity = candidate.peer, .node_id = candidate.node_id, .dial = .{ .automatic = true, .eligible_at_ms = now_ms, .replacement_after_ms = now_ms +| replacement_grace_ms, .hints = hints, .hints_at_ms = now_ms } };
         if (catalog.find(&candidate.peer)) |ref| {
             const row = catalog.rowForMut(ref).?;
             if (row.node_id) |id| if (!std.mem.eql(u8, &id, &candidate.node_id)) return error.InvalidCandidate;
@@ -228,7 +228,7 @@ pub const Dialing = struct {
         row.dial.automatic = true;
         row.dial.replay = .untried;
         row.dial.deferUntil(now_ms);
-        row.dial.history_until_ms = @max(row.dial.history_until_ms, now_ms +| history_retention_ms);
+        row.dial.replacement_after_ms = @max(row.dial.replacement_after_ms, now_ms +| replacement_grace_ms);
         applyAddresses(&row.dial, &admitted);
         self.selection_dirty = true;
         catalog.markDial(ref.index);
@@ -255,8 +255,8 @@ pub const Dialing = struct {
                 row.generation == std.math.maxInt(u64)) continue;
             std.debug.assert(row.connection == null and row.pending_close == null and !row.pending_update);
             const usefulness: u2 = if (row.dial.failures != 0) 0 else matchesDemand(row, context, wanted, now_ms);
-            if (incoming_utility < usefulness or (row.dial.failures == 0 and incoming_utility == usefulness and now_ms < row.dial.history_until_ms)) continue;
-            if (victim == null or usefulness < victim_utility or (usefulness == victim_utility and row.dial.history_until_ms < catalog.rows[victim.?].dial.history_until_ms)) {
+            if (incoming_utility < usefulness or (row.dial.failures == 0 and incoming_utility == usefulness and now_ms < row.dial.replacement_after_ms)) continue;
+            if (victim == null or usefulness < victim_utility or (usefulness == victim_utility and row.dial.replacement_after_ms < catalog.rows[victim.?].dial.replacement_after_ms)) {
                 victim = index;
                 victim_utility = usefulness;
             }

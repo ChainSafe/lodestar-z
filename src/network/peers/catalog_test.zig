@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const t = @import("types.zig");
 const Catalog = @import("catalog.zig").Catalog;
 const Handle = t.Handle;
@@ -27,6 +28,10 @@ fn identity(comptime hex: []const u8) t.PeerId {
 }
 const first = Handle{ .index = 1, .generation = 1 };
 const replacement = Handle{ .index = 1, .generation = 2 };
+
+fn at(ms: u64) Now {
+    return Now.fromMilliseconds(.{ .mono_ms = ms, .unix_s = 0 });
+}
 
 test "peer options reject incompatible bounds before allocation" {
     try (Catalog.Options{}).validate();
@@ -64,7 +69,7 @@ test "peer admission preserves dial commitments through inbound churn and goodby
     const other: t.PeerId = .{ .bytes = @splat(99) };
     try std.testing.expectEqual(Catalog.Admission.capacity, catalog.admit(&other, &local, .{ .index = 11, .generation = 1 }, &.{ .direction = .outbound, .endpoint = .unspecified, .now_ms = 21 }));
     try std.testing.expect(catalog.deferRedial(selected.peer, .{ .index = 10, .generation = 1 }, 20, 300_000));
-    try std.testing.expect(catalog.disconnect(selected.peer, .{ .index = 10, .generation = 1 }, .count_pruning, 22));
+    try std.testing.expect(catalog.disconnect(selected.peer, .{ .index = 10, .generation = 1 }, .count_pruning, .{}, at(22)));
     try std.testing.expectEqual(Catalog.Admission.cooldown, catalog.admit(&remote, &local, .{ .index = 10, .generation = 2 }, &.{ .direction = .inbound, .endpoint = .unspecified, .now_ms = 23 }));
     try std.testing.expectEqual(@as(f64, 0), catalog.get(selected.peer).?.score);
 }
@@ -92,7 +97,7 @@ test "peer catalog identity duplicates and obsolete close preserve replacement" 
     const result = admit(&c, &remote, replacement, .outbound, 0).admitted;
     try std.testing.expectEqual(first, result.displaced.?);
     try std.testing.expectEqual(ref, result.peer);
-    try std.testing.expect(!c.disconnect(ref, first, .transport_closed, 1));
+    try std.testing.expect(!c.disconnect(ref, first, .transport_closed, .{}, at(1)));
     try std.testing.expectEqual(replacement, c.get(ref).?.connection.?);
     const distinct = third;
     const other = admit(&c, &distinct, .{ .index = 0, .generation = 1 }, .inbound, 1).admitted.peer;
@@ -106,7 +111,7 @@ test "peer catalog zero output closes native ownership and pins terminal until o
     var out: [1]t.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&out));
     try std.testing.expectEqual(.ready, std.meta.activeTag(out[0]));
-    try std.testing.expect(c.disconnect(ref, first, .host, 1));
+    try std.testing.expect(c.disconnect(ref, first, .host, .{}, at(1)));
     try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&.{}));
     try std.testing.expect(c.get(ref).?.connection == null);
     try std.testing.expectEqual(
@@ -148,7 +153,7 @@ test "peer catalog endpoint observations preserve publication and connection gen
     try std.testing.expectEqual(initial, c.get(ref).?.endpoint);
     try std.testing.expect(c.markUnavailable(ref, replacement, .host));
     try std.testing.expect(!c.updateEndpoint(ref, replacement, &rebound));
-    try std.testing.expect(c.disconnect(ref, replacement, .host, 2));
+    try std.testing.expect(c.disconnect(ref, replacement, .host, .{}, at(2)));
     try std.testing.expect(!c.updateEndpoint(ref, replacement, &rebound));
 }
 test "peer catalog bounds banned retention while preserving the outbound reserve" {
@@ -158,7 +163,7 @@ test "peer catalog bounds banned retention while preserving the outbound reserve
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     try std.testing.expectEqual(t.ReputationDecision.ban, c.report(ref, .fatal, 0).?);
-    try std.testing.expect(c.disconnect(ref, first, .banned, 0));
+    try std.testing.expect(c.disconnect(ref, first, .banned, .{}, at(0)));
     var out: [1]t.Event = undefined;
     _ = c.pollEvents(&out);
     try std.testing.expectEqual(Catalog.Admission.banned, admit(&c, &remote, replacement, .inbound, 1));
@@ -177,7 +182,7 @@ test "peer catalog cooldown churn cannot exclude a fresh inbound identity" {
         const conn: Handle = .{ .index = @intCast(index), .generation = 1 };
         const peer = admit(&c, &identity_value, conn, .inbound, 0).admitted.peer;
         try std.testing.expect(c.cooldown(peer, conn, 0, 600_000));
-        try std.testing.expect(c.disconnect(peer, conn, .remote_goodbye, 0));
+        try std.testing.expect(c.disconnect(peer, conn, .remote_goodbye, .{}, at(0)));
     }
     var out: [2]t.Event = undefined;
     _ = c.pollEvents(&out);
@@ -192,7 +197,7 @@ test "peer catalog local pruning enforces reconnection cooldown without a score 
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     try std.testing.expect(c.deferRedial(ref, first, 0, 300_000));
-    try std.testing.expect(c.disconnect(ref, first, .count_pruning, 0));
+    try std.testing.expect(c.disconnect(ref, first, .count_pruning, .{}, at(0)));
     var out: [1]t.Event = undefined;
     _ = c.pollEvents(&out);
     try std.testing.expectEqual(@as(u64, 300_000), c.get(ref).?.redial_until_ms);
@@ -201,7 +206,7 @@ test "peer catalog local pruning enforces reconnection cooldown without a score 
     try std.testing.expect(!c.deferRedial(ref, first, 1, 300_000));
     try std.testing.expect(admit(&c, &remote, replacement, .inbound, 300_000) == .admitted);
     try std.testing.expect(c.cooldown(ref, replacement, 300_000, 600_000));
-    try std.testing.expect(c.disconnect(ref, replacement, .remote_goodbye, 300_000));
+    try std.testing.expect(c.disconnect(ref, replacement, .remote_goodbye, .{}, at(300_000)));
     _ = c.pollEvents(&out);
     try std.testing.expectEqual(Catalog.Admission.cooldown, admit(&c, &remote, first, .inbound, 300_001));
 }
@@ -265,7 +270,7 @@ test "peer catalog unpublished closure coalesces updates without artificial read
     try std.testing.expect(c.updateStatus(ref, first, &.{ .head_slot = 2 }, 2));
     try std.testing.expect(c.updateMetadata(ref, first, &.{ .seq_number = 2 }, 2));
     try std.testing.expect(!c.updateMetadata(ref, first, &.{ .seq_number = 1 }, 3));
-    try std.testing.expect(c.disconnect(ref, first, .host, 3));
+    try std.testing.expect(c.disconnect(ref, first, .host, .{}, at(3)));
     var out: [1]t.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&out));
     try std.testing.expectEqual(.closed, std.meta.activeTag(out[0]));
@@ -280,7 +285,7 @@ test "peer catalog negative reconnect survives while direct and pending slots re
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .outbound, 0).admitted.peer;
     _ = c.report(ref, .mid_tolerance, 0);
-    try std.testing.expect(c.disconnect(ref, first, .host, 0));
+    try std.testing.expect(c.disconnect(ref, first, .host, .{}, at(0)));
     const other = third;
     try std.testing.expectEqual(Catalog.Admission.capacity, admit(&c, &other, replacement, .outbound, 0));
     var out: [1]t.Event = undefined;
@@ -288,7 +293,7 @@ test "peer catalog negative reconnect survives while direct and pending slots re
     try std.testing.expectEqual(ref, admit(&c, &remote, replacement, .outbound, 0).admitted.peer);
     try std.testing.expectEqual(@as(f64, -5), c.get(ref).?.score);
     try std.testing.expect(c.setDirect(ref, true));
-    try std.testing.expect(c.disconnect(ref, replacement, .host, 0));
+    try std.testing.expect(c.disconnect(ref, replacement, .host, .{}, at(0)));
     _ = c.pollEvents(&out);
     try std.testing.expectEqual(
         Catalog.Admission.capacity,
@@ -307,7 +312,7 @@ test "peer catalog rejected banned reconnect does not mutate retained reputation
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .outbound, 0).admitted.peer;
     _ = c.report(ref, .fatal, 0);
-    try std.testing.expect(c.disconnect(ref, first, .banned, 0));
+    try std.testing.expect(c.disconnect(ref, first, .banned, .{}, at(0)));
     var out: [1]t.Event = undefined;
     _ = c.pollEvents(&out);
     const before = c.rows[ref.index].reputation;
@@ -335,8 +340,8 @@ test "peer catalog accepts native generation zero and still rejects another full
     const ref = admit(&c, &remote, zero, .outbound, 0).admitted.peer;
     try std.testing.expect(ref.generation != 0);
     try std.testing.expect(c.updateStatus(ref, zero, &.{}, 0));
-    try std.testing.expect(!c.disconnect(ref, .{ .index = 0, .generation = 1 }, .host, 0));
-    try std.testing.expect(c.disconnect(ref, zero, .host, 0));
+    try std.testing.expect(!c.disconnect(ref, .{ .index = 0, .generation = 1 }, .host, .{}, at(0)));
+    try std.testing.expect(c.disconnect(ref, zero, .host, .{}, at(0)));
 }
 
 test "peer catalog custody binds authenticated generations and preserves unchanged freshness work" {
@@ -417,9 +422,9 @@ test "peer catalog revisions follow canonical generation replacement and reject 
     _ = admit(&c, &remote, replacement, .outbound, 1).admitted;
     try std.testing.expectEqual(admitted_revision + 1, c.revision);
     try std.testing.expect(!c.updateMetadata(ref, first, &.{}, 1));
-    try std.testing.expect(!c.disconnect(ref, first, .host, 1));
+    try std.testing.expect(!c.disconnect(ref, first, .host, .{}, at(1)));
     try std.testing.expectEqual(admitted_revision + 1, c.revision);
-    try std.testing.expect(c.disconnect(ref, replacement, .host, 2));
+    try std.testing.expect(c.disconnect(ref, replacement, .host, .{}, at(2)));
     var events: [1]t.Event = undefined;
     _ = c.pollEvents(&events);
     const closed_revision = c.revision;
@@ -501,7 +506,7 @@ test "peer catalog sampling publishes complete pair and invalidates closed gener
     _ = c.advanceCustody(&fork, 1, 60_000, &budget);
     try std.testing.expectEqual(@as(usize, 4), c.get(ref).?.custody_groups.?.count());
     try std.testing.expectEqual(@as(usize, 128), c.get(ref).?.sampling_groups.?.count());
-    try std.testing.expect(c.disconnect(ref, first, .host, 2));
+    try std.testing.expect(c.disconnect(ref, first, .host, .{}, at(2)));
     try std.testing.expect(c.get(ref).?.custody_groups == null);
     try std.testing.expect(c.get(ref).?.sampling_groups == null);
     var events: [1]t.Event = undefined;
@@ -573,9 +578,9 @@ test "catalog indexes retain disconnected identity and reject displaced and recy
     try std.testing.expectEqual(first, admitted.displaced.?);
     try std.testing.expect(c.findConnection(first) == null);
     try std.testing.expectEqual(ref, c.findConnection(preferred).?);
-    try std.testing.expect(!c.disconnect(ref, first, .transport_closed, 2));
+    try std.testing.expect(!c.disconnect(ref, first, .transport_closed, .{}, at(2)));
     try std.testing.expectEqual(ref, c.findConnection(preferred).?);
-    try std.testing.expect(c.disconnect(ref, preferred, .host, 3));
+    try std.testing.expect(c.disconnect(ref, preferred, .host, .{}, at(3)));
     try std.testing.expect(c.findConnection(preferred) == null);
     try std.testing.expectEqual(ref, c.find(&remote).?);
     try std.testing.expectEqual(t.ReputationDecision.none, c.report(ref, .high_tolerance, 3).?);
@@ -584,7 +589,7 @@ test "catalog indexes retain disconnected identity and reject displaced and recy
     const renewed: Handle = .{ .index = 2, .generation = 2 };
     try std.testing.expectEqual(ref, admit(&c, &remote, renewed, .outbound, 4).admitted.peer);
     try std.testing.expectEqual(ref, c.findConnection(renewed).?);
-    try std.testing.expect(!c.disconnect(ref, preferred, .transport_closed, 5));
+    try std.testing.expect(!c.disconnect(ref, preferred, .transport_closed, .{}, at(5)));
     try std.testing.expectEqual(ref, c.findConnection(renewed).?);
     const other = admit(&c, &third, replacement, .inbound, 6).admitted.peer;
     try std.testing.expectEqual(other, c.findConnection(replacement).?);
@@ -615,12 +620,12 @@ test "catalog caches node ID across custody changes and reconnects and resets it
     try std.testing.expect(c.updateMetadata(ref, first, &.{ .seq_number = 1, .custody_group_count = 8 }, 1));
     _ = c.advanceCustody(&.{ .fork = .fulu, .minimum_sampling_groups = 16 }, 1, 60_000, &budget);
     try std.testing.expectEqual(expected, c.rows[ref.index].node_id.?);
-    try std.testing.expect(c.disconnect(ref, first, .host, 2));
+    try std.testing.expect(c.disconnect(ref, first, .host, .{}, at(2)));
     var events: [2]t.Event = undefined;
     _ = c.pollEvents(&events);
     try std.testing.expectEqual(ref, admit(&c, &remote, replacement, .outbound, 3).admitted.peer);
     try std.testing.expectEqual(expected, c.rows[ref.index].node_id.?);
-    try std.testing.expect(c.disconnect(ref, replacement, .host, 4));
+    try std.testing.expect(c.disconnect(ref, replacement, .host, .{}, at(4)));
     _ = c.pollEvents(&events);
     const third_id = try custody.nodeId(&third);
     const reused = c.admit(&third, &local, .{ .index = 1, .generation = 3 }, &.{ .direction = .outbound, .endpoint = .unspecified, .now_ms = 5, .node_id = third_id }).admitted.peer;
@@ -636,7 +641,7 @@ test "weak non-completion persists across reconnect and connection slot reuse" {
     defer catalog.deinit(std.testing.allocator);
     const peer = admit(&catalog, &remote, first, .outbound, 0).admitted.peer;
     try std.testing.expect(catalog.nonCompletion(peer, 100));
-    try std.testing.expect(catalog.disconnect(peer, first, .transport_closed, 100));
+    try std.testing.expect(catalog.disconnect(peer, first, .transport_closed, .{}, at(100)));
     const other = admit(&catalog, &third, replacement, .inbound, 100).admitted.peer;
     try std.testing.expect(catalog.nonCompletion(catalog.find(&remote).?, 100));
     try std.testing.expectEqual(@as(f64, -1), catalog.get(peer).?.score);
@@ -662,7 +667,7 @@ test "peer catalog uses empty established slots before reclaiming disconnected i
             c.rowForMut(peer).?.dial.addresses = .{ .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9001 } }, .unspecified };
             c.rowForMut(peer).?.dial.address_count = 1;
             try std.testing.expectEqual(peer, admit(&c, &remote, first, direction, 0).admitted.peer);
-            try std.testing.expect(c.disconnect(peer, first, .transport_closed, 1));
+            try std.testing.expect(c.disconnect(peer, first, .transport_closed, .{}, at(1)));
             var events: [3]t.Event = undefined;
             _ = c.pollEvents(&events);
             const before = c.rowFor(peer).?.dial;

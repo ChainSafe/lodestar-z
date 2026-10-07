@@ -421,22 +421,19 @@ pub const Control = struct {
             row.rejection = .early_close;
     }
 
-    /// Records a tracked connection's close against the peer's identity and endpoint, then retires
-    /// its control state. Returns false for an untracked connection; the owner leaves it alone.
+    /// Retires control state and returns its evidence for the catalog close. A pending request
+    /// keeps its reservation until its terminal event. Untracked connections have no effect.
     pub fn close(
         self: *Control,
-        catalog: *Catalog,
         peer: t.PeerRef,
         conn: t.Handle,
         reason: t.DisconnectReason,
-        now: Now,
-    ) bool {
-        const row = self.connectionState(peer, conn) orelse return false;
-        catalog.settleRejections(peer, conn, row.evidence != .pending, row.rejection, now.millis());
-        catalog.rememberClosed(peer, conn, row.evidence != .pending, reason, row.rejection, now);
+    ) ?Catalog.CloseEvidence {
+        const row = self.connectionState(peer, conn) orelse return null;
+        const evidence: Catalog.CloseEvidence = .{ .ready = row.evidence != .pending, .rejection = row.rejection };
         self.retire(peer, conn);
         self.counters.closed[@intFromEnum(reason)] +|= 1;
-        return true;
+        return evidence;
     }
     fn acceptStatus(
         self: *Control,

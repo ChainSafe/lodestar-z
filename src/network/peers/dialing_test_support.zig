@@ -1,4 +1,5 @@
 const schedule_test_support = @import("../schedule_test_support.zig");
+const Now = @import("../types.zig").Now;
 const Catalog = @import("catalog.zig").Catalog;
 const std = @import("std");
 const mod = @import("dialing.zig");
@@ -39,7 +40,7 @@ pub fn disconnect(catalog: *Catalog, peer: *const t.PeerId, connected_at_ms: u64
     const ref = catalog.find(peer).?;
     const row = catalog.rowFor(ref).?;
     std.debug.assert(row.connected_at_ms == connected_at_ms);
-    if (row.connection) |conn| std.debug.assert(catalog.disconnect(ref, conn, reason, now_ms));
+    if (row.connection) |conn| std.debug.assert(catalog.disconnect(ref, conn, reason, .{}, Now.fromMilliseconds(.{ .mono_ms = now_ms, .unix_s = 0 })));
 }
 
 pub fn expire(queue: *mod.Dialing, catalog: *Catalog, now_ms: u64) !void {

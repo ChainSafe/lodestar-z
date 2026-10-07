@@ -18,7 +18,7 @@ const client = @import("client.zig");
 const goodbye = @import("goodbye.zig");
 
 pub const Catalog = struct {
-    pub const history_retention_ms: u64 = 600_000;
+    pub const replacement_grace_ms: u64 = 600_000;
     pub const hint_freshness_ms: u64 = 300_000;
     pub const DialState = struct {
         automatic: bool = false,
@@ -31,7 +31,7 @@ pub const Catalog = struct {
         address_index: u8 = 0,
         manual_until_ms: u64 = 0,
         eligible_at_ms: u64 = 0,
-        history_until_ms: u64 = 0,
+        replacement_after_ms: u64 = 0,
         failures: u8 = 0,
         /// Replay queued this automatic intent from a remembered record; its first attempt is preferred.
         replay: enum { none, untried, tried } = .none,
@@ -688,14 +688,27 @@ pub const Catalog = struct {
         return self.connected_count;
     }
 
+    pub const CloseEvidence = struct {
+        /// The connection completed valid Status and Metadata exchanges.
+        ready: bool = false,
+        rejection: ?t.Rejection = null,
+    };
+
+    /// Records close evidence before clearing the connection and applying its retry policy.
+    /// Duplicate and stale connections have no effect.
     pub fn disconnect(
         self: *Catalog,
         ref: t.PeerRef,
         conn: t.Handle,
         reason: t.DisconnectReason,
-        now_ms: u64,
+        evidence: CloseEvidence,
+        now: Now,
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
+        const now_ms = now.millis();
+        self.settleRejections(ref, row, evidence, now_ms);
+        if (evidence.ready)
+            self.serve(row, servedUntil(reason) and (evidence.rejection == null or evidence.rejection == .shutdown), now);
         std.log.scoped(.network_peers).debug("peer_disconnected peer={f} connection={d}:{d} reason={s} connected_ms={d} relevant={any} agent={f}", .{ logging.peer(&row.identity), conn.index, conn.generation, @tagName(reason), now_ms -| row.connected_at_ms, row.status != null, std.json.fmt(client.agent(&row.identify), .{}) });
         self.revision +|= 1;
         self.by_connection[conn.index] = null;
@@ -717,7 +730,7 @@ pub const Catalog = struct {
 
     fn connectionClosed(self: *Catalog, index: usize, reason: t.DisconnectReason, now_ms: u64) void {
         const row = &self.rows[index];
-        row.dial.history_until_ms = @max(row.dial.history_until_ms, now_ms +| history_retention_ms);
+        row.dial.replacement_after_ms = @max(row.dial.replacement_after_ms, now_ms +| replacement_grace_ms);
         if (reason == .capacity or reason == .count_pruning) {
             if (row.reputation.redial_until_ms <= now_ms)
                 row.reputation.deferRedial(now_ms, goodbye.cooldownMs(129));
@@ -761,34 +774,22 @@ pub const Catalog = struct {
         self.history.clearFailures(self.history.endpointKey(&row.identity, endpoint));
     }
 
-    /// Settles the identity's rejection memory as its connection closes. Control calls it with whether
-    /// the connection completed the Status and Metadata exchange, and with the rejection the remote
-    /// ended it with. A ready connection closing `kept_connection_ms` or more after its admission
-    /// first clears the identity's earlier rejections. A rejection then adds one and releases the
-    /// discovery intent, so only a rediscovery once the block passed dials the peer again.
-    pub fn settleRejections(self: *Catalog, ref: t.PeerRef, conn: t.Handle, ready: bool, rejection: ?t.Rejection, now_ms: u64) void {
-        const row = self.connectedRow(ref, conn) orelse return;
+    /// A ready connection kept for at least `kept_connection_ms` clears earlier rejections before
+    /// recording this close's rejection. Rejecting the discovery intent requires rediscovery after
+    /// the block passes before another automatic dial.
+    fn settleRejections(self: *Catalog, ref: t.PeerRef, row: *Row, evidence: CloseEvidence, now_ms: u64) void {
         const key = self.history.identityKey(&row.identity);
-        if (ready and now_ms -| row.connected_at_ms >= dial_history.kept_connection_ms) self.history.clearRejections(key);
-        const kind = rejection orelse return;
+        if (evidence.ready and now_ms -| row.connected_at_ms >= dial_history.kept_connection_ms) self.history.clearRejections(key);
+        const kind = evidence.rejection orelse return;
         const block_ms = self.history.reject(key, kind, now_ms);
         self.rejections[@intFromEnum(kind)] +|= 1;
         if (kind != .shutdown) self.remembered.forget(&row.identity);
+        const conn = row.connection.?;
         std.log.scoped(.network_peers).debug("peer_rejection_recorded peer={f} connection={d}:{d} kind={s} block_ms={d}", .{ logging.peer(&row.identity), conn.index, conn.generation, @tagName(kind), block_ms });
         if (!row.dial.automatic) return;
         row.dial.automatic = false;
         self.markDial(ref.index);
         if (!row.direct and row.dial.manual_until_ms == 0 and row.attempt == null) self.releaseIntent(ref);
-    }
-
-    /// Counts an automatic dial's connection as kept, and refreshes the peer's remembered record,
-    /// once it has served `qualify_ms`. Control calls it as the connection closes, with whether it
-    /// completed the Status and Metadata exchange and how it ended: a remote rejection or a close
-    /// that shows the peer ineligible leaves the record as it was.
-    pub fn rememberClosed(self: *Catalog, ref: t.PeerRef, conn: t.Handle, ready: bool, reason: t.DisconnectReason, rejection: ?t.Rejection, now: Now) void {
-        const row = self.connectedRow(ref, conn) orelse return;
-        if (!ready) return;
-        self.serve(row, servedUntil(reason) and (rejection == null or rejection == .shutdown), now);
     }
 
     /// Refreshes the remembered record of every connection that qualifies now: our dial, admitted
@@ -864,7 +865,7 @@ pub const Catalog = struct {
         if (row.closing_reason != null) return false;
         self.revision +|= 1;
         row.status = status.*;
-        row.dial.history_until_ms = @max(row.dial.history_until_ms, now_ms +| history_retention_ms);
+        row.dial.replacement_after_ms = @max(row.dial.replacement_after_ms, now_ms +| replacement_grace_ms);
         row.status_at_ms = now_ms;
         row.pending_update = true;
         self.syncEvent(ref.index);

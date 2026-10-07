@@ -342,18 +342,18 @@ test "core coverage automatic retention renews only at authenticated Status succ
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.protocols.gossipsub, &.{candidate}, setup.pair.now).accepted);
     _ = try setup.pair.dial();
     for (0..50) |_| try setup.step(0);
-    const horizon = setup.client.peer_manager.catalog.rows[0].dial.history_until_ms;
+    const horizon = setup.client.peer_manager.catalog.rows[0].dial.replacement_after_ms;
     setup.pair.advance(1000);
     for (0..10) |_| try setup.step(0);
-    try std.testing.expectEqual(horizon, setup.client.peer_manager.catalog.rows[0].dial.history_until_ms);
+    try std.testing.expectEqual(horizon, setup.client.peer_manager.catalog.rows[0].dial.replacement_after_ms);
     candidate.hints.sequence = 2;
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.protocols.gossipsub, &.{candidate}, setup.pair.now).accepted);
     setup.pair.advance(21_000);
     for (0..50) |_| try setup.step(0);
-    try std.testing.expectEqual(horizon, setup.client.peer_manager.catalog.rows[0].dial.history_until_ms);
+    try std.testing.expectEqual(horizon, setup.client.peer_manager.catalog.rows[0].dial.replacement_after_ms);
     setup.client.peer_manager.reStatusPeers(setup.pair.now);
     for (0..50) |_| try setup.step(0);
-    try std.testing.expect(setup.client.peer_manager.catalog.rows[0].dial.history_until_ms > horizon);
+    try std.testing.expect(setup.client.peer_manager.catalog.rows[0].dial.replacement_after_ms > horizon);
 }
 
 test "core coverage bounded custody work resumes without output and stale metadata cannot satisfy demand" {

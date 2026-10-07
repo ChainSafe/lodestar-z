@@ -219,8 +219,8 @@ pub const PeerManager = struct {
     pub fn retireConnection(self: *PeerManager, peer: t.PeerRef, conn: t.Handle, reason: t.DisconnectReason, now: Now) ?Retired {
         const current = self.catalog.findConnection(conn) orelse return null;
         if (!std.meta.eql(current, peer)) return null;
-        if (!self.control.close(&self.catalog, peer, conn, reason, now)) return null;
-        const disconnected = self.catalog.disconnect(peer, conn, reason, now.millis());
+        const evidence = self.control.close(peer, conn, reason) orelse return null;
+        const disconnected = self.catalog.disconnect(peer, conn, reason, evidence, now);
         std.debug.assert(disconnected);
         return .{ .peer = peer, .conn = conn };
     }
