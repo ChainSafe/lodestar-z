@@ -12,8 +12,7 @@ export function immediates(): (() => void)[] {
 }
 
 export function runUntilEscalated(queued: (() => void)[], max: number): boolean {
-  for (let i = 0; i < max; i++) {
-    if (queued.length === 0) vi.advanceTimersByTime(25);
+  for (let i = 0; i < max && queued.length > 0; i++) {
     try {
       queued.shift()?.();
     } catch (error) {

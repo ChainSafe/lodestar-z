@@ -79,7 +79,8 @@ if (mode === "exit") {
   const outcome = (promise) => promise.then(() => null, error => error);
   let host = {
     network: null,
-    capacity: () => ({ordinary: true, serving: 32}),
+    subscribeCapacity: () => () => {},
+    capacity: () => ({gossipValidation: "ready", incomingRequestSlots: 32}),
     validate(job) {
       deliver([outcome(job.reported), outcome(Promise.all([Promise.resolve(), job.reported]))]);
       return validation;
@@ -139,7 +140,8 @@ if (mode === "exit") {
   const batches = [];
   function closePending() {
     const network = createNativeNetwork(config, {
-      capacity: () => null,
+      subscribeCapacity: () => () => {},
+      capacity: () => ({gossipValidation: "backpressured", incomingRequestSlots: 0}),
       validate: async () => [],
       checkDependencies: (checks) => checks.map(() => false),
       serve: (request) => request.cancel(),
@@ -147,6 +149,7 @@ if (mode === "exit") {
       failed: noop,
       logs: noop,
     });
+    network.stopDelivery();
     const runtime = runtimeOf(network);
     const exchange = runtime.exchange.bind(runtime);
     runtime.exchange = (...args) => {
@@ -170,7 +173,8 @@ if (mode === "exit") {
   // A completed publication, command or request pull leaves a running, idle network, which the process exits under
   // without a close. So does a request whose outcome no pull took.
   const network = createNativeNetwork(applicationConfig(), {
-    capacity: () => ({ordinary: true, serving: 32}),
+    subscribeCapacity: () => () => {},
+    capacity: () => ({gossipValidation: "ready", incomingRequestSlots: 32}),
     validate: (job) => Promise.resolve(job.messages.map(() => "ignore")),
     checkDependencies: (checks) => checks.map(() => false),
     serve: (request) => request.cancel(),
@@ -204,7 +208,8 @@ if (mode === "exit") {
     served = resolve;
   });
   const network = createNativeNetwork(config, {
-    capacity: () => ({ordinary: true, serving: 32}),
+    subscribeCapacity: () => () => {},
+    capacity: () => ({gossipValidation: "ready", incomingRequestSlots: 32}),
     validate: (job) => Promise.resolve(job.messages.map(() => "ignore")),
     checkDependencies: (checks) => checks.map(() => false),
     async serve(request) {

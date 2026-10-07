@@ -39,11 +39,11 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     if (len < which.info().request_min) return error.RequestTooSmall;
     if (len > which.info().request_max) return error.RequestTooLarge;
     runtime.lock();
-    if (runtime.stop or runtime.quiescent) {
+    if (runtime.bridge.stop or runtime.bridge.quiescent) {
         runtime.unlock();
         return error.NetworkClosed;
     }
-    const token = runtime.requests.?.reserve(which, len) catch |err| {
+    const token = runtime.bridge.requests.?.reserve(which, len) catch |err| {
         runtime.unlock();
         if (err == error.NetworkRequestFull or err == error.NetworkBridgeFull) return rejectAdmission(runtime.env);
         return err;
@@ -56,19 +56,19 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
         runtime.retireRequestStorageLocked();
         runtime.unlock();
     }
-    try runtime.requests.?.allocate(token, len);
-    const cell = runtime.requests.?.get(token).?;
+    try runtime.bridge.requests.?.allocate(token, len);
+    const cell = runtime.bridge.requests.?.get(token).?;
     cell.peer = identity;
     cell.options = request_options;
     const value = try network_js.handle(runtime.env, token.index, token.generation);
     try decode.bytes(data, cell.input);
     runtime.lock();
     defer runtime.unlock();
-    if (runtime.stop or runtime.quiescent) return error.NetworkClosed;
-    cell.order = try runtime.table.nextOrder();
+    if (runtime.bridge.stop or runtime.bridge.quiescent) return error.NetworkClosed;
+    cell.order = try runtime.bridge.commands.nextOrder();
     cell.state = .queued;
-    runtime.requests.?.refresh(cell);
-    runtime.signalLocked();
+    runtime.bridge.requests.?.refresh(cell);
+    runtime.wakeOwnerLocked();
     return value;
 }
 fn rejectAdmission(env: napi.Env) anyerror {
@@ -82,7 +82,7 @@ fn rejectAdmission(env: napi.Env) anyerror {
 pub fn pull(runtime: *Runtime, handle: Value) !void {
     const token = try decode.handle(requests.Token, handle, requests.capacity_max);
     runtime.lock();
-    const cell = runtime.requests.?.get(token) orelse {
+    const cell = runtime.bridge.requests.?.get(token) orelse {
         runtime.unlock();
         return error.InvalidRequestHandle;
     };
@@ -91,23 +91,23 @@ pub fn pull(runtime: *Runtime, handle: Value) !void {
         return error.NetworkRequestBusy;
     }
     requests.armPull(runtime, cell);
-    const ref_notify = runtime.notify_live;
+    const ref_notify = runtime.bridge.notify_live;
     runtime.unlock();
-    if (ref_notify) runtime.notify.ref(runtime.env) catch {};
+    if (ref_notify) runtime.bridge.notify.ref(runtime.env) catch {};
 }
 /// Cancels and retires the request. Its terminal completion ends a retirement the iterator awaits, one not
 /// `abandoned`; a stale handle's request already retired.
 pub fn retire(runtime: *Runtime, handle: Value, abandoned: bool) !void {
     const token = try decode.handle(requests.Token, handle, requests.capacity_max);
     runtime.lock();
-    const cell = runtime.requests.?.get(token) orelse {
+    const cell = runtime.bridge.requests.?.get(token) orelse {
         runtime.unlock();
         return;
     };
     requests.armRetirement(runtime, cell, !abandoned);
-    const ref_notify = runtime.notify_live;
+    const ref_notify = runtime.bridge.notify_live;
     runtime.unlock();
-    if (ref_notify and !abandoned) runtime.notify.ref(runtime.env) catch {};
+    if (ref_notify and !abandoned) runtime.bridge.notify.ref(runtime.env) catch {};
 }
 fn terminalError(env: napi.Env, terminal: requests.Terminal, cell: *const requests.Cell) !Value {
     switch (terminal) {
@@ -139,7 +139,7 @@ fn terminalError(env: napi.Env, terminal: requests.Terminal, cell: *const reques
 /// A request completion: `value`, a copy of the chunk its pending pull resolves with, or its terminal outcome, `done`
 /// or the `error` a pending pull rejects with.
 pub fn completion(env: napi.Env, runtime: *Runtime, delivered: requests.Completion) !Value {
-    const cell = &runtime.requests.?.cells[delivered.token.index];
+    const cell = &runtime.bridge.requests.?.cells[delivered.token.index];
     const object = try env.createObject();
     try object.setNamedProperty("family", try env.createStringUtf8("request"));
     try object.setNamedProperty("handle", try network_js.handle(env, delivered.token.index, delivered.token.generation));

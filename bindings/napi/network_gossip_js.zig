@@ -20,7 +20,7 @@ pub fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell) !Value
     var destination: [*]u8 = undefined;
     const buffer = try env.createArrayBuffer(cell.input.len, &destination);
     const data = try env.createTypedarray(.uint8, cell.input.len, buffer, 0);
-    runtime.gossip.?.copyPayload(cell, destination[0..cell.input.len]);
+    runtime.bridge.gossip.?.copyPayload(cell, destination[0..cell.input.len]);
     try object.setNamedProperty("data", data);
     var encoded: [172]u8 = undefined;
     try object.setNamedProperty("attestationData", if (cell.metadata.group) |group| try env.createStringUtf8(std.base64.standard.Encoder.encode(&encoded, &group)) else try env.getNull());

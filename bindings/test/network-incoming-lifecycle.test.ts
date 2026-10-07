@@ -3,8 +3,8 @@ import type {NativeForkEntry, NativeIdentity} from "../src/network.js";
 import type {NativeAction, NativeExchange, NativeExchangeDemand} from "../src/network-runtime.js";
 import {
   applicationConfig,
-  capacity,
   childTestTimeout,
+  gossipAll,
   localIntent,
   requestForks,
   runChild,
@@ -76,7 +76,7 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
         .poll(
           () => {
             // Peer events are taken too, so nothing waits.
-            incoming = native.exchange([], {...settleOnly, capacity, peers: 64, servingStarts: 1}).serving[0] ?? null;
+            incoming = native.exchange([], {...gossipAll, servingStarts: 1}).serving[0] ?? null;
             return incoming !== null;
           },
           {timeout: 5000}

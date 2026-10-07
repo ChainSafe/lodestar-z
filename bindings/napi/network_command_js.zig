@@ -14,7 +14,7 @@ const network_gossip_diagnostics = @import("network_gossip_diagnostics.zig");
 
 /// A completed command's record: the result its promise resolves with, or the error it rejects with.
 pub fn completion(env: napi.Env, runtime: *Runtime, token: commands.Token) !Value {
-    const cell = runtime.table.get(token);
+    const cell = runtime.bridge.commands.get(token);
     const object = try env.createObject();
     try object.setNamedProperty("family", try env.createStringUtf8("command"));
     try object.setNamedProperty("handle", try js.handle(env, token.index, token.generation));
@@ -26,10 +26,10 @@ pub fn completion(env: napi.Env, runtime: *Runtime, token: commands.Token) !Valu
 }
 
 fn result(env: napi.Env, runtime: *Runtime, index: usize) !Value {
-    const operation = &runtime.table.cells[index];
-    const store = runtime.table.cells[index].store;
+    const operation = &runtime.bridge.commands.cells[index];
+    const store = runtime.bridge.commands.cells[index].store;
     const object = switch (operation.input.command) {
-        .getGossipDiagnostics => try network_gossip_diagnostics.copy(env, &runtime.stores.?.gossip_diagnostics[store.?]),
+        .getGossipDiagnostics => try network_gossip_diagnostics.copy(env, &runtime.bridge.stores.?.gossip_diagnostics[store.?]),
         .getIdentity => try identity(env, &operation.identity),
         .applyIntent, .getPeers, .getDirectPeers, .getRememberedPeers => try env.createObject(),
         .removeDirectPeer => return env.getBoolean(operation.boolean),
@@ -43,7 +43,7 @@ fn result(env: napi.Env, runtime: *Runtime, index: usize) !Value {
         },
         .getPeers => {
             const peers = try env.createArrayWithLength(operation.count);
-            for (runtime.stores.?.snapshots[store.?][0..operation.count], 0..) |*row, i| try peers.setElement(@intCast(i), try projection.state(env, row));
+            for (runtime.bridge.stores.?.snapshots[store.?][0..operation.count], 0..) |*row, i| try peers.setElement(@intCast(i), try projection.state(env, row));
             try object.setNamedProperty("peers", peers);
             try object.setNamedProperty("occupiedCount", try env.createDouble(@floatFromInt(operation.count)));
             try object.setNamedProperty("capacity", try env.createUint32(runtime.peer_capacity));
@@ -55,11 +55,11 @@ fn result(env: napi.Env, runtime: *Runtime, index: usize) !Value {
         },
         .getDirectPeers => {
             const identities = try env.createArrayWithLength(operation.count);
-            for (runtime.stores.?.direct[store.?][0..operation.count], 0..) |*peer, i| try identities.setElement(@intCast(i), try js.peerIdValue(env, peer));
+            for (runtime.bridge.stores.?.direct[store.?][0..operation.count], 0..) |*peer, i| try identities.setElement(@intCast(i), try js.peerIdValue(env, peer));
             try object.setNamedProperty("identities", identities);
         },
         .getRememberedPeers => {
-            const page = &runtime.stores.?.remembered[store.?];
+            const page = &runtime.bridge.stores.?.remembered[store.?];
             try object.setNamedProperty("genesisValidatorsRoot", try js.bytes(env, &page.genesis_root));
             const peers = try env.createArrayWithLength(operation.count);
             for (page.records[0..operation.count], 0..) |*record, i| {
@@ -109,21 +109,21 @@ fn parseAddresses(value: Value, input: *commands.Input) !void {
 pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Command, args: []const Value) !Value {
     const token = try runtime.reserveCommand(command);
     errdefer runtime.abortCommand(token);
-    const operation = &runtime.table.cells[token.index];
-    const store = runtime.table.cells[token.index].store;
+    const operation = &runtime.bridge.commands.cells[token.index];
+    const store = runtime.bridge.commands.cells[token.index].store;
     switch (command) {
         .applyIntent => {
             operation.input.slot = try decode.bigint(args[1]);
-            try application_cfg.parseIntent(args[0], &runtime.stores.?.intents[store.?], runtime.max_peers);
+            try application_cfg.parseIntent(args[0], &runtime.bridge.stores.?.intents[store.?], runtime.max_peers);
         },
         .updateStatus => try cfg.parseStatus(args[0], &operation.input.status),
         .getIdentity, .getPeers, .getDirectPeers, .getRememberedPeers => {},
         .getGossipDiagnostics => operation.input.diagnostics_cursor = @intCast(try decode.integer(args[0], 512)),
         .reStatusPeers => {
             operation.input.target_count = @intCast(try decode.array(args[0], 256));
-            for (runtime.stores.?.targets[store.?][0..operation.input.target_count], 0..) |*peer, i| {
+            for (runtime.bridge.stores.?.targets[store.?][0..operation.input.target_count], 0..) |*peer, i| {
                 peer.* = try decode.peerIdFrom(try args[0].getElement(@intCast(i)));
-                for (runtime.stores.?.targets[store.?][0..i]) |*prior| if (peer.eql(prior)) return error.InvalidNetworkConfig;
+                for (runtime.bridge.stores.?.targets[store.?][0..i]) |*prior| if (peer.eql(prior)) return error.InvalidNetworkConfig;
             }
         },
         else => {
@@ -138,6 +138,6 @@ pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Comma
     // Prepared before admission commits, so every admitted command has a handle to complete.
     const handle = try js.handle(env, token.index, token.generation);
     try runtime.queueCommand(token);
-    runtime.notify.ref(env) catch {};
+    runtime.bridge.notify.ref(env) catch {};
     return handle;
 }

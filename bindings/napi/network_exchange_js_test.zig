@@ -7,7 +7,7 @@ const shim = @import("network_test_support.zig");
 test "exchange failures classify as stopped or contract" {
     // An exception that clears is the bridge's contract failure; a pending-exception status with none pending is how
     // N-API reports JavaScript that cannot run.
-    var classified: Runtime = .{ .env = undefined, .notify_live = false };
+    var classified: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false } };
     var host: exchange_js.Host = .{ .env = undefined, .runtime = &classified };
     for ([_]struct { anyerror, bool, exchange_mod.Failure }{
         .{ error.Closing, true, .stopped },

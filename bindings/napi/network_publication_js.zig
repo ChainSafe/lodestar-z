@@ -30,7 +30,7 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     const len = payloadLength(data) catch |err| return rejectInput(runtime.env, err);
     const token = runtime.reservePublication(canonical.name.kind, len) catch |err| return rejectInput(runtime.env, err);
     errdefer runtime.retirePublication(token);
-    const cell = runtime.publications.?.get(token).?;
+    const cell = runtime.bridge.publications.?.get(token).?;
     cell.topic_len = @intCast(topic_len);
     @memcpy(cell.topic[0..topic_len], name[0..topic_len]);
     cell.options = publish_options;
@@ -42,16 +42,16 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     const queued_ms = try clock.monotonic();
     runtime.lock();
     defer runtime.unlock();
-    if (runtime.stop or runtime.quiescent) return error.NetworkClosed;
-    cell.order = try runtime.table.nextOrder();
+    if (runtime.bridge.stop or runtime.bridge.quiescent) return error.NetworkClosed;
+    cell.order = try runtime.bridge.commands.nextOrder();
     cell.queued_ms = queued_ms;
     cell.payload = copy;
-    runtime.publications.?.transition(cell, .queued);
-    runtime.publications.?.diag.copies +|= 1;
-    runtime.publications.?.diag.bytesCopied +|= len;
-    runtime.signalLocked();
+    runtime.bridge.publications.?.transition(cell, .queued);
+    runtime.bridge.publications.?.diag.copies +|= 1;
+    runtime.bridge.publications.?.diag.bytesCopied +|= len;
+    runtime.wakeOwnerLocked();
     // Ref does not allocate JS values or invoke JavaScript.
-    runtime.notify.ref(runtime.env) catch {};
+    runtime.bridge.notify.ref(runtime.env) catch {};
     return handle;
 }
 

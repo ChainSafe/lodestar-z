@@ -71,7 +71,7 @@ pub const Table = struct {
     /// quiescent flags. `refresh` keeps them current after each change to a cell.
     due: [4]std.StaticBitSet(capacity_max) = @splat(.empty),
     /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
-    settle_cursor: usize = 0,
+    completion_cursor: usize = 0,
     backing: std.mem.Allocator,
     budget: *Budget,
     diag: Diagnostics = .{},
@@ -159,7 +159,7 @@ pub const Table = struct {
     pub fn refresh(self: *Table, cell: *const Cell) void {
         const index = (@intFromPtr(cell) - @intFromPtr(self.cells.ptr)) / @sizeOf(Cell);
         std.debug.assert(&self.cells[index] == cell);
-        for (&self.due, 0..) |*set, flags_index| set.setValue(index, settleable(cell, flags_index & 1 != 0, flags_index & 2 != 0));
+        for (&self.due, 0..) |*set, flags_index| set.setValue(index, completionReady(cell, flags_index & 1 != 0, flags_index & 2 != 0));
     }
     /// The first cell at or after `from` whose completion is due. O(1).
     pub fn nextDue(self: *const Table, from: usize, stop: bool, quiescent: bool) ?usize {
@@ -170,7 +170,7 @@ pub const Table = struct {
     /// Whether the completion of any cell is due. O(1); debug builds check it against a scan.
     pub fn anyDue(self: *const Table, stop: bool, quiescent: bool) bool {
         if (builtin.mode == .Debug) for (&self.due, 0..) |*set, flags_index| for (0..capacity_max) |i| {
-            std.debug.assert(set.isSet(i) == (i < self.cells.len and settleable(&self.cells[i], flags_index & 1 != 0, flags_index & 2 != 0)));
+            std.debug.assert(set.isSet(i) == (i < self.cells.len and completionReady(&self.cells[i], flags_index & 1 != 0, flags_index & 2 != 0)));
         };
         return self.due[dueIndex(stop, quiescent)].findFirstSet() != null;
     }
@@ -245,7 +245,7 @@ pub fn deliverable(cell: *const Cell, stop: bool) bool {
 }
 /// A completion an exchange delivers now: a chunk to its pending pull, or the terminal outcome to a pending pull or a
 /// retirement, or to the iterator once the owner has quiesced, so no request outlives the runtime's close.
-pub fn settleable(cell: *const Cell, stop: bool, quiescent: bool) bool {
+pub fn completionReady(cell: *const Cell, stop: bool, quiescent: bool) bool {
     if (cell.state == .free or cell.state == .preparing or cell.copying) return false;
     if (deliverable(cell, stop)) return true;
     const terminal = cell.terminal != null and cell.native == null and (cell.chunk == null or cell.retiring or stop);
@@ -266,9 +266,9 @@ pub fn outcome(cell: *const Cell) Terminal {
 pub fn armPull(runtime: *Runtime, cell: *Cell) void {
     cell.pulling = true;
     if (cell.delivered) cell.consume = true;
-    runtime.requests.?.refresh(cell);
-    runtime.signalLocked();
-    runtime.recomputeLocked(.completions);
+    runtime.bridge.requests.?.refresh(cell);
+    runtime.wakeOwnerLocked();
+    runtime.notifyIfReadyLocked();
 }
 /// JS thread: asks the owner to cancel and retire the request, whose terminal completion ends a retirement that is
 /// `awaited`.
@@ -276,9 +276,9 @@ pub fn armRetirement(runtime: *Runtime, cell: *Cell, awaited: bool) void {
     cell.retirement_awaited = cell.retirement_awaited or awaited;
     cell.retiring = true;
     cell.cancel = true;
-    runtime.requests.?.refresh(cell);
-    runtime.signalLocked();
-    runtime.recomputeLocked(.completions);
+    runtime.bridge.requests.?.refresh(cell);
+    runtime.wakeOwnerLocked();
+    runtime.notifyIfReadyLocked();
 }
 
 pub fn rejection(err: anyerror) !Rejection {
@@ -300,12 +300,12 @@ pub const turn_max = 16;
 pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
     runtime.lock();
     defer runtime.unlock();
-    const table = &runtime.requests.?;
+    const table = &runtime.bridge.requests.?;
     const cell = table.get(token) orelse return error.InvalidRequestHandle;
-    if (cell.cancel or runtime.stop) {
-        cell.terminal = if (runtime.stop) .closed else .{ .failed = .{ .reason = .cancelled, .phase = null } };
+    if (cell.cancel or runtime.bridge.stop) {
+        cell.terminal = if (runtime.bridge.stop) .closed else .{ .failed = .{ .reason = .cancelled, .phase = null } };
     } else {
-        const core = &runtime.heavy.?.core;
+        const core = &runtime.owner.?.core;
         cell.native = core.sendReqRespRequest(&cell.peer, cell.protocol, cell.input, cell.sink, cell.options, now) catch |err| blk: {
             cell.terminal = .{ .rejected = try rejection(err) };
             break :blk null;
@@ -319,36 +319,36 @@ pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
     }
     table.releasePayload(cell);
     table.refresh(cell);
-    runtime.recomputeLocked(.completions);
+    runtime.notifyIfReadyLocked();
 }
 pub fn applyPending(runtime: *Runtime, now: n.Now) void {
     runtime.lock();
     defer runtime.unlock();
-    if (runtime.requests) |*table| for (table.cells) |*cell| {
+    if (runtime.bridge.requests) |*table| for (table.cells) |*cell| {
         if (cell.state == .free or cell.state == .preparing or cell.state == .queued or cell.copying) continue;
-        if (cell.cancel or runtime.stop) {
+        if (cell.cancel or runtime.bridge.stop) {
             cell.chunk = null;
-            if (cell.native) |handle| _ = runtime.heavy.?.core.cancelRequest(handle, now);
+            if (cell.native) |handle| _ = runtime.owner.?.core.cancelRequest(handle, now);
         } else if (cell.consume) {
             cell.consume = false;
             cell.chunk = null;
             cell.delivered = false;
-            if (cell.native) |handle| _ = runtime.heavy.?.core.consumeResponse(handle, now);
+            if (cell.native) |handle| _ = runtime.owner.?.core.consumeResponse(handle, now);
         }
         table.releasePayload(cell);
         table.refresh(cell);
-        if (cell.terminal != null and (cell.pulling or cell.retiring)) runtime.recomputeLocked(.completions);
+        if (cell.terminal != null and (cell.pulling or cell.retiring)) runtime.notifyIfReadyLocked();
     };
 }
 pub fn capture(runtime: *Runtime, events: []const rr.ReqResp.Event, now: n.Now) !void {
     runtime.lock();
     defer runtime.unlock();
-    const core = &runtime.heavy.?.core;
+    const core = &runtime.owner.?.core;
     for (events) |event| {
         try network_incoming.captureLocked(runtime, event, now);
         switch (event) {
             .request => |incoming| {
-                if (runtime.incoming == null) try core.respondError(incoming.request, 2, "application handlers unavailable", now);
+                if (runtime.bridge.incoming == null) try core.respondError(incoming.request, 2, "application handlers unavailable", now);
                 continue;
             },
             .chunk_sent, .served => continue,
@@ -361,13 +361,13 @@ pub fn capture(runtime: *Runtime, events: []const rr.ReqResp.Event, now: n.Now) 
             else => unreachable,
         };
         if (handle.direction != .outbound) continue;
-        const table = if (runtime.requests) |*table| table else continue;
+        const table = if (runtime.bridge.requests) |*table| table else continue;
         for (table.cells) |*cell| {
             if (cell.native == null or !std.meta.eql(cell.native.?, handle)) continue;
             switch (event) {
                 .chunk => |chunk| {
                     std.debug.assert(cell.chunk == null and chunk.bytes.ptr == cell.sink.ptr and chunk.bytes.len <= cell.sink.len);
-                    if (!cell.cancel and !runtime.stop) cell.chunk = .{ .len = chunk.bytes.len, .fork = chunk.fork };
+                    if (!cell.cancel and !runtime.bridge.stop) cell.chunk = .{ .len = chunk.bytes.len, .fork = chunk.fork };
                 },
                 .done => {
                     cell.native = null;
@@ -384,7 +384,7 @@ pub fn capture(runtime: *Runtime, events: []const rr.ReqResp.Event, now: n.Now) 
                 },
                 else => unreachable,
             }
-            if (runtime.stop) {
+            if (runtime.bridge.stop) {
                 cell.terminal = .closed;
                 if (!cell.copying) cell.chunk = null;
             }
@@ -397,13 +397,13 @@ pub fn capture(runtime: *Runtime, events: []const rr.ReqResp.Event, now: n.Now) 
             }
             table.releasePayload(cell);
             table.refresh(cell);
-            runtime.recomputeLocked(.completions);
+            runtime.notifyIfReadyLocked();
             break;
         }
     }
 }
 pub fn closeLocked(runtime: *Runtime) void {
-    if (runtime.requests) |*table| for (table.cells) |*cell| {
+    if (runtime.bridge.requests) |*table| for (table.cells) |*cell| {
         if (cell.state == .free or cell.state == .preparing) continue;
         cell.native = null;
         cell.terminal = .closed;

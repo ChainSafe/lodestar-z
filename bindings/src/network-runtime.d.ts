@@ -3,6 +3,7 @@
  * package exports only `createNativeNetwork`, and binding ownership tests import this module directly.
  */
 import type {
+  HostCapacity,
   IpEndpoint,
   NativeApplicationConfig,
   NativeConnection,
@@ -31,23 +32,15 @@ import type {
   PeerIdStr,
 } from "./network.js";
 
-/**
- * One exchange's quotas, where zero disables a service, and the host's standing capacities. Completions settle or
- * arrive per family (1..256), whatever the rest of the demand; up to `peers` (0..64), `checks` (0..64) and
- * `servingStarts` (0..8) are delivered, and one job batch of `messages` (0..64) and `bytes` (0..16 MiB, a larger first
- * message comes alone), with ordinary jobs only under `claimOrdinary` and ordinary capacity.
- */
-export interface NativeExchangeDemand {
-  settleCells: number;
-  peers: number;
-  checks: number;
-  servingStarts: number;
-  messages: number;
-  bytes: number;
-  claimOrdinary: boolean;
-  /** Serving starts the host can take (0..32), counted down by delivered starts, and ordinary execution. Null keeps them. */
-  capacity: {serving: number; ordinary: boolean} | null;
-}
+/** Standing host capacity and this turn's remaining delivery allowance. */
+export type NativeExchangeDemand =
+  | {mode: "control"}
+  | {
+      mode: "delivery";
+      capacity: HostCapacity;
+      servingStarts: number;
+      claimNonUrgentGossip: boolean;
+    };
 
 /**
  * Applied before the exchange selects its delivery: one verdict per delivered message, one classification per
@@ -73,11 +66,8 @@ export interface NativeExchange {
    * resolved or expired them. Each handle arrives once; close drops the rest. Not a peer penalty.
    */
   readonly acknowledged: readonly NativeGossipHandle[];
-  /** Another exchange with the same enablement would make progress. */
-  readonly more: boolean;
-  /** Work waits for capacity the host reported as zero, or for a service this demand disabled. */
-  readonly parked: {readonly serving: boolean; readonly ordinary: boolean};
-  readonly disabledWaiting: boolean;
+  /** Deliverable work remains, including work deferred by this turn's allowance. */
+  readonly needsAnotherExchange: boolean;
   /**
    * Completed publications and commands, requests' chunks and terminal outcomes, and incoming streams'
    * acknowledgements, closes and permissions. Each settles its operation's promise, or its stream's pending calls and
@@ -204,7 +194,7 @@ export interface NativeNetworkApplicationRuntime {
    */
   getRememberedPeers(): Promise<NativeRememberedPeersSnapshot>;
   /**
-   * One host turn: applies up to 256 `actions`, delivers up to `demand.settleCells` publication, command, request and
+   * One host turn: applies up to 256 `actions`, delivers up to 32 publication, command, request and
    * incoming completions per family in `completions`, then the close result once nothing else awaits delivery, and
    * delivers the payload `demand` asks for. It throws only for invalid input or a nested call, before applying anything. Actions after
    * a stop are ignored; unknown penalized identities count in peerReportsIgnored.
@@ -232,11 +222,11 @@ export interface NativeNetworkApplicationRuntime {
  * another initializes only after the previous one closes and is fully released, including garbage collection.
  * Copies configuration and returns a running runtime; failure is terminal.
  * Calls onWorkAvailable on that thread when completions, the close result, peer events, incoming requests, or gossip
- * work arrive after an exchange found nothing queued.
+ * work becomes deliverable under the last exchange's standing capacity.
  * onWorkAvailable must only schedule an exchange in a later macrotask. No further notification arrives while work
- * stays queued, so the host exchanges again while one returns `more`, retries on a timer while it returns
- * `disabledWaiting` or `parked` work it can take later, and never cancels a scheduled exchange, also after the
- * runtime closes. The host must retain and drain the runtime through its close result.
+ * remains deliverable, so the caller exchanges again while `needsAnotherExchange` is true and schedules when host
+ * capacity recovers. Run an initial exchange and never cancel a scheduled exchange, including during shutdown.
+ * The caller must retain and drain the runtime through its close result.
  */
 export function initializeNativeNetworkRuntime(
   config: NativeApplicationConfig,

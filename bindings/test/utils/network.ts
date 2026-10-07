@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import {type SpawnSyncReturns, spawnSync} from "node:child_process";
 import {basename} from "node:path";
 import {setTimeout as delay} from "node:timers/promises";
@@ -31,30 +32,15 @@ import type {
 
 const MIB = 1024 * 1024;
 
-/** An exchange that only settles results, as a closed host's does; tests add the payload they take. */
-export const settleOnly: NativeExchangeDemand = {
-  bytes: 0,
-  capacity: null,
-  checks: 0,
-  claimOrdinary: false,
-  messages: 0,
-  peers: 0,
-  servingStarts: 0,
-  settleCells: 32,
-};
-/** A host that serves every start and executes ordinary gossip. */
-export const capacity = {ordinary: true, serving: 32};
-/** Dependency checks and every claimable gossip job, as one exchange takes them. */
-export const gossipAll: NativeExchangeDemand = {
-  ...settleOnly,
-  bytes: 16 * MIB,
+export const settleOnly = {mode: "control"} as const;
+export const capacity = {gossipValidation: "ready", incomingRequestSlots: 32} as const;
+export const gossipAll = {
   capacity,
-  checks: 64,
-  claimOrdinary: true,
-  messages: 64,
-};
-/** Dependency checks without a gossip claim. */
-export const checksOnly: NativeExchangeDemand = {...settleOnly, capacity, checks: 64};
+  claimNonUrgentGossip: true,
+  mode: "delivery",
+  servingStarts: 8,
+} as const;
+export const gossipUrgent = {...gossipAll, claimNonUrgentGossip: false};
 
 export function exchange(
   runtime: Pick<NativeNetworkApplicationRuntime, "exchange">,
@@ -64,11 +50,13 @@ export function exchange(
   return runtime.exchange(actions, demand);
 }
 
-/** The oldest queued incoming request, as one serving start of an exchange. */
-export function nextIncoming<T = NativeIncomingRequest>(runtime: {
-  exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): {serving: readonly T[]};
-}): T | null {
-  return runtime.exchange([], {...settleOnly, capacity, servingStarts: 1}).serving[0] ?? null;
+/** For request-only fixtures; unrelated payload delivery fails instead of losing its obligations. */
+export function nextIncoming(runtime: Pick<NativeNetworkApplicationRuntime, "exchange">): NativeIncomingRequest | null {
+  const result = runtime.exchange([], {...gossipAll, servingStarts: 1});
+  assert.equal(result.gossip, null, "Unexpected gossip while taking an incoming request");
+  assert.equal(result.checks.length, 0, "Unexpected dependency checks while taking an incoming request");
+  assert(result.serving.length <= 1, "Exchange exceeded its serving allowance");
+  return result.serving[0] ?? null;
 }
 
 /**
@@ -263,30 +251,20 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
 
 /**
  * The least a host does: each notification schedules settle-only exchanges in later macrotasks while they report
- * more, and retries on a timer while payload waits for a service it disables. Peers, serving starts and gossip stay
+ * pending completions. Peers, serving starts and gossip stay
  * with the test, which can also hold the host to take every exchange's results itself.
  */
 function settlingHost(onWorkAvailable: () => void = () => undefined) {
   let runtime: Pick<NativeNetworkApplicationRuntime, "exchange"> | undefined;
   let scheduled = false;
   let held = false;
-  let timer: NodeJS.Timeout | undefined;
   const drain = () => {
     scheduled = false;
     if (held) return;
     const result = runtime?.exchange([], settleOnly);
     if (result?.closed) {
-      if (timer) clearTimeout(timer);
-      timer = undefined;
       runtime = undefined;
-    } else if (result?.more) schedule();
-    else if (result?.disabledWaiting && !timer) {
-      timer = setTimeout(() => {
-        timer = undefined;
-        schedule();
-      }, 25);
-      timer.unref();
-    }
+    } else if (result?.needsAnotherExchange) schedule();
   };
   const schedule = () => {
     if (scheduled) return;

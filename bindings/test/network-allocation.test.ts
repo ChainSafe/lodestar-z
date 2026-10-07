@@ -26,7 +26,8 @@ test.skipIf(!glibc)(
       const script = `import {createNativeNetwork} from "./bindings/src/network.js";
         import {applicationConfig, topicName} from "./bindings/test/utils/network.ts";
         const host = {
-          capacity: () => ({ordinary: true, serving: 32}),
+          subscribeCapacity: () => () => {},
+          capacity: () => ({gossipValidation: "ready", incomingRequestSlots: 32}),
           validate: (job) => Promise.resolve(job.messages.map(() => "ignore")),
           checkDependencies: (checks) => checks.map(() => false),
           serve: (request) => request.cancel(),

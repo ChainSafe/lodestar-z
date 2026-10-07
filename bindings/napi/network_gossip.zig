@@ -39,12 +39,12 @@ pub fn projectWall(admitted: u64, clock: n.Now) !u64 {
 pub fn maintain(runtime: *Runtime, io: std.Io, tick: n.Now) !bool {
     runtime.lock();
     defer runtime.unlock();
-    const table = if (runtime.gossip) |*table| table else return false;
-    const core = &runtime.heavy.?.core;
+    const table = if (runtime.bridge.gossip) |*table| table else return false;
+    const core = &runtime.owner.?.core;
     const clock = try sample(io);
     table.maintain(clock.millis(), core.current_slot);
     var retired_bytes: usize = 0;
-    for (0..if (runtime.verdicts_held) 0 else batch_max) |_| {
+    for (0..if (runtime.bridge.verdicts_held) 0 else batch_max) |_| {
         const token = table.nextVerdict() orelse break;
         const cell = table.get(token).?;
         if (retired_bytes > 0 and cell.input.len > batch_bytes -| retired_bytes) break;
@@ -53,10 +53,8 @@ pub fn maintain(runtime: *Runtime, io: std.Io, tick: n.Now) !bool {
         table.outcome(result);
         table.retire(token);
     }
-    runtime.recomputeLocked(.completions);
-    runtime.recomputeLocked(.checks);
-    runtime.recomputeLocked(.gossip);
-    return table.pending(!runtime.verdicts_held);
+    runtime.notifyIfReadyLocked();
+    return table.pending(!runtime.bridge.verdicts_held);
 }
 pub const Ingress = struct {
     runtime: *Runtime,
@@ -73,8 +71,8 @@ pub const Ingress = struct {
         const runtime = self.runtime;
         runtime.lock();
         defer runtime.unlock();
-        if (runtime.stop) return false;
-        const table = if (runtime.gossip) |*table| table else return false;
+        if (runtime.bridge.stop) return false;
+        const table = if (runtime.bridge.gossip) |*table| table else return false;
         return table.checkAdmissionCapacity(kind, len);
     }
 
@@ -93,16 +91,15 @@ pub const Ingress = struct {
         if (clock.millis() >= candidate.event.deadline) return false;
         runtime.lock();
         defer runtime.unlock();
-        if (runtime.stop or self.failure != null) return false;
-        const core = &runtime.heavy.?.core;
-        const accepted = runtime.gossip.?.admit(core.protocols.gossipsub, candidate, candidate.event.admitted_ms, received_at, core.current_slot);
-        runtime.recomputeLocked(.checks);
-        runtime.recomputeLocked(.gossip);
+        if (runtime.bridge.stop or self.failure != null) return false;
+        const core = &runtime.owner.?.core;
+        const accepted = runtime.bridge.gossip.?.admit(core.protocols.gossipsub, candidate, candidate.event.admitted_ms, received_at, core.current_slot);
+        runtime.notifyIfReadyLocked();
         return accepted;
     }
 };
 pub fn closeLocked(runtime: *Runtime) void {
-    if (runtime.gossip) |*table| table.close();
+    if (runtime.bridge.gossip) |*table| table.close();
 }
 test {
     _ = @import("network_gossip_test.zig");

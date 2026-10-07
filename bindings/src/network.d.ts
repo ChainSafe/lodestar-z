@@ -581,15 +581,24 @@ export interface IncomingRequest {
   cancel(): Promise<void>;
 }
 
+/** Current additional host capacity. Native applies its own gossip priority and execution limits. */
+export interface HostCapacity {
+  /** Native still delivers urgent gossip while validation is backpressured. */
+  gossipValidation: "ready" | "backpressured";
+  /** Excludes active requests. Finite; the binding floors and clamps it to 0..32. */
+  incomingRequestSlots: number;
+}
+
 /** The consumer of one network's delivered work. The binding calls it only from later macrotasks. */
 export interface NativeHost {
+  /** A throw or an invalid value fails the host and stops payload delivery. */
+  capacity(): HostCapacity;
   /**
-   * Null requests control-only draining. Serving is current additional host capacity, excluding active work; ordinary
-   * is whether ordinary gossip can execute. Serving must be finite; it is floored and clamped to 0..32.
-   * A throw or an invalid value pauses payload delivery, reports the error,
-   * and retries while control and completions continue to drain.
+   * Notify whenever capacity can have increased. Notifications may coalesce and carry no reservation.
+   * The binding subscribes before its first capacity read and unsubscribes when delivery stops.
+   * Return an idempotent unsubscribe function. A throw or invalid return fails the host.
    */
-  capacity(): {ordinary: boolean; serving: number} | null;
+  subscribeCapacity(wake: () => void): () => void;
   /**
    * One verdict per message, in order. Must not await job.reported. A throw, a rejection or the wrong verdicts ignore
    * every message of the job.
@@ -605,7 +614,7 @@ export interface NativeHost {
   /** Updates replace the previous state of the same peer. A throw fails the network. */
   peers(events: readonly NativePeerObservation[]): void;
   /**
-   * A throwing peer handler failed the network with `error`, which the close result reports first. Payload delivery
+   * A host capacity or peer callback failed the network with `error`, which the close result reports first. Payload delivery
    * has stopped and settlement continues: finish bounded cleanup, such as the final remembered-peer snapshot, then
    * close the network. A throw closes it at once.
    * An owner failure arrives through `closed` with reason `failed`.
@@ -622,11 +631,7 @@ export interface NativeHost {
   error?(error: unknown): void;
 }
 
-/**
- * updateStatus, connect, disconnect, setDirectPeer, reStatus and the get* methods can throw during admission,
- * including NetworkCommandFull when command or snapshot capacity is occupied. Their promises report admitted
- * operations' outcomes. applyIntent and publish reject admission errors through their promises.
- */
+/** Promise-returning operations reject both admission errors and admitted operation failures. */
 export interface NativeNetwork {
   readonly limits: NativeResolvedLimits;
   /** Native shutdown and its promised completions finished. A failed network cannot restart. */
@@ -640,8 +645,11 @@ export interface NativeNetwork {
   /** Throws, queueing nothing, for a malformed peer id or an unknown action. */
   reportPeer(peerId: PeerIdStr, action: NativePeerAction): void;
   dropQueuedGossip(): void;
-  /** Capacity the host released; the binding drains again. */
-  notifyCapacity(): void;
+  /**
+   * Stops delivery of peer observations, dependency checks, serving starts and gossip. Irreversible and idempotent.
+   * Completions and administrative operations continue; already started host tasks must still retire.
+   */
+  stopDelivery(): void;
   /** Copies admitted input. Admission pressure rejects with admission_full before any publication. */
   publish(topic: string, data: Uint8Array, options?: NativeGossipPublishOptions): Promise<NativeGossipPublishResult>;
   request(

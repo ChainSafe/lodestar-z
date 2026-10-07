@@ -37,12 +37,13 @@ function blockPayload(byte: number): Uint8Array {
 /** A host that takes nothing but what a test overrides. */
 function host(overrides: Partial<NativeHost> = {}): NativeHost {
   return {
-    capacity: () => ({ordinary: true, serving: 32}),
+    capacity: () => ({gossipValidation: "ready", incomingRequestSlots: 32}),
     checkDependencies: (checks) => checks.map(() => false),
     failed: () => undefined,
     logs: () => undefined,
     peers: () => undefined,
     serve: (request) => request.cancel(),
+    subscribeCapacity: () => () => undefined,
     validate: (job) => Promise.resolve(job.messages.map(() => "ignore" as const)),
     ...overrides,
   };
@@ -438,4 +439,21 @@ test("the facade validates its host, starts without host callbacks and hides the
 test.each(["close-reports", "close-batches"])("explicit close lifecycle: %s", childTestTimeout(), (mode) => {
   const output = runChild(["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode]);
   expect(output).toContain(`${mode}-settled`);
+});
+
+test("promise-returning operations reject admission failures without throwing", async () => {
+  const network = createNativeNetwork(applicationConfig(), host());
+  try {
+    await expect(network.connect("invalid", [])).rejects.toThrow("InvalidNetworkPeerId");
+    await expect(network.disconnect("invalid")).rejects.toThrow("InvalidNetworkPeerId");
+    await expect(network.setDirectPeer("invalid", null)).rejects.toThrow("InvalidNetworkPeerId");
+    await expect(network.reStatus(["invalid"])).rejects.toThrow("InvalidNetworkPeerId");
+    await expect(network.getGossipDiagnostics(-1)).rejects.toThrow("InvalidNetworkInteger");
+  } finally {
+    await network.close();
+  }
+  await expect(network.getIdentity()).rejects.toThrow("NetworkClosed");
+  await expect(network.getPeers()).rejects.toThrow("NetworkClosed");
+  await expect(network.getDirectPeers()).rejects.toThrow("NetworkClosed");
+  await expect(network.getRememberedPeers()).rejects.toThrow("NetworkClosed");
 });

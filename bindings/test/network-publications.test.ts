@@ -115,7 +115,7 @@ test("close settles every pending publication", async () => {
   }
 });
 
-test("limited settlement reaches a terminal publication above refilled lower cells", async () => {
+test("settlement retires every completed publication before a lower cell refills", async () => {
   const runtime = initializeNativeNetworkRuntime(applicationConfig(), () => undefined);
   const publish = (fill: number) =>
     runtime.publishGossip(BLOCK, new Uint8Array(4000).fill(fill), {allowZeroPeers: true, ignoreDuplicate: true}).then(
@@ -130,22 +130,22 @@ test("limited settlement reaches a terminal publication above refilled lower cel
   const publications = [publish(1), publish(2)];
   const delivered: number[] = [];
   try {
-    // Each pass settles one cell; the lowest cell refills before the next pass.
-    for (let pass = 0; pass < 2; pass++) {
-      await vi.waitFor(() => {
-        for (const {handle} of runtime.exchange([], {...settleOnly, settleCells: 1}).completions)
-          delivered.push(handle.index);
-        expect(delivered).toHaveLength(pass + 1);
-      });
-      if (pass === 0) publications.push(publish(3));
-    }
-    // The second pass reached the higher cell although the lowest had refilled.
+    await vi.waitFor(() => {
+      for (const {handle} of runtime.exchange([], settleOnly).completions) delivered.push(handle.index);
+      expect(delivered).toHaveLength(2);
+    });
     expect(delivered).toEqual([0, 1]);
+    publications.push(publish(3));
+    await vi.waitFor(() => {
+      for (const {handle} of runtime.exchange([], settleOnly).completions) delivered.push(handle.index);
+      expect(delivered).toHaveLength(3);
+    });
+    expect(delivered).toEqual([0, 1, 0]);
   } finally {
     runtime.close();
     for (let i = 0; i < 400 && !closed; i++) {
       await delay(5);
-      for (let pass = 0; pass < 8 && runtime.exchange([], settleOnly).more; pass++);
+      for (let pass = 0; pass < 8 && runtime.exchange([], settleOnly).needsAnotherExchange; pass++);
     }
   }
   expect(await Promise.all(publications)).toEqual(Array(3).fill("published"));
@@ -167,7 +167,7 @@ test("a completion delivered in the job that admitted its publication settles th
   }
 });
 
-test("close settles after every publication and command admitted before it, one completion per family per exchange", async () => {
+test("close settles after every publication and command admitted before it, with bounded completion batches", async () => {
   const runtime = startRuntime(applicationConfig());
   holdSettling(runtime, true);
   const order: string[] = [];
@@ -188,12 +188,12 @@ test("close settles after every publication and command admitted before it, one 
   const delivered: string[][] = [];
   for (let i = 0; i < 400 && !order.includes("closed"); i++) {
     await delay(5);
-    delivered.push(runtime.exchange([], {...settleOnly, settleCells: 1}).completions.map(({family}) => family));
+    delivered.push(runtime.exchange([], settleOnly).completions.map(({family}) => family));
   }
   await Promise.all([...operations, closing]);
   expect(order.at(-1)).toBe("closed");
   expect(order.filter((label) => label === "publication")).toHaveLength(4);
   expect(order.filter((label) => label === "command")).toHaveLength(2);
-  expect(delivered.every((families) => new Set(families).size === families.length)).toBe(true);
+  expect(delivered.every((families) => families.length <= 64)).toBe(true);
   expect(delivered.flat().sort()).toEqual(["command", "command", ...Array(4).fill("publication")]);
 });

@@ -15,9 +15,7 @@ pub const commands = @import("network_commands.zig");
 pub const application_config = @import("network_application_config.zig");
 pub const projection = @import("network_peer_projection.zig");
 const Wake = @import("network_wake.zig").Wake;
-const readiness_mod = @import("network_readiness.zig");
-pub const DeliveryKind = readiness_mod.DeliveryKind;
-pub const Place = readiness_mod.Place;
+pub const DeliveryKind = enum { completions, peers, checks, serving, gossip };
 pub const Owner = @import("network_owner.zig").Owner;
 pub const allocator = std.heap.c_allocator;
 pub const State = enum { running, stopping, closed, failed };
@@ -44,135 +42,145 @@ pub const Identity = struct {
     enr: [d.wire.constants.enr_size_max]u8,
     enr_len: u16,
 };
-/// The host's standing capacities: serving starts it can take now, and whether it executes ordinary gossip.
-pub const Capacity = struct { serving: u32 = 0, ordinary: bool = false };
+/// Standing host permissions, independent of one exchange's delivery allowance.
+pub const Capacity = struct {
+    incoming_request_slots: u32 = 0,
+    gossip_validation: enum { ready, backpressured } = .backpressured,
+};
 
-pub const Runtime = struct {
-    logs: n.logging.Sink = .{},
-    metrics: network_metrics.Export = .{},
-    metrics_due_ms: u64 = 0,
-    health_log_due_ms: u64 = 0,
-    refs: std.atomic.Value(u32) = .init(1),
+/// Shared operation storage and lifecycle. Runtime lock/unlock guard state transitions; a claimed cell has one writer.
+const Bridge = struct {
     mutex: std.Io.Mutex = .init,
-    heavy: ?*Owner = null,
-    graceful: bool = false,
-    closing_deadline: ?u64 = null,
     stores: ?*network_storage.Stores = null,
-    lane: ?*projection.Lane = null,
-    table: commands.Table = .{},
+    peer_updates: ?*projection.Lane = null,
+    commands: commands.Table = .{},
     reports: network_peer_reports.Table = .{},
     publications: ?publications_mod.Table = null,
     requests: ?requests_mod.Table = null,
     incoming: ?incoming_mod.Table = null,
     gossip: ?gossip_mod.Table = null,
     payload_budget: network_budget.Budget = .{},
-    peer_capacity: u16 = 0,
-    max_peers: u16 = 0,
-
     wake: ?Wake = null,
-    thread: ?std.Thread = null,
     notify: Notify = undefined,
     notify_live: bool = true,
-    notify_finalized: bool = false,
-    readiness: readiness_mod.Readiness = .{},
-    capacity: Capacity = .{},
-    /// JS thread: an exchange is running, so a nested one is refused.
-    in_exchange: bool = false,
-    /// The exchange results created at initialize, which idle exchanges and rollbacks return.
-    results: network_exchange_js.Results = .{},
-    /// Owner thread: an event capture left host work for the next apply, so the next turn is due now.
-    host_due: bool = false,
+    notification_armed: bool = true,
+    capacity: ?Capacity = null,
     /// The owner leaves reported verdicts unapplied while an ownership test holds them.
     verdicts_held: bool = false,
     /// The owner starts no admitted command, publication or request while an ownership test holds them.
     operations_held: bool = false,
     env_alive: bool = true,
-    disposed: bool = false,
     /// An exchange delivered the close result, after owner quiescence, the join and every promised completion.
     close_delivered: bool = false,
-    hook_live: bool = false,
-    env: napi.Env,
+    graceful: bool = false,
     stop: bool = false,
     reason: Reason = .requested,
     quiescent: bool = false,
     terminal_error: ?anyerror = null,
     state: State = .running,
+};
+
+pub const Runtime = struct {
+    bridge: Bridge = .{},
+    logs: n.logging.Sink = .{},
+    metrics: network_metrics.Export = .{},
+    refs: std.atomic.Value(u32) = .init(1),
+    owner: ?*Owner = null,
+    peer_capacity: u16 = 0,
+    max_peers: u16 = 0,
+
+    thread: ?std.Thread = null,
+    /// JS thread: an exchange is running, so a nested one is refused.
+    in_exchange: bool = false,
+    /// The exchange results created at initialize, which idle exchanges and rollbacks return.
+    results: network_exchange_js.Results = .{},
+    notify_finalized: bool = false,
+    disposed: bool = false,
+    hook_live: bool = false,
+    env: napi.Env,
+
+    // Network thread scheduling and counters, read after joining at teardown.
+    metrics_due_ms: u64 = 0,
+    health_log_due_ms: u64 = 0,
+    closing_deadline: ?u64 = null,
+    /// Owner thread: an event capture left host work for the next apply, so the next turn is due now.
+    host_due: bool = false,
     owner_turns: u64 = 0,
     operational_failures: u64 = 0,
 
     /// No admitted operation awaits its outcome and the owner runs, so the event loop need not wait for this runtime.
     pub fn idleLocked(self: *const Runtime) bool {
-        return self.table.occupied == 0 and (self.publications == null or !self.publications.?.obligated()) and !self.requestObligations() and self.notify_live and !self.stop;
+        return self.bridge.commands.occupied == 0 and (self.bridge.publications == null or !self.bridge.publications.?.obligated()) and !self.requestObligations() and self.bridge.notify_live and !self.bridge.stop;
     }
     pub fn requestObligations(self: *const Runtime) bool {
-        return (if (self.requests) |*requests| requests.obligated() else false) or (if (self.incoming) |*incoming| incoming.obligated() else false);
+        return (if (self.bridge.requests) |*requests| requests.obligated() else false) or (if (self.bridge.incoming) |*incoming| incoming.obligated() else false);
     }
     pub fn retireRequest(self: *Runtime, token: requests_mod.Token) void {
         self.lock();
-        self.requests.?.retire(token);
+        self.bridge.requests.?.retire(token);
         self.unlock();
         self.release();
     }
     pub fn retireRequestStorageLocked(self: *Runtime) void {
-        if (!self.quiescent) return;
-        if (self.publications) |*table| table.trim();
-        if (self.gossip) |*table| table.trim();
-        if (self.incoming) |*table| {
+        if (!self.bridge.quiescent) return;
+        if (self.bridge.publications) |*table| table.trim();
+        if (self.bridge.gossip) |*table| table.trim();
+        if (self.bridge.incoming) |*table| {
             if (table.diag.occupied == 0) {
                 table.backing.free(table.cells);
                 table.cells = &.{};
             }
         }
-        if (self.requests) |*table| {
+        if (self.bridge.requests) |*table| {
             if (table.diag.occupied != 0) return;
             table.backing.free(table.cells);
             table.cells = &.{};
         }
     }
     pub fn retireStoresLocked(self: *Runtime) void {
-        if (!self.quiescent or self.table.occupied != 0) return;
-        if (self.stores) |stores| {
+        if (!self.bridge.quiescent or self.bridge.commands.occupied != 0) return;
+        if (self.bridge.stores) |stores| {
             stores.destroy();
-            self.stores = null;
+            self.bridge.stores = null;
         }
     }
     fn destroyOwner(self: *Runtime) void {
-        if (self.heavy) |heavy| {
-            if (heavy.core_live) {
-                heavy.core.shutdown((n.Now.read(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now));
+        if (self.owner) |owner| {
+            if (owner.core_live) {
+                owner.core.shutdown((n.Now.read(owner.threaded.io()) catch owner.core.last_now).floor(owner.core.last_now));
                 if (self.metrics.allocatedBytes() > 0) {
-                    self.captureProcessorLocked(&heavy.processor_metrics);
-                    var context = n.metrics.Context.init(&heavy.core, (n.Now.read(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now), false);
-                    context.processor = &heavy.processor_metrics;
+                    self.captureProcessorLocked(&owner.processor_metrics);
+                    var context = n.metrics.Context.init(&owner.core, (n.Now.read(owner.threaded.io()) catch owner.core.last_now).floor(owner.core.last_now), false);
+                    context.processor = &owner.processor_metrics;
                     if (self.metrics.render(&context)) |index| {
                         self.metrics.published = index;
                         self.metrics.failure = null;
                     } else |err| self.metrics.failure = err;
                     self.metrics.finish();
                 }
-                heavy.core.deinit(heavy.threaded.io());
+                owner.core.deinit(owner.threaded.io());
             }
-            if (heavy.threaded_live) heavy.threaded.deinit();
-            heavy.config.wipe();
-            std.crypto.secureZero(u8, std.mem.asBytes(heavy));
-            allocator.destroy(heavy);
-            self.heavy = null;
+            if (owner.threaded_live) owner.threaded.deinit();
+            owner.config.wipe();
+            std.crypto.secureZero(u8, std.mem.asBytes(owner));
+            allocator.destroy(owner);
+            self.owner = null;
         }
     }
     /// Copies the processor state for one metrics render.
     pub fn captureProcessorLocked(self: *const Runtime, into: *processor_metrics.Snapshot) void {
-        if (self.gossip) |*table| into.captureProcessor(table);
+        if (self.bridge.gossip) |*table| into.captureProcessor(table);
     }
     pub fn lock(self: *Runtime) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLock(&self.bridge.mutex);
     }
     pub fn unlock(self: *Runtime) void {
         // A payload release while the owner waits for budget wakes it to retry.
-        if (self.payload_budget.released) {
-            self.payload_budget.released = false;
-            self.signalLocked();
+        if (self.bridge.payload_budget.released) {
+            self.bridge.payload_budget.released = false;
+            self.wakeOwnerLocked();
         }
-        std.Io.Threaded.mutexUnlock(&self.mutex);
+        std.Io.Threaded.mutexUnlock(&self.bridge.mutex);
     }
     pub fn retain(self: *Runtime) void {
         _ = self.refs.fetchAdd(1, .monotonic);
@@ -181,14 +189,14 @@ pub const Runtime = struct {
         if (self.refs.fetchSub(1, .acq_rel) == 1) {
             self.destroyOwner();
             self.metrics.deinit();
-            if (self.stores) |stores| stores.destroy();
-            if (self.lane) |lane| allocator.destroy(lane);
-            if (self.publications) |*table| table.deinit();
-            if (self.requests) |*requests| requests.deinit();
-            if (self.incoming) |*incoming| incoming.deinit();
-            if (self.gossip) |*gossip| gossip.deinit();
-            std.debug.assert(self.payload_budget.used == 0);
-            for (self.payload_budget.owned) |owned| std.debug.assert(owned == 0);
+            if (self.bridge.stores) |stores| stores.destroy();
+            if (self.bridge.peer_updates) |lane| allocator.destroy(lane);
+            if (self.bridge.publications) |*table| table.deinit();
+            if (self.bridge.requests) |*requests| requests.deinit();
+            if (self.bridge.incoming) |*incoming| incoming.deinit();
+            if (self.bridge.gossip) |*gossip| gossip.deinit();
+            std.debug.assert(self.bridge.payload_budget.used == 0);
+            for (self.bridge.payload_budget.owned) |owned| std.debug.assert(owned == 0);
             std.crypto.secureZero(u8, std.mem.asBytes(self));
             allocator.destroy(self);
             const claimed = runtime_live.swap(false, .release);
@@ -198,79 +206,77 @@ pub const Runtime = struct {
     pub fn requestStop(self: *Runtime) void {
         self.lock();
         defer self.unlock();
-        if (self.stop or self.quiescent) return;
-        self.stop = true;
-        self.reason = .requested;
-        self.state = .stopping;
-        self.signalLocked();
-        self.refreshLocked();
+        if (self.bridge.stop or self.bridge.quiescent) return;
+        self.bridge.stop = true;
+        self.bridge.reason = .requested;
+        self.bridge.state = .stopping;
+        self.wakeOwnerLocked();
+        self.notifyIfReadyLocked();
     }
-    pub fn signalLocked(self: *Runtime) void {
-        if (self.wake) |*wake| wake.signal() catch self.failLocked(error.NetworkWakeFailed);
+    pub fn wakeOwnerLocked(self: *Runtime) void {
+        if (self.bridge.wake) |*wake| wake.signal() catch self.failLocked(error.NetworkWakeFailed);
     }
     /// Stops the owner for a terminal failure. The first one is the close result's error, also after a requested
     /// stop began.
     pub fn failLocked(self: *Runtime, err: anyerror) void {
-        self.stop = true;
-        if (self.reason == .failed) return;
-        self.reason = .failed;
-        self.terminal_error = err;
-        self.state = .failed;
+        self.bridge.stop = true;
+        if (self.bridge.reason == .failed) return;
+        self.bridge.reason = .failed;
+        self.bridge.terminal_error = err;
+        self.bridge.state = .failed;
     }
-    /// Where `kind` belongs now. No new host work is served after a stop, no claim after
-    /// quiescence, and nothing once the close result was delivered, so a host may stop exchanging.
-    pub fn wantLocked(self: *Runtime, kind: DeliveryKind) Place {
-        switch (kind) {
-            .completions => return if (self.settleableLocked() or self.acknowledgingLocked() or (self.quiescent and !self.close_delivered)) .control else .none,
-            .peers => return if (!self.close_delivered and self.lane != null and self.lane.?.len > 0) .payload else .none,
-            .checks => {
-                const table = if (self.gossip) |*table| table else return .none;
-                return if (!self.stop and !self.quiescent and table.readiness().checks) .payload else .none;
-            },
-            .serving => {
-                const table = if (self.incoming) |*table| table else return .none;
-                if (self.stop or self.quiescent or table.oldest() == null) return .none;
-                return if (self.capacity.serving > 0) .payload else .parked;
-            },
-            .gossip => {
-                const table = if (self.gossip) |*table| table else return .none;
-                if (self.stop or self.quiescent) return .none;
+    /// Must hold the bridge mutex. Delivery readiness ignores one exchange's temporary allowance.
+    pub fn deliverableLocked(self: *Runtime, kind: DeliveryKind) bool {
+        if (kind == .completions)
+            return self.completionsReadyLocked() or self.acknowledgingLocked() or (self.bridge.quiescent and !self.bridge.close_delivered);
+        const capacity = self.bridge.capacity orelse return false;
+        if (self.bridge.close_delivered) return false;
+        if (kind == .peers) return self.bridge.peer_updates != null and self.bridge.peer_updates.?.len > 0;
+        if (self.bridge.stop or self.bridge.quiescent) return false;
+        return switch (kind) {
+            .checks => if (self.bridge.gossip) |*table| table.readiness().checks else false,
+            .serving => capacity.incoming_request_slots > 0 and self.bridge.incoming != null and self.bridge.incoming.?.oldest() != null,
+            .gossip => if (self.bridge.gossip) |*table| blk: {
                 const work = table.readiness();
-                if (work.urgent or (work.ordinary and self.capacity.ordinary)) return .payload;
-                return if (work.ordinary) .parked else .none;
-            },
+                break :blk work.urgent or (work.ordinary and capacity.gossip_validation == .ready);
+            } else false,
+            .completions, .peers => unreachable,
+        };
+    }
+    pub fn hasDeliveryLocked(self: *Runtime) bool {
+        inline for (@typeInfo(DeliveryKind).@"enum".fields) |field| {
+            if (self.deliverableLocked(@enumFromInt(field.value))) return true;
+        }
+        return false;
+    }
+    pub fn notifyIfReadyLocked(self: *Runtime) void {
+        if (self.bridge.notification_armed and self.hasDeliveryLocked()) {
+            self.bridge.notification_armed = false;
+            self.notifyHostLocked();
         }
     }
-    /// Moves `kind` to where it belongs, notifying the host when the move disarms.
-    pub fn recomputeLocked(self: *Runtime, kind: DeliveryKind) void {
-        if (self.readiness.recompute(kind, self.wantLocked(kind))) self.notifyLocked();
-    }
-    pub fn refreshLocked(self: *Runtime) void {
-        inline for (@typeInfo(DeliveryKind).@"enum".fields) |field| self.recomputeLocked(@enumFromInt(field.value));
-    }
-    pub fn notifyLocked(self: *Runtime) void {
-        if (!self.notify_live or !self.env_alive) return;
-        self.notify.call(undefined, .non_blocking) catch |err| switch (err) {
+    pub fn notifyHostLocked(self: *Runtime) void {
+        if (!self.bridge.notify_live or !self.bridge.env_alive) return;
+        self.bridge.notify.call(undefined, .non_blocking) catch |err| switch (err) {
             // An undequeued notification remains, and its exchange sees this work.
             error.QueueFull => {},
             error.Closing => {
-                self.notify_live = false;
-                self.stop = true;
+                self.bridge.notify_live = false;
+                self.bridge.stop = true;
             },
             else => self.failLocked(err),
         };
     }
     /// An owner disposition of a delivered message that an exchange would acknowledge now. O(1).
     pub fn acknowledgingLocked(self: *const Runtime) bool {
-        return if (self.gossip) |*table| table.diag.acknowledging > 0 else false;
+        return if (self.bridge.gossip) |*table| table.diag.acknowledging > 0 else false;
     }
-    /// An incoming result an exchange would settle, or a command, publication or request completion it would deliver,
-    /// now. O(1).
-    pub fn settleableLocked(self: *const Runtime) bool {
-        return self.table.anyTerminal() or
-            (if (self.publications) |*table| table.anyTerminal() else false) or
-            (if (self.requests) |*table| table.anyDue(self.stop, self.quiescent) else false) or
-            (if (self.incoming) |*table| table.anyDue() else false);
+    /// Whether any operation has a completion ready for delivery. O(1).
+    pub fn completionsReadyLocked(self: *const Runtime) bool {
+        return self.bridge.commands.anyTerminal() or
+            (if (self.bridge.publications) |*table| table.anyTerminal() else false) or
+            (if (self.bridge.requests) |*table| table.anyDue(self.bridge.stop, self.bridge.quiescent) else false) or
+            (if (self.bridge.incoming) |*table| table.anyDue() else false);
     }
     pub fn join(self: *Runtime) void {
         if (self.thread) |thread| {
@@ -287,22 +293,22 @@ pub const Runtime = struct {
     pub fn forceStop(self: *Runtime, env_dying: bool) void {
         self.lock();
         self.disposed = true;
-        if (env_dying) self.env_alive = false;
-        self.graceful = false;
-        if (self.stop and !self.quiescent) self.signalLocked();
+        if (env_dying) self.bridge.env_alive = false;
+        self.bridge.graceful = false;
+        if (self.bridge.stop and !self.bridge.quiescent) self.wakeOwnerLocked();
         self.unlock();
         self.requestStop();
         self.join();
     }
     /// Environment disposal reclaims every cell JavaScript can no longer take, rather than emulating its delivery.
     pub fn reclaim(self: *Runtime) void {
-        std.debug.assert(self.quiescent and self.notify_finalized and self.disposed);
-        if (self.requests) |*table| for (table.cells, 0..) |cell, i| {
+        std.debug.assert(self.bridge.quiescent and self.notify_finalized and self.disposed);
+        if (self.bridge.requests) |*table| for (table.cells, 0..) |cell, i| {
             if (cell.state == .free) continue;
             std.debug.assert(cell.state == .terminal and cell.native == null and !cell.copying);
             self.retireRequest(.{ .index = @intCast(i), .generation = cell.generation });
         };
-        if (self.incoming) |*table| for (table.cells, 0..) |cell, i| {
+        if (self.bridge.incoming) |*table| for (table.cells, 0..) |cell, i| {
             if (cell.state == .free) continue;
             std.debug.assert(!cell.native and !cell.copying);
             table.retire(.{ .index = @intCast(i), .generation = cell.generation });
@@ -319,18 +325,18 @@ pub const Runtime = struct {
         self.hook_live = false;
         self.forceStop(true);
         self.retireClosedPublications();
-        for (0..self.table.cells.len) |i| {
+        for (0..self.bridge.commands.cells.len) |i| {
             self.lock();
-            const cell = &self.table.cells[i];
+            const cell = &self.bridge.commands.cells[i];
             const token: ?commands.Token = if (cell.state == .free) null else .{ .index = @intCast(i), .generation = cell.generation };
             std.debug.assert(cell.state != .preparing and cell.state != .copying);
             self.unlock();
             if (token) |live| self.abortCommand(live);
         }
-        if (self.requests) |*requests| for (requests.cells, 0..) |cell, i| {
+        if (self.bridge.requests) |*requests| for (requests.cells, 0..) |cell, i| {
             if (cell.state != .free) self.retireRequest(.{ .index = @intCast(i), .generation = cell.generation });
         };
-        if (self.incoming) |*incoming| for (incoming.cells, 0..) |cell, i| {
+        if (self.bridge.incoming) |*incoming| for (incoming.cells, 0..) |cell, i| {
             if (cell.state != .free) {
                 incoming.retire(.{ .index = @intCast(i), .generation = cell.generation });
             }
@@ -345,11 +351,11 @@ pub const Runtime = struct {
     }
 
     pub fn cancelCommandsLocked(self: *Runtime) void {
-        for (&self.table.cells, 0..) |*cell, i| {
+        for (&self.bridge.commands.cells, 0..) |*cell, i| {
             switch (cell.state) {
                 .queued, .executing, .waiting => {
-                    self.table.cells[i].failure = self.terminal_error orelse error.NetworkClosed;
-                    self.table.transition(cell, .terminal);
+                    self.bridge.commands.cells[i].failure = self.bridge.terminal_error orelse error.NetworkClosed;
+                    self.bridge.commands.transition(cell, .terminal);
                 },
                 else => {},
             }
@@ -370,47 +376,46 @@ pub const Runtime = struct {
         incoming_mod.closeLocked(self);
         gossip_mod.closeLocked(self);
         self.cancelCommandsLocked();
-        if (self.publications) |*table| table.close(self.terminal_error orelse error.NetworkClosed);
-        if (self.wake) |*wake| wake.deinit();
-        self.wake = null;
-        self.quiescent = true;
+        if (self.bridge.publications) |*table| table.close(self.bridge.terminal_error orelse error.NetworkClosed);
+        if (self.bridge.wake) |*wake| wake.deinit();
+        self.bridge.wake = null;
+        self.bridge.quiescent = true;
         self.retireStoresLocked();
         self.retireRequestStorageLocked();
-        self.state = if (self.reason == .failed) .failed else .closed;
-        std.log.scoped(.network_runtime).info("owner_stopped reason={s} turns={d} operational_failures={d}", .{ @tagName(self.reason), self.owner_turns, self.operational_failures });
+        self.bridge.state = if (self.bridge.reason == .failed) .failed else .closed;
+        std.log.scoped(.network_runtime).info("owner_stopped reason={s} turns={d} operational_failures={d}", .{ @tagName(self.bridge.reason), self.owner_turns, self.operational_failures });
         // Every host sees quiescence, also one whose waiting payload left it disarmed.
-        self.readiness.armed = false;
-        self.refreshLocked();
-        self.notifyLocked();
-        const release_notify = self.notify_live;
-        self.notify_live = false;
+        self.bridge.notification_armed = false;
+        self.notifyHostLocked();
+        const release_notify = self.bridge.notify_live;
+        self.bridge.notify_live = false;
         self.unlock();
-        if (release_notify) self.notify.release(.release) catch unreachable;
+        if (release_notify) self.bridge.notify.release(.release) catch unreachable;
     }
     pub fn advanceSequence(self: *Runtime) !u64 {
         self.lock();
         defer self.unlock();
-        return self.table.advance();
+        return self.bridge.commands.advance();
     }
     pub fn reservePublication(self: *Runtime, kind: n.gossipsub.topic.Kind, bytes: usize) !publications_mod.Token {
         self.lock();
         defer self.unlock();
-        if (self.stop or self.quiescent) return error.NetworkClosed;
-        const token = try self.publications.?.reserve(kind, bytes);
+        if (self.bridge.stop or self.bridge.quiescent) return error.NetworkClosed;
+        const token = try self.bridge.publications.?.reserve(kind, bytes);
         self.retain();
         return token;
     }
     pub fn retirePublication(self: *Runtime, token: publications_mod.Token) void {
         self.lock();
-        self.publications.?.retire(token);
+        self.bridge.publications.?.retire(token);
         self.retireRequestStorageLocked();
         self.unlock();
         self.release();
     }
     fn retireClosedPublications(self: *Runtime) void {
         for (0..publications_mod.capacity_max) |i| {
-            if (self.publications == null or i >= self.publications.?.cells.len) break;
-            const cell = &self.publications.?.cells[i];
+            if (self.bridge.publications == null or i >= self.bridge.publications.?.cells.len) break;
+            const cell = &self.bridge.publications.?.cells[i];
             if (cell.state == .free) continue;
             std.debug.assert(cell.state == .terminal);
             self.retirePublication(.{ .index = @intCast(i), .generation = cell.generation });
@@ -419,11 +424,11 @@ pub const Runtime = struct {
     pub fn reserveCommand(self: *Runtime, command: commands.Command) !commands.Token {
         self.lock();
         defer self.unlock();
-        if (self.stop or self.quiescent) return error.NetworkClosed;
-        const token = self.table.reserve(command) catch |err| {
+        if (self.bridge.stop or self.bridge.quiescent) return error.NetworkClosed;
+        const token = self.bridge.commands.reserve(command) catch |err| {
             if (err == error.NetworkSequenceExhausted) {
                 self.failLocked(err);
-                self.signalLocked();
+                self.wakeOwnerLocked();
             }
             return err;
         };
@@ -432,7 +437,7 @@ pub const Runtime = struct {
     }
     pub fn abortCommand(self: *Runtime, token: commands.Token) void {
         self.lock();
-        self.table.retire(token);
+        self.bridge.commands.retire(token);
         self.retireStoresLocked();
         self.unlock();
         self.release();
@@ -440,9 +445,9 @@ pub const Runtime = struct {
     pub fn queueCommand(self: *Runtime, token: commands.Token) !void {
         self.lock();
         defer self.unlock();
-        if (self.stop or self.quiescent) return error.NetworkClosed;
-        self.table.transition(self.table.get(token), .queued);
-        self.signalLocked();
+        if (self.bridge.stop or self.bridge.quiescent) return error.NetworkClosed;
+        self.bridge.commands.transition(self.bridge.commands.get(token), .queued);
+        self.wakeOwnerLocked();
     }
 };
 

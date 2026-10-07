@@ -10,7 +10,6 @@ import {
 } from "../src/network-runtime.js";
 import {
   applicationConfig,
-  capacity,
   childTestTimeout,
   configureChain,
   discoveryConfig,
@@ -231,28 +230,20 @@ it("rejects every invalid exchange demand, oversized batch and nested exchange b
   });
   try {
     await runtime.identity;
-    expect(exchange(runtime, settleOnly).more).toBe(false);
-    const invalid: [Partial<Record<keyof NativeExchangeDemand, unknown>>, string][] = [
-      ...[-1, 0.5, 65, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1].map(
-        (peers): [Partial<Record<keyof NativeExchangeDemand, unknown>>, string] => [{peers}, "InvalidNetworkInteger"]
-      ),
-      ...[0, -1, 0.5, 257, Number.NaN].map(
-        (settleCells): [Partial<Record<keyof NativeExchangeDemand, unknown>>, string] => [
-          {settleCells},
-          "InvalidNetworkInteger",
-        ]
-      ),
-      [{servingStarts: 9}, "InvalidNetworkInteger"],
-      [{checks: 65}, "InvalidNetworkInteger"],
-      [{messages: 65}, "InvalidNetworkInteger"],
-      [{bytes: 16 * 1024 * 1024 + 1}, "InvalidNetworkInteger"],
-      [{claimOrdinary: 1}, "InvalidNetworkConfig"],
-      [{capacity: {ordinary: true, serving: 33}}, "InvalidNetworkInteger"],
-      [{capacity: {ordinary: "yes", serving: 1}}, "InvalidNetworkConfig"],
+    expect(exchange(runtime, settleOnly).needsAnotherExchange).toBe(false);
+    const invalid: [Record<string, unknown>, string][] = [
+      ...[-1, 0.5, 9, Number.NaN, Number.POSITIVE_INFINITY].map((servingStarts): [Record<string, unknown>, string] => [
+        {servingStarts},
+        "InvalidNetworkInteger",
+      ]),
+      [{mode: "unknown"}, "InvalidNetworkConfig"],
+      [{claimNonUrgentGossip: 1}, "InvalidNetworkConfig"],
+      [{capacity: {gossipValidation: "ready", incomingRequestSlots: 33}}, "InvalidNetworkInteger"],
+      [{capacity: {gossipValidation: "yes", incomingRequestSlots: 1}}, "InvalidNetworkConfig"],
       [{capacity: []}, "InvalidNetworkConfig"],
     ];
     for (const [fields, code] of invalid)
-      expect(() => runtime.exchange([], {...settleOnly, ...fields} as NativeExchangeDemand)).toThrow(code);
+      expect(() => runtime.exchange([], {...gossipAll, ...fields} as NativeExchangeDemand)).toThrow(code);
     const recheck: NativeAction = {type: "recheck"};
     expect(() =>
       runtime.exchange(
@@ -263,9 +254,9 @@ it("rejects every invalid exchange demand, oversized batch and nested exchange b
     expect(() => runtime.exchange({} as NativeAction[], settleOnly)).toThrow("InvalidNetworkActions");
     const nested = {
       ...settleOnly,
-      get peers() {
+      get mode() {
         runtime.exchange([], settleOnly);
-        return 0;
+        return "control" as const;
       },
     };
     expect(() => runtime.exchange([], nested)).toThrow("NetworkExchangeReentered");
@@ -277,11 +268,11 @@ it("rejects every invalid exchange demand, oversized batch and nested exchange b
     expect(
       exchange(
         runtime,
-        {...settleOnly, capacity, peers: 64},
+        {...gossipAll},
         Array.from({length: 256}, () => recheck)
       )
     ).toMatchObject({
-      more: false,
+      needsAnotherExchange: false,
       peers: [],
     });
     expect(Object.isFrozen(exchange(runtime, settleOnly))).toBe(true);
@@ -527,6 +518,8 @@ it("publishes copied peer observations without repeating unread notifications", 
   ]);
   try {
     const identity = await runtime.identity;
+    holdSettling(runtime, true);
+    exchange(runtime, gossipAll);
     const address = multiaddr(identity.localMultiaddr).toString();
     await remote.command("dial", {address});
     await remote.command("control", {address, protocol: "/eth2/beacon_chain/req/status/1/ssz_snappy"});
@@ -541,7 +534,7 @@ it("publishes copied peer observations without repeating unread notifications", 
     const before = notifications;
     await delay(250);
     expect(notifications).toBe(before);
-    const result = exchange(runtime, {...settleOnly, peers: 32});
+    const result = exchange(runtime, {...gossipAll});
     expect(Object.getOwnPropertyDescriptor(result, "peers")).toMatchObject({
       configurable: true,
       enumerable: true,
@@ -556,10 +549,12 @@ it("publishes copied peer observations without repeating unread notifications", 
     expect(ready.state).not.toHaveProperty("peer");
     expect(typeof ready.state.identity).toBe("string");
     const retained = ready.state.identity.slice();
+    holdSettling(runtime, false);
     await runtime.close();
     expect(ready.state.identity).toEqual(retained);
   } finally {
     await remote.stop();
+    holdSettling(runtime, false);
     await runtime.close();
   }
 }, 20000);
@@ -581,7 +576,7 @@ it("settles results only in an exchange and notifies once until an exchange find
   const runtime = initializeNativeNetworkRuntime(config, () => {
     notifications++;
   });
-  const drain = () => runtime.exchange([], settleOnly).more;
+  const drain = () => runtime.exchange([], settleOnly).needsAnotherExchange;
   const watch = (promise: Promise<unknown>) => {
     let settled = false;
     promise.then(
@@ -604,7 +599,7 @@ it("settles results only in an exchange and notifies once until an exchange find
     expect(notifications).toBe(1);
     expect(intentSettled()).toBe(false);
     const identitySettled = watch(identity);
-    expect(runtime.exchange([], settleOnly).more).toBe(false);
+    expect(runtime.exchange([], settleOnly).needsAnotherExchange).toBe(false);
     await delay(0);
     expect([intentSettled(), identitySettled()]).toEqual([true, true]);
     expect(Object.isFrozen(runtime.exchange([], settleOnly))).toBe(true);
@@ -626,5 +621,5 @@ it("settles results only in an exchange and notifies once until an exchange find
     }
   }
   expect(await runtime.closed).toEqual({reason: "requested"});
-  expect(runtime.exchange([], settleOnly)).toMatchObject({more: false});
+  expect(runtime.exchange([], settleOnly)).toMatchObject({needsAnotherExchange: false});
 }, 20000);

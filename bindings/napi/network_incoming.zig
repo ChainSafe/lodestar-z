@@ -79,7 +79,7 @@ pub const Table = struct {
     /// The cells whose completion is due now. `refresh` keeps it current after each change to a cell.
     due: std.StaticBitSet(capacity_max) = .empty,
     /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
-    settle_cursor: usize = 0,
+    completion_cursor: usize = 0,
     backing: std.mem.Allocator,
     budget: *Budget,
     diag: Diagnostics = .{},
@@ -183,7 +183,7 @@ pub const Table = struct {
     pub fn refresh(self: *Table, cell: *const Cell) void {
         const index = (@intFromPtr(cell) - @intFromPtr(self.cells.ptr)) / @sizeOf(Cell);
         std.debug.assert(&self.cells[index] == cell);
-        self.due.setValue(index, settleable(cell));
+        self.due.setValue(index, completionReady(cell));
     }
     /// The first cell at or after `from` whose completion is due. O(1).
     pub fn nextDue(self: *const Table, from: usize) ?usize {
@@ -193,7 +193,7 @@ pub const Table = struct {
     }
     /// Whether the completion of any cell is due. O(1); debug builds check it against a scan.
     pub fn anyDue(self: *const Table) bool {
-        if (builtin.mode == .Debug) for (0..capacity_max) |i| std.debug.assert(self.due.isSet(i) == (i < self.cells.len and settleable(&self.cells[i])));
+        if (builtin.mode == .Debug) for (0..capacity_max) |i| std.debug.assert(self.due.isSet(i) == (i < self.cells.len and completionReady(&self.cells[i])));
         return self.due.findFirstSet() != null;
     }
     /// Pins the due cell at `index` for delivery, with what is due of its acknowledgement, close and permission.
@@ -335,7 +335,7 @@ fn awaited(cell: *const Cell) bool {
 }
 /// A completion an exchange delivers now: a write acknowledgement, the close of a finished stream, or a response
 /// permission.
-pub fn settleable(cell: *const Cell) bool {
+pub fn completionReady(cell: *const Cell) bool {
     if (cell.state == .free or cell.copying or cell.state == .response_preparing) return false;
     return (cell.ack != null and cell.response_awaited) or (!cell.native and cell.closed_awaited) or ((cell.permission_ready or !cell.native) and cell.permission_awaited);
 }
@@ -357,25 +357,25 @@ fn ownerWork(cell: *const Cell) bool {
 pub fn applyPending(runtime: *Runtime, now: n.Now) !bool {
     runtime.lock();
     defer runtime.unlock();
-    const table = if (runtime.incoming) |*table| table else return false;
+    const table = if (runtime.bridge.incoming) |*table| table else return false;
     if (table.cells.len == 0) return false;
     var submissions: usize = 0;
     var more = false;
-    // Cells refresh their completions at the end of each iteration, so the completions row is recomputed after the loop.
-    defer runtime.recomputeLocked(.completions);
+    // Check for notifications after every cell has refreshed its completion state.
+    defer runtime.notifyIfReadyLocked();
     for (0..table.cells.len) |offset| {
         const cell = &table.cells[(table.cursor + offset) % table.cells.len];
         defer table.refresh(cell);
         if (releasable(cell)) {
-            const released = runtime.heavy.?.core.releaseServing(cell.serving.?);
+            const released = runtime.owner.?.core.releaseServing(cell.serving.?);
             std.debug.assert(released);
             cell.serving = null;
             table.retire(.{ .index = @intCast((table.cursor + offset) % table.cells.len), .generation = cell.generation });
             continue;
         }
         if (!cell.native) continue;
-        const core = &runtime.heavy.?.core;
-        if (cell.action == .cancel or runtime.stop) {
+        const core = &runtime.owner.?.core;
+        if (cell.action == .cancel or runtime.bridge.stop) {
             _ = core.cancelRequest(cell.handle, now);
             continue;
         }
@@ -417,12 +417,12 @@ pub fn applyPending(runtime: *Runtime, now: n.Now) !bool {
     return more;
 }
 pub fn captureLocked(runtime: *Runtime, event: rr.ReqResp.Event, now: n.Now) !void {
-    const table = if (runtime.incoming) |*table| table else return;
+    const table = if (runtime.bridge.incoming) |*table| table else return;
     if (event == .request) return admitLocked(runtime, event.request, now) catch |err| switch (@as(anyerror, err)) {
         error.OutOfMemory => {
             runtime.operational_failures +|= 1;
-            runtime.heavy.?.core.respondError(event.request.request, 2, "local serving allocation failed", now) catch {
-                _ = runtime.heavy.?.core.cancelRequest(event.request.request, now);
+            runtime.owner.?.core.respondError(event.request.request, 2, "local serving allocation failed", now) catch {
+                _ = runtime.owner.?.core.cancelRequest(event.request.request, now);
             };
         },
         else => return err,
@@ -454,21 +454,21 @@ pub fn captureLocked(runtime: *Runtime, event: rr.ReqResp.Event, now: n.Now) !vo
             },
             .failed => |failed| {
                 const reason = try failure(failed.reason);
-                if (cell.response_awaited and cell.ack == null and !runtime.stop) cell.ack = .{ .failed = reason };
+                if (cell.response_awaited and cell.ack == null and !runtime.bridge.stop) cell.ack = .{ .failed = reason };
                 cell.native = false;
             },
             else => unreachable,
         }
         if (!cell.native) {
             if (cell.response_awaited and cell.ack == null) {
-                std.debug.assert(runtime.stop);
+                std.debug.assert(runtime.bridge.stop);
                 cell.ack = .closed;
             }
             if (cell.state != .response_preparing) cell.state = .terminal;
             table.releasePayload(cell);
             if (!cell.exposed and !cell.copying) {
                 if (cell.serving != null) {
-                    const released = runtime.heavy.?.core.releaseServing(cell.serving.?);
+                    const released = runtime.owner.?.core.releaseServing(cell.serving.?);
                     std.debug.assert(released);
                     cell.serving = null;
                 }
@@ -476,15 +476,14 @@ pub fn captureLocked(runtime: *Runtime, event: rr.ReqResp.Event, now: n.Now) !vo
             }
         }
         table.refresh(cell);
-        runtime.recomputeLocked(.completions);
-        runtime.recomputeLocked(.serving);
+        runtime.notifyIfReadyLocked();
         if (ownerWork(cell)) runtime.host_due = true;
         break;
     }
 }
 fn admitLocked(runtime: *Runtime, request: @FieldType(rr.ReqResp.Event, "request"), now: n.Now) !void {
-    const table = &runtime.incoming.?;
-    const core = &runtime.heavy.?.core;
+    const table = &runtime.bridge.incoming.?;
+    const core = &runtime.owner.?.core;
     const identity = core.peerIdentity(request.conn) orelse {
         _ = core.cancelRequest(request.request, now);
         return;
@@ -507,12 +506,12 @@ fn admitLocked(runtime: *Runtime, request: @FieldType(rr.ReqResp.Event, "request
     cell.native = true;
     cell.serving = core.retainServing(request.request) orelse unreachable;
     table.refresh(cell);
-    runtime.recomputeLocked(.serving);
+    runtime.notifyIfReadyLocked();
 }
 /// Ends every stream at the owner's quiescence. With no owner left to return serving slots, a cell the host awaits
 /// nothing more of retires now, also one whose close the host already took and whose release may come later.
 pub fn closeLocked(runtime: *Runtime) void {
-    if (runtime.incoming) |*table| for (table.cells, 0..) |*cell, i| {
+    if (runtime.bridge.incoming) |*table| for (table.cells, 0..) |*cell, i| {
         if (cell.state == .free) continue;
         cell.native = false;
         cell.serving = null;
