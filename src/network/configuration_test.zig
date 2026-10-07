@@ -11,6 +11,50 @@ const config = @import("config");
 const PeerId = @import("wire/peer_id.zig").PeerId;
 const ForkEntry = @import("types.zig").ForkEntry;
 const configuration = @import("configuration.zig");
+const gossip_limits = @import("gossip_limits.zig");
+const gossip_options = @import("gossipsub/options.zig");
+
+test "configuration derives gossip storage from payload limits in both profiles" {
+    const mib = 1024 * 1024;
+    for ([_]Profile{ .small, .beacon_node }) |profile| {
+        const defaults = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
+        try std.testing.expectEqual(@as(usize, if (profile == .small) 64 else 1024), defaults.core.protocols.gossipsub.validation_capacity);
+        try std.testing.expectEqual(@as(usize, if (profile == .small) gossip_options.mcache_arena_bytes_min else 64 * mib), defaults.core.protocols.gossipsub.mcache_arena_bytes);
+        for ([_]u32{ 4096, mib }) |bytes| {
+            const limits: gossip_limits.Limits = @splat(.{ .items = 2, .bytes = bytes });
+            var request: configuration.Options = .{
+                .profile = profile,
+                .seed = 1,
+                .forks = &.{},
+                .admission_policy = policy_fixture.config(),
+                .gossip = .{ .topic_policy = &.{topic_fixture.full(@splat(0))}, .payload_limits = limits },
+            };
+            const resolved = try resolve(request);
+            const options = resolved.core.protocols.gossipsub;
+            try std.testing.expectEqual(@as(usize, 26), options.validation_capacity);
+            try std.testing.expectEqual(@as(usize, if (bytes == 4096) gossip_options.mcache_arena_bytes_min else 26 * mib), options.mcache_arena_bytes);
+            try std.testing.expectEqualDeep(limits, options.payload_limits.?);
+            try std.testing.expectEqual(defaults.core.protocols.gossipsub.mcache_capacity, options.mcache_capacity);
+            try std.testing.expectEqual(defaults.core.protocols.gossipsub.receive_arena_bytes, options.receive_arena_bytes);
+
+            request.gossip.mcache_arena_bytes = 32 * mib;
+            try std.testing.expectEqual(@as(usize, 32 * mib), (try resolve(request)).core.protocols.gossipsub.mcache_arena_bytes);
+            request.gossip.validation_capacity = 25;
+            try std.testing.expectError(error.InvalidLimits, resolve(request));
+            request.gossip.validation_capacity = null;
+            request.gossip.mcache_arena_bytes = gossip_options.mcache_arena_bytes_min - 1;
+            try std.testing.expectError(error.InvalidLimits, resolve(request));
+        }
+        const invalid: gossip_limits.Limits = @splat(.{ .items = 1, .bytes = 4096 });
+        try std.testing.expectError(error.InvalidLimits, resolve(.{
+            .profile = profile,
+            .seed = 1,
+            .forks = &.{},
+            .admission_policy = policy_fixture.config(),
+            .gossip = .{ .payload_limits = invalid },
+        }));
+    }
+}
 
 test "configuration resolves dial concurrency independently of peer headroom" {
     for ([_]u16{ 1, 2, 10 }) |headroom| {

@@ -34,6 +34,9 @@ test("metrics are available through startup and remain readable after close", as
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     await vi.waitFor(() => expect(samples(runtime.getMetrics()).get("lodestar_native_network_running")).toBe(1));
     const metrics = samples(runtime.getMetrics());
+    expect(metrics.get("lodestar_native_gossipsub_validation_capacity")).toBe(
+      Object.values(config.gossipPolicy.processor).reduce((total, limit) => total + limit.items, 0)
+    );
     expect(metrics.has("lodestar_peer_manager_starved_bool")).toBe(false);
     expect(metrics.has("lodestar_discovery_total_dial_attempts")).toBe(false);
     const published = metrics.get("lodestar_native_network_metrics_updated_timestamp_seconds");

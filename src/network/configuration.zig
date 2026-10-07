@@ -12,14 +12,82 @@ const Router = @import("router.zig").Router;
 const identify_mod = @import("identify/root.zig");
 const ForkEntry = @import("types.zig").ForkEntry;
 const request_policy = @import("reqresp/request_policy.zig");
-const message_store = @import("gossipsub/message_store.zig");
 const receive_pool = @import("gossipsub/receive_pool.zig");
 
 pub const Profile = enum { small, beacon_node };
-pub const ReqRespOverrides = Overrides(rr.Options, &.{ "connections", "forks", "request_fork", "outbound_control_reserved", "serving_control_reserved", "admission" });
-pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "connection_slots", "retained_capacity", "retained_outbound_reserve", "random_seed" });
-pub const IdentifyOverrides = Overrides(identify_mod.Handler.Options, &.{});
-pub const RouterOverrides = Overrides(Router.Options, &.{ "outbound_control_reserved", "inbound_connections" });
+pub const ReqRespOverrides = struct {
+    outbound_max: ?u16 = null,
+    serving_max: ?u16 = null,
+    serving_per_peer_max: ?u8 = null,
+    outbound_per_connection_max: ?u8 = null,
+    inbound_per_connection_max: ?u8 = null,
+    inbound_application_per_connection_max: ?u8 = null,
+    progress_timeout_ms: ?u64 = null,
+    host_timeout_ms: ?u64 = null,
+    quota_timeout_ms: ?u64 = null,
+    work_per_pump_max: ?u16 = null,
+};
+pub const GossipOverrides = struct {
+    topic_policy: ?@FieldType(gossip.Options, "topic_policy") = null,
+    message_id_policy: ?@FieldType(gossip.Options, "message_id_policy") = null,
+    iwant_followup_ms: ?u64 = null,
+    idontwant_min_data_size: ?usize = null,
+    heartbeat_interval_ms: ?u64 = null,
+    seen_capacity: ?usize = null,
+    mcache_capacity: ?usize = null,
+    mcache_arena_bytes: ?usize = null,
+    /// Derives validation capacity and payload storage before explicit capacity overrides.
+    payload_limits: ?@FieldType(gossip.Options, "payload_limits") = null,
+    validation_capacity: ?usize = null,
+    validation_timeout_ms: ?u64 = null,
+    validation_tombstone_ms: ?u64 = null,
+    pressure_timeout_ms: ?u64 = null,
+    tx_timeout_ms: ?u64 = null,
+    control_bytes: ?usize = null,
+    critical_bytes: ?usize = null,
+    tx_peer_bytes: ?usize = null,
+    tx_local_descriptors: ?usize = null,
+    tx_local_bytes: ?usize = null,
+    peers_per_pump: ?usize = null,
+    topics_per_pump: ?usize = null,
+    items_per_peer: ?usize = null,
+    items_per_pump: ?usize = null,
+    input_per_peer: ?usize = null,
+    input_per_pump: ?usize = null,
+    output_per_peer: ?usize = null,
+    output_per_pump: ?usize = null,
+    fields_per_peer: ?usize = null,
+    fields_per_pump: ?usize = null,
+    work_per_pump: ?usize = null,
+    calls_per_peer: ?usize = null,
+    calls_per_pump: ?usize = null,
+    decompress_per_peer_bytes: ?usize = null,
+    large_frame_timeout_ms: ?u64 = null,
+    body_buffer_bytes: ?usize = null,
+    receive_arena_bytes: ?usize = null,
+    seen_ttl_ms: ?u64 = null,
+    gossip_factor: ?f64 = null,
+    retained_score_ms: ?u64 = null,
+    ip_allowlist: ?@FieldType(gossip.Options, "ip_allowlist") = null,
+    score_params: ?@FieldType(gossip.Options, "score_params") = null,
+    topic_params: ?@FieldType(gossip.Options, "topic_params") = null,
+    initial_slot: ?u64 = null,
+    opportunistic_graft_interval_ms: ?u64 = null,
+};
+pub const IdentifyOverrides = struct {
+    inbound_max: ?u16 = null,
+    outbound_max: ?u16 = null,
+    agent: ?[]const u8 = null,
+    protocol_version: ?[]const u8 = null,
+    addresses: ?@FieldType(identify_mod.Handler.Options, "addresses") = null,
+};
+pub const RouterOverrides = struct {
+    capabilities: ?@FieldType(Router.Options, "capabilities") = null,
+    negotiations_max: ?u16 = null,
+    outbound_reserved: ??u16 = null,
+    inbound_per_connection_max: ?u16 = null,
+    meshsub_versions: ?@FieldType(Router.Options, "meshsub_versions") = null,
+};
 
 /// Req/resp, gossip and router fields override profile defaults; shared capacities are derived.
 pub const Options = struct {
@@ -134,8 +202,11 @@ pub fn resolve(options: Options) !Resolved {
         gossip_options.seen_capacity = 4096;
         gossip_options.mcache_capacity = 256;
         gossip_options.validation_capacity = 64;
-        gossip_options.mcache_arena_bytes = c.maxCompressedLen(c.MAX_PAYLOAD_SIZE) + message_store.page_bytes;
+        gossip_options.mcache_arena_bytes = gossip.mcache_arena_bytes_min;
         gossip_options.receive_arena_bytes = std.mem.alignForward(usize, c.GOSSIP_MAX_SIZE, receive_pool.page_bytes);
+    }
+    if (options.gossip.payload_limits) |payload_limits| {
+        if (payload_limits) |*limits_by_kind| try gossip_options.setPayloadLimits(limits_by_kind);
     }
     applyOverrides(&gossip_options, options.gossip);
     const result: Resolved = .{
@@ -176,26 +247,6 @@ pub fn validate(limits: Engine.Limits, options: Core) !void {
         options.protocols.reqresp.outbound_control_reserved < options.peers.max_peers or
         options.protocols.router.outbound_control_reserved < options.protocols.reqresp.outbound_control_reserved)
         return error.InvalidOptions;
-}
-
-fn Overrides(comptime BaseOptions: type, comptime derived: []const []const u8) type {
-    const fields = std.meta.fields(BaseOptions);
-    var names: [fields.len - derived.len][:0]const u8 = undefined;
-    var types: [names.len]type = undefined;
-    var attrs: [names.len]std.builtin.Type.StructField.Attributes = undefined;
-    var count: usize = 0;
-    for (fields) |field| {
-        var shared = false;
-        for (derived) |name| shared = shared or std.mem.eql(u8, name, field.name);
-        if (shared) continue;
-        const optional = ?field.type;
-        names[count] = field.name;
-        types[count] = optional;
-        attrs[count] = .{ .default_value_ptr = &@as(optional, null) };
-        count += 1;
-    }
-    std.debug.assert(count == names.len);
-    return @Struct(.auto, null, &names, &types, &attrs);
 }
 
 fn applyOverrides(options: anytype, overrides: anytype) void {
