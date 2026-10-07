@@ -3,7 +3,6 @@ const ForkSeq = @import("config").ForkSeq;
 const constants = @import("constants");
 const preset = @import("preset");
 const Protocol = @import("protocol.zig").Protocol;
-const quota_config = @import("quotas.zig");
 const ct = @import("consensus_types");
 const constants_mod = @import("constants.zig");
 const BeaconConfig = @import("config").BeaconConfig;
@@ -130,18 +129,6 @@ pub const Policy = struct {
         return maximum;
     }
 
-    pub fn defaultQuotas(self: *const Policy, fork: ForkSeq) quota_config.Quotas {
-        var out = quota_config.defaultQuotas();
-        for ([_]Protocol{ .blocks_by_range_v2, .blocks_by_root_v2 }) |which|
-            out[@intFromEnum(which)].tokens = self.blocks(fork);
-        out[@intFromEnum(Protocol.blocks_by_head_v1)].tokens = self.config.blocks_deneb;
-        for ([_]Protocol{ .blob_sidecars_by_range_v1, .blob_sidecars_by_root_v1 }) |which|
-            out[@intFromEnum(which)].tokens = self.blobs(fork);
-        for ([_]Protocol{ .data_column_sidecars_by_range_v1, .data_column_sidecars_by_root_v1 }) |which|
-            out[@intFromEnum(which)].tokens = self.config.column_chunks;
-        return out;
-    }
-
     pub fn inspect(self: *const Policy, which: Protocol, bytes: []const u8, request_fork: ForkSeq) InspectError!Inspection {
         const bounds = self.requestBounds(which, request_fork);
         const intrinsic = which.info();
@@ -248,10 +235,10 @@ pub const Policy = struct {
     fn host(self: *const Policy, value: u64) InspectError!void {
         if (self.config.host_integer_max) |limit| if (value > limit) return error.HostIntegerRange;
     }
-    fn blocks(self: *const Policy, fork: ForkSeq) u32 {
+    pub fn blocks(self: *const Policy, fork: ForkSeq) u32 {
         return if (fork.gte(.deneb)) self.config.blocks_deneb else self.config.blocks_pre_deneb;
     }
-    fn blobs(self: *const Policy, fork: ForkSeq) u32 {
+    pub fn blobs(self: *const Policy, fork: ForkSeq) u32 {
         return if (fork.gte(.electra)) self.config.blob_identifiers_electra else self.config.blob_identifiers_deneb;
     }
 };

@@ -5,6 +5,7 @@ const RequestIO = @import("RequestIO.zig");
 const ReqResp = @import("ReqResp.zig");
 const Server = @import("Server.zig");
 const admission = @import("admission.zig");
+const quotas = @import("quotas.zig");
 const ReceiveLayout = @import("ReceiveLayout.zig");
 const constants = @import("constants.zig");
 const index_list = @import("../index_list.zig");
@@ -65,7 +66,7 @@ connection_cursors: []ConnectionCursor,
 ready: [2]index_list.List = .{ .{}, .{} },
 pending: bool = false,
 
-pub fn init(allocator: std.mem.Allocator, options: admission.Options, connections: u16) admission.InitError!InboundAdmission {
+pub fn init(allocator: std.mem.Allocator, options: quotas.Options, connections: u16) admission.InitError!InboundAdmission {
     var limiter = try admission.Limiter.init(allocator, options);
     errdefer limiter.deinit(allocator);
     const cursors = try allocator.alloc(ConnectionCursor, connections);

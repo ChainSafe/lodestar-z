@@ -3,7 +3,7 @@ const config = @import("config");
 const constants = @import("constants.zig");
 const request_policy = @import("request_policy.zig");
 const admission_mod = @import("admission.zig");
-const Protocol = @import("protocol.zig").Protocol;
+const quotas = @import("quotas.zig");
 const limits = @import("../quic/limits.zig");
 const ForkEntry = @import("../types.zig").ForkEntry;
 
@@ -47,27 +47,10 @@ pub const Options = struct {
 
     pub const Admission = struct {
         policy: request_policy.Config,
-        limits: admission_mod.Options,
+        limits: quotas.Options,
 
         pub fn defaults(configuration: *const request_policy.Config, identities: u16, control_peers: u16, application_max: u16) error{InvalidPolicy}!Admission {
-            if (control_peers == 0 or control_peers > identities) return error.InvalidPolicy;
-            const policy = try request_policy.Policy.init(configuration);
-            var quotas: admission_mod.Options = undefined;
-            quotas.identities = identities;
-            quotas.starts = .{ .tokens = Protocol.count * constants.MAX_CONCURRENT_REQUESTS, .period_ms = constants.progress_timeout_ms_default };
-            for (0..config.ForkSeq.count) |i| {
-                quotas.peer[i] = policy.defaultQuotas(@enumFromInt(i));
-                quotas.global[i] = quotas.peer[i];
-                for (0..Protocol.count) |j| {
-                    const which: Protocol = @enumFromInt(j);
-                    if (which.isControl()) {
-                        quotas.global[i][j].tokens *= control_peers;
-                    } else {
-                        quotas.global[i][j].tokens *= @max(1, @as(u32, application_max) / (2 * constants.MAX_CONCURRENT_REQUESTS));
-                    }
-                }
-            }
-            return .{ .policy = configuration.*, .limits = quotas };
+            return .{ .policy = configuration.*, .limits = try quotas.Options.defaults(configuration, identities, control_peers, application_max) };
         }
     };
 

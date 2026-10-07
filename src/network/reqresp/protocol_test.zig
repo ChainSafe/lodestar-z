@@ -51,7 +51,6 @@ test "protocol info sizes follow the consensus types" {
     try std.testing.expectEqual(ct.phase0.SignedBeaconBlock.min_size, blocks.response_min);
     try std.testing.expect(blocks.context_bytes);
     try std.testing.expectEqual(@as(u32, consensus.MAX_REQUEST_BLOCKS), blocks.chunks_max);
-    try std.testing.expectEqual(@as(u32, 128), blocks.quota_tokens);
     try std.testing.expectEqual(ct.phase0.BeaconBlockRoots.max_size, Protocol.blocks_by_root_v2.info().request_max);
     try std.testing.expectEqual(ct.deneb.BlobSidecar.fixed_size, Protocol.blob_sidecars_by_root_v1.info().response_min);
     try std.testing.expectEqual(@as(u32, preset.MAX_REQUEST_DATA_COLUMN_SIDECARS), Protocol.data_column_sidecars_by_range_v1.info().chunks_max);
@@ -84,11 +83,11 @@ test "reqresp active light client range allows an exact empty stream" {
 
 test "reqresp active literal ids shapes and application partition" {
     const cases = .{
-        .{ Protocol.blocks_by_head_v1, "/eth2/beacon_chain/req/beacon_blocks_by_head/1/ssz_snappy", 40, 128, 10_000 },
-        .{ Protocol.light_client_bootstrap_v1, "/eth2/beacon_chain/req/light_client_bootstrap/1/ssz_snappy", 32, 5, 15_000 },
-        .{ Protocol.light_client_updates_by_range_v1, "/eth2/beacon_chain/req/light_client_updates_by_range/1/ssz_snappy", 16, 128, 10_000 },
-        .{ Protocol.light_client_finality_update_v1, "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy", 0, 2, 12_000 },
-        .{ Protocol.light_client_optimistic_update_v1, "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy", 0, 2, 12_000 },
+        .{ Protocol.blocks_by_head_v1, "/eth2/beacon_chain/req/beacon_blocks_by_head/1/ssz_snappy", 40 },
+        .{ Protocol.light_client_bootstrap_v1, "/eth2/beacon_chain/req/light_client_bootstrap/1/ssz_snappy", 32 },
+        .{ Protocol.light_client_updates_by_range_v1, "/eth2/beacon_chain/req/light_client_updates_by_range/1/ssz_snappy", 16 },
+        .{ Protocol.light_client_finality_update_v1, "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy", 0 },
+        .{ Protocol.light_client_optimistic_update_v1, "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy", 0 },
     };
     inline for (cases) |case| {
         const which = case[0];
@@ -98,8 +97,6 @@ test "reqresp active literal ids shapes and application partition" {
         try std.testing.expect(which.info().context_bytes);
         try std.testing.expectEqual(@as(usize, case[2]), which.info().request_min);
         try std.testing.expectEqual(@as(usize, case[2]), which.info().request_max);
-        try std.testing.expectEqual(@as(u32, case[3]), which.info().quota_tokens);
-        try std.testing.expectEqual(@as(u64, case[4]), which.info().quota_period_ms);
         if (case[2] == 0) {
             try std.testing.expectEqual(@as(u32, 1), try chunkLimit(which, ""));
             try std.testing.expectError(error.InvalidRequest, chunkLimit(which, "\x00"));

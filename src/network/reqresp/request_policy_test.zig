@@ -54,7 +54,6 @@ test "reqresp request admission policy range work and schedule boundaries" {
         try std.testing.expectEqual(@as(u32, 1024), historical.chunks_max);
         try std.testing.expectEqual(@as(u128, 1024), historical.charged_cost);
     }
-    try std.testing.expectEqual(@as(u32, 128), policy.defaultQuotas(.fulu)[@intFromEnum(Protocol.blocks_by_range_v2)].tokens);
     for ([_]u64{ 1, 128, 129, std.math.maxInt(u64) }) |count| {
         put(&bytes, 0, 10);
         put(&bytes, 8, count);
