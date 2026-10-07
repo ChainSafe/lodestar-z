@@ -151,16 +151,18 @@ test "memory_safety: variable progressive container clone preserves out on OOM" 
     try value.a.append(std.testing.allocator, 1);
     try value.b.append(std.testing.allocator, 2);
 
-    var out = Container.default_value;
-    defer Container.deinit(std.testing.allocator, &out);
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
-
-    try std.testing.expectError(
-        error.OutOfMemory,
-        Container.clone(failing.allocator(), &value, &out),
-    );
-    try std.testing.expectEqual(@as(usize, 0), out.a.items.len);
-    try std.testing.expectEqual(@as(usize, 0), out.b.items.len);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, input: *const Container.Type) !void {
+            var out: Container.Type = Container.default_value;
+            defer Container.deinit(allocator, &out);
+            Container.clone(allocator, input, &out) catch |err| {
+                try std.testing.expectEqual(@as(usize, 0), out.a.items.len);
+                try std.testing.expectEqual(@as(usize, 0), out.b.items.len);
+                return err;
+            };
+            try std.testing.expect(Container.equals(input, &out));
+        }
+    }.run, .{&value});
 }
 
 test "memory_safety: fixed progressive container byte deserialization preserves out on malformed input" {

@@ -789,16 +789,14 @@ test "memory_safety: diff helpers preserve appended indices on allocation failur
     inline for (.{ types.phase0.Validator.fixed_size, INACTIVITY_SCORE_SIZE }) |element_size| {
         const old_bytes = [_]u8{0} ** (257 * element_size);
         const new_bytes = [_]u8{1} ** (257 * element_size);
-        var saw_oom = false;
 
         try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
-            fn run(allocator: Allocator, before: []const u8, after: []const u8, failed: *bool) !void {
+            fn run(allocator: Allocator, before: []const u8, after: []const u8) !void {
                 var got: std.ArrayList(ValidatorIndex) = .empty;
                 defer got.deinit(allocator);
                 try got.append(allocator, 3);
 
                 findModifiedIndices(element_size, allocator, before, after, &got) catch |err| {
-                    failed.* = true;
                     try std.testing.expectEqual(error.OutOfMemory, err);
                     try std.testing.expectEqual(@as(ValidatorIndex, 3), got.items[0]);
                     for (got.items[1..], 0..) |index, i| {
@@ -812,8 +810,7 @@ test "memory_safety: diff helpers preserve appended indices on allocation failur
                     try std.testing.expectEqual(@as(ValidatorIndex, i), index);
                 }
             }
-        }.run, .{ &old_bytes, &new_bytes, &saw_oom });
-        try std.testing.expect(saw_oom);
+        }.run, .{ &old_bytes, &new_bytes });
     }
 }
 

@@ -85,14 +85,12 @@ test "memory_safety: setSyncCommitteesIndexed should preserve caches on every OO
     const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
     const indices = [_]ValidatorIndex{ 0, 0, 2 };
     var accounting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var saw_oom = false;
 
     try std.testing.checkAllAllocationFailures(accounting.allocator(), struct {
         fn run(
             allocator: std.mem.Allocator,
             input: []const ValidatorIndex,
             counter: *const std.testing.FailingAllocator,
-            failed: *bool,
         ) !void {
             var epoch_cache: EpochCache = undefined;
             epoch_cache.allocator = allocator;
@@ -112,7 +110,6 @@ test "memory_safety: setSyncCommitteesIndexed should preserve caches on every OO
             const old_next = epoch_cache.next_sync_committee_indexed;
             const outstanding_bytes = counter.allocated_bytes - counter.freed_bytes;
             epoch_cache.setSyncCommitteesIndexed(input) catch |err| {
-                failed.* = true;
                 try std.testing.expectEqual(old_current, epoch_cache.current_sync_committee_indexed);
                 try std.testing.expectEqual(old_next, epoch_cache.next_sync_committee_indexed);
                 try std.testing.expectEqual(
@@ -132,8 +129,7 @@ test "memory_safety: setSyncCommitteesIndexed should preserve caches on every OO
                 try epoch_cache.next_sync_committee_indexed.get().getValidatorIndices(),
             );
         }
-    }.run, .{ &indices, &accounting, &saw_oom });
-    try std.testing.expect(saw_oom);
+    }.run, .{ &indices, &accounting });
 }
 
 test "memory_safety: rotateSyncCommitteeIndexed should preserve shared caches on allocation failure" {
@@ -195,16 +191,16 @@ test "memory_safety: EpochCache.clone does not retain shared references when all
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
-    var failing_allocator = std.testing.FailingAllocator.init(
-        allocator,
-        .{ .fail_index = 0 },
-    );
-
     // Leaked refs prevent test_state teardown from releasing the last shared owners.
-    try std.testing.expectError(
-        error.OutOfMemory,
-        test_state.cached_state.epoch_cache.clone(failing_allocator.allocator()),
-    );
+    try std.testing.checkAllAllocationFailures(allocator, struct {
+        fn run(
+            clone_allocator: std.mem.Allocator,
+            source: *@import("epoch_cache.zig").EpochCache,
+        ) !void {
+            const cloned = try source.clone(clone_allocator);
+            defer cloned.deinit();
+        }
+    }.run, .{test_state.cached_state.epoch_cache});
 }
 
 test "memory_safety: afterProcessEpoch releases copied indices when RC allocation fails" {

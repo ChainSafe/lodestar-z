@@ -78,52 +78,15 @@ test "memory_safety: EpochShuffling.init frees output when positions allocation 
     try std.testing.expectEqualSlices(u64, &.{ 1, 7, std.math.maxInt(u64) }, active_indices);
 }
 
-test "memory_safety: EpochShuffling.init should free completed committees when a later slot allocation fails" {
-    const allocator = std.testing.allocator;
-    const active_indices = try allocator.alloc(ct.primitive.ValidatorIndex.Type, 256);
-    defer allocator.free(active_indices);
-    for (active_indices, 0..) |*index, i| {
-        index.* = @intCast(i);
-    }
+test "memory_safety: EpochShuffling.init should free partial allocations on OOM" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const active_indices = try allocator.alloc(ct.primitive.ValidatorIndex.Type, 256);
+            errdefer allocator.free(active_indices);
+            for (active_indices, 0..) |*index, i| index.* = @intCast(i);
 
-    // The shuffling, positions, and first slot allocations succeed; the second slot allocation fails.
-    var failing = std.testing.FailingAllocator.init(
-        allocator,
-        .{ .fail_index = 3 },
-    );
-    try std.testing.expectError(
-        error.OutOfMemory,
-        EpochShuffling.init(
-            failing.allocator(),
-            [_]u8{0} ** 32,
-            0,
-            active_indices,
-        ),
-    );
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-}
-
-test "memory_safety: EpochShuffling.init should free committees when the final allocation fails" {
-    const allocator = std.testing.allocator;
-    const active_indices = try allocator.alloc(ct.primitive.ValidatorIndex.Type, 256);
-    defer allocator.free(active_indices);
-    for (active_indices, 0..) |*index, i| {
-        index.* = @intCast(i);
-    }
-
-    // Shuffling, positions, and one allocation per slot precede the final struct allocation.
-    var failing = std.testing.FailingAllocator.init(
-        allocator,
-        .{ .fail_index = 2 + preset.SLOTS_PER_EPOCH },
-    );
-    try std.testing.expectError(
-        error.OutOfMemory,
-        EpochShuffling.init(
-            failing.allocator(),
-            [_]u8{0} ** 32,
-            0,
-            active_indices,
-        ),
-    );
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            const shuffling = try EpochShuffling.init(allocator, [_]u8{0} ** 32, 0, active_indices);
+            defer shuffling.deinit();
+        }
+    }.run, .{});
 }

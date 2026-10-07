@@ -88,16 +88,18 @@ test "memory_safety: compatible union clone preserves out on OOM" {
     source_data = null;
     defer Union.deinit(std.testing.allocator, &source);
 
-    var out: Union.Type = @unionInit(Union.Type, "option_1", Items.default_value);
-    defer Union.deinit(std.testing.allocator, &out);
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-
-    try std.testing.expectError(
-        error.OutOfMemory,
-        Union.clone(failing.allocator(), &source, &out),
-    );
-    try std.testing.expectEqual(@as(u8, 1), Union.getSelector(&out));
-    try std.testing.expectEqual(@as(usize, 0), out.option_1.items.len);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, input: *const Union.Type) !void {
+            var out: Union.Type = @unionInit(Union.Type, "option_1", Items.default_value);
+            defer Union.deinit(allocator, &out);
+            Union.clone(allocator, input, &out) catch |err| {
+                try std.testing.expectEqual(@as(u8, 1), Union.getSelector(&out));
+                try std.testing.expectEqual(@as(usize, 0), out.option_1.items.len);
+                return err;
+            };
+            try std.testing.expect(Union.equals(input, &out));
+        }
+    }.run, .{&source});
 }
 
 test "memory_safety: compatible union byte deserialization preserves out on malformed input" {
