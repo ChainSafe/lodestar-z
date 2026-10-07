@@ -2,19 +2,21 @@ const std = @import("std");
 const TypeKind = @import("type_kind.zig").TypeKind;
 const isBasicType = @import("type_kind.zig").isBasicType;
 const isFixedType = @import("type_kind.zig").isFixedType;
+const canMemcpySsz = @import("type_kind.zig").canMemcpySsz;
 const VariableElementIterator = @import("variable_element_iterator.zig").VariableElementIterator;
 const mixInLength = @import("hashing").mixInLength;
-const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Depth = @import("hashing").Depth;
 const Node = @import("persistent_merkle_tree").Node;
+const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
 const progressive = @import("progressive.zig");
+const TypeOpts = @import("list.zig").TypeOpts;
 
 pub fn FixedProgressiveListType(comptime ST: type) type {
     return FixedProgressiveListTypeWithOptions(ST, .{});
 }
 
 /// Chunked storage applies within subtrees of at least ChunkedLeaf.K chunks, preserving SSZ roots.
-pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @import("list.zig").TypeOpts) type {
+pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: TypeOpts) type {
     comptime {
         if (!isFixedType(ST)) {
             @compileError("ST must be fixed type");
@@ -30,7 +32,7 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @i
         pub const Element: type = ST;
         pub const opts = _opts;
         const use_chunked_leaf = opts.chunked_leaf;
-        const chunked = @import("progressive_list_chunks.zig");
+        const items_per_chunk = 32 / Element.fixed_size;
         pub const Type: type = std.ArrayList(Element.Type);
         pub const min_size: usize = 0;
         pub const max_size: usize = std.math.maxInt(usize);
@@ -60,7 +62,6 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @i
 
         fn chunkCountForLength(len: usize) usize {
             if (comptime isBasicType(Element)) {
-                const items_per_chunk = 32 / Element.fixed_size;
                 return len / items_per_chunk + @intFromBool(len % items_per_chunk != 0);
             } else return len;
         }
@@ -68,7 +69,6 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @i
         pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
             var accumulator = try progressive.MerkleAccumulator.init(chunkCount(value));
             if (comptime isBasicType(Element)) {
-                const items_per_chunk = 32 / Element.fixed_size;
                 var index: usize = 0;
                 while (index < value.items.len) {
                     var chunk: [32]u8 = @splat(0);
@@ -203,43 +203,50 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @i
                 return len;
             }
 
+            /// Decodes `values.len` packed elements from `bytes`, which start on a chunk boundary.
+            pub fn toValuesPackedFromBytes(bytes: []const u8, values: []Element.Type) void {
+                comptime std.debug.assert(isBasicType(Element));
+                std.debug.assert(bytes.len % 32 == 0);
+                std.debug.assert(bytes.len >= values.len * Element.fixed_size);
+                if (comptime canMemcpySsz(Element)) {
+                    const size = values.len * Element.fixed_size;
+                    @memcpy(std.mem.sliceAsBytes(values), bytes[0..size]);
+                } else if (comptime Element.kind == .bool) {
+                    for (values, bytes[0..values.len]) |*value, byte| value.* = byte != 0;
+                } else {
+                    for (values, 0..) |*value, i| {
+                        const chunk = bytes[i / items_per_chunk * 32 ..][0..32];
+                        Element.tree.toValuePackedFromBytes(chunk, i, value);
+                    }
+                }
+            }
+
+            /// Fills `out` in place. The caller initializes `out` with `allocator` and keeps
+            /// ownership; on error only its allocation stays valid.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 if (comptime use_chunked_leaf) {
                     const len = try length(node, pool);
-                    var replacement: Type = .empty;
-                    errdefer replacement.deinit(allocator);
-                    try replacement.resize(allocator, len);
-                    var it = try chunked.Iterator.init(pool, try node.getLeft(pool), chunkCountForLength(len));
+                    var it = try progressive.NodeIterator.initChunkedLeaf(
+                        pool,
+                        try node.getLeft(pool),
+                        chunkCountForLength(len),
+                    );
+                    try out.resize(allocator, len);
                     var index: usize = 0;
-                    while (try it.next()) |bytes| {
+                    while (try it.nextBytes()) |bytes| {
                         const count = @min(bytes.len / Element.fixed_size, len - index);
-                        if (comptime @import("type_kind.zig").canMemcpySsz(Element)) {
-                            @memcpy(std.mem.sliceAsBytes(replacement.items[index..][0..count]), bytes[0 .. count * Element.fixed_size]);
-                        } else if (comptime Element.kind == .bool) {
-                            for (replacement.items[index..][0..count], bytes[0..count]) |*element, byte| element.* = byte != 0;
-                        } else {
-                            for (replacement.items[index..][0..count], 0..) |*element, i| {
-                                try Element.deserializeFromBytes(bytes[i * Element.fixed_size ..][0..Element.fixed_size], element);
-                            }
-                        }
+                        toValuesPackedFromBytes(bytes, out.items[index..][0..count]);
                         index += count;
                     }
                     std.debug.assert(index == len);
-                    deinit(allocator, out);
-                    out.* = replacement;
                     return;
                 }
                 const len = try length(node, pool);
-                const chunk_count = if (comptime isBasicType(Element))
-                    (Element.fixed_size * len + 31) / 32
-                else
-                    len;
+                const chunk_count = chunkCountForLength(len);
+                if (chunk_count > progressive.max_tree_chunks) return error.InvalidSubtreeLength;
 
-                var replacement: Type = .empty;
-                errdefer replacement.deinit(allocator);
                 if (chunk_count == 0) {
-                    deinit(allocator, out);
-                    out.* = replacement;
+                    try out.resize(allocator, 0);
                     return;
                 }
 
@@ -249,8 +256,8 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @i
                 const contents_node = try node.getLeft(pool);
                 try progressive.getNodes(pool, contents_node, nodes);
 
-                try replacement.resize(allocator, len);
-                @memset(replacement.items, Element.default_value);
+                try out.resize(allocator, len);
+                @memset(out.items, Element.default_value);
                 if (comptime isBasicType(Element)) {
                     for (0..len) |i| {
                         const chunk_index = (i * Element.fixed_size) / 32;
@@ -259,7 +266,7 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @i
                             nodes[chunk_index],
                             pool,
                             element_index,
-                            &replacement.items[i],
+                            &out.items[i],
                         );
                     }
                 } else {
@@ -267,13 +274,10 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @i
                         try Element.tree.toValue(
                             nodes[i],
                             pool,
-                            &replacement.items[i],
+                            &out.items[i],
                         );
                     }
                 }
-
-                deinit(allocator, out);
-                out.* = replacement;
             }
 
             pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
@@ -286,9 +290,13 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @i
                 if (out.len < size) return error.InvalidSize;
                 const chunk_count = chunkCountForLength(len);
                 if (comptime use_chunked_leaf) {
-                    var it = try chunked.Iterator.init(pool, try node.getLeft(pool), chunk_count);
+                    var it = try progressive.NodeIterator.initChunkedLeaf(
+                        pool,
+                        try node.getLeft(pool),
+                        chunk_count,
+                    );
                     var offset: usize = 0;
-                    while (try it.next()) |bytes| {
+                    while (try it.nextBytes()) |bytes| {
                         const count = @min(bytes.len, size - offset);
                         @memcpy(out[offset..][0..count], bytes[0..count]);
                         offset += count;
@@ -314,7 +322,7 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @i
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 if (comptime use_chunked_leaf) {
                     try serialized.validate(data);
-                    return chunked.fromBytes(Element, pool, data);
+                    return buildChunkedLeaf(true, pool, data);
                 }
                 const allocator = pool.allocator;
                 var value = Self.default_value;
@@ -324,8 +332,93 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @i
                 return fromValue(pool, &value);
             }
 
+            fn buildChunkedLeaf(
+                comptime from_bytes: bool,
+                pool: *Node.Pool,
+                input: if (from_bytes) []const u8 else []const Element.Type,
+            ) !Node.Id {
+                const len = if (from_bytes) input.len / Element.fixed_size else input.len;
+                const chunk_count = chunkCountForLength(len);
+                if (chunk_count > progressive.max_tree_chunks) return error.InputTooLong;
+
+                var roots: [progressive.max_tree_subtrees]Node.Id = undefined;
+                var root_count: usize = 0;
+                errdefer for (roots[0..root_count]) |root| pool.unref(root);
+
+                var item_index: usize = 0;
+                for (0..progressive.max_tree_subtrees) |subtree_index| {
+                    if (item_index == len) break;
+                    const depth: Depth = @intCast(2 * subtree_index);
+                    const leaf_offset: Depth =
+                        if (depth >= ChunkedLeaf.k_log2) ChunkedLeaf.k_log2 else 0;
+                    const capacity = @as(usize, 1) << @intCast(depth);
+                    const chunks_done = item_index / items_per_chunk;
+                    const subtree_chunks = @min(capacity, chunk_count - chunks_done);
+                    const chunks_per_leaf = @as(usize, 1) << @intCast(leaf_offset);
+                    const leaf_count = (subtree_chunks + chunks_per_leaf - 1) / chunks_per_leaf;
+
+                    var it = Node.FillWithContentsIterator.initWithOffset(
+                        pool,
+                        depth - leaf_offset,
+                        leaf_offset,
+                    );
+                    errdefer it.deinit();
+
+                    for (0..leaf_count) |_| {
+                        const count = @min(chunks_per_leaf * items_per_chunk, len - item_index);
+                        const size = count * Element.fixed_size;
+                        const leaf_chunks = (count + items_per_chunk - 1) / items_per_chunk;
+                        const leaf = if (leaf_offset == 0)
+                            try pool.createLeaf(&@as([32]u8, @splat(0)))
+                        else
+                            try pool.createChunkedLeafEmpty(@intCast(leaf_chunks));
+                        {
+                            errdefer pool.unref(leaf);
+                            const bytes: []u8 = if (leaf_offset == 0)
+                                &pool.nodes.items(.root)[@intFromEnum(leaf)]
+                            else
+                                std.mem.asBytes(&(try leaf.getChunkedLeafPtr(pool)).chunks);
+                            const out = bytes[0..size];
+                            if (from_bytes) {
+                                @memcpy(out, input[item_index * Element.fixed_size ..][0..size]);
+                            } else if (comptime canMemcpySsz(Element)) {
+                                @memcpy(out, std.mem.sliceAsBytes(input[item_index..][0..count]));
+                            } else {
+                                for (input[item_index..][0..count], 0..) |*element, i| {
+                                    _ = Element.serializeIntoBytes(
+                                        element,
+                                        out[i * Element.fixed_size ..][0..Element.fixed_size],
+                                    );
+                                }
+                            }
+                        }
+                        // append consumes the fresh node even if branch allocation fails.
+                        try it.append(leaf);
+                        item_index += count;
+                    }
+                    roots[root_count] = try it.finish();
+                    root_count += 1;
+                }
+                std.debug.assert(item_index == len);
+
+                var contents: Node.Id = @enumFromInt(0);
+                errdefer pool.unref(contents);
+
+                while (root_count > 0) {
+                    contents = try pool.createBranch(roots[root_count - 1], contents);
+                    root_count -= 1;
+                }
+
+                const length_leaf = try pool.createLeafFromUint(len);
+                errdefer pool.unref(length_leaf);
+
+                return pool.createBranch(contents, length_leaf);
+            }
+
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                if (comptime use_chunked_leaf) return chunked.fromValue(Element, pool, value.items);
+                if (comptime use_chunked_leaf) {
+                    return buildChunkedLeaf(false, pool, value.items);
+                }
                 const allocator = pool.allocator;
                 const len = value.items.len;
                 const chunk_count = chunkCount(value);
@@ -343,7 +436,6 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: @i
                 var content_owns_nodes = false;
                 errdefer if (!content_owns_nodes) pool.free(nodes);
                 if (comptime isBasicType(Element)) {
-                    const items_per_chunk = 32 / Element.fixed_size;
                     var next: usize = 0;
 
                     for (0..chunk_count) |i| {

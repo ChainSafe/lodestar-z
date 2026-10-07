@@ -377,6 +377,35 @@ test "progressive basic view clone transfer drops writes and retains root consis
     try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
 }
 
+test "progressive basic view toValue fills caller-owned out in place" {
+    var pool = try Node.Pool.init(.{
+        .allocator = allocator,
+        .page_allocator = allocator,
+        .pool_size = 1024,
+    });
+    defer pool.deinit();
+    inline for (.{ List, ChunkedList }) |ST| {
+        var value: ST.Type = .empty;
+        defer value.deinit(allocator);
+        try value.resize(allocator, 100);
+        for (value.items, 0..) |*element, i| element.* = i;
+        const view = try ST.TreeView.fromValue(allocator, &pool, &value);
+        defer view.deinit();
+        try view.set(99, 7);
+        value.items[99] = 7;
+
+        var out: ST.Type = .empty;
+        defer out.deinit(allocator);
+        try out.resize(allocator, 200);
+        @memset(out.items, 0xff);
+        const storage = out.items.ptr;
+        try view.toValue(allocator, &out);
+        try std.testing.expectEqual(storage, out.items.ptr);
+        try std.testing.expectEqualSlices(u64, value.items, out.items);
+    }
+    try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
+}
+
 test "progressive basic view integrates as an ordinary container field" {
     inline for (.{ List, ChunkedList }) |ST| {
         const Container = ssz.VariableContainerType(struct { values: ST });

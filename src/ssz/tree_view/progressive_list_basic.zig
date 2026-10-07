@@ -7,7 +7,7 @@ const Node = pmt.Node;
 const ChunkedLeaf = pmt.ChunkedLeaf;
 const Gindex = pmt.Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
-const canMemcpySsz = @import("../type/type_kind.zig").canMemcpySsz;
+const progressive = @import("../type/progressive.zig");
 const TreeViewState = @import("utils/tree_view_state.zig").TreeViewState;
 const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
@@ -35,15 +35,9 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
         const Self = @This();
         const items_per_chunk = 32 / ST.Element.fixed_size;
         const use_chunked_leaf = ST.opts.chunked_leaf;
-        // A chunk in subtree i has path length 3*i + 2 from the list root.
-        const max_subtrees = @min((hashing.max_depth - 2) / 3, (@bitSizeOf(usize) - 1) / 2) + 1;
-        const max_chunks = blk: {
-            var total: usize = 0;
-            for (0..max_subtrees) |i| total += @as(usize, 1) << @intCast(2 * i);
-            break :blk total;
-        };
+        const length_gindex: Gindex = @enumFromInt(3);
         pub const max_length: usize = @intCast(@min(
-            @as(u128, max_chunks) * items_per_chunk,
+            @as(u128, progressive.max_tree_chunks) * items_per_chunk,
             std.math.maxInt(usize) / ST.Element.fixed_size,
         ));
 
@@ -222,7 +216,7 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             if (self._len != self._orig_len) {
                 const length_node = try pool.createLeafFromUint(self._len);
                 errdefer pool.unref(length_node);
-                try self.state.setChildNode(@enumFromInt(3), length_node);
+                try self.state.setChildNode(length_gindex, length_node);
             }
 
             const old_count = subtreeCount(chunkCount(self._orig_len));
@@ -245,17 +239,12 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
 
                 const original = self.state.root;
                 self.state.root = expanded;
-                var published = false;
-                defer {
-                    if (published) {
-                        pool.unref(original);
-                    } else {
-                        pool.unref(self.state.root);
-                        self.state.root = original;
-                    }
+                errdefer {
+                    pool.unref(self.state.root);
+                    self.state.root = original;
                 }
                 try self.state.commitNodes();
-                published = true;
+                pool.unref(original);
             }
             self._orig_len = self._len;
             self.cached_chunk = null;
@@ -275,33 +264,15 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             while (index < values.len) {
                 const block = try chunks.next();
                 const count = @min(block.count * items_per_chunk, values.len - index);
-                if (block.node.getState(self.state.pool).isZero()) {
+                const pool = self.state.pool;
+                if (block.node.getState(pool).isZero()) {
                     @memset(values[index..][0..count], std.mem.zeroes(Element));
-                } else if (block.leaf_offset != 0) {
-                    const bytes = try block.node.getChunkedLeafChunks(self.state.pool);
-                    if (comptime canMemcpySsz(ST.Element)) {
-                        @memcpy(
-                            std.mem.sliceAsBytes(values[index..][0..count]),
-                            @as([*]const u8, @ptrCast(bytes))[0 .. count * ST.Element.fixed_size],
-                        );
-                    } else {
-                        for (values[index..][0..count], 0..) |*value, i| {
-                            ST.Element.tree.toValuePackedFromBytes(
-                                &bytes[i / items_per_chunk],
-                                i % items_per_chunk,
-                                value,
-                            );
-                        }
-                    }
                 } else {
-                    const bytes = block.node.getRoot(self.state.pool);
-                    if (comptime canMemcpySsz(ST.Element)) {
-                        @memcpy(std.mem.sliceAsBytes(values[index..][0..count]), bytes[0 .. count * ST.Element.fixed_size]);
-                    } else {
-                        for (values[index..][0..count], 0..) |*value, i| {
-                            ST.Element.tree.toValuePackedFromBytes(bytes, i, value);
-                        }
-                    }
+                    const bytes: []const u8 = if (block.leaf_offset != 0)
+                        std.mem.asBytes(try block.node.getChunkedLeafChunks(pool))
+                    else
+                        block.node.getRoot(pool);
+                    ST.tree.toValuesPackedFromBytes(bytes, values[index..][0..count]);
                 }
                 index += count;
             }
@@ -331,9 +302,9 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
                 const block = self.block orelse blk: {
                     const next_block = try self.chunks.next();
                     self.bytes = if (next_block.node.getState(pool).isZero())
-                        &zero_bytes
+                        &progressive.zero_leaf_bytes
                     else if (next_block.leaf_offset != 0)
-                        @as([*]const u8, @ptrCast(try next_block.node.getChunkedLeafChunks(pool)))[0 .. ChunkedLeaf.K * 32]
+                        std.mem.asBytes(try next_block.node.getChunkedLeafChunks(pool))
                     else
                         next_block.node.getRoot(pool);
                     self.block = next_block;
@@ -358,7 +329,6 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             count: usize,
             leaf_offset: Depth,
         };
-        const zero_bytes: [ChunkedLeaf.K * 32]u8 = @splat(0);
 
         const ChunkIterator = struct {
             view: *const Self,
@@ -423,7 +393,7 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             const leaf_offset = leafOffset(subtree);
             const depth: Depth = @intCast(2 * subtree - leaf_offset);
             const offset = (chunk_index - subtreeStart(subtree)) >> leaf_offset;
-            var prefixes: [max_subtrees]Node.Id = undefined;
+            var prefixes: [progressive.max_tree_subtrees]Node.Id = undefined;
             var spine = try self.state.root.getLeft(pool);
             for (0..subtree) |i| {
                 prefixes[i] = try spine.getLeft(pool);
@@ -462,35 +432,32 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             try pool.ref(trimmed);
             defer pool.unref(trimmed);
 
-            var contents = try pool.createBranch(trimmed, @enumFromInt(0));
-            defer pool.unref(contents);
+            const sliced = blk: {
+                var contents = try pool.createBranch(trimmed, @enumFromInt(0));
+                errdefer pool.unref(contents);
 
-            var i = subtree;
-            while (i > 0) {
-                i -= 1;
-                contents = try pool.createBranch(prefixes[i], contents);
-            }
+                var i = subtree;
+                while (i > 0) {
+                    i -= 1;
+                    contents = try pool.createBranch(prefixes[i], contents);
+                }
 
-            var length_node: ?Node.Id = try pool.createLeafFromUint(index + 1);
-            defer if (length_node) |node| pool.unref(node);
+                const length_node = try pool.createLeafFromUint(index + 1);
+                errdefer pool.unref(length_node);
 
-            const sliced = try pool.createBranch(contents, length_node.?);
-            // The new root owns contents; its initialization must clean up that root on failure.
-            contents = @enumFromInt(0);
-            length_node = null;
+                break :blk try pool.createBranch(contents, length_node);
+            };
             errdefer pool.unref(sliced);
+
             return Self.init(self.allocator, pool, sliced);
         }
 
-        /// Replaces an initialized, caller-owned value only on success; use its owning allocator.
+        /// Fills `out` in place. The caller initializes `out` with `allocator` and keeps
+        /// ownership; on error only its allocation stays valid.
         pub fn toValue(self: *Self, allocator: Allocator, out: *ST.Type) !void {
             try self.commit();
-            var replacement: ST.Type = .empty;
-            errdefer replacement.deinit(allocator);
-            try replacement.resize(allocator, self._len);
-            _ = try self.getAllInto(replacement.items);
-            out.deinit(allocator);
-            out.* = replacement;
+            try out.resize(allocator, self._len);
+            _ = try self.getAllInto(out.items);
         }
 
         pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
