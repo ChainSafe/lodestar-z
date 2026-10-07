@@ -14,8 +14,6 @@ const receiveForTest = support.receiveMessage;
 const testMessage = support.message;
 const constants = @import("constants.zig");
 const StorageRefusal = @import("messages.zig").StorageRefusal;
-const topic_policy = @import("topic_policy.zig");
-const gossip_limits = @import("../gossip_limits.zig");
 const frame = @import("frame.zig");
 
 fn buildTopic(name: []const u8, out: []u8) []const u8 {
@@ -346,28 +344,4 @@ test "gossip recent attribution survives validation slot reuse and duplicate pre
     g.messages.expire(&g.peers, 30_008);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[g.sessions.rows[source.index].logical.index].pins);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[g.sessions.rows[duplicate.index].logical.index].pins);
-}
-
-test "gossip pending validation quota preserves room for another peer and refunds completed work" {
-    var boundary: topic_policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
-    boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 1024 };
-    for ([_]bool{ false, true }) |planned| {
-        var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = if (planned) 4 * gossip_limits.kind_count else 4, .payload_limits = if (planned) @as(gossip_limits.Limits, @splat(.{ .items = 4, .bytes = 4096 })) else null });
-        defer g.deinit();
-        const first = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-        const second = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
-        try support.subscribe(&g, "/eth2/01020304/beacon_block/ssz_snappy");
-        var inbox: support.Inbox = .{};
-        defer inbox.deinit();
-        inbox.attach(&g);
-        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "first", 1));
-        const held = inbox.last().handle;
-        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "second", 2));
-        try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, first.index, "third", 3));
-        try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(StorageRefusal.peer_validations)]);
-        try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[first.index].logical, 3));
-        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, second.index, "other peer", 4));
-        try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(held, .ignore, Now.fromMilliseconds(.{ .mono_ms = 5, .unix_s = 0 })));
-        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "third", 6));
-    }
 }

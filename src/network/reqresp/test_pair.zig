@@ -7,8 +7,10 @@ const multistream = @import("../wire/multistream.zig");
 const Event = reqresp.Event;
 const ForkEntry = @import("../types.zig").ForkEntry;
 const ForkSeq = @import("config").ForkSeq;
-const protocols_test_support = @import("../protocols_test_support.zig");
-const protocols = @import("../protocols.zig");
+const support = @import("../quic/test_support.zig");
+const Router = @import("../router.zig").Router;
+const Now = @import("../types.zig").Now;
+const limits = @import("../quic/limits.zig");
 const policy_fixture = @import("policy_fixture.zig");
 
 pub const deneb_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xa9 };
@@ -27,8 +29,127 @@ pub const Overrides = struct {
     admission: ?reqresp.Options.Admission = null,
 };
 
+pub const Endpoint = struct {
+    reqresp: reqresp,
+    router: Router,
+
+    pub fn init(allocator: std.mem.Allocator, options: reqresp.Options, router_options: Router.Options) !Endpoint {
+        var router = try Router.init(allocator, router_options);
+        errdefer router.deinit();
+        const configured = router.capabilities();
+        var active = configured;
+        active.receive = .initEmpty();
+        active.request = .initEmpty();
+        for (std.enums.values(protocol.Protocol)) |which| {
+            if (configured.receive.contains(.{ .reqresp = which })) active.receive.insert(.{ .reqresp = which });
+            if (configured.request.contains(.{ .reqresp = which })) active.request.insert(.{ .reqresp = which });
+        }
+        router.setCapabilities(active);
+        return .{ .router = router, .reqresp = try reqresp.init(allocator, options) };
+    }
+
+    pub fn deinit(self: *Endpoint) void {
+        self.reqresp.deinit();
+        self.router.deinit();
+    }
+
+    fn readiness(self: *Endpoint, engine: *Engine, events: []const Engine.Event) void {
+        for (events) |event| {
+            const stream, const route = switch (event) {
+                .stream_ready => |ready| .{ ready.stream, engine.route(ready.stream) orelse continue },
+                .stream_closed => |closed| .{ closed.stream, closed.route },
+                else => continue,
+            };
+            switch (route.owner) {
+                .negotiation => self.router.negotiator.streamReady(route.row, stream),
+                .reqresp_outbound, .reqresp_inbound => self.reqresp.streamReady(route, stream),
+                .none => {},
+                else => unreachable,
+            }
+        }
+    }
+
+    pub fn process(self: *Endpoint, engine: *Engine, events: []const Engine.Event, now: Now, outputs: reqresp.Outputs) reqresp.OutputCounts {
+        self.readiness(engine, events);
+        self.reqresp.cleanupPending(engine, &self.router);
+        self.router.transportEvents(engine, events, now);
+        for (events) |event| switch (event) {
+            .closed => |closed| self.reqresp.connectionClosed(closed.conn, now),
+            .stream_closed => |closed| self.reqresp.streamClosed(closed.route, closed.stream, closed.reset_code, now),
+            else => {},
+        };
+        self.reqresp.cleanupPending(engine, &self.router);
+        var outcomes: [Router.outcomes_per_pump]Router.Outcome = undefined;
+        const count = self.router.pump(engine, now, &outcomes);
+        for (outcomes[0..count]) |outcome| {
+            const owner = outcome.owner orelse continue;
+            std.debug.assert(owner == .reqresp);
+            if (outcome.result == .ready) engine.bindStream(outcome.stream, .{}) catch {};
+            self.reqresp.negotiationResult(&self.router, engine, outcome, now);
+        }
+        self.router.releaseOutcomes();
+        return self.reqresp.pump(engine, &self.router, now, outputs);
+    }
+};
+
+const TransportPair = struct {
+    pair: support.Pair = .{},
+    client: Endpoint = undefined,
+    server: Endpoint = undefined,
+    handles: struct { client: Engine.Handle, server: Engine.Handle } = undefined,
+
+    fn init(self: *TransportPair, client: reqresp.Options, server: reqresp.Options) !void {
+        try self.pair.init(.{}, .{});
+        errdefer self.pair.deinit();
+        self.client = try Endpoint.init(std.testing.allocator, client, .{ .negotiations_max = 16 });
+        errdefer self.client.deinit();
+        self.server = try Endpoint.init(std.testing.allocator, server, .{ .negotiations_max = 16 });
+        errdefer self.server.deinit();
+        const handles = try support.connectPair(&self.pair);
+        self.handles = .{ .client = handles.client, .server = handles.server };
+    }
+
+    fn deinit(self: *TransportPair) void {
+        self.client.reqresp.cancelAll(&self.pair.client, &self.client.router, self.pair.now);
+        self.server.reqresp.cancelAll(&self.pair.server, &self.server.router, self.pair.now);
+        self.server.deinit();
+        self.client.deinit();
+        self.pair.deinit();
+    }
+
+    pub fn processClient(self: *TransportPair, outputs: reqresp.Outputs) reqresp.OutputCounts {
+        var events: [limits.events_per_turn_max]Engine.Event = undefined;
+        return self.client.process(&self.pair.client, self.pair.events(&self.pair.client, &events), self.pair.now, outputs);
+    }
+
+    pub fn processServer(self: *TransportPair, outputs: reqresp.Outputs) reqresp.OutputCounts {
+        var events: [limits.events_per_turn_max]Engine.Event = undefined;
+        return self.server.process(&self.pair.server, self.pair.events(&self.pair.server, &events), self.pair.now, outputs);
+    }
+
+    fn step(self: *TransportPair, client: reqresp.Outputs, server: reqresp.Outputs) !struct { client: reqresp.OutputCounts, server: reqresp.OutputCounts } {
+        try self.pair.pump();
+        const server_count = self.processServer(server);
+        const client_count = self.processClient(client);
+        try self.pair.pump();
+        return .{ .client = client_count, .server = server_count };
+    }
+};
+
+/// Delivers readiness only, leaving lifecycle events and pumping under the test's control.
+pub fn forward(pair: *support.Pair, engine: *Engine, requests: *reqresp) void {
+    for (pair.streamEvents(engine)) |event| {
+        const stream, const route = switch (event) {
+            .stream_ready => |ready| .{ ready.stream, engine.route(ready.stream) orelse continue },
+            .stream_closed => |closed| .{ closed.stream, closed.route },
+            else => continue,
+        };
+        if (route.owner == .reqresp_outbound or route.owner == .reqresp_inbound) requests.streamReady(route, stream);
+    }
+}
+
 pub const Pair = struct {
-    shared: protocols_test_support.ProtocolsPair = .{},
+    shared: TransportPair = .{},
     forks: [2]ForkEntry = .{
         .{ .digest = deneb_digest, .fork = .deneb },
         .{ .digest = fulu_digest, .fork = .fulu },
@@ -40,15 +161,11 @@ pub const Pair = struct {
     server_event_capacity: usize = 16,
 
     pub fn init(self: *Pair, client: Overrides, server: Overrides) !void {
-        try self.shared.init(try protocolsOptions(client, &self.forks), try protocolsOptions(server, &self.forks));
-    }
-
-    fn protocolsOptions(overrides: Overrides, forks: []const ForkEntry) !protocols.Protocols.Options {
-        return .{ .reqresp = try options(overrides, forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 } };
+        try self.shared.init(try options(client, &self.forks), try options(server, &self.forks));
     }
 
     /// Admission defaults over the fixture policy unless the caller supplies admission.
-    fn options(overrides: Overrides, forks: []const ForkEntry) !reqresp.Options {
+    pub fn options(overrides: Overrides, forks: []const ForkEntry) !reqresp.Options {
         const connections = 128;
         return .{
             .connections = connections,
@@ -72,8 +189,8 @@ pub const Pair = struct {
 
     /// Routes both sides' stream events to their negotiators and reqresp owners.
     pub fn forwardEvents(self: *Pair) void {
-        protocols_test_support.forward(&self.shared.pair, &self.shared.pair.client, .{ .negotiator = &self.shared.client.router.negotiator, .reqresp = &self.shared.client.reqresp });
-        protocols_test_support.forward(&self.shared.pair, &self.shared.pair.server, .{ .negotiator = &self.shared.server.router.negotiator, .reqresp = &self.shared.server.reqresp });
+        self.shared.client.readiness(&self.shared.pair.client, self.shared.pair.streamEvents(&self.shared.pair.client));
+        self.shared.server.readiness(&self.shared.pair.server, self.shared.pair.streamEvents(&self.shared.pair.server));
     }
 
     pub fn pumpOnce(self: *Pair) !void {

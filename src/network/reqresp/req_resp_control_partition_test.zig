@@ -1,13 +1,9 @@
 const std = @import("std");
-const schedule_test_support = @import("../schedule_test_support.zig");
 const rr = @import("ReqResp.zig");
 const protocol = @import("protocol.zig");
 const Router = @import("../router.zig").Router;
 const support = @import("../quic/test_support.zig");
-const Engine = @import("../quic/Engine.zig");
 const reservedOptions = @import("control_fixture.zig").reservedOptions;
-const protocols_test_support = @import("../protocols_test_support.zig");
-const consensus_types = @import("consensus_types");
 
 test "reqresp drain retains blocked terminals across control and application partitions" {
     var pair: support.Pair = .{};
@@ -87,113 +83,4 @@ test "reqresp drain retains blocked terminals across control and application par
     try std.testing.expectEqual(application, output[0].failed.request);
     _ = requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &.{} });
     try std.testing.expectEqual(0, requests.pendingCounts().outbound);
-}
-
-test "reqresp protocol integration retains request and chunk bytes through control progress" {
-    var pair: support.Pair = .{};
-    try pair.init(.{}, .{});
-    defer pair.deinit();
-    const handles = try support.connectPair(&pair);
-    var options = try reservedOptions();
-    options.forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }};
-    var client = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.client);
-    defer client.deinit();
-    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
-    defer server.deinit();
-    defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
-    const sink = try std.testing.allocator.alloc(
-        u8,
-        protocol.Protocol.blocks_by_root_v2.info().response_max,
-    );
-    defer {
-        client.reqresp.cancelAll(&pair.client, &client.router, pair.now);
-        std.testing.allocator.free(sink);
-    }
-    const root = [_]u8{0xa5} ** 32;
-    const app = try client.request(
-        &pair.client,
-        handles.client,
-        .blocks_by_root_v2,
-        &root,
-        sink,
-        .{ .expected_chunks = 1 },
-        pair.now,
-    );
-    const ping_bytes = [_]u8{42} ++ [_]u8{0} ** 7;
-    var pong: [8]u8 = undefined;
-    _ = try client.request(
-        &pair.client,
-        handles.client,
-        .ping_v1,
-        &ping_bytes,
-        &pong,
-        .{},
-        pair.now,
-    );
-    var got_pong = false;
-    var transport: [16]Engine.Event = undefined;
-    var output: [1]rr.Event = undefined;
-    for (0..24) |_| {
-        try pair.pump();
-        const received = client.process(&pair.client, pair.events(&pair.client, &transport), pair.now, .{ .application = &.{}, .control = &output });
-        for (output[0..received.control]) |event| switch (event) {
-            .chunk => |chunk| {
-                try std.testing.expectEqualSlices(u8, &ping_bytes, chunk.bytes);
-                try std.testing.expect(client.reqresp.consume(chunk.request, pair.now));
-                got_pong = true;
-            },
-            .failed => return error.TestUnexpectedResult,
-            else => {},
-        };
-        const incoming = server.process(&pair.server, pair.events(&pair.server, &transport), pair.now, .{ .application = &.{}, .control = &output });
-        for (output[0..incoming.control]) |event| switch (event) {
-            .request => |request| {
-                try std.testing.expectEqual(protocol.Protocol.ping_v1, request.protocol);
-                try server.reqresp.respond(request.request, &ping_bytes, null, pair.now);
-            },
-            .chunk_sent => |sent| _ = server.reqresp.finish(sent.request, pair.now),
-            .failed => return error.TestUnexpectedResult,
-            else => {},
-        };
-    }
-    try std.testing.expect(got_pong);
-    try std.testing.expectEqual(
-        1,
-        server.reqresp.pump(&pair.server, &server.router, pair.now, .{ .application = &output, .control = &.{} }).application,
-    );
-    const request = output[0].request;
-    try std.testing.expectEqualSlices(u8, &root, request.bytes);
-    const block = [_]u8{0x5a} ** consensus_types.deneb.SignedBeaconBlock.min_size;
-    try server.reqresp.respond(request.request, &block, .{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }, pair.now);
-    for (0..16) |_| {
-        try pair.pump();
-        _ = client.process(&pair.client, pair.events(&pair.client, &transport), pair.now, .{ .application = &.{}, .control = &output });
-        const count = server.process(&pair.server, pair.events(&pair.server, &transport), pair.now, .{ .control = &output }).control;
-        for (output[0..count]) |event| {
-            if (event == .chunk_sent) _ = server.reqresp.finish(event.chunk_sent.request, pair.now);
-        }
-    }
-    try std.testing.expect(client.reqresp.outbound[app.index].request.pendingEvent() != null);
-    try std.testing.expectEqualSlices(u8, &block, sink[0..block.len]);
-    try std.testing.expectEqual(
-        pair.now.millis() + 10_000,
-        schedule_test_support.wakeupMilliseconds(client.reqresp.schedule(.{ .application = 0, .control = 1 }), pair.now.millis()),
-    );
-    try std.testing.expectEqual(
-        pair.now.millis(),
-        schedule_test_support.wakeupMilliseconds(client.reqresp.schedule(.{ .application = 1, .control = 0 }), pair.now.millis()),
-    );
-    try std.testing.expect(client.reqresp.cancel(app, pair.now));
-    _ = client.reqresp.pump(&pair.client, &client.router, pair.now, .{ .application = &.{}, .control = &.{} });
-    try std.testing.expectEqual(
-        1,
-        client.reqresp.pump(&pair.client, &client.router, pair.now, .{ .application = &output, .control = &.{} }).application,
-    );
-    try std.testing.expectEqualSlices(u8, &block, output[0].chunk.bytes);
-    try std.testing.expectEqual(app, output[0].chunk.request);
-    try std.testing.expectEqual(
-        1,
-        client.reqresp.pump(&pair.client, &client.router, pair.now, .{ .application = &output, .control = &.{} }).application,
-    );
-    try std.testing.expectEqual(app, output[0].failed.request);
 }

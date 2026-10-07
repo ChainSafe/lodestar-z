@@ -1,4 +1,3 @@
-const topic_fixture = @import("../gossipsub/topic_fixture.zig");
 const std = @import("std");
 const RequestIO = @import("RequestIO.zig");
 const rr = @import("ReqResp.zig");
@@ -6,7 +5,7 @@ const protocol = @import("protocol.zig");
 const Router = @import("../router.zig").Router;
 const support = @import("../quic/test_support.zig");
 const policy_fixture = @import("policy_fixture.zig");
-const protocols_test_support = @import("../protocols_test_support.zig");
+const Endpoint = @import("test_pair.zig").Endpoint;
 
 const reservedOptions = @import("control_fixture.zig").reservedOptions;
 
@@ -290,7 +289,6 @@ test "reqresp control capacity bounds application requests per connection across
     );
 }
 
-const Protocols = @import("../protocols.zig").Protocols;
 const Engine = @import("../quic/Engine.zig");
 
 fn inboundStream(pair: *support.Pair, conn: Engine.Handle) !Engine.StreamHandle {
@@ -304,14 +302,14 @@ fn inboundStream(pair: *support.Pair, conn: Engine.Handle) !Engine.StreamHandle 
     return error.TestUnexpectedResult;
 }
 
-test "reqresp control capacity raw and protocol-stack inbound admission select the same reserved sink" {
+test "reqresp inbound admission selects distinct reserved sinks" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
     var options = try reservedOptions();
     options.inbound_per_connection_max = 4;
-    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })}, .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
+    var server = try Endpoint.init(std.testing.allocator, options, .{});
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const ordinary: Router.Selection = .{
@@ -518,13 +516,9 @@ test "reqresp control capacity zero defaults retain all ordinary slots and admis
 fn allocationFailures(allocator: std.mem.Allocator) !void {
     var options = try reservedOptions();
     options.outbound_per_connection_max = 2;
-    var protocols = try Protocols.init(allocator, .{
-        .gossipsub = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })}, .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 },
-        .reqresp = options,
-        .router = .{ .negotiations_max = 4, .outbound_control_reserved = 2 },
-    }, &try protocols_test_support.fixtureLocal(.{}));
-    defer protocols.deinit();
-    const plan = protocols.reqresp.memoryPlan();
+    var requests = try rr.init(allocator, options);
+    defer requests.deinit();
+    const plan = requests.memoryPlan();
     try std.testing.expectEqual(plan.facade_bytes + plan.slot_bytes + plan.io_bytes +
         plan.admission_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes, plan.total_bytes);
 }
@@ -536,7 +530,7 @@ test "reqresp reserved physical sinks admit full native control wave and recycle
     const handles = try support.connectPair(&pair);
     var options = try reservedOptions();
     options.inbound_per_connection_max = 4;
-    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })}, .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
+    var server = try Endpoint.init(std.testing.allocator, options, .{});
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     var wave: [4]rr.RequestHandle = undefined;

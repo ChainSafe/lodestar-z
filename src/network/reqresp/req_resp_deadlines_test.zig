@@ -17,7 +17,6 @@ const firstFailure = harness.firstFailure;
 const waitForRequest = harness.waitForRequest;
 const policy_fixture = @import("policy_fixture.zig");
 const time = @import("../time.zig");
-const protocols_test_support = @import("../protocols_test_support.zig");
 
 test "reqresp fails a request whose peer stops making progress" {
     var setup: Pair = .{};
@@ -383,7 +382,7 @@ test "reqresp absolute response expires despite continuous wire progress" {
             setup.shared.pair.now.monotonic = time.milliseconds(due - 90 + i * 10);
             try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.server.write(stream, encoded[i .. i + 1], false));
             try setup.shared.pair.pump();
-            protocols_test_support.forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
+            harness.forward(&setup.shared.pair, &setup.shared.pair.client, &setup.shared.client.reqresp);
             try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
             try std.testing.expectEqual(@as(?u64, due), setup.shared.client.reqresp.outbound[handle.index].deadline());
         }

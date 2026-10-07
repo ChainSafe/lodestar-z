@@ -19,6 +19,8 @@ const IwantOutcome = @import("metrics.zig").IwantOutcome;
 const topic_fixture = @import("topic_fixture.zig");
 const Reservations = @import("../reservations.zig").Reservations;
 const frame = @import("frame.zig");
+const session_io = @import("session_io.zig");
+const turn_mod = @import("turn.zig");
 
 fn buildTopic(name: []const u8, out: []u8) []const u8 {
     return topic_mod.build(digest, name, out);
@@ -382,4 +384,35 @@ test "gossip paged RPC cursors survive shared workspace reuse without runtime al
     for (0..2) |i| try std.testing.expect(g.sessions.resetRx(@intCast(i)));
     try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
     try std.testing.expectEqual(calls, backing.allocations);
+}
+
+test "gossip invalid verdict stops remaining publications in the same RPC" {
+    var opts: Gossipsub.Options = .{
+        .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })},
+        .random_seed = 1,
+        .connected_capacity = 4,
+        .retained_capacity = 8,
+        .retained_outbound_reserve = 1,
+        .body_buffer_bytes = 64,
+    };
+    opts.score_params.gossip_threshold = -20;
+    opts.score_params.publish_threshold = -40;
+    opts.score_params.graylist_threshold = -50;
+    var g = try support.init(std.testing.allocator, opts);
+    defer g.deinit();
+    const source = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    try support.subscribe(&g, test_topic);
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
+    var body: [1024]u8 = undefined;
+    var writer = protobuf.Writer.init(&body);
+    for (0..3) |_| protobuf.writeMessage(&writer, &.{5}, test_topic);
+    const io = &g.sessions.rows[source.index].io;
+    io.startRpc(writer.written());
+    var turn = Gossipsub.beginPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
+    var credit = turn_mod.Credits.peer(&g.options);
+    try std.testing.expectEqual(.done, try session_io.processRpc(&g, source.index, &turn, &credit));
+    try std.testing.expectEqual(@as(f64, 1), support.invalidDeliveries(&g));
+    _ = g.sessions.finishFrame(io);
 }
