@@ -119,6 +119,9 @@ jobs:
       - name: Run beacon-node tests
         run: |
           zig build test:beacon_node
+      - name: Run decoupled-consensus simulator tests
+        run: |
+          zig build test:decoupled
 
       - name: Build benchmarks
         run: |
