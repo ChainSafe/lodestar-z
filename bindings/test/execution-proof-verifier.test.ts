@@ -9,7 +9,7 @@ import {
   hasExecutionProofVerifier,
   registerExecutionProofVerifier,
   verifyExecutionProof,
-} from "../src/proof-engine.js";
+} from "../src/execution-proof-verifier.js";
 
 /** Populated by `zig build run:download_ere_fixtures`; fixture tests skip when absent. */
 const FIXTURE_DIR = join(import.meta.dirname, "../../test/fixtures/ere");
@@ -42,7 +42,7 @@ function readFixture(name: string, file: string): Uint8Array | null {
   return existsSync(path) ? new Uint8Array(readFileSync(path)) : null;
 }
 
-describe.skipIf(!EXECUTION_PROOF_VERIFIER_AVAILABLE)("proof engine", () => {
+describe.skipIf(!EXECUTION_PROOF_VERIFIER_AVAILABLE)("execution proof verifier", () => {
   beforeAll(() => {
     registerExecutionProofVerifier(PROOF_TYPE.registered, ZKVM_KIND.sp1, SP1_ZERO_VK);
   });

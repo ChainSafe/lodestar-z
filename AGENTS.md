@@ -141,7 +141,7 @@ Do not assume minimal and mainnet constants are interchangeable.
 
 ### ere verifier fixtures
 
-The proof-engine binding test verifies ere's own fixture proofs when the fixtures are present;
+The execution-proof-verifier binding test verifies ere's own fixture proofs when the fixtures are present;
 ere.zig covers the same proofs at the library level:
 
 ```bash

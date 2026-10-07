@@ -63,7 +63,7 @@ fn zkvmKindFromNumber(zkvm_kind: js.Number) !Verifier.ZkvmKind {
 /// Binds `proof_type` to a verifier for `zkvm_kind` and `program_vk`, once per
 /// process. Throws when the proof type is already registered, the kind is
 /// unknown, or the key does not decode.
-pub fn registerVerifier(proof_type: js.Number, zkvm_kind: js.Number, program_vk: js.Uint8Array) !void {
+pub fn register(proof_type: js.Number, zkvm_kind: js.Number, program_vk: js.Uint8Array) !void {
     const index = try proofTypeIndex(proof_type);
     if (state.verifiers[index] != null) return error.ProofTypeAlreadyRegistered;
 
@@ -71,7 +71,7 @@ pub fn registerVerifier(proof_type: js.Number, zkvm_kind: js.Number, program_vk:
     state.verifiers[index] = try Verifier.init(kind, try program_vk.toSlice());
 }
 
-pub fn hasVerifier(proof_type: js.Number) !js.Boolean {
+pub fn has(proof_type: js.Number) !js.Boolean {
     return js.Boolean.from(state.verifiers[try proofTypeIndex(proof_type)] != null);
 }
 
@@ -113,7 +113,7 @@ const VerifyTask = struct {
 /// verifier failure.
 ///
 /// Throws for an unregistered proof type or an oversized proof.
-pub fn verifyExecutionProof(proof_type: js.Number, proof_data: js.Uint8Array) !js.Value {
+pub fn verify(proof_type: js.Number, proof_data: js.Uint8Array) !js.Value {
     const slot = &state.verifiers[try proofTypeIndex(proof_type)];
     const verifier: *const Verifier = if (slot.*) |*entry| entry else return error.ProofTypeNotRegistered;
 
@@ -123,5 +123,5 @@ pub fn verifyExecutionProof(proof_type: js.Number, proof_data: js.Uint8Array) !j
     const copy = try js.allocator().dupe(u8, proof);
     errdefer js.allocator().free(copy);
 
-    return js.spawn(VerifyTask, .{ .verifier = verifier, .proof = copy }, "verifyExecutionProof");
+    return js.spawn(VerifyTask, .{ .verifier = verifier, .proof = copy }, "executionProofVerifier.verify");
 }

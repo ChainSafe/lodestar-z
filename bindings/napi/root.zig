@@ -12,7 +12,7 @@ pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const blsVerifier = @import("./bls_verifier.zig");
 pub const pubkeys = @import("./pubkeys.zig");
-pub const proofEngine = @import("./proof_engine.zig");
+pub const executionProofVerifier = @import("./execution_proof_verifier.zig");
 
 const options = @import("bls_options");
 
@@ -65,7 +65,7 @@ fn cleanup(new_ref_count: u32) void {
         // Last environment — tear down shared state.
         blst.state.deinit();
         pubkeys.state.deinit();
-        proofEngine.state.deinit();
+        executionProofVerifier.state.deinit();
     }
 }
 
