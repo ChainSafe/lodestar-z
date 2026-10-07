@@ -88,7 +88,6 @@ const ValidatorActivation = struct {
 const ValidatorActivationList = std.ArrayList(ValidatorActivation);
 
 const ShufflingJob = struct {
-    const PreparationError = @typeInfo(@typeInfo(@TypeOf(prepare)).@"fn".return_type.?).error_union.error_set;
     const Error = Allocator.Error || @import("swap_or_not_shuffle").ShufflingError;
 
     io: std.Io,
@@ -107,17 +106,13 @@ const ShufflingJob = struct {
         return .{ .shuffling = shuffling, .duration = time.since(io, timer) };
     }
 
-    fn prepare(allocator: Allocator, io: std.Io, state: *AnyBeaconState, indices: []const ValidatorIndex) !ShufflingJob {
+    fn start(allocator: Allocator, io: std.Io, state: *AnyBeaconState, indices: []const ValidatorIndex) !ShufflingJob {
         const epoch = computeEpochAtSlot(try state.slot()) + preset.MIN_SEED_LOOKAHEAD + 1;
         var seed: [32]u8 = undefined;
         switch (state.forkSeq()) {
             inline else => |fork| try getSeed(fork, state.castToFork(fork), epoch, c.DOMAIN_BEACON_ATTESTER, &seed),
         }
         const active_indices = try allocator.dupe(ValidatorIndex, indices);
-        return start(allocator, io, seed, epoch, active_indices);
-    }
-
-    fn start(allocator: Allocator, io: std.Io, seed: [32]u8, epoch: Epoch, active_indices: []ValidatorIndex) @This() {
         return .{
             .io = io,
             .future = std.Io.async(io, worker, .{ allocator, io, seed, epoch, active_indices }),
@@ -282,8 +277,7 @@ pub const EpochTransitionCache = struct {
     balances: ?U64Array,
     next_shuffling_active_indices: []const ValidatorIndex,
     next_shuffling: ?*EpochShufflingRc,
-    /// Preparation errors propagate at processEpoch entry, after the before_process_epoch metric.
-    shuffling_job: ?(ShufflingJob.PreparationError!ShufflingJob),
+    shuffling_job: ?ShufflingJob,
     next_epoch_total_active_balance_by_increment: u64,
     // these are borrowed from ReusedEpochTransitionCache
     is_active_prev_epoch: []const bool,
@@ -451,15 +445,11 @@ pub const EpochTransitionCache = struct {
         // here in zig we simply return a slice, consumer only borrows this slice and need to allocate a separate array for the next shuffling computation
         const next_shuffling_active_indices = reused_cache.next_epoch_shuffling_active_validator_indices.items[0..next_epoch_shuffling_active_indices_length];
 
-        var shuffling_job: ?(ShufflingJob.PreparationError!ShufflingJob) = null;
-        errdefer {
-            if (shuffling_job) |*result| {
-                if (result.*) |*job| job.cancel() else |_| {}
-            }
-        }
+        var shuffling_job: ?ShufflingJob = null;
+        errdefer if (shuffling_job) |*job| job.cancel();
         if (shuffling_io) |io| {
             if (fork_seq.gte(.fulu)) {
-                shuffling_job = ShufflingJob.prepare(epoch_cache.allocator, io, state, next_shuffling_active_indices);
+                shuffling_job = try ShufflingJob.start(epoch_cache.allocator, io, state, next_shuffling_active_indices);
             }
         }
 
@@ -657,24 +647,15 @@ pub const EpochTransitionCache = struct {
         };
     }
 
-    pub fn startShuffling(self: *EpochTransitionCache, allocator: Allocator, io: std.Io, seed: [32]u8, epoch: Epoch) !void {
-        std.debug.assert(self.shuffling_job == null);
-        const active_indices = try allocator.alloc(ValidatorIndex, self.next_shuffling_active_indices.len);
-        std.mem.copyForwards(ValidatorIndex, active_indices, self.next_shuffling_active_indices);
-        self.shuffling_job = ShufflingJob.start(allocator, io, seed, epoch, active_indices);
-    }
-
     pub fn joinShuffling(self: *EpochTransitionCache) !*EpochShuffling {
-        var job = try (self.shuffling_job orelse return error.ShufflingJobNotStarted);
+        var job = self.shuffling_job orelse return error.ShufflingJobNotStarted;
         self.shuffling_job = null;
         return job.join();
     }
 
     pub fn deinit(self: *EpochTransitionCache) void {
         if (self.next_shuffling) |next_shuffling| next_shuffling.unref();
-        if (self.shuffling_job) |*result| {
-            if (result.*) |*job| job.cancel() else |_| {}
-        }
+        if (self.shuffling_job) |*job| job.cancel();
         // no need to deinit proposer_indices and inclusion_delays as they are from reused_cache
         // no need to deinit below as they are from reused_cache
         // self.flags.deinit();

@@ -14,21 +14,42 @@ test "shuffling job records completed builds" {
     try metrics.init(allocator, std.testing.io, .{});
     defer metrics.deinit();
 
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 200_000 });
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 375_000 });
     defer pool.deinit();
 
     {
         var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
         defer test_state.deinit();
 
-        const cache = test_state.epoch_transition_cache;
-        const seed = [_]u8{0} ** 32;
-        const epoch = cache.current_epoch + 2;
-        try cache.startShuffling(allocator, std.testing.io, seed, epoch);
-        const shuffling = try cache.joinShuffling();
-        shuffling.deinit();
+        const fulu_state = try upgradeStateToFulu(
+            allocator,
+            test_state.cached_state.config,
+            test_state.cached_state.epoch_cache,
+            try test_state.cached_state.state.tryCastToFork(.electra),
+        );
+        test_state.cached_state.state.* = .{ .fulu = fulu_state.inner };
 
-        try cache.startShuffling(allocator, std.testing.io, seed, epoch);
+        {
+            var joined = try EpochTransitionCache.init(
+                allocator,
+                test_state.cached_state.config,
+                test_state.cached_state.epoch_cache,
+                test_state.cached_state.state,
+                std.testing.io,
+            );
+            defer joined.deinit();
+            const shuffling = try joined.joinShuffling();
+            shuffling.deinit();
+        }
+
+        var cancelled = try EpochTransitionCache.init(
+            allocator,
+            test_state.cached_state.config,
+            test_state.cached_state.epoch_cache,
+            test_state.cached_state.state,
+            std.testing.io,
+        );
+        defer cancelled.deinit();
     }
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -190,7 +211,7 @@ test "memory_safety: early shuffling is reclaimed when cache initialization fail
             );
             defer cache.deinit();
             try std.testing.expect(cache.shuffling_job != null);
-            try std.testing.expectEqual(scheduled, (try cache.shuffling_job.?).future.any_future != null);
+            try std.testing.expectEqual(scheduled, cache.shuffling_job.?.future.any_future != null);
             const shuffling = try cache.joinShuffling();
             defer shuffling.deinit();
             try std.testing.expectEqualSlices(u64, cache.next_shuffling_active_indices, shuffling.active_indices);
@@ -231,13 +252,10 @@ test "memory_safety: early shuffling is reclaimed when cache initialization fail
     }
 }
 
-test "memory_safety: early shuffling preserves preparation and worker error boundaries" {
+test "memory_safety: early shuffling releases its inputs on preparation and worker OOM" {
     const allocator = std.testing.allocator;
     var threaded: std.Io.Threaded = .init(allocator, .{ .async_limit = .nothing });
     defer threaded.deinit();
-
-    try metrics.init(allocator, threaded.io(), .{});
-    defer metrics.deinit();
 
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 375_000 });
     defer pool.deinit();
@@ -291,12 +309,6 @@ test "memory_safety: early shuffling preserves preparation and worker error boun
                     null,
                 ));
                 try std.testing.expectEqual(slot, try state.slot());
-
-                var output: std.Io.Writer.Allocating = .init(allocator);
-                defer output.deinit();
-                try metrics.write(&output.writer);
-                try std.testing.expect(std.mem.find(u8, output.written(), "lodestar_stfn_epoch_transition_step_seconds_count{step=\"before_process_epoch\"} 1\n") != null);
-                try std.testing.expect(std.mem.find(u8, output.written(), "step=\"process_justification_and_finalization\"") == null);
             } else {
                 var cache = try EpochTransitionCache.init(
                     allocator,
@@ -306,7 +318,6 @@ test "memory_safety: early shuffling preserves preparation and worker error boun
                     threaded.io(),
                 );
                 defer cache.deinit();
-                _ = try cache.shuffling_job.?;
                 try std.testing.expectError(error.OutOfMemory, cache.joinShuffling());
                 try std.testing.expect(cache.shuffling_job == null);
             }
