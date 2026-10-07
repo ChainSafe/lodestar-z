@@ -2,6 +2,8 @@ const std = @import("std");
 const types = @import("consensus_types");
 const metrics = @import("../metrics.zig");
 const time = @import("time");
+const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
+const getSeed = @import("../utils/seed.zig").getSeed;
 
 const Allocator = std.mem.Allocator;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
@@ -86,6 +88,7 @@ const ValidatorActivation = struct {
 const ValidatorActivationList = std.ArrayList(ValidatorActivation);
 
 const ShufflingJob = struct {
+    const PreparationError = @typeInfo(@typeInfo(@TypeOf(prepare)).@"fn".return_type.?).error_union.error_set;
     const Error = Allocator.Error || @import("swap_or_not_shuffle").ShufflingError;
 
     io: std.Io,
@@ -102,6 +105,16 @@ const ShufflingJob = struct {
         const timer = time.start(io);
         const shuffling = try EpochShuffling.init(allocator, seed, epoch, active_indices);
         return .{ .shuffling = shuffling, .duration = time.since(io, timer) };
+    }
+
+    fn prepare(allocator: Allocator, io: std.Io, state: *AnyBeaconState, indices: []const ValidatorIndex) !ShufflingJob {
+        const epoch = computeEpochAtSlot(try state.slot()) + preset.MIN_SEED_LOOKAHEAD + 1;
+        var seed: [32]u8 = undefined;
+        switch (state.forkSeq()) {
+            inline else => |fork| try getSeed(fork, state.castToFork(fork), epoch, c.DOMAIN_BEACON_ATTESTER, &seed),
+        }
+        const active_indices = try allocator.dupe(ValidatorIndex, indices);
+        return start(allocator, io, seed, epoch, active_indices);
     }
 
     fn start(allocator: Allocator, io: std.Io, seed: [32]u8, epoch: Epoch, active_indices: []ValidatorIndex) @This() {
@@ -269,7 +282,8 @@ pub const EpochTransitionCache = struct {
     balances: ?U64Array,
     next_shuffling_active_indices: []const ValidatorIndex,
     next_shuffling: ?*EpochShufflingRc,
-    shuffling_job: ?ShufflingJob,
+    /// Preparation errors propagate at processEpoch entry, after the before_process_epoch metric.
+    shuffling_job: ?(ShufflingJob.PreparationError!ShufflingJob),
     next_epoch_total_active_balance_by_increment: u64,
     // these are borrowed from ReusedEpochTransitionCache
     is_active_prev_epoch: []const bool,
@@ -290,6 +304,7 @@ pub const EpochTransitionCache = struct {
         config: *const BeaconConfig,
         epoch_cache: *EpochCache,
         state: *AnyBeaconState,
+        shuffling_io: ?std.Io,
     ) !EpochTransitionCache {
         const fork_seq = state.forkSeq();
         const current_epoch = epoch_cache.epoch;
@@ -432,11 +447,21 @@ pub const EpochTransitionCache = struct {
             }
         } // end validator loop
 
-        // no need to trigger async build as zig should be fast enough
-
         // typescript: only the first `activeValidatorCount` elements are copied to `activeIndices`
         // here in zig we simply return a slice, consumer only borrows this slice and need to allocate a separate array for the next shuffling computation
         const next_shuffling_active_indices = reused_cache.next_epoch_shuffling_active_validator_indices.items[0..next_epoch_shuffling_active_indices_length];
+
+        var shuffling_job: ?(ShufflingJob.PreparationError!ShufflingJob) = null;
+        errdefer {
+            if (shuffling_job) |*result| {
+                if (result.*) |*job| job.cancel() else |_| {}
+            }
+        }
+        if (shuffling_io) |io| {
+            if (fork_seq.gte(.fulu)) {
+                shuffling_job = ShufflingJob.prepare(epoch_cache.allocator, io, state, next_shuffling_active_indices);
+            }
+        }
 
         if (total_active_stake_by_increment < 1) {
             total_active_stake_by_increment = 1;
@@ -614,7 +639,7 @@ pub const EpochTransitionCache = struct {
             .indices_to_eject = indices_to_eject,
             .next_shuffling_active_indices = next_shuffling_active_indices,
             .next_shuffling = null,
-            .shuffling_job = null,
+            .shuffling_job = shuffling_job,
             // to be updated in processEffectiveBalanceUpdates
             .next_epoch_total_active_balance_by_increment = 0,
             .is_active_prev_epoch = reused_cache.is_active_prev_epoch.items,
@@ -640,14 +665,16 @@ pub const EpochTransitionCache = struct {
     }
 
     pub fn joinShuffling(self: *EpochTransitionCache) !*EpochShuffling {
-        var job = self.shuffling_job orelse return error.ShufflingJobNotStarted;
+        var job = try (self.shuffling_job orelse return error.ShufflingJobNotStarted);
         self.shuffling_job = null;
         return job.join();
     }
 
     pub fn deinit(self: *EpochTransitionCache) void {
         if (self.next_shuffling) |next_shuffling| next_shuffling.unref();
-        if (self.shuffling_job) |*job| job.cancel();
+        if (self.shuffling_job) |*result| {
+            if (result.*) |*job| job.cancel() else |_| {}
+        }
         // no need to deinit proposer_indices and inclusion_delays as they are from reused_cache
         // no need to deinit below as they are from reused_cache
         // self.flags.deinit();

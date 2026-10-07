@@ -56,7 +56,7 @@ pub fn computeAttestationsRewards(
         allocator.destroy(state);
     }
 
-    var cache = try EpochTransitionCache.init(allocator, state.config, state.epoch_cache, state.state);
+    var cache = try EpochTransitionCache.init(allocator, state.config, state.epoch_cache, state.state, null);
     defer cache.deinit();
 
     // Epoch rewards use the finality and inactivity scores after these updates.

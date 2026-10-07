@@ -93,6 +93,7 @@ test "EpochTransitionCache.beforeProcessEpoch" {
             test_state.cached_state.config,
             test_state.cached_state.epoch_cache,
             test_state.cached_state.state,
+            null,
         );
         defer epoch_transition_cache.deinit();
     }
@@ -124,6 +125,7 @@ test "memory_safety: fixed compounding flag tail does not allocate for sequentia
         test_state.cached_state.config,
         test_state.cached_state.epoch_cache,
         test_state.cached_state.state,
+        null,
     );
     defer cache.deinit();
 
@@ -136,5 +138,180 @@ test "memory_safety: fixed compounding flag tail does not allocate for sequentia
     try std.testing.expectEqual(bytes_before, second_caller.allocated_bytes);
     for (0..preset.MAX_PENDING_DEPOSITS_PER_EPOCH) |i| {
         try std.testing.expectEqual(i % 2 == 0, cache.isCompoundingValidator(initial_validator_count + i));
+    }
+}
+
+test "memory_safety: early shuffling is reclaimed when cache initialization fails" {
+    const allocator = std.testing.allocator;
+    inline for (.{ false, true }) |scheduled| {
+        var threaded: std.Io.Threaded = .init(allocator, .{ .async_limit = if (scheduled) .limited(1) else .nothing });
+        defer threaded.deinit();
+
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 375_000 });
+        defer pool.deinit();
+
+        var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+        defer test_state.deinit();
+
+        const fulu_state = try upgradeStateToFulu(
+            allocator,
+            test_state.cached_state.config,
+            test_state.cached_state.epoch_cache,
+            try test_state.cached_state.state.tryCastToFork(.electra),
+        );
+        test_state.cached_state.state.* = .{ .fulu = fulu_state.inner };
+
+        var validators = try test_state.cached_state.state.validators();
+        var validator = try validators.get(0);
+        try validator.set("activation_epoch", @import("constants").FAR_FUTURE_EPOCH);
+        try validator.set("activation_eligibility_epoch", 0);
+
+        {
+            var cache = try EpochTransitionCache.init(
+                allocator,
+                test_state.cached_state.config,
+                test_state.cached_state.epoch_cache,
+                test_state.cached_state.state,
+                null,
+            );
+            defer cache.deinit();
+            try std.testing.expect(cache.shuffling_job == null);
+            try std.testing.expectEqualSlices(u64, &.{0}, cache.indices_eligible_for_activation.items);
+        }
+
+        var counting = std.testing.FailingAllocator.init(allocator, .{});
+        {
+            var cache = try EpochTransitionCache.init(
+                counting.allocator(),
+                test_state.cached_state.config,
+                test_state.cached_state.epoch_cache,
+                test_state.cached_state.state,
+                threaded.io(),
+            );
+            defer cache.deinit();
+            try std.testing.expect(cache.shuffling_job != null);
+            try std.testing.expectEqual(scheduled, (try cache.shuffling_job.?).future.any_future != null);
+            const shuffling = try cache.joinShuffling();
+            defer shuffling.deinit();
+            try std.testing.expectEqualSlices(u64, cache.next_shuffling_active_indices, shuffling.active_indices);
+        }
+        try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+
+        var saw_post_launch_oom = false;
+        for (0..counting.alloc_index) |fail_index| {
+            try metrics.init(allocator, threaded.io(), .{});
+            defer metrics.deinit();
+
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+            const result = EpochTransitionCache.init(
+                failing.allocator(),
+                test_state.cached_state.config,
+                test_state.cached_state.epoch_cache,
+                test_state.cached_state.state,
+                threaded.io(),
+            );
+            if (result) |value| {
+                var cache = value;
+                cache.deinit();
+                return error.ExpectedOutOfMemory;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+            }
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+
+            var output: std.Io.Writer.Allocating = .init(allocator);
+            defer output.deinit();
+            try metrics.write(&output.writer);
+            if (std.mem.find(u8, output.written(), "lodestar_stfn_epoch_shuffling_job_seconds_count 1\n") != null) {
+                saw_post_launch_oom = true;
+            }
+        }
+        try std.testing.expect(saw_post_launch_oom);
+    }
+}
+
+test "memory_safety: early shuffling preserves preparation and worker error boundaries" {
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+
+    try metrics.init(allocator, threaded.io(), .{});
+    defer metrics.deinit();
+
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 375_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const epoch_cache = test_state.cached_state.epoch_cache;
+    const state = test_state.cached_state.state;
+    const fulu_state = try upgradeStateToFulu(
+        allocator,
+        test_state.cached_state.config,
+        epoch_cache,
+        try state.tryCastToFork(.electra),
+    );
+    state.* = .{ .fulu = fulu_state.inner };
+
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    {
+        const previous_balances = epoch_cache.effective_balance_increments.ref();
+        epoch_cache.allocator = counting.allocator();
+        defer {
+            epoch_cache.effective_balance_increments.unref();
+            epoch_cache.effective_balance_increments = previous_balances;
+            epoch_cache.allocator = allocator;
+        }
+        try epoch_cache.beforeEpochTransition();
+    }
+    try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+
+    for (0..2) |worker_offset| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{
+            .fail_index = counting.alloc_index + worker_offset,
+        });
+        {
+            const previous_balances = epoch_cache.effective_balance_increments.ref();
+            epoch_cache.allocator = failing.allocator();
+            defer {
+                epoch_cache.effective_balance_increments.unref();
+                epoch_cache.effective_balance_increments = previous_balances;
+                epoch_cache.allocator = allocator;
+            }
+            if (worker_offset == 0) {
+                const slot = try state.slot();
+                try std.testing.expectEqual(preset.SLOTS_PER_EPOCH - 1, slot % preset.SLOTS_PER_EPOCH);
+                try std.testing.expectError(error.OutOfMemory, @import("../state_transition.zig").processSlots(
+                    allocator,
+                    threaded.io(),
+                    test_state.cached_state,
+                    slot + 1,
+                    null,
+                ));
+                try std.testing.expectEqual(slot, try state.slot());
+
+                var output: std.Io.Writer.Allocating = .init(allocator);
+                defer output.deinit();
+                try metrics.write(&output.writer);
+                try std.testing.expect(std.mem.find(u8, output.written(), "lodestar_stfn_epoch_transition_step_seconds_count{step=\"before_process_epoch\"} 1\n") != null);
+                try std.testing.expect(std.mem.find(u8, output.written(), "step=\"process_justification_and_finalization\"") == null);
+            } else {
+                var cache = try EpochTransitionCache.init(
+                    allocator,
+                    test_state.cached_state.config,
+                    epoch_cache,
+                    state,
+                    threaded.io(),
+                );
+                defer cache.deinit();
+                _ = try cache.shuffling_job.?;
+                try std.testing.expectError(error.OutOfMemory, cache.joinShuffling());
+                try std.testing.expect(cache.shuffling_job == null);
+            }
+            try std.testing.expect(failing.has_induced_failure);
+        }
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
 }
