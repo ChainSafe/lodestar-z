@@ -95,7 +95,7 @@ test "identify saturation leaves reserved Ping negotiation usable" {
         const cc = client.process(&pair.client, pair.events(&pair.client, &events), pair.now, .{ .control = &requests });
         for (requests[0..cc.control]) |event| if (event == .chunk) {
             try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);
-            try std.testing.expect(client.reqresp.consume(event.chunk.request, pair.now));
+            try std.testing.expect(client.reqresp.consume(&pair.client, &client.router, event.chunk.request, pair.now));
             received = true;
         };
         try pair.pump();

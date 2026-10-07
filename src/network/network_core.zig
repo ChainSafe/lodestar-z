@@ -311,7 +311,7 @@ pub const NetworkCore = struct {
     }
     /// Releases the delivered response chunk and permits the next write into the sink.
     pub fn consumeResponse(self: *NetworkCore, request: rr.ReqResp.RequestHandle, now: Now) bool {
-        return self.protocols.reqresp.consume(request, now);
+        return self.protocols.reqresp.consume(&self.transport.engine, &self.protocols.router, request, now);
     }
     /// Borrows bytes until chunk_sent or terminal delivery. Readiness is not a reservation.
     pub fn respond(self: *NetworkCore, request: rr.ReqResp.RequestHandle, bytes: []const u8, context: ?ForkEntry, now: Now) !void {
@@ -325,15 +325,10 @@ pub const NetworkCore = struct {
     pub fn finishResponse(self: *NetworkCore, request: rr.ReqResp.RequestHandle, now: Now) bool {
         return self.protocols.reqresp.finish(request, now);
     }
-    /// Requests cancellation. Pending notifications precede the terminal that ends borrows.
+    /// Cancels I/O immediately. Pending notifications precede the terminal that ends borrows.
     pub fn cancelRequest(self: *NetworkCore, request: rr.ReqResp.RequestHandle, now: Now) bool {
-        return self.protocols.reqresp.cancel(request, now);
+        return self.protocols.reqresp.cancel(&self.transport.engine, &self.protocols.router, request, now);
     }
-    /// Borrows the peer error message until the next advance or deinit.
-    pub fn errorMessage(self: *const NetworkCore, request: rr.ReqResp.RequestHandle) []const u8 {
-        return self.protocols.reqresp.errorMessage(request);
-    }
-
     /// Holds host execution capacity independently of request completion, without extending borrows.
     pub fn retainServing(self: *NetworkCore, request: rr.ReqResp.RequestHandle) ?rr.ReqResp.ServingHandle {
         return self.protocols.reqresp.retainServing(request);
@@ -471,7 +466,7 @@ pub const NetworkCore = struct {
         if (!std.meta.eql(pm.local.fork, prepared.local.fork)) {
             var cursor: usize = 0;
             while (pm.nextRevalidation(&cursor, now)) |stale| {
-                self.control_protocol.cancel(&self.protocols.reqresp, stale.peer, stale.conn, now);
+                self.control_protocol.cancel(&self.protocols.reqresp, &self.protocols.router, &self.transport.engine, stale.peer, stale.conn, now);
             }
         }
         pm.commitLocal(&prepared.local, now);
@@ -679,8 +674,7 @@ pub const NetworkCore = struct {
 
     /// Delivers the turn's transport events, runs the one Protocols pass, applies its faults and
     /// control results, runs due control maintenance, then advances custody and selection.
-    /// Application borrows stay valid until the next turn; closes after publication clean up
-    /// without a second recycling pass.
+    /// Payload borrows end at their documented delivery or acknowledgment boundary.
     fn process(self: *NetworkCore, events: []const Engine.Event, now: Now, outputs: Outputs) Counts {
         std.debug.assert(events.len <= limits.events_per_turn_max);
         const pm = &self.peer_manager;
@@ -694,9 +688,9 @@ pub const NetworkCore = struct {
         const identify_results = &self.identify_results;
         const counts = self.protocols.process(quic, events, now, .{ .application = outputs.application, .control = controls, .identify = identify_results });
         for ([_][]const rr.ReqResp.Event{ outputs.application[0..counts.application], controls[0..counts.control] }) |batch| {
-            for (batch) |event| {
-                const fault = self.protocols.reqresp.peerFault(event) orelse continue;
-                pm.requestFault(&fault, now);
+            for (batch) |*event| {
+                const fault = event.peerFault() orelse continue;
+                pm.requestFault(fault, now);
             }
         }
         pm.identified(identify_results[0..counts.identify]);
@@ -767,10 +761,10 @@ pub const NetworkCore = struct {
         for (batch) |*event| switch (event.*) {
             .request => |*request| {
                 const peer = pm.controlRequested(request, now, self.current_slot) orelse {
-                    _ = reqresp.cancel(request.request, now);
+                    _ = reqresp.cancel(&self.transport.engine, &self.protocols.router, request.request, now);
                     continue;
                 };
-                requests.respond(reqresp, peer, request, &pm.local, now);
+                requests.respond(reqresp, &self.protocols.router, &self.transport.engine, peer, request, &pm.local, now);
             },
             else => {
                 const result = requests.result(reqresp, event.*, now) orelse continue;

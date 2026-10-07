@@ -62,7 +62,7 @@ test "protocol stack composes simultaneous ping and meshsub on one connection" {
         for (request_events[0..client_count]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &ping, chunk.bytes);
-                try std.testing.expect(client.reqresp.consume(chunk.request, pair.now));
+                try std.testing.expect(client.reqresp.consume(&pair.client, &client.router, chunk.request, pair.now));
                 pong = true;
             },
             else => {},
@@ -166,7 +166,7 @@ test "protocol stack gossip capacity refusal preserves reqresp and explicit host
         const count = client.process(&pair.client, pair.events(&pair.client, &transport), pair.now, .{ .control = &requests }).control;
         for (requests[0..count]) |event| if (event == .chunk) {
             try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);
-            try std.testing.expect(client.reqresp.consume(event.chunk.request, pair.now));
+            try std.testing.expect(client.reqresp.consume(&pair.client, &client.router, event.chunk.request, pair.now));
             pong = true;
         };
         const counts = server.process(&pair.server, pair.events(&pair.server, &transport), pair.now, .{ .control = &requests });
@@ -260,7 +260,7 @@ test "protocol stack capabilities activation preserves negotiated response conte
                 try std.testing.expectEqual(@as(?ForkSeq, .phase0), chunk.fork);
                 try std.testing.expectEqualSlices(u8, &payload, chunk.bytes);
                 chunks += 1;
-                try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now));
+                try std.testing.expect(setup.shared.client.reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, chunk.request, setup.shared.pair.now));
             },
             .done => done = true,
             .failed => return error.TestUnexpectedResult,

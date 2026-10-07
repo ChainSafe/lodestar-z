@@ -142,7 +142,7 @@ test "reqresp explicit BPO context validates without consuming the serving slot"
                         try std.testing.expectEqual(selected.fork, chunk.fork.?);
                         try std.testing.expectEqualSlices(u8, &block, chunk.bytes);
                         chunks += 1;
-                        try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now));
+                        try std.testing.expect(setup.shared.client.reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, chunk.request, setup.shared.pair.now));
                     },
                     .done => done = true,
                     .failed => return error.TestUnexpectedResult,

@@ -81,7 +81,7 @@ test "reqresp active new methods enforce request ceilings through real exchanges
                         chunks += 1;
                         try std.testing.expectEqual(@as(?config.ForkSeq, .fulu), chunk.fork);
                         try std.testing.expectEqualSlices(u8, payload[0..case[3]], chunk.bytes);
-                        try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now));
+                        try std.testing.expect(setup.shared.client.reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, chunk.request, setup.shared.pair.now));
                     },
                     .done => |terminal| {
                         try std.testing.expect(!done);
@@ -230,7 +230,7 @@ test "reqresp active zero ceiling rejects malicious success and permits remote e
                         try std.testing.expect(failure.reason == .too_many_chunks);
                     } else {
                         try std.testing.expectEqual(@as(u8, 3), failure.reason.peer_error.code);
-                        try std.testing.expectEqualStrings("unavailable", setup.shared.client.reqresp.errorMessage(failure.request));
+                        try std.testing.expectEqualStrings("unavailable", failure.errorMessage());
                     }
                     failed = true;
                 },
@@ -314,9 +314,9 @@ test "reqresp active light client traffic preserves control reserve and cancella
         try std.testing.expectError(error.SlotsExhausted, owner.request(&pair.client, &router, handles.client, .light_client_updates_by_range_v1, &([_]u8{0} ** 16), sink, .{}, pair.now));
         var ping: [8]u8 = @splat(0);
         const control = try owner.request(&pair.client, &router, handles.client, .ping_v1, &ping, &ping, .{}, pair.now);
-        try std.testing.expect(owner.cancel(a, pair.now));
-        try std.testing.expect(owner.cancel(b, pair.now));
-        try std.testing.expect(owner.cancel(control, pair.now));
+        try std.testing.expect(owner.cancel(&pair.client, &router, a, pair.now));
+        try std.testing.expect(owner.cancel(&pair.client, &router, b, pair.now));
+        try std.testing.expect(owner.cancel(&pair.client, &router, control, pair.now));
         var events: [2]reqresp.Event = undefined;
         const controls = owner.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &events });
         try std.testing.expectEqual(@as(usize, 0), controls.application);
@@ -398,7 +398,7 @@ fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const 
                 }
                 try std.testing.expectEqual(code, failed.reason.peer_error.code);
                 const message = if (code == 139) "rate limited" else "invalid request";
-                try std.testing.expectEqualSlices(u8, message, setup.shared.client.reqresp.errorMessage(failed.request));
+                try std.testing.expectEqualSlices(u8, message, failed.errorMessage());
                 terminal = true;
             },
             else => {},
@@ -429,7 +429,7 @@ fn waitExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u
         if (waiting) break;
     }
     try std.testing.expect(waiting);
-    try std.testing.expect(setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
+    try std.testing.expect(setup.shared.client.reqresp.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
     for (0..20) |_| {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| {

@@ -156,12 +156,10 @@ pub const Protocols = struct {
         now: types.Now,
     ) void {
         self.routeReadiness(engine, events);
-        // Cancellation must detach stream I/O before the router can advance or reuse its buffers.
-        self.reqresp.cleanupPending(engine, &self.router);
         self.router.transportEvents(engine, events, now);
         for (events) |event| switch (event) {
-            .closed => |closed| self.reqresp.connectionClosed(closed.conn, now),
-            .stream_closed => |closed| self.reqresp.streamClosed(closed.route, closed.stream, closed.reset_code, now),
+            .closed => |closed| self.reqresp.connectionClosed(engine, &self.router, closed.conn, now),
+            .stream_closed => |closed| self.reqresp.streamClosed(engine, &self.router, closed.route, closed.stream, closed.reset_code, now),
             else => {},
         };
         self.identify.transportEvents(engine, events);
@@ -169,7 +167,7 @@ pub const Protocols = struct {
             if (!self.applications_open or event == .connected) continue;
             self.gossipsub.transportEvents(&self.router, engine, &.{event}, now);
         }
-        self.reqresp.cleanupPending(engine, &self.router);
+
         self.negotiate(engine, now);
     }
 

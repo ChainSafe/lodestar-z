@@ -77,7 +77,7 @@ test "incoming submission recognizes a genuine native terminal awaiting output c
     }
     const request = handle.?;
     try std.testing.expectEqual(.ready, pair.shared.server.reqresp.responseReadiness(request));
-    try std.testing.expect(pair.shared.server.reqresp.cancel(request, pair.shared.pair.now));
+    try std.testing.expect(pair.shared.server.reqresp.cancel(&pair.shared.pair.server, &pair.shared.server.router, request, pair.shared.pair.now));
     pair.server_event_capacity = 0;
     try pair.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), pair.serverEvents().len);
@@ -239,7 +239,7 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
         cell.state = .response_queued;
         cell.response_awaited = true;
         try runtime.bridge.payload_budget.reserve(.publication, response_max - 4000);
-        _ = try incoming.applyPending(&runtime, pair.shared.pair.now);
+        _ = try applyIncoming(&pair, &runtime);
         for (0..20) |_| {
             const delivered = try pumpIncoming(&pair, &owner.core.protocols, &events);
             runtime.lock();
@@ -250,7 +250,7 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
         try std.testing.expectEqual(@as(u32, 1), cell.chunks);
         try std.testing.expect(cell.response.len == 0 and cell.response_reservation == 0);
         try std.testing.expect(!table.anyDue() and cell.response_awaited and runtime.host_due);
-        _ = try incoming.applyPending(&runtime, pair.shared.pair.now);
+        _ = try applyIncoming(&pair, &runtime);
         try std.testing.expect(runtime.bridge.payload_budget.waiting and !table.anyDue());
         try runtime.bridge.wake.?.drain();
         if (ending == .after_next_credit) {
@@ -258,7 +258,7 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
             runtime.bridge.payload_budget.release(.publication, response_max - 4000);
             runtime.unlock();
             try std.testing.expect(runtime.bridge.wake.?.pending);
-            _ = try incoming.applyPending(&runtime, pair.shared.pair.now);
+            _ = try applyIncoming(&pair, &runtime);
             try std.testing.expect(table.anyDue());
             const completion = table.pin(token.index);
             try std.testing.expect(completion.ack.? == .sent and !completion.closed);
@@ -267,7 +267,7 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
             try std.testing.expectEqual(response_max, cell.response_reservation);
         }
         if (ending == .shutdown) runtime.bridge.stop = true else cell.action = .cancel;
-        _ = try incoming.applyPending(&runtime, pair.shared.pair.now);
+        _ = try applyIncoming(&pair, &runtime);
         for (0..20) |_| {
             const delivered = try pumpIncoming(&pair, &owner.core.protocols, &events);
             runtime.lock();
@@ -294,4 +294,15 @@ fn pumpIncoming(pair: *rr.testing.Pair, server: *n.Protocols, events: []rr.ReqRe
     _ = pair.shared.processClient(.{});
     try pair.shared.pair.pump();
     return events[0..count.application];
+}
+
+fn applyIncoming(pair: *rr.testing.Pair, runtime: *Runtime) !bool {
+    const core = &runtime.owner.?.core;
+    core.transport.engine = pair.shared.pair.server;
+    pair.shared.pair.server = undefined;
+    defer {
+        pair.shared.pair.server = core.transport.engine;
+        core.transport.engine = undefined;
+    }
+    return incoming.applyPending(runtime, pair.shared.pair.now);
 }

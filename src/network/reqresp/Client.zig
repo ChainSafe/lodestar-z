@@ -33,17 +33,17 @@ host_held_ms: u64 = 0,
 /// On the owner's list for this slot's connection index while occupied.
 conn_link: index_list.Link = .{},
 
-pub fn complete(self: *Client, owner: *ReqResp, index: u16, event: Event, now: Now) void {
-    owner.complete(&self.request, index, event, .{ .phase_name = @tagName(self.phase) }, now);
+pub fn complete(self: *Client, owner: *ReqResp, engine: *Engine, router: *Router, index: u16, event: Event, now: Now) void {
+    owner.complete(engine, router, &self.request, index, event, .{ .phase_name = @tagName(self.phase) }, now);
 }
 
-pub fn fail(self: *Client, owner: *ReqResp, index: u16, reason: Failure, now: Now) void {
-    self.complete(owner, index, .{ .failed = .{ .request = self.request.handle(index), .reason = reason, .phase = self.phase } }, now);
+pub fn fail(self: *Client, owner: *ReqResp, engine: *Engine, router: *Router, index: u16, reason: Failure, now: Now) void {
+    self.complete(owner, engine, router, index, .{ .failed = .{ .request = self.request.handle(index), .reason = reason, .phase = self.phase } }, now);
 }
 
-fn failStream(self: *Client, owner: *ReqResp, index: u16, err: Engine.StreamError, now: Now) void {
+fn failStream(self: *Client, owner: *ReqResp, engine: *Engine, router: *Router, index: u16, err: Engine.StreamError, now: Now) void {
     self.request.failure_detail = @errorName(err);
-    self.fail(owner, index, switch (err) {
+    self.fail(owner, engine, router, index, switch (err) {
         error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
         else => .transport,
     }, now);
@@ -53,7 +53,7 @@ pub fn deadline(self: *const Client) ?u64 {
     return if (self.request.running()) self.phase_deadline_ms else null;
 }
 
-pub fn advance(self: *Client, ctx: *ReqResp, engine: *Engine, index: u16, now: Now) void {
+pub fn advance(self: *Client, ctx: *ReqResp, engine: *Engine, router: *Router, index: u16, now: Now) void {
     const request = &self.request;
     if (!request.running()) return;
     if (self.deadline()) |due| if (now.millis() >= due) {
@@ -64,18 +64,18 @@ pub fn advance(self: *Client, ctx: *ReqResp, engine: *Engine, index: u16, now: N
         if (reason == .timeout and self.phase == .response and !request.protocol.isControl() and
             self.host_held_ms == 0 and !request.io.unread(engine, request.stream))
             request.peer_fault = .non_completion;
-        self.fail(ctx, index, reason, now);
+        self.fail(ctx, engine, router, index, reason, now);
         return;
     };
     if (request.waitingHost()) return;
     switch (self.phase) {
         .negotiation => {},
-        .request => sendRequest(ctx, engine, self, index, now),
-        .response => readResponse(ctx, engine, self, index, now),
+        .request => sendRequest(ctx, engine, router, self, index, now),
+        .response => readResponse(ctx, engine, router, self, index, now),
     }
 }
 
-fn sendRequest(owner: *ReqResp, engine: *Engine, slot: *Client, index: u16, now: Now) void {
+fn sendRequest(owner: *ReqResp, engine: *Engine, router: *Router, slot: *Client, index: u16, now: Now) void {
     const request = &slot.request;
     const flushed = request.io.flush(engine, request.stream, true) catch |err| stopped: {
         if (err == error.StreamStopped or (err == error.UnknownStream and request.io.fin_seen)) {
@@ -87,7 +87,7 @@ fn sendRequest(owner: *ReqResp, engine: *Engine, slot: *Client, index: u16, now:
             break :stopped .done;
         }
         request.failure_detail = @errorName(err);
-        slot.fail(owner, index, switch (err) {
+        slot.fail(owner, engine, router, index, switch (err) {
             error.StaleHandle, error.UnknownStream => .stream_closed,
             else => .transport,
         }, now);
@@ -109,6 +109,7 @@ fn sendRequest(owner: *ReqResp, engine: *Engine, slot: *Client, index: u16, now:
 fn readResponse(
     owner: *ReqResp,
     engine: *Engine,
+    router: *Router,
     slot: *Client,
     index: u16,
     now: Now,
@@ -117,56 +118,56 @@ fn readResponse(
     var reads: u32 = 0;
     while (reads < reads_per_pump_max) : (reads += 1) {
         const input = request.io.read(engine, request.stream) catch |err| {
-            slot.failStream(owner, index, err, now);
+            slot.failStream(owner, engine, router, index, err, now);
             return;
         };
         if (input.reset) {
-            slot.fail(owner, index, .stream_closed, now);
+            slot.fail(owner, engine, router, index, .stream_closed, now);
             return;
         }
         if (input.bytes.len == 0 and !input.fin) return;
         if (input.bytes.len > 0) {
             const done = request.io.feed(input.bytes) catch |err| {
                 if (request.io.decoder.protocolFault(err)) request.peer_fault = .protocol;
-                slot.fail(owner, index, .{ .invalid_response = err }, now);
+                slot.fail(owner, engine, router, index, .{ .invalid_response = err }, now);
                 return;
             };
             if (request.io.decoder.awaitingContext()) {
                 const digest = request.io.decoder.context().?;
                 const fork = owner.forkFor(digest) orelse {
                     request.peer_fault = .protocol;
-                    slot.fail(owner, index, .{ .unknown_context = digest }, now);
+                    slot.fail(owner, engine, router, index, .{ .unknown_context = digest }, now);
                     return;
                 };
                 _ = request.protocol.responseBounds(fork) catch |err| {
                     request.peer_fault = .protocol;
-                    slot.fail(owner, index, .{ .invalid_response = err }, now);
+                    slot.fail(owner, engine, router, index, .{ .invalid_response = err }, now);
                     return;
                 };
                 const bounds = owner.responseBounds(request.protocol, fork) catch |err| {
-                    slot.fail(owner, index, .{ .invalid_response = err }, now);
+                    slot.fail(owner, engine, router, index, .{ .invalid_response = err }, now);
                     return;
                 };
                 request.io.decoder.setContextBounds(bounds) catch |err| {
-                    slot.fail(owner, index, .{ .invalid_response = err }, now);
+                    slot.fail(owner, engine, router, index, .{ .invalid_response = err }, now);
                     return;
                 };
             }
             if (done) {
-                Client.completeChunk(owner, slot, index, now);
+                Client.completeChunk(owner, engine, router, slot, index, now);
                 return;
             }
         }
         if (request.io.fin_seen and request.io.buffered_start == request.io.buffered_end) {
             if (request.io.decoder.phase == .result) {
                 if (request.chunks == 0 and request.chunks_max > 0 and request.protocol.requiresResponse()) {
-                    slot.fail(owner, index, .empty_response, now);
+                    slot.fail(owner, engine, router, index, .empty_response, now);
                 } else {
-                    slot.complete(owner, index, .{ .done = .{ .request = request.handle(index), .chunks = request.chunks } }, now);
+                    slot.complete(owner, engine, router, index, .{ .done = .{ .request = request.handle(index), .chunks = request.chunks } }, now);
                 }
             } else {
                 request.peer_fault = .protocol;
-                slot.fail(owner, index, .{ .invalid_response = error.Truncated }, now);
+                slot.fail(owner, engine, router, index, .{ .invalid_response = error.Truncated }, now);
             }
             return;
         }
@@ -176,6 +177,8 @@ fn readResponse(
 
 fn completeChunk(
     owner: *ReqResp,
+    engine: *Engine,
+    router: *Router,
     slot: *Client,
     index: u16,
     now: Now,
@@ -189,19 +192,19 @@ fn completeChunk(
         request.error_len = message_len;
         const code = request.io.decoder.result();
         const reason = Failure{ .peer_error = .{ .code = code, .message_len = message_len } };
-        slot.fail(owner, index, reason, now);
+        slot.fail(owner, engine, router, index, reason, now);
         return;
     }
     if (request.chunks >= request.chunks_max) {
         if (request.chunks >= slot.protocol_chunks_max) request.peer_fault = .protocol;
-        slot.fail(owner, index, .too_many_chunks, now);
+        slot.fail(owner, engine, router, index, .too_many_chunks, now);
         return;
     }
     var fork: ?config.ForkSeq = null;
     if (request.io.decoder.context()) |digest| {
         fork = owner.forkFor(digest) orelse {
             request.peer_fault = .protocol;
-            slot.fail(owner, index, .{ .unknown_context = digest }, now);
+            slot.fail(owner, engine, router, index, .{ .unknown_context = digest }, now);
             return;
         };
     }
@@ -258,7 +261,7 @@ pub fn start(self: *Client, input: *const Start, now: Now) void {
     };
 }
 
-pub fn negotiated(slot: *Client, owner: *ReqResp, engine: *Engine, index: u16, outcome: Router.Outcome, now: Now) void {
+pub fn negotiated(slot: *Client, owner: *ReqResp, engine: *Engine, router: *Router, index: u16, outcome: Router.Outcome, now: Now) void {
     const request = &slot.request;
     assert(request.running() and slot.phase == .negotiation);
     assert(std.meta.eql(request.stream, outcome.stream));
@@ -268,7 +271,7 @@ pub fn negotiated(slot: *Client, owner: *ReqResp, engine: *Engine, index: u16, o
             if (ready.protocol != .reqresp or ready.protocol.reqresp != request.protocol or
                 ready.leftover.len > request.io.read_buffer.len)
             {
-                slot.fail(owner, index, .transport, now);
+                slot.fail(owner, engine, router, index, .transport, now);
                 return;
             }
             // A stream that is already gone fails on the slot's first write.
@@ -284,15 +287,15 @@ pub fn negotiated(slot: *Client, owner: *ReqResp, engine: *Engine, index: u16, o
             request.io.writing = request.protocol.info().request_max > 0;
             if (!request.io.writing) request.io.outbox.queue("", true);
         },
-        .rejected => slot.fail(owner, index, .negotiation_rejected, now),
+        .rejected => slot.fail(owner, engine, router, index, .negotiation_rejected, now),
         .failed => |failure| {
             if (failure == .malformed) request.peer_fault = .protocol;
-            slot.fail(owner, index, if (failure == .timeout) .timeout else .{ .negotiation_failed = failure }, now);
+            slot.fail(owner, engine, router, index, if (failure == .timeout) .timeout else .{ .negotiation_failed = failure }, now);
         },
     }
 }
 
-pub fn consume(slot: *Client, owner: *ReqResp, index: u16, now: Now) bool {
+pub fn consume(slot: *Client, owner: *ReqResp, engine: *Engine, router: *Router, index: u16, now: Now) bool {
     const request = &slot.request;
     if (!request.consume()) return false;
     if (slot.host_hold_started_ms) |since| {
@@ -304,7 +307,7 @@ pub fn consume(slot: *Client, owner: *ReqResp, index: u16, now: Now) bool {
     assert(slot.phase == .response);
     if (request.chunks >= request.chunks_max) {
         const done = Event{ .done = .{ .request = request.handle(index), .chunks = request.chunks } };
-        slot.complete(owner, index, done, now);
+        slot.complete(owner, engine, router, index, done, now);
         return true;
     }
     slot.resetResponseDecoder(owner);

@@ -472,8 +472,8 @@ pub fn failStatus(setup: *Setup, failure: ReqResp.Failure) !void {
         if (operation.protocol != .status_v1) continue;
         const requests = &setup.client.protocols.reqresp;
         const slot = &requests.outbound[handle.index];
-        slot.fail(requests, handle.index, failure, setup.pair.now);
-        requests.cleanupPending(setup.pair.client, &setup.client.protocols.router);
+        slot.fail(requests, setup.pair.client, &setup.client.protocols.router, handle.index, failure, setup.pair.now);
+
         return;
     };
     return error.TestUnexpectedResult;

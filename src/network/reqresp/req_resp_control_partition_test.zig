@@ -62,10 +62,10 @@ test "reqresp drain retains blocked terminals across control and application par
         .{},
         pair.now,
     );
-    try std.testing.expect(requests.cancel(application_second, pair.now));
-    try std.testing.expect(requests.cancel(control_second, pair.now));
-    try std.testing.expect(requests.cancel(application, pair.now));
-    try std.testing.expect(requests.cancel(control, pair.now));
+    try std.testing.expect(requests.cancel(&pair.client, &router, application_second, pair.now));
+    try std.testing.expect(requests.cancel(&pair.client, &router, control_second, pair.now));
+    try std.testing.expect(requests.cancel(&pair.client, &router, application, pair.now));
+    try std.testing.expect(requests.cancel(&pair.client, &router, control, pair.now));
     try std.testing.expectEqual(
         rr.OutputCounts{ .application = 0, .control = 0 },
         requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &.{} }),

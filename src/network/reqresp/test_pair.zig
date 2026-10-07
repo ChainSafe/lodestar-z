@@ -71,14 +71,14 @@ pub const Endpoint = struct {
 
     pub fn process(self: *Endpoint, engine: *Engine, events: []const Engine.Event, now: Now, outputs: reqresp.Outputs) reqresp.OutputCounts {
         self.readiness(engine, events);
-        self.reqresp.cleanupPending(engine, &self.router);
+
         self.router.transportEvents(engine, events, now);
         for (events) |event| switch (event) {
-            .closed => |closed| self.reqresp.connectionClosed(closed.conn, now),
-            .stream_closed => |closed| self.reqresp.streamClosed(closed.route, closed.stream, closed.reset_code, now),
+            .closed => |closed| self.reqresp.connectionClosed(engine, &self.router, closed.conn, now),
+            .stream_closed => |closed| self.reqresp.streamClosed(engine, &self.router, closed.route, closed.stream, closed.reset_code, now),
             else => {},
         };
-        self.reqresp.cleanupPending(engine, &self.router);
+
         var outcomes: [Router.outcomes_per_pump]Router.Outcome = undefined;
         const count = self.router.pump(engine, now, &outcomes);
         for (outcomes[0..count]) |outcome| {

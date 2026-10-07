@@ -46,7 +46,7 @@ fn roundTrip(setup: *Pair, seed: u8) !void {
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &reply, chunk.bytes);
-                try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now));
+                try std.testing.expect(setup.shared.client.reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, chunk.request, setup.shared.pair.now));
             },
             .done => done = true,
             .failed => return error.TestUnexpectedResult,
@@ -135,7 +135,7 @@ test "protocol stack control wakeup includes negotiation after application quies
     const handle = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .timeouts = .{ .response = .fromMilliseconds(60_000) } }, setup.shared.pair.now);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
     try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis() + 5_000), schedule_test_support.wakeupMilliseconds(setup.shared.client.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
-    try std.testing.expect(setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
+    try std.testing.expect(setup.shared.client.reqresp.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
     try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.shared.client.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
     var events: [1]Event = undefined;
@@ -228,7 +228,7 @@ test "protocol stack request work remains bounded and rotates between live strea
         handle.* = events[0].chunk.request;
     }
     try std.testing.expect(!std.meta.eql(delivered[0], delivered[1]));
-    for (handles) |handle| try std.testing.expect(setup.shared.client.reqresp.consume(handle, setup.shared.pair.now));
+    for (handles) |handle| try std.testing.expect(setup.shared.client.reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
 }
 
 test "protocol stack reqresp slot is serviced only after a stream event or its deadline" {
@@ -376,7 +376,7 @@ test "protocol stack reqresp slots stay indexed by connection across a reconnect
     try std.testing.expectEqual(@as(u8, 1), client.outboundProtocolPendingCount(fresh_client, .ping_v1));
     try std.testing.expectEqual(@as(u8, 0), client.outboundProtocolPendingCount(old.client, .ping_v1));
     // A repeated close of the old connection leaves the new one's slot running.
-    server.connectionClosed(old.server, setup.shared.pair.now);
+    server.connectionClosed(&setup.shared.pair.server, &setup.shared.server.router, old.server, setup.shared.pair.now);
     try std.testing.expectEqual(@as(u8, 1), server.inboundProtocolRunningCount(fresh_server, .ping_v1));
 
     setup.server_event_capacity = 16;
@@ -410,7 +410,7 @@ test "protocol stack reqresp slots stay indexed by connection across a reconnect
             try std.testing.expect(server.finish(event.chunk_sent.request, setup.shared.pair.now));
         };
         for (setup.clientEvents()) |event| switch (event) {
-            .chunk => |chunk| try std.testing.expect(client.consume(chunk.request, setup.shared.pair.now)),
+            .chunk => |chunk| try std.testing.expect(client.consume(&setup.shared.pair.client, &setup.shared.client.router, chunk.request, setup.shared.pair.now)),
             .done => done = true,
             .failed => return error.TestUnexpectedResult,
             else => {},
@@ -463,7 +463,7 @@ test "protocol stack reqresp request on one connection among 64 visits only its 
             try std.testing.expect(server.finish(event.chunk_sent.request, setup.shared.pair.now));
         };
         for (setup.clientEvents()) |event| switch (event) {
-            .chunk => |chunk| try std.testing.expect(client.consume(chunk.request, setup.shared.pair.now)),
+            .chunk => |chunk| try std.testing.expect(client.consume(&setup.shared.pair.client, &setup.shared.client.router, chunk.request, setup.shared.pair.now)),
             .done => done = true,
             else => {},
         };
@@ -529,7 +529,7 @@ test "protocol stack reqresp retains request and chunk bytes through control pro
         for (output[0..received.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &ping_bytes, chunk.bytes);
-                try std.testing.expect(client.reqresp.consume(chunk.request, pair.now));
+                try std.testing.expect(client.reqresp.consume(&pair.client, &client.router, chunk.request, pair.now));
                 got_pong = true;
             },
             .failed => return error.TestUnexpectedResult,
@@ -573,7 +573,7 @@ test "protocol stack reqresp retains request and chunk bytes through control pro
         pair.now.millis(),
         schedule_test_support.wakeupMilliseconds(client.reqresp.schedule(.{ .application = 1, .control = 0 }), pair.now.millis()),
     );
-    try std.testing.expect(client.reqresp.cancel(app, pair.now));
+    try std.testing.expect(client.reqresp.cancel(&pair.client, &client.router, app, pair.now));
     _ = client.reqresp.pump(&pair.client, &client.router, pair.now, .{ .application = &.{}, .control = &.{} });
     try std.testing.expectEqual(
         1,

@@ -140,8 +140,8 @@ test "reqresp control capacity protects outbound slots and retains terminal owne
         pair.now,
     );
     try std.testing.expectEqual(.outbound, ping.direction);
-    try std.testing.expect(requests.cancel(first, pair.now));
-    requests.cleanupPending(&pair.client, &router);
+    try std.testing.expect(requests.cancel(&pair.client, &router, first, pair.now));
+
     try std.testing.expectError(
         error.SlotsExhausted,
         requests.request(
@@ -158,20 +158,6 @@ test "reqresp control capacity protects outbound slots and retains terminal owne
     var events: [1]rr.Event = undefined;
     try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &events }).application);
     try std.testing.expectEqual(first, events[0].failed.request);
-    try std.testing.expectError(
-        error.SlotsExhausted,
-        requests.request(
-            &pair.client,
-            &router,
-            handles.client,
-            .blocks_by_root_v2,
-            &.{},
-            sinks[size * 2 ..],
-            .{},
-            pair.now,
-        ),
-    );
-    _ = requests.pump(&pair.client, &router, pair.now, .{ .application = &.{} }).application;
     _ = try requests.request(
         &pair.client,
         &router,
@@ -245,7 +231,7 @@ test "reqresp control capacity bounds application requests per connection across
         .{},
         pair.now,
     );
-    try std.testing.expect(requests.cancel(first, pair.now));
+    try std.testing.expect(requests.cancel(&pair.client, &router, first, pair.now));
     var events: [1]rr.Event = undefined;
     _ = requests.pump(&pair.client, &router, pair.now, .{ .application = &.{} }).application;
     try std.testing.expectError(
@@ -263,20 +249,6 @@ test "reqresp control capacity bounds application requests per connection across
     );
     try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &events }).application);
     try std.testing.expectEqual(first, events[0].failed.request);
-    try std.testing.expectError(
-        error.TooManyRequests,
-        requests.request(
-            &pair.client,
-            &router,
-            handles.client,
-            .blocks_by_root_v2,
-            &.{},
-            sinks[2 * size ..],
-            .{},
-            pair.now,
-        ),
-    );
-    _ = requests.pump(&pair.client, &router, pair.now, .{ .application = &.{} }).application;
     _ = try requests.request(
         &pair.client,
         &router,
@@ -539,7 +511,7 @@ test "reqresp reserved physical sinks admit full native control wave and recycle
         try std.testing.expectEqual(server.reqresp.inbound[wave[i].index].receive.sink.ptr, server.reqresp.inbound[wave[i].index].request.io.sink.ptr);
         try std.testing.expect(server.reqresp.inbound[wave[i].index].receive.sink.len >= which.info().request_max);
     }
-    try std.testing.expect(server.reqresp.cancel(wave[0], pair.now));
+    try std.testing.expect(server.reqresp.cancel(&pair.server, &server.router, wave[0], pair.now));
     var events: [4]rr.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), server.reqresp.pump(&pair.server, &server.router, pair.now, .{ .control = &events }).control);
     try std.testing.expectEqual(wave[0], events[0].failed.request);

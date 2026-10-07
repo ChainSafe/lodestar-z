@@ -492,7 +492,7 @@ pub const PeerManager = struct {
         self.control.reStatusPeers(&self.catalog, now);
     }
     pub fn requestFault(self: *PeerManager, fault: *const ReqResp.PeerFault, now: Now) void {
-        const peer = self.catalog.find(fault.identity) orelse return;
+        const peer = self.catalog.find(&fault.identity) orelse return;
         switch (fault.kind) {
             .protocol => _ = self.reportPeer(peer, .low_tolerance, now),
             .non_completion => {

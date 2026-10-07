@@ -193,7 +193,7 @@ test "core native application response borrows survive same turn hard close" {
         if (client.application == 1 and output[0] == .chunk) {
             try std.testing.expectEqualDeep(request, output[0].chunk.request);
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
-            try std.testing.expect(setup.client.protocols.reqresp.consume(request, setup.pair.now));
+            try std.testing.expect(setup.client.protocols.reqresp.consume(setup.pair.client, &setup.client.protocols.router, request, setup.pair.now));
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
             received = true;
             break;
@@ -208,14 +208,6 @@ test "core native application response borrows survive same turn hard close" {
             "busy",
             setup.pair.now,
         ),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        setup.client.protocols.reqresp.errorMessage(.{
-            .index = 65535,
-            .generation = 42,
-            .direction = .outbound,
-        }).len,
     );
 }
 
@@ -278,7 +270,7 @@ test "core native application response borrows survive immediate public close" {
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
             try std.testing.expect(setup.client.closePeer(&snapshots[0].identity, setup.pair.now));
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
-            try std.testing.expect(setup.client.protocols.reqresp.consume(request, setup.pair.now));
+            try std.testing.expect(setup.client.protocols.reqresp.consume(setup.pair.client, &setup.client.protocols.router, request, setup.pair.now));
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
             received = true;
             break;

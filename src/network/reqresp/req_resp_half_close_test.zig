@@ -25,7 +25,7 @@ fn negotiate(pair: *Pair, method: protocol.Protocol, bytes: []const u8, sink: []
         var outcomes: [8]Router.Outcome = undefined;
         pair.forwardEvents();
         const clients = pair.shared.client.router.pump(&pair.shared.pair.client, pair.shared.pair.now, &outcomes);
-        for (outcomes[0..clients]) |outcome| try std.testing.expect(pair.shared.client.reqresp.negotiated(&pair.shared.pair.client, outcome, pair.shared.pair.now));
+        for (outcomes[0..clients]) |outcome| try std.testing.expect(pair.shared.client.reqresp.negotiated(&pair.shared.pair.client, &pair.shared.client.router, outcome, pair.shared.pair.now));
         pair.forwardEvents();
         const servers = pair.shared.server.router.pump(&pair.shared.pair.server, pair.shared.pair.now, &outcomes);
         for (outcomes[0..servers]) |outcome| switch (outcome.result) {
@@ -41,7 +41,7 @@ fn negotiate(pair: *Pair, method: protocol.Protocol, bytes: []const u8, sink: []
 
 fn pump(pair: *Pair) ![]const rr.Event {
     try pair.shared.pair.pump();
-    pair.shared.client.reqresp.cleanupPending(&pair.shared.pair.client, &pair.shared.client.router);
+
     harness.forward(&pair.shared.pair, &pair.shared.pair.client, &pair.shared.client.reqresp);
     const counts = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .application = pair.client_events[0..16], .control = pair.client_events[16..] });
     std.mem.copyForwards(rr.Event, pair.client_events[counts.application..], pair.client_events[16..][0..counts.control]);
@@ -63,7 +63,7 @@ fn expectDone(pair: *Pair, request: Request, expected: []const u8) !void {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, expected, chunk.bytes);
                 chunks += 1;
-                try std.testing.expect(pair.shared.client.reqresp.consume(chunk.request, pair.shared.pair.now));
+                try std.testing.expect(pair.shared.client.reqresp.consume(&pair.shared.pair.client, &pair.shared.client.router, chunk.request, pair.shared.pair.now));
             },
             .done => |event_done| {
                 try std.testing.expectEqual(@as(u32, 1), event_done.chunks);
@@ -79,8 +79,8 @@ fn expectDone(pair: *Pair, request: Request, expected: []const u8) !void {
     }
     try std.testing.expect(done);
     try std.testing.expectEqual(@as(u32, 1), chunks);
-    pair.shared.client.reqresp.cleanupPending(&pair.shared.pair.client, &pair.shared.client.router);
-    try std.testing.expect(!pair.shared.client.reqresp.outbound[request.handle.index].request.awaitingTerminal());
+
+    try std.testing.expect(!pair.shared.client.reqresp.outbound[request.handle.index].request.occupied());
     try std.testing.expect(!pair.shared.pair.client.registry.slots[pair.shared.handles.client.index].table.matches(
         pair.shared.client.reqresp.outbound[request.handle.index].request.stream.slot,
         pair.shared.client.reqresp.outbound[request.handle.index].request.stream.id,
@@ -123,7 +123,7 @@ test "reqresp recovers only complete Goodbye bytes retained by a closed authenti
         const result = pair.shared.server.reqresp.closingGoodbye(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.handles.server, pair.shared.pair.now);
         try std.testing.expectEqual(if (truncated) @as(?u64, null) else @as(?u64, 129), result);
         try std.testing.expect(pair.shared.server.reqresp.closingGoodbye(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.handles.server, pair.shared.pair.now) == null);
-        pair.shared.server.reqresp.connectionClosed(pair.shared.handles.server, pair.shared.pair.now);
+        pair.shared.server.reqresp.connectionClosed(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.handles.server, pair.shared.pair.now);
     };
 }
 
@@ -344,9 +344,9 @@ test "reqresp half close cancellation frees the only slot for a subsequent reque
     const first = try negotiate(&pair, .metadata_v3, &.{}, &sink, .{});
     pair.shared.pair.server.shutdown(first.remote, .read, 0);
     for (0..4) |_| try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
-    try std.testing.expect(pair.shared.client.reqresp.cancel(first.handle, pair.shared.pair.now));
+    try std.testing.expect(pair.shared.client.reqresp.cancel(&pair.shared.pair.client, &pair.shared.client.router, first.handle, pair.shared.pair.now));
     try expectFailure(&pair, .cancelled);
-    pair.shared.client.reqresp.cleanupPending(&pair.shared.pair.client, &pair.shared.client.router);
+
     try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
     const second = try negotiate(&pair, .metadata_v3, &.{}, &sink, .{});
     try std.testing.expectEqual(first.handle.index, second.handle.index);
@@ -379,7 +379,7 @@ test "reqresp half close preserves context and successive response chunks" {
                     try std.testing.expectEqual(.deneb, chunk.fork.?);
                     try std.testing.expectEqualSlices(u8, &block, chunk.bytes);
                     chunks += 1;
-                    try std.testing.expect(pair.shared.client.reqresp.consume(chunk.request, pair.shared.pair.now));
+                    try std.testing.expect(pair.shared.client.reqresp.consume(&pair.shared.pair.client, &pair.shared.client.router, chunk.request, pair.shared.pair.now));
                 },
                 .failed => return error.TestUnexpectedResult,
                 else => {},
@@ -450,7 +450,7 @@ test "reqresp FIN before the first chunk still completes Goodbye" {
     try std.testing.expect(done);
 }
 
-test "reqresp closing Goodbye drains read-failure cleanup before returning outside pump" {
+test "reqresp closing Goodbye detaches I/O on read failure before returning outside pump" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
@@ -469,7 +469,6 @@ test "reqresp closing Goodbye drains read-failure cleanup before returning outsi
     const slot = &owner.inbound[active.index];
     try std.testing.expectEqual(rr.Failure.stream_closed, slot.request.terminalEvent().?.failed.reason);
     try std.testing.expectEqual(.closed, slot.request.stream_owner);
-    try std.testing.expectEqual(@as(u32, 0), owner.closing.len);
     try std.testing.expect(slot.request.occupied());
     try std.testing.expect(owner.closingGoodbye(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.handles.server, pair.shared.pair.now) == null);
     var output: [1]rr.Event = undefined;

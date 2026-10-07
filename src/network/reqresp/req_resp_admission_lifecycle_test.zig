@@ -17,7 +17,7 @@ fn application(setup: *harness.Pair, which: Protocol, bytes: []const u8, sink: [
     return setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, which, bytes, sink, .{}, setup.shared.pair.now);
 }
 
-test "reqresp admission counts distinguish completion delivery and slot recycling" {
+test "reqresp admission counts release native slots on terminal delivery" {
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{});
     defer setup.deinit();
@@ -32,8 +32,8 @@ test "reqresp admission counts distinguish completion delivery and slot recyclin
     try std.testing.expectEqual(1, client.outboundProtocolPendingCount(client_conn, .blocks_by_root_v2));
     try std.testing.expectEqual(1, server.inboundProtocolRunningCount(server_conn, .blocks_by_root_v2));
     try std.testing.expectEqual(1, server.inboundPendingCount(server_conn));
-    try std.testing.expect(client.cancel(outbound, setup.shared.pair.now));
-    try std.testing.expect(server.cancel(inbound, setup.shared.pair.now));
+    try std.testing.expect(client.cancel(&setup.shared.pair.client, &setup.shared.client.router, outbound, setup.shared.pair.now));
+    try std.testing.expect(server.cancel(&setup.shared.pair.server, &setup.shared.server.router, inbound, setup.shared.pair.now));
     try std.testing.expectEqual(1, client.outboundProtocolPendingCount(client_conn, .blocks_by_root_v2));
     try std.testing.expectEqual(0, server.inboundProtocolRunningCount(server_conn, .blocks_by_root_v2));
     try std.testing.expectEqual(1, server.inboundPendingCount(server_conn));
@@ -44,9 +44,6 @@ test "reqresp admission counts distinguish completion delivery and slot recyclin
     try std.testing.expectEqual(0, server.inboundPendingCount(server_conn));
     try std.testing.expectEqual(0, client.pendingCounts().outbound);
     try std.testing.expectEqual(0, server.pendingCounts().inbound);
-    try std.testing.expectEqual(1, client.outboundApplicationOccupiedCount(client_conn));
-    try std.testing.expectEqual(1, server.inboundApplicationOccupiedCount(server_conn));
-    try setup.pumpOnce();
     try std.testing.expectEqual(0, client.outboundApplicationOccupiedCount(client_conn));
     try std.testing.expectEqual(0, server.inboundApplicationOccupiedCount(server_conn));
 }
@@ -104,7 +101,7 @@ test "reqresp admission lifecycle cancellation retains execution until host reti
         for (setup.serverEvents()) |event| try std.testing.expect(event != .request);
     }
     try std.testing.expectEqual(@as(usize, 1), owner.resourceSnapshot().inbound_phases[@intFromEnum(rr.metrics.InboundPhase.ready)]);
-    try std.testing.expect(setup.shared.client.reqresp.cancel(first, setup.shared.pair.now));
+    try std.testing.expect(setup.shared.client.reqresp.cancel(&setup.shared.pair.client, &setup.shared.client.router, first, setup.shared.pair.now));
     var terminal = false;
     for (0..30) |_| {
         try setup.pumpOnce();
@@ -343,9 +340,9 @@ test "reqresp request admission host capacity cancellation and queued cancellati
     const incoming = first.request.handle(@intCast(slot));
     try std.testing.expect(first.request.pendingEvent().? == .request);
     try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.resourceSnapshot().inbound_phases[@intFromEnum(rr.metrics.InboundPhase.waiting_host)]);
-    try std.testing.expect(setup.shared.server.reqresp.cancel(incoming, setup.shared.pair.now));
+    try std.testing.expect(setup.shared.server.reqresp.cancel(&setup.shared.pair.server, &setup.shared.server.router, incoming, setup.shared.pair.now));
     try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.resourceSnapshot().inbound_phases[@intFromEnum(rr.metrics.InboundPhase.terminal)]);
-    try std.testing.expect(setup.shared.client.reqresp.cancel(outbound, setup.shared.pair.now));
+    try std.testing.expect(setup.shared.client.reqresp.cancel(&setup.shared.pair.client, &setup.shared.client.router, outbound, setup.shared.pair.now));
     setup.server_event_capacity = 16;
     for (0..4) |_| try setup.pumpOnce();
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
@@ -364,7 +361,7 @@ test "reqresp request admission host capacity cancellation and queued cancellati
     const replacement = &setup.shared.server.reqresp.inbound[slot];
     try std.testing.expect(replacement.request.generation > incoming.generation);
     try std.testing.expectEqual(@as(usize, 0), replacement.request.io.payload.len);
-    try std.testing.expect(setup.shared.client.reqresp.cancel(queued, setup.shared.pair.now));
+    try std.testing.expect(setup.shared.client.reqresp.cancel(&setup.shared.pair.client, &setup.shared.client.router, queued, setup.shared.pair.now));
     var failed = false;
     for (0..20) |_| {
         try setup.pumpOnce();

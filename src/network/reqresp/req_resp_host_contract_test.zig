@@ -37,9 +37,9 @@ test "reqresp host readiness distinguishes notification pressure terminal race a
     try std.testing.expectEqual(.ready, owner.responseReadiness(handle));
     try std.testing.expectEqualDeep(before, owner.resourceSnapshot());
     const serving = owner.retainServing(handle) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(owner.cancel(handle, pair.shared.pair.now));
-    try std.testing.expect(!owner.cancel(handle, pair.shared.pair.now));
-    try std.testing.expectEqual(@as(u32, 1), owner.closing.len);
+    try std.testing.expect(owner.cancel(&pair.shared.pair.server, &pair.shared.server.router, handle, pair.shared.pair.now));
+    try std.testing.expect(!owner.cancel(&pair.shared.pair.server, &pair.shared.server.router, handle, pair.shared.pair.now));
+    try std.testing.expectEqual(.closed, owner.inbound[handle.index].request.stream_owner);
     try std.testing.expectEqual(.terminal, owner.responseReadiness(handle));
     try std.testing.expectError(error.Terminal, owner.respond(handle, &bytes, null, pair.shared.pair.now));
     try std.testing.expectError(error.Terminal, owner.respondError(handle, 2, "closed", pair.shared.pair.now));
@@ -51,12 +51,7 @@ test "reqresp host readiness distinguishes notification pressure terminal race a
     stale = handle;
     stale.direction = .outbound;
     try std.testing.expectEqual(.stale, owner.responseReadiness(stale));
-    owner.cleanupPending(&pair.shared.pair.server, &pair.shared.server.router);
-    const closed = owner.resourceSnapshot();
-    owner.cleanupPending(&pair.shared.pair.server, &pair.shared.server.router);
-    try std.testing.expectEqualDeep(closed, owner.resourceSnapshot());
-    try std.testing.expectEqual(@as(u32, 0), owner.closing.len);
-    try std.testing.expectEqual(.closed, owner.inbound[handle.index].request.stream_owner);
+
     try std.testing.expectEqualSlices(u8, &bytes, borrowed);
     try std.testing.expectEqual(@as(usize, 0), drain(&pair, &.{}));
     try std.testing.expectEqual(.terminal, owner.responseReadiness(handle));
@@ -64,14 +59,14 @@ test "reqresp host readiness distinguishes notification pressure terminal race a
     try std.testing.expectEqual(rr.Failure.cancelled, events[0].failed.reason);
     try std.testing.expectEqual(.stale, owner.responseReadiness(handle));
     try std.testing.expectError(error.StaleHandle, owner.respond(handle, &bytes, null, pair.shared.pair.now));
-    try std.testing.expectEqual(@as(usize, 0), drain(&pair, &events));
     try std.testing.expect(!owner.inbound[handle.index].request.occupied());
+    try std.testing.expectEqual(@as(usize, 0), drain(&pair, &events));
     try std.testing.expectEqual(@as(usize, 1), owner.resourceSnapshot().serving_occupied);
     try std.testing.expect(owner.releaseServing(serving));
     try std.testing.expectEqual(@as(usize, 0), owner.resourceSnapshot().serving_occupied);
 }
 
-test "reqresp queued chunk acknowledgement precedes cancellation terminal after cleanup" {
+test "reqresp queued chunk acknowledgement precedes cancellation terminal after I/O detachment" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
@@ -89,8 +84,8 @@ test "reqresp queued chunk acknowledgement precedes cancellation terminal after 
     }
     try std.testing.expectEqual(.chunk_sent, std.meta.activeTag(owner.inbound[handle.index].request.pendingEvent().?));
     try std.testing.expectEqual(.backpressured, owner.responseReadiness(handle));
-    try std.testing.expect(owner.cancel(handle, pair.shared.pair.now));
-    owner.cleanupPending(&pair.shared.pair.server, &pair.shared.server.router);
+    try std.testing.expect(owner.cancel(&pair.shared.pair.server, &pair.shared.server.router, handle, pair.shared.pair.now));
+
     try std.testing.expectEqual(.terminal, owner.responseReadiness(handle));
     try std.testing.expectEqual(@as(usize, 1), drain(&pair, &events));
     try std.testing.expectEqual(@as(u32, 1), events[0].chunk_sent.chunks);
