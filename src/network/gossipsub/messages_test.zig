@@ -8,14 +8,12 @@ const topic = @import("topic.zig");
 const constants = @import("constants.zig");
 const topic_policy = @import("topic_policy.zig");
 const snappy = @import("snappy");
-const validation = @import("validation.zig");
 const turn_mod = @import("turn.zig");
 
 test "message admission retains canonical topic bounds" {
     const Sink = struct {
         canonical: ?topic.Canonical = null,
         maximum: usize = 0,
-        source_maximum: usize = 0,
         handle: Gossipsub.ValidationHandle = undefined,
         id: Gossipsub.MessageId = undefined,
 
@@ -27,8 +25,7 @@ test "message admission retains canonical topic bounds" {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.canonical = candidate.canonical;
             self.maximum = candidate.maximum_compressed;
-            self.source_maximum = candidate.sourceUsage().maximum_bytes;
-            if (!candidate.feasible(&candidate.usage(&.{}))) return false;
+            if (!candidate.sourceRoom() or !candidate.feasible(&.{})) return false;
             candidate.commit();
             self.handle = candidate.event.handle;
             self.id = candidate.event.id;
@@ -64,7 +61,6 @@ test "message admission retains canonical topic bounds" {
         if (sink.canonical) |canonical| try t.expectEqual(topic.Kind.beacon_block, canonical.name.kind);
         const maximum = constants.maxCompressedLen(6000);
         try t.expectEqual(maximum, sink.maximum);
-        try t.expectEqual(validation.Validation.chargedBytes(maximum), sink.source_maximum);
         try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(sink.handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
     }
 }

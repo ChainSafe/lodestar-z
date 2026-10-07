@@ -201,6 +201,11 @@ test "gossip admission rejects ineligible candidates without replacing work and 
     const victim = oldestReplaceable(&table);
     const handle = table.get(victim).?.handle;
     const free_pages = g.messages.store.free_pages;
+    vote(&bytes, 8, 1);
+    try receive(&g, 0, attestation, &bytes);
+    try t.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.peer_validations)]);
+    try t.expectEqual(@as(u64, 0), table.diag.reportsAppliedIgnore);
+    try t.expect(table.get(victim) != null);
     vote(&bytes, 9, 1000);
     try receive(&g, 2, attestation, &bytes);
     try t.expectEqual(@as(u64, 1), table.diag.slotRefusals);
@@ -868,4 +873,67 @@ test "gossip processor pending validation quota preserves room for another peer 
         table.acknowledge(token);
         try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, first.index, "third", 6));
     }
+}
+
+test "gossip protocol expiry frees compressed storage while host work retains processor charges" {
+    const limits: processor.limits.Limits = @splat(.{ .items = 4, .bytes = 8192 });
+    var boundary: topic_policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+    boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 6000 };
+    var opts = options;
+    opts.topic_policy = &.{boundary};
+    opts.payload_limits = limits;
+    opts.validation_capacity = processor.limits.items(&limits);
+    opts.validation_timeout_ms = 100;
+    var g = try support.init(t.allocator, opts);
+    defer g.deinit();
+    var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy, &.{.{ .digest = boundary.digest, .fork = .fulu }}, 1));
+    defer table.deinit();
+    defer table.close();
+    var consumer: Consumer = .{ .table = &table, .owner = &g };
+    const sink = consumer.sink();
+    g.message_sink = &sink;
+    try support.subscribe(&g, block);
+    for (0..2) |i| _ = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+
+    const kind = @intFromEnum(processor.limits.Kind.beacon_block);
+    var random = std.Random.DefaultPrng.init(913);
+    var payload: [4097]u8 = undefined;
+    random.random().bytes(&payload);
+    std.mem.writeInt(u64, payload[100..108], 1, .little);
+    try receive(&g, 0, block, &payload);
+    const batch = table.claim(1);
+    try t.expectEqual(@as(usize, 1), batch.len);
+    const token = batch.tokens[0];
+    const validation = table.get(token).?.handle;
+    table.finish(&batch, true);
+    try t.expectEqual(@as(usize, 0), table.used_bytes[kind]);
+    try t.expectEqual(@as(usize, 2), g.messages.store.used_by_kind[kind]);
+
+    random.random().bytes(&payload);
+    std.mem.writeInt(u64, payload[100..108], 1, .little);
+    var compressed: [8192]u8 = undefined;
+    const len = try snappy.raw.compress(&payload, &compressed);
+    const message: protobuf.Message = .{ .topic = block, .data = compressed[0..len] };
+    try t.expect(table.hasCapacity(.beacon_block, payload.len));
+    try t.expectEqual(@as(?usize, 0), support.receiveMessage(&g, 1, message, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
+    try t.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.kind_payload)]);
+    try t.expectEqual(@as(u64, 0), table.diag.capacityRefusals);
+    try t.expectEqual(@as(u64, 0), table.refusals[kind][@intFromEnum(processor.GossipProcessor.Refusal.store_full)]);
+
+    g.messages.expire(&g.peers, 101);
+    table.expire(101);
+    try t.expectEqual(@as(usize, 0), g.resourceSnapshot().pending_validations);
+    try t.expectEqual(@as(usize, 0), g.messages.store.used_by_kind[kind]);
+    try t.expectEqual(@as(usize, 1), table.used_items[kind]);
+    try t.expectEqual(@as(usize, payload.len), table.executing_bytes[kind]);
+    try t.expectEqual(@as(?usize, 0), support.receiveMessage(&g, 0, message, Now.fromMilliseconds(.{ .mono_ms = 102, .unix_s = 0 })));
+    try t.expectEqual(@as(u64, 1), table.refusals[kind][@intFromEnum(processor.GossipProcessor.Refusal.source_full)]);
+    try t.expectEqual(@as(?usize, 1), support.receiveMessage(&g, 1, message, Now.fromMilliseconds(.{ .mono_ms = 103, .unix_s = 0 })));
+    try t.expectEqual(@as(usize, 0), table.claim(103).len);
+    try t.expect(!table.report(token, .accept, 104));
+    try t.expectEqual(Gossipsub.ReportOutcome.expired, g.report(validation, .accept, Now.fromMilliseconds(.{ .mono_ms = 104, .unix_s = 0 })));
+    table.acknowledge(token);
+    const next = table.claim(104);
+    try t.expectEqual(@as(usize, 1), next.len);
+    table.finish(&next, false);
 }

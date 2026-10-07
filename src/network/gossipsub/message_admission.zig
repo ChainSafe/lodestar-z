@@ -5,9 +5,11 @@ const validation = @import("validation.zig");
 const topic = @import("topic.zig");
 const assert = std.debug.assert;
 const turn = @import("turn.zig");
+const limits_mod = @import("../gossip_limits.zig");
 
-/// A synchronous borrow. Preflight and commit run under the processor lock on the
-/// network owner; no admission or validation mutation may intervene.
+/// A synchronous borrow on the network owner. The consumer serializes preflight,
+/// replacement and commit with its own state. Only preflighted victims may be
+/// retired between preflight and commit.
 pub const Admission = struct {
     messages: *messages.Messages,
     context: *const messages.Context,
@@ -21,34 +23,30 @@ pub const Admission = struct {
     committed: bool = false,
     refusal: messages.StorageRefusal = .processor_capacity,
 
-    pub const Usage = struct {
+    const Usage = struct {
         available: usize,
         records: usize,
         pages: usize,
         entries: usize,
-        kind_pending: usize,
         kind_pages: usize,
         kind_entries: usize,
     };
 
-    pub const SourceUsage = struct {
-        items: usize,
-        kind_items: usize,
-        kind_bytes: usize,
-        maximum_bytes: usize,
-        validation_capacity: usize,
-    };
-
-    pub fn sourceUsage(self: *const Admission) SourceUsage {
+    /// Check before considering victims: replacing one's own work must not renew
+    /// a source's full share.
+    pub fn sourceRoom(self: *Admission) bool {
         const pending = &self.messages.validation;
+        const source = self.source.peer.index;
         const k = @intFromEnum(self.kind());
-        return .{
-            .items = pending.pending_per_peer[self.source.peer.index],
-            .kind_items = pending.pending_per_peer_kind[self.source.peer.index][k],
-            .kind_bytes = pending.bytes_per_peer_kind[self.source.peer.index][k],
-            .maximum_bytes = validation.Validation.chargedBytes(self.maximum_compressed),
-            .validation_capacity = pending.entries.len,
-        };
+        if (self.context.options.payload_limits) |limits| {
+            const limit = limits[k];
+            const maximum = validation.Validation.chargedBytes(self.maximum_compressed);
+            const bytes = limits_mod.sourceBytes(limit, maximum, storage.inline_bytes);
+            if (pending.pending_per_peer_kind[source][k] >= limits_mod.sourceItems(limit) or
+                validation.Validation.chargedBytes(self.compressed.len) > bytes -| pending.bytes_per_peer_kind[source][k])
+                return self.refuse(.peer_validations);
+        } else if (pending.pending_per_peer[source] >= @max(1, pending.entries.len / 2)) return self.refuse(.peer_validations);
+        return true;
     }
 
     fn kind(self: *const Admission) topic.Kind {
@@ -67,7 +65,7 @@ pub const Admission = struct {
         return self.messages.store.get(entry.state.pending.message).?.len;
     }
 
-    pub fn usage(self: *const Admission, victims: []const validation.Handle) Usage {
+    fn usage(self: *const Admission, victims: []const validation.Handle) Usage {
         const owner = self.messages;
         const pending = &owner.validation;
         const store = &owner.store;
@@ -75,10 +73,11 @@ pub const Admission = struct {
         const k = @intFromEnum(incoming_kind);
         var available = pending.available_entries.len;
         var records = pending.free_records.len + pending.resolved_records.len;
-        var kind_pending: usize = pending.pending_per_kind[k];
         var pages = store.free_pages;
         var entries = store.entries.len - store.used_entries - store.retired_entries;
         var kind_pages = store.used_by_kind[k] - store.retained_by_kind[k];
+        // At admission boundaries, every unretained entry belongs to a pending validation.
+        // Acceptance moves the entry to history and finishes validation in one owner call.
         var kind_entries = store.entries_by_kind[k] - store.retained_entries_by_kind[k];
         for (victims, 0..) |handle, i| {
             for (victims[0..i]) |previous| assert(!std.meta.eql(handle, previous));
@@ -88,7 +87,6 @@ pub const Admission = struct {
             available += @intFromBool(entry.generation != std.math.maxInt(u64));
             records += 1;
             const payload = store.get(entry.state.pending.message).?;
-            if (payload.kind == incoming_kind) kind_pending -= 1;
             if (payload.provisional or payload.history) continue;
             const released = storage.Store.pagesFor(payload.len);
             pages += released;
@@ -98,11 +96,20 @@ pub const Admission = struct {
                 kind_entries -= 1;
             }
         }
-        return .{ .available = available, .records = records, .pages = pages, .entries = entries, .kind_pending = kind_pending, .kind_pages = kind_pages, .kind_entries = kind_entries };
+        return .{ .available = available, .records = records, .pages = pages, .entries = entries, .kind_pages = kind_pages, .kind_entries = kind_entries };
     }
 
-    /// Global physical feasibility only. Per-kind and source policy belongs to the processor.
-    pub fn feasible(self: *Admission, resources: *const Usage) bool {
+    /// Checks compressed storage and validation capacity after retiring `victims`.
+    /// Does not release victims or retained history. Call `sourceRoom` first.
+    pub fn feasible(self: *Admission, victims: []const validation.Handle) bool {
+        // Receipt work covers constant-time admission; replacement pays for each repeated preflight.
+        if (!self.charge(victims.len * @sizeOf(Usage))) return false;
+        const resources = self.usage(victims);
+        if (self.context.options.payload_limits) |limits| {
+            const limit = limits[@intFromEnum(self.kind())];
+            if (resources.kind_entries >= limit.items) return self.refuse(.kind_validations);
+            if (storage.Store.pagesFor(self.compressed.len) > limit.bytes / storage.page_bytes -| resources.kind_pages) return self.refuse(.kind_payload);
+        }
         const owner = self.messages;
         const pending = &owner.validation;
         const store = &owner.store;
@@ -114,7 +121,7 @@ pub const Admission = struct {
         return true;
     }
 
-    pub fn refuse(self: *Admission, reason: messages.StorageRefusal) bool {
+    fn refuse(self: *Admission, reason: messages.StorageRefusal) bool {
         self.refusal = reason;
         return false;
     }
@@ -122,8 +129,7 @@ pub const Admission = struct {
     pub fn commit(self: *Admission) void {
         assert(!self.committed);
         const owner = self.messages;
-        const resources = self.usage(&.{});
-        assert(self.feasible(&resources));
+        assert(self.feasible(&.{}));
         var reservation = owner.validation.reserve(self.event.id).?;
         const payload = owner.history.admitPayload(&owner.store, self.event.id, self.event.topic, self.compressed).?;
         self.event.handle = reservation.commit(&owner.store, self.context.peers, payload, self.source.peer, self.topic_index, self.event.admitted_ms);
@@ -133,3 +139,7 @@ pub const Admission = struct {
         self.committed = true;
     }
 };
+
+test {
+    _ = @import("message_admission_test.zig");
+}

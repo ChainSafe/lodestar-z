@@ -60,7 +60,6 @@ pub const Validation = struct {
     timeout_ms: u64,
     tombstone_ms: u64,
     pending_per_peer_kind: [peer_book.capacity][gossip_limits.kind_count]u16 = @splat(@splat(0)),
-    pending_per_kind: [gossip_limits.kind_count]usize = @splat(0),
     pending_per_peer: [peer_book.capacity]u16 = @splat(0),
     bytes_per_peer_kind: [peer_book.capacity][gossip_limits.kind_count]usize = @splat(@splat(0)),
 
@@ -103,7 +102,6 @@ pub const Validation = struct {
         @memset(&self.bytes_per_peer_kind, @splat(0));
         @memset(&self.pending_per_peer, 0);
         @memset(&self.pending_per_peer_kind, @splat(0));
-        @memset(&self.pending_per_kind, 0);
         for (self.entries, 0..) |*entry, i| {
             assert(!entry.reserved);
             if (entry.state == .pending) store.releaseValidation(entry.state.pending.message);
@@ -172,7 +170,6 @@ pub const Validation = struct {
             const handle: Handle = .{ .index = self.index, .generation = entry.generation + 1 };
             peers.retain(source);
             owner.pending_per_peer[source.index] += 1;
-            owner.pending_per_kind[@intFromEnum(store.get(message).?.kind)] += 1;
             owner.pending_per_peer_kind[source.index][@intFromEnum(store.get(message).?.kind)] += 1;
             owner.bytes_per_peer_kind[source.index][@intFromEnum(store.get(message).?.kind)] += chargedBytes(store.get(message).?.len);
             record.* = .{ .handle = handle, .state = .pending, .id = id, .source = source, .topic = topic, .admitted_ms = now, .pinned = true };
@@ -229,7 +226,6 @@ pub const Validation = struct {
         const kind = @intFromEnum(store.get(pending.message).?.kind);
         assert(self.pending_per_peer[record.source.index] > 0);
         self.pending_per_peer[record.source.index] -= 1;
-        self.pending_per_kind[kind] -= 1;
         self.pending_per_peer_kind[record.source.index][kind] -= 1;
         self.bytes_per_peer_kind[record.source.index][kind] -= chargedBytes(store.get(pending.message).?.len);
         self.pending_entries.remove(self.entries, "deadline_link", index);

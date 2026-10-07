@@ -3,7 +3,6 @@ const Now = @import("../types.zig").Now;
 const processor = @import("root.zig");
 const gossip = @import("../gossipsub/root.zig");
 const storage = @import("../gossipsub/message_store.zig");
-const policy = @import("policy.zig");
 const none = @import("../index_list.zig").none;
 const assert = std.debug.assert;
 
@@ -24,7 +23,7 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
         table.refuse(kind, .ineligible);
         return false;
     }
-    if (!policy.sourceRoom(candidate)) return false;
+    if (!candidate.sourceRoom()) return false;
     if (!table.sourceRoom(message.source, kind, message.bytes.len)) {
         table.refuse(kind, .source_full);
         return false;
@@ -35,9 +34,11 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
     var bytes: usize = 0;
     var cursor = table.expiry.head;
     var inspected: usize = 0;
+    var processor_full = false;
     while (count <= tokens.len) {
         if (!candidate.charge(count * @sizeOf(processor.GossipProcessor.Cell))) break;
-        if (capacityAfter(table, kind, message.bytes.len, tokens[0..count]) and policy.feasible(candidate, handles[0..count])) {
+        processor_full = !capacityAfter(table, kind, message.bytes.len, tokens[0..count]);
+        if (!processor_full and candidate.feasible(handles[0..count])) {
             for (tokens[0..count], handles[0..count]) |token, handle| {
                 table.outcome(owner.report(handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = now, .unix_s = 0 })));
                 table.retire(token);
@@ -70,8 +71,10 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
         handles[count] = cell.handle;
         count += 1;
     }
-    table.diag.capacityRefusals +|= 1;
-    table.refuseCapacity(kind, message.bytes.len);
+    if (processor_full) {
+        table.diag.capacityRefusals +|= 1;
+        table.refuseCapacity(kind, message.bytes.len);
+    }
     return false;
 }
 
