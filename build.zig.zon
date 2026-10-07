@@ -61,9 +61,9 @@
             .url = "git+https://github.com/lalinsky/zio?ref=v0.14.0#aa860381beb42bc077e24ef304827cbdc23fcef9",
             .hash = "zio-0.14.0-xHbVVPxFHgBCop4CvfF4u360kzWlHD4FS8Ud-RIkPcZ7",
         },
-        .ere = .{
-            .url = "git+https://github.com/ChainSafe/ere.zig#644efebbe501801d2f6a643affb0029b4bf18648",
-            .hash = "ere_zig-0.1.0-UBcsLY02AACvO3q1mTXI97rWKWElKKCOHi803qo13jln",
+        .ere_zig = .{
+            .url = "git+https://github.com/ChainSafe/ere.zig#6f9bdad0192793e2b8ca03bb5ea6ded7a1ddc212",
+            .hash = "ere_zig-0.1.0-UBcsLZk2AAAOWBMd1vo5oud_pMIR6Y3vIhpG_y9FHiRX",
         },
     },
     .options_modules = .{
@@ -243,9 +243,9 @@
             .root_source_file = "src/beacon_node/root.zig",
             .imports = .{ .consensus_types, .state_transition, .persistent_merkle_tree, .testing_allocators, .metrics, .hex, .time },
         },
-        .ere_verifier = .{
-            .root_source_file = "src/ere_verifier/root.zig",
-            .imports = .{.ere},
+        .ere = .{
+            .root_source_file = "src/ere/root.zig",
+            .imports = .{.ere_zig},
         },
     },
     .executables = .{
@@ -414,7 +414,7 @@
                     .fork_types,
                     .state_transition,
                     .hex,
-                    .ere_verifier,
+                    .ere,
                     "zapi:zapi",
                 },
             },
@@ -445,7 +445,7 @@
         .fork_choice = .{ .root_module = .fork_choice },
         .clock = .{ .root_module = .clock },
         .beacon_node = .{ .root_module = .beacon_node },
-        .ere_verifier = .{ .root_module = .ere_verifier },
+        .ere = .{ .root_module = .ere },
         .bindings_allocator = .{
             .root_module = .{
                 .root_source_file = "bindings/napi/tracked_allocator.zig",

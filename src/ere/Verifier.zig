@@ -4,7 +4,7 @@
 //! `deinit` must not overlap with them.
 
 const std = @import("std");
-const ere = @import("ere");
+const ere = @import("ere_zig");
 const c = ere.c;
 
 const Verifier = @This();
