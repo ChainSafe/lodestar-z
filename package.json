@@ -35,6 +35,10 @@
     "./shuffle": {
       "import": "./bindings/src/shuffle.js",
       "types": "./bindings/src/shuffle.d.ts"
+    },
+    "./proof-engine": {
+      "import": "./bindings/src/proof-engine.js",
+      "types": "./bindings/src/proof-engine.d.ts"
     }
   },
   "scripts": {
