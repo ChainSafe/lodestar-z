@@ -258,7 +258,7 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
 
 const Visits = struct {
     timer: u64,
-    collect: u64,
+    advance: u64,
     flush: u64,
     reqresp: u64,
     negotiation: u64,
@@ -270,7 +270,7 @@ const Visits = struct {
         const engine = node.transport.engine.visits;
         return .{
             .timer = engine.timer,
-            .collect = engine.collect,
+            .advance = engine.advance,
             .flush = engine.flush,
             .reqresp = node.protocols.reqresp.visits,
             .negotiation = node.protocols.router.negotiator.visits,

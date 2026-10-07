@@ -155,3 +155,30 @@ test "engine rejects invalid limits" {
         standaloneEngine(3, .{ .connections_max = 4, .handshaking_max = 8 }),
     );
 }
+
+test "engine releases inbound admission before advancing the receive batch" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{ .handshaking_max = 1 });
+    defer pair.deinit();
+    _ = try pair.dial();
+    try pair.flush(&pair.client);
+    try pair.flush(&pair.client);
+    try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
+    pair.settle(&pair.server);
+    try pair.flush(&pair.server);
+    pair.settle(&pair.client);
+    try pair.flush(&pair.client);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
+    const before = pair.server.visits;
+
+    _ = try pair.dial();
+    try pair.flush(&pair.client);
+    try pair.flush(&pair.client);
+    try std.testing.expectEqualDeep(before, pair.server.visits);
+    try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
+    try std.testing.expectEqual(@as(usize, 2), pair.server.registry.activeIndices().len);
+    pair.settle(&pair.server);
+    try std.testing.expectEqual(before.advance + 2, pair.server.visits.advance);
+    try pair.pump();
+    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
+}

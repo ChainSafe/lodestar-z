@@ -660,8 +660,7 @@ test "transport keys quiche's timer from a clock read after the flush so it neve
         try std.testing.expect(deadline_ms > now.millis());
         try std.Io.sleep(io, .fromMilliseconds(@intCast(deadline_ms - now.millis())), .awake);
         const turn = try Now.read(io);
-        transport.expire(turn);
-        transport.engine.collect(turn);
+        transport.engine.advance(turn);
         var flushed: Transport.Progress = .{ .now = turn };
         try transport.flush(io, turn, &flushed);
     }
@@ -861,7 +860,7 @@ test "transport recovers a locally dropped first flight through QUIC loss recove
     try std.testing.expect(deadline_ms > now.millis() and deadline_ms - now.millis() < 3_000);
     try std.Io.sleep(std.testing.io, .fromMilliseconds(@intCast(deadline_ms - now.millis())), .awake);
     const after = try Now.read(std.testing.io);
-    client.transport.expire(after);
+    client.transport.engine.advance(after);
     var retransmitted: Transport.Progress = .{ .now = after };
     try client.transport.flush(std.testing.io, after, &retransmitted);
     try std.testing.expect(retransmitted.datagrams_sent > 0);

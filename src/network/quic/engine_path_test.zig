@@ -156,23 +156,23 @@ test "engine routes a replayed client Initial to the existing connection" {
     try std.testing.expectEqual(@as(usize, 1), pair.server.registry.activeIndices().len);
 }
 
-test "engine collects and flushes only the connections that received datagrams" {
+test "engine advances and flushes only the connections that received datagrams" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try connectPair(&pair);
     try pair.pump();
     try std.testing.expect(!pair.client.backlog());
-    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.collect.len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.pending.len);
 
     const stream = try pair.server.openStream(handles.server);
     _ = try pair.server.write(stream, "x", false);
     try std.testing.expect(try pair.transfer(&pair.server, &pair.client, server_address, false));
     const slot = &pair.client.registry.slots[handles.client.index];
-    try std.testing.expect(slot.collect_link.linked and slot.dirty_link.linked);
-    try std.testing.expectEqual(@as(usize, 1), pair.client.registry.collect.len);
+    try std.testing.expect(slot.pending_link.linked and slot.dirty_link.linked);
+    try std.testing.expectEqual(@as(usize, 1), pair.client.registry.pending.len);
     pair.settle(&pair.client);
-    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.collect.len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.pending.len);
 
     var storage: [8]Engine.Event = undefined;
     const polled = pair.events(&pair.client, &storage);
@@ -208,7 +208,7 @@ test "engine junk short header from a live peer's address marks nothing" {
     );
     try std.testing.expectEqual(Engine.ReceiveOutcome.dropped, outcome);
     const slot = &pair.client.registry.slots[handles.client.index];
-    try std.testing.expect(!slot.collect_link.linked and !slot.dirty_link.linked);
+    try std.testing.expect(!slot.pending_link.linked and !slot.dirty_link.linked);
     try std.testing.expect(!pair.client.backlog());
 
     try std.testing.expect(pair.client.peerId(handles.client) != null);

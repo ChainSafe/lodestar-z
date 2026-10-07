@@ -574,8 +574,8 @@ pub const NetworkCore = struct {
     };
 
     /// Advances one bounded turn from supplied readiness and time; never waits for readiness.
-    /// Receive/expire/collect precede host apply, protocols, discovery, dials and flush. The I/O
-    /// provider must complete datagram operations without waiting. Read event arrays before the
+    /// Receive and transport processing precede host apply, protocols, discovery, dials and flush.
+    /// The I/O provider must complete datagram operations without waiting. Read event arrays before the
     /// next advance, beginGracefulClose or teardown; request payloads follow the request API's
     /// borrow contracts. Do not call after shutdown or initiate shutdown from the host callback.
     /// Time must not move backwards.
@@ -611,8 +611,7 @@ pub const NetworkCore = struct {
                 self.counters.transport_failures +|= 1;
             };
         }
-        self.transport.expire(tick);
-        result.transport.events = self.transport.collect(tick, self.native_events);
+        result.transport.events = self.transport.process(tick, self.native_events);
         result.transport.events_pending = self.transport.engine.eventsPending();
         result.transport_events = self.native_events[0..result.transport.events];
         if (!result.cancelled) {

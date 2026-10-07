@@ -505,7 +505,7 @@ test "engine read shutdown consumes readiness while the write half stays open" {
     try std.testing.expect(response.fin);
 }
 
-test "engine immediate host close before collect preserves peer stream claims" {
+test "engine immediate host close before advancement preserves peer stream claims" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();

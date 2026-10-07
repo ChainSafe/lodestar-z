@@ -222,7 +222,7 @@ pub const Transport = struct {
         cancelled: bool = false,
     };
 
-    /// Uses the same receive/expire/collect/flush ordering as NetworkCore. Events caused by
+    /// Uses the same receive/process/flush ordering as NetworkCore. Events caused by
     /// flush remain pending for the next turn. Consume event borrows before advancing again.
     pub fn advance(self: *Transport, io: std.Io, input: Input, events: []Engine.Event) AdvanceResult {
         const now = input.now;
@@ -233,8 +233,7 @@ pub const Transport = struct {
             cancelled = cancelled or err == error.Canceled;
             failure = failure orelse err;
         };
-        self.expire(now);
-        result.events = self.collect(now, events);
+        result.events = self.process(now, events);
         result.events_pending = self.engine.eventsPending();
         if (!cancelled) self.flush(io, now, &result) catch |err| {
             cancelled = true;
@@ -251,13 +250,9 @@ pub const Transport = struct {
         return self.receiveBatch(io, result, ready);
     }
 
-    pub fn expire(self: *Transport, now: Engine.Now) void {
-        self.engine.expire(now);
-    }
-
-    /// Gathers stream readiness for the connections touched this turn and drains their events.
-    pub fn collect(self: *Transport, now: Engine.Now, events: []Engine.Event) usize {
-        self.engine.collect(now);
+    /// Advances the receive batch and due timers, then drains connection and stream events.
+    pub fn process(self: *Transport, now: Engine.Now, events: []Engine.Event) usize {
+        self.engine.advance(now);
         return self.engine.pollEvents(events);
     }
 

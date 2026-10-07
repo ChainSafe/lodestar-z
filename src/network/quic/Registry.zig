@@ -15,9 +15,7 @@ positions: []u16,
 /// One key per live connection: its earliest QUIC timer, handshake limit, keep-alive or
 /// deferred close, in monotonic nanoseconds.
 timers: DeadlineHeap,
-/// Rows popped by one expiry pass.
-expired: []u16,
-collect: index_list.List = .{},
+pending: index_list.List = .{},
 dirty: index_list.List = .{},
 events: index_list.List = .{},
 released: index_list.List = .{},
@@ -45,8 +43,6 @@ pub fn init(allocator: std.mem.Allocator, slots_max: u16, seed: u64) !Registry {
 
     var timers = try DeadlineHeap.init(allocator, slots_max);
     errdefer timers.deinit(allocator);
-    const expired = try allocator.alloc(u16, slots_max);
-    errdefer allocator.free(expired);
 
     const positions = try allocator.alloc(u16, slots_max);
     errdefer allocator.free(positions);
@@ -56,7 +52,6 @@ pub fn init(allocator: std.mem.Allocator, slots_max: u16, seed: u64) !Registry {
         .routes = routes,
         .active = active,
         .timers = timers,
-        .expired = expired,
         .positions = positions,
     };
 }
@@ -65,7 +60,6 @@ pub fn deinit(self: *Registry, allocator: std.mem.Allocator) void {
     for (self.slots) |*slot| if (slot.state != .free) {
         slot.release();
     };
-    allocator.free(self.expired);
     self.timers.deinit(allocator);
     allocator.free(self.active);
     allocator.free(self.positions);
@@ -132,7 +126,7 @@ pub fn retire(self: *Registry, index: u16) void {
 fn unlink(self: *Registry, index: u16) void {
     assert(index < self.slots.len);
     const slot = &self.slots[index];
-    if (slot.collect_link.linked) self.collect.remove(self.slots, "collect_link", index);
+    if (slot.pending_link.linked) self.pending.remove(self.slots, "pending_link", index);
     if (slot.dirty_link.linked) self.dirty.remove(self.slots, "dirty_link", index);
     if (slot.event_link.linked) self.events.remove(self.slots, "event_link", index);
     if (slot.release_link.linked) self.released.remove(self.slots, "release_link", index);

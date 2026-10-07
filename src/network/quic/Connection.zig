@@ -97,8 +97,8 @@ close_event: enum { none, pending, reported } = .none,
 path_changed_pending: ?types.Address = null,
 /// Largest watermark this peer's flow-control windows let a blocked stream reach.
 write_lowat_ceiling: u32 = limits.write_lowat_max,
-/// Accepted a datagram or had a timer fire; stream readiness is gathered this turn.
-collect_link: index_list.Link = .{},
+/// Needs advancement after received datagrams, timer expiry or stream operations.
+pending_link: index_list.Link = .{},
 /// May have output for quiche_conn_send.
 dirty_link: index_list.Link = .{},
 /// Has undelivered lifecycle or stream events.
@@ -117,7 +117,7 @@ pub fn open(
 ) Error!void {
     assert(self.state == .free);
     assert(self.conn == null);
-    assert(!self.collect_link.linked and !self.dirty_link.linked and !self.event_link.linked and !self.release_link.linked);
+    assert(!self.pending_link.linked and !self.dirty_link.linked and !self.event_link.linked and !self.release_link.linked);
     assert(!self.deferred_link.linked);
     self.handshake = .{ .now_unix = params.now.unixSeconds() };
     self.direction = params.direction;

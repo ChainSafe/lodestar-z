@@ -94,12 +94,12 @@ pub const Limits = struct {
 /// Per-connection visits by phase. An idle connection is visited in none of them. Readiness tests
 /// and the idle benchmarks read them.
 pub const Visits = struct {
-    /// Timer keys popped by expire.
+    /// Due timer keys popped before advancement.
     timer: u64 = 0,
-    /// quiche_conn_on_timeout calls, made only when a popped key found quiche's timer expired.
+    /// quiche_conn_on_timeout calls, made only when quiche's current timer has expired.
     timeouts: u64 = 0,
-    /// Connections whose stream readiness collect gathered.
-    collect: u64 = 0,
+    /// Connections advanced for received packets, stream changes or timer expiry.
+    advance: u64 = 0,
     /// Dirty connections a flush pass drained.
     flush: u64 = 0,
 };
@@ -455,7 +455,7 @@ pub fn write(self: *Engine, stream: StreamHandle, bytes: []const u8, fin: bool) 
 
 fn streamEffects(self: *Engine, index: u16, effects: Connection.Effects) void {
     if (effects.dirty) self.markLiveDirty(index);
-    if (effects.collect) self.markCollect(index);
+    if (effects.collect) self.markPending(index);
     self.noteEvents(index);
 }
 
@@ -546,7 +546,7 @@ pub fn receive(
     const header = binding.Header.parse(datagram, &self.header_token) catch
         return .dropped;
     if (self.registry.findRoute(&header.dcid)) |index| {
-        _ = self.feed(index, datagram, from, now, false);
+        _ = self.feed(index, datagram, from, false);
         return .{ .accepted = self.toHandle(index) };
     }
     if (header.packet_type == .short) {
@@ -554,7 +554,7 @@ pub fn receive(
         // from a live peer's address marks nothing.
         const index = self.slotForPeer(from) orelse
             return .dropped;
-        if (!self.feed(index, datagram, from, now, true)) return .dropped;
+        if (!self.feed(index, datagram, from, true)) return .dropped;
         return .{ .accepted = self.toHandle(index) };
     }
     if (!self.admission_open) return .dropped;
@@ -608,7 +608,7 @@ pub fn receive(
     assert(slot.scid.eql(&header.dcid));
     self.registry.handshaking += 1;
     assert(self.registry.handshaking <= self.limits.handshaking_max);
-    _ = self.feed(index, datagram, from, now, false);
+    _ = self.feed(index, datagram, from, false);
     return .{ .accepted = self.toHandle(index) };
 }
 
@@ -638,63 +638,52 @@ fn negotiateVersion(
     return .{ .version_negotiation = out[0..length] };
 }
 
-/// Pops due timer keys. Applies the handshake limit, keep-alive and a deferred close whose
-/// flight left, and calls on_timeout only when quiche's own timer has expired. Each popped
-/// connection joins collect and dirty. A connection re-keyed during this call is not popped
-/// again in it.
-pub fn expire(self: *Engine, now: Now) void {
+/// Advances received connections and due timers once, then gathers their stream readiness.
+/// Call after the receive batch, before observing events, streams or the next deadline.
+/// Sending remains a separate phase and refreshes deadlines after each burst.
+pub fn advance(self: *Engine, now: Now) void {
     const registry = &self.registry;
-    const now_ns = now.nanos();
-    var count: usize = 0;
-    while (count < registry.expired.len) : (count += 1) {
-        const row = registry.timers.popDue(now_ns) orelse break;
-        registry.expired[count] = @intCast(row);
+    const slots = registry.slots;
+    // Gather due keys before re-keying any connection, including immediately due ones.
+    for (0..slots.len) |_| {
+        const row = registry.timers.popDue(now.nanos()) orelse break;
+        self.visits.timer +|= 1;
+        self.markPending(@intCast(row));
     }
-    self.visits.timer +|= count;
-    for (registry.expired[0..count]) |index| self.fire(index, now);
-}
 
-fn fire(self: *Engine, index: u16, now: Now) void {
-    const slot = &self.registry.slots[index];
-    assert(slot.state == .handshaking or slot.state == .established);
-    if (slot.timeoutNs()) |remaining| if (remaining == 0) {
-        slot.onTimeout();
-        self.visits.timeouts +|= 1;
-    };
-    if (slot.state == .handshaking and slot.closing == .none and
-        now.millis() -| slot.created_ms >= self.handshakeLimitMs(slot))
-    {
-        const unanswered = slot.direction == .outbound and !slot.answered;
-        slot.close(if (unanswered) .dial_unanswered else .handshake_timeout, types.app_error_handshake_timeout);
-    }
-    if (slot.state == .established and slot.closing == .none and
-        now.millis() -| slot.last_send_ms >= self.limits.keep_alive_ms and
-        slot.keepAlive())
-    {
-        slot.last_send_ms = now.millis();
-    }
-    slot.closeAfterFlight();
-    self.refresh(index);
-    self.observePath(index);
-    self.touched(index, now);
-}
-
-/// Gathers stream readiness for the connections that received datagrams or had a timer fire,
-/// claiming new peer streams, and refreshes their timer keys.
-pub fn collect(self: *Engine, now: Now) void {
-    const slots = self.registry.slots;
     var visited: usize = 0;
-    while (self.registry.collect.pop(slots, "collect_link")) |row| : (visited += 1) {
+    while (registry.pending.head != index_list.none) : (visited += 1) {
         assert(visited < slots.len);
-        const index: u16 = @intCast(row);
-        self.visits.collect +|= 1;
+        const index: u16 = @intCast(registry.pending.head);
         const slot = &slots[index];
-        if (slot.state != .handshaking and slot.state != .established) continue;
+        assert(slot.state == .handshaking or slot.state == .established);
+        self.visits.advance +|= 1;
+        // Received packets may have replaced the timer represented by the old heap key.
+        if (slot.timeoutNs()) |remaining| if (remaining == 0) {
+            slot.onTimeout();
+            self.visits.timeouts +|= 1;
+        };
+        if (slot.state == .handshaking and slot.closing == .none and
+            now.millis() -| slot.created_ms >= self.handshakeLimitMs(slot))
+        {
+            const unanswered = slot.direction == .outbound and !slot.answered;
+            slot.close(if (unanswered) .dial_unanswered else .handshake_timeout, types.app_error_handshake_timeout);
+        }
+        if (slot.state == .established and slot.closing == .none and
+            now.millis() -| slot.last_send_ms >= self.limits.keep_alive_ms and
+            slot.keepAlive())
+        {
+            slot.last_send_ms = now.millis();
+        }
+        slot.closeAfterFlight();
         self.refresh(index);
         slot.collectStreams();
         self.observePath(index);
+        self.markLiveDirty(index);
         self.rekey(index, now);
         self.noteEvents(index);
+        // Keep it linked through refresh so establishment cannot enqueue it twice.
+        if (slot.pending_link.linked) registry.pending.remove(slots, "pending_link", index);
     }
 }
 
@@ -748,14 +737,14 @@ fn checkInvariants(self: *Engine, now: Now) void {
         // Deferred close events wait on the deferred list.
         assert(slot.deferred_link.linked == (slot.table.deferred != 0));
         if (slot.state == .free) {
-            assert(!slot.collect_link.linked and !slot.dirty_link.linked and !slot.event_link.linked and !slot.release_link.linked);
+            assert(!slot.pending_link.linked and !slot.dirty_link.linked and !slot.event_link.linked and !slot.release_link.linked);
             assert(self.registry.timers.get(index) == null);
             continue;
         }
         // E3: undelivered events if and only if the slot is on the events list.
         assert(slot.event_link.linked == slot.hasEvents());
         if (slot.state == .closed) {
-            assert(!slot.collect_link.linked and !slot.dirty_link.linked);
+            assert(!slot.pending_link.linked and !slot.dirty_link.linked);
             assert(self.registry.timers.get(index) == null);
             continue;
         }
@@ -779,7 +768,7 @@ fn checkInvariants(self: *Engine, now: Now) void {
             const rc = binding.connSend(slot.conn.?, &scratch, &info);
             assert(rc == c.QUICHE_ERR_DONE);
         }
-        if (slot.collect_link.linked or slot.state != .established or slot.closing == .after_flight) continue;
+        if (slot.pending_link.linked or slot.state != .established or slot.closing == .after_flight) continue;
         slot.checkStreamInvariants();
     }
 }
@@ -833,19 +822,8 @@ fn rekey(self: *Engine, index: u16, now: Now) void {
     if (native_deadline) |deadline| assert(self.registry.timers.get(index).? <= deadline);
 }
 
-/// A datagram was processed or a timer fired: gather readiness and flush this turn.
-fn touched(self: *Engine, index: u16, now: Now) void {
-    const slot = &self.registry.slots[index];
-    if (slot.state == .handshaking or slot.state == .established) {
-        self.markCollect(index);
-        self.markDirty(index);
-    }
-    self.rekey(index, now);
-    self.noteEvents(index);
-}
-
-fn markCollect(self: *Engine, index: u16) void {
-    _ = self.registry.collect.insert(self.registry.slots, "collect_link", index);
+fn markPending(self: *Engine, index: u16) void {
+    _ = self.registry.pending.insert(self.registry.slots, "pending_link", index);
 }
 
 fn markDirty(self: *Engine, index: u16) void {
@@ -936,7 +914,7 @@ fn localFor(self: *const Engine, peer: Address) ?Address {
 
 /// Returns false only when progress was required and quiche neither processed a packet nor
 /// started closing.
-fn feed(self: *Engine, index: u16, datagram: []u8, from: *const Address, now: Now, require_progress: bool) bool {
+fn feed(self: *Engine, index: u16, datagram: []u8, from: *const Address, require_progress: bool) bool {
     assert(index < self.registry.slots.len);
     assert(datagram.len > 0);
     const slot = &self.registry.slots[index];
@@ -948,9 +926,14 @@ fn feed(self: *Engine, index: u16, datagram: []u8, from: *const Address, now: No
     const received = if (slot.recv(datagram, &source, &destination)) |_| true else |_| false;
     if (require_progress and slot.receivedPackets() == received_before and !slot.isFinished()) return false;
     if (received) slot.answered = true;
-    self.refresh(index);
+    // Admission permits must be released before receiving the next Initial in this batch.
+    if (slot.state == .handshaking) self.refresh(index);
+    // Address fallback for the next datagram needs the latest validated path.
     self.observePath(index);
-    self.touched(index, now);
+    if (slot.state == .handshaking or slot.state == .established) {
+        self.markPending(index);
+        self.markDirty(index);
+    }
     return true;
 }
 
@@ -998,7 +981,7 @@ fn refresh(self: *Engine, index: u16) void {
         } else {
             slot.close(.tls_failed, types.app_error_normal);
         }
-        if (slot.state == .established and slot.closing != .after_flight) self.markCollect(index);
+        if (slot.state == .established and slot.closing != .after_flight) self.markPending(index);
     }
     if (slot.state != .closed and slot.isFinished()) {
         self.markClosed(index, slot.closeReason());
@@ -1027,7 +1010,7 @@ fn markClosed(self: *Engine, index: u16, reason: CloseReason) void {
     self.registry.removeRoute(index);
     const slots = self.registry.slots;
     if (slot.deferred_link.linked) self.registry.deferred.remove(slots, "deferred_link", index);
-    if (slot.collect_link.linked) self.registry.collect.remove(slots, "collect_link", index);
+    if (slot.pending_link.linked) self.registry.pending.remove(slots, "pending_link", index);
     if (slot.dirty_link.linked) self.registry.dirty.remove(slots, "dirty_link", index);
     self.registry.timers.clear(index);
     self.noteEvents(index);

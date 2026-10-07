@@ -91,8 +91,7 @@ pub const Pair = struct {
         self.now.monotonic = time.milliseconds(self.now.millis() + ms);
     }
 
-    /// Delivers datagrams both ways and runs both engines' timer and readiness phases until
-    /// neither side has output left.
+    /// Delivers datagrams both ways and advances both engines until neither has output left.
     pub fn pump(self: *Pair) !void {
         var rounds: usize = 0;
         while (rounds < 64) : (rounds += 1) {
@@ -113,10 +112,9 @@ pub const Pair = struct {
         } else _ = try self.transfer(&self.server, &self.client, server_address, false);
     }
 
-    /// Runs one engine's timer and readiness phases at the pair's clock.
+    /// Advances one engine at the pair's clock.
     pub fn settle(self: *Pair, engine: *Engine) void {
-        engine.expire(self.now);
-        engine.collect(self.now);
+        engine.advance(self.now);
     }
 
     /// Flushes the sender's dirty connections into the receiver, as the transport does.

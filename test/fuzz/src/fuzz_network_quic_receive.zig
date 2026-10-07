@@ -28,8 +28,7 @@ pub export fn zig_fuzz_test(bytes: [*]const u8, len: usize) callconv(.c) void {
         const source = fixture.source(i);
         _ = engine.receive(datagram[0..len], &source, now, &output);
         now.monotonic = network.time.milliseconds(now.millis() + 1);
-        engine.expire(now);
-        engine.collect(now);
+        engine.advance(now);
         _ = engine.pollEvents(&events);
         engine.releaseReported();
         std.debug.assert(engine.registry.active_len <= 4);

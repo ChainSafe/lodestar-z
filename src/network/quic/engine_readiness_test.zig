@@ -18,7 +18,7 @@ fn drainEvents(pair: *Pair, engine: *Engine) usize {
     return total;
 }
 
-test "engine idle connections cost no timer, collect or flush visits" {
+test "engine idle connections cost no timer, advance or flush visits" {
     var pair: Pair = .{};
     try pair.init(.{}, .{ .handshaking_per_prefix_max = 32, .handshaking_per_source_max = 32 });
     defer pair.deinit();
@@ -187,4 +187,41 @@ test "engine changing a write watermark replaces an unpolled writable edge" {
     try std.testing.expectEqual(@as(usize, 0), countWritable(&pair, stream));
     try std.testing.expectError(error.WouldBlock, pair.client.write(stream, payload[0..512], false));
     try std.testing.expectEqual(@as(usize, 0), countWritable(&pair, stream));
+}
+
+test "engine advances a received burst and its due timer once" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    binding.c.quiche_config_set_initial_congestion_window_packets(pair.client.config.ptr, 128);
+    const handles = try support.connectPair(&pair);
+    try pair.pump();
+    const stream = try pair.client.openStream(handles.client);
+    const payload = [_]u8{0x5a} ** (64 * 1024);
+    try std.testing.expectEqual(payload.len, try pair.client.write(stream, &payload, false));
+
+    // Retain a due key while packets change the connection's native timer.
+    pair.server.registry.timers.set(handles.server.index, pair.now.nanos());
+    const before = pair.server.visits;
+    var buffer: [constants.datagram_size_max]u8 = undefined;
+    var reply: [constants.datagram_size_max]u8 = undefined;
+    for (0..32) |_| {
+        const sent = pair.client.sendOne(handles.client.index, pair.now, &buffer) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(handles.server, pair.server.receive(sent.bytes, &support.client_address, pair.now, &reply).accepted);
+    }
+    try std.testing.expectEqualDeep(before, pair.server.visits);
+    try std.testing.expectEqual(pair.now.nanos(), pair.server.registry.timers.get(handles.server.index).?);
+    pair.server.advance(pair.now);
+    try std.testing.expectEqual(before.timer + 1, pair.server.visits.timer);
+    try std.testing.expectEqual(before.advance + 1, pair.server.visits.advance);
+    try std.testing.expectEqual(before.timeouts, pair.server.visits.timeouts);
+    try std.testing.expect(pair.server.nextDeadlineNs().? > pair.now.nanos());
+
+    var events: [8]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&events));
+    const inbound = try support.expectStreamOpened(events[0], handles.server);
+    var sink: [payload.len]u8 = undefined;
+    const read = try pair.server.read(inbound, &sink);
+    try std.testing.expect(read.len > 30 * 1024);
+    try std.testing.expectEqualSlices(u8, payload[0..read.len], sink[0..read.len]);
 }
