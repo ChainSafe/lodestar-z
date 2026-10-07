@@ -298,6 +298,8 @@ pub const EpochTransitionCache = struct {
         config: *const BeaconConfig,
         epoch_cache: *EpochCache,
         state: *AnyBeaconState,
+        /// Non-null starts the Fulu shuffling job. Pass it only when the caller runs
+        /// `processProposerLookahead`, which joins the job. Otherwise `deinit` waits for an unused shuffle.
         shuffling_io: ?std.Io,
     ) !EpochTransitionCache {
         const fork_seq = state.forkSeq();
