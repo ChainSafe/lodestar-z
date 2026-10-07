@@ -194,7 +194,7 @@ test "gossip policy sent promise survives reconnect without token rearming" {
     const next = g.addPeer(.{ .index = 0, .generation = 2 }, &metadata, now).admitted;
     g.recovery.controlSent(g.sessions.rows[next.index].conn, 9, g.options.iwant_followup_ms, 2000);
     try std.testing.expectEqual(@as(?u64, 3010), g.recovery.batches[0].expiry);
-    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 3010, .unix_s = 0 }));
+    support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 3010, .unix_s = 0 }));
     try std.testing.expectEqual(@as(u64, 1), g.counters.broken_promises);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[ref.index].pins);
 }

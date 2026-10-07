@@ -275,14 +275,6 @@ pub const Recovery = struct {
         return broken;
     }
 
-    pub fn nextExpiry(self: *const Recovery) ?u64 {
-        var next: ?u64 = null;
-        for (self.batches[0..self.batch_len]) |batch| {
-            next = @min(next orelse batch.expiry, batch.expiry);
-        }
-        return next;
-    }
-
     fn releaseRequest(self: *Recovery, slot: u16) void {
         const request = &self.requests[slot];
         if (request.bucket_prev == none) {

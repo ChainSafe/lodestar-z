@@ -26,20 +26,20 @@ test "recovery receipts bind connection generation and token and release only ca
     recovery.add(&peers, [_]u8{2} ** 20, peer, connection, 8, 30_000);
     recovery.controlSent(next_connection, 7, 3000, 10);
     recovery.controlSent(connection, 6, 3000, 10);
-    try std.testing.expectEqual(@as(?u64, 30_000), recovery.nextExpiry());
+    try std.testing.expectEqual(@as(u64, 30_000), recovery.batches[0].expiry);
     recovery.controlSent(connection, 7, 3000, 20);
-    try std.testing.expectEqual(@as(?u64, 3020), recovery.nextExpiry());
+    try std.testing.expectEqual(@as(u64, 3020), recovery.batches[0].expiry);
     try std.testing.expectEqual(@as(u64, 0), recovery.cancel(&peers, next_connection, true).removed);
     try std.testing.expectEqual(@as(u64, 1), recovery.cancel(&peers, connection, false).removed);
     try std.testing.expectEqual(@as(u32, 1), peers.rows[peer.index].pins);
     recovery.controlSent(connection, 7, 3000, 200);
     recovery.controlSent(connection, 8, 3000, 200);
-    try std.testing.expectEqual(@as(?u64, 3020), recovery.nextExpiry());
+    try std.testing.expectEqual(@as(u64, 3020), recovery.batches[0].expiry);
     try std.testing.expectEqual(@as(u64, 1), recovery.cancel(&peers, connection, true).removed);
     try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
     try std.testing.expectEqual(@as(usize, constants.promises_cap), recovery.available());
     recovery.controlSent(connection, 7, 3000, 300);
-    try std.testing.expect(recovery.nextExpiry() == null);
+    try std.testing.expectEqual(@as(usize, 0), recovery.batch_len);
 }
 
 test "recovery capacity resolves every matching attribution and deinit releases remaining pins" {

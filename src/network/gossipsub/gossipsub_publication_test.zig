@@ -132,7 +132,7 @@ test "publication failed history admission retains payloads and recovery attribu
     try std.testing.expectEqual(@as(u64, retained.len), g.topic_metrics.get(test_topic).published);
     try std.testing.expect(!g.messages.seen.contains(id, 2));
     try std.testing.expectEqual(@as(usize, 2), g.recovery.len);
-    try std.testing.expectEqual(@as(?u64, 12_001), g.recovery.nextExpiry());
+    try std.testing.expectEqual(@as(u64, 12_001), g.recovery.batches[0].expiry);
     try std.testing.expectEqual(@as(u32, 1), g.peers.rows[logical.index].pins);
     try std.testing.expectEqual(@as(u32, 1), g.peers.rows[second_logical.index].pins);
     try std.testing.expectEqual(retained.len, g.messages.history.count);

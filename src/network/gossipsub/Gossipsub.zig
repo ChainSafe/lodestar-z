@@ -392,13 +392,16 @@ pub fn overlayContext(self: *Gossipsub, now_ms: u64) overlay_mod.Context {
 
 // Pump -------------------------------------------------------------------
 
-pub fn tick(self: *Gossipsub, now: Now) void {
+/// Returns whether a heartbeat ran. Expire recovery after servicing that turn.
+pub fn tick(self: *Gossipsub, now: Now) bool {
     if (self.heartbeat_at == 0) {
         self.heartbeat_at = now.millis() +| self.options.heartbeat_interval_ms;
     } else if (now.millis() >= self.heartbeat_at) {
         self.heartbeat(now);
         self.heartbeat_at = now.millis() +| self.options.heartbeat_interval_ms;
+        return true;
     }
+    return false;
 }
 
 pub const receiveItem = rpc_handler.receiveItem;
@@ -599,8 +602,7 @@ pub fn schedule(self: *const Gossipsub) types.Schedule {
         .deadline = time.optionalMilliseconds(self.heartbeat_at),
     };
     if (self.sessions.deadlines.peek()) |top| result = result.merge(.{ .deadline = time.optionalMilliseconds(top.deadline) });
-    result = result.merge(.{ .deadline = time.optionalMilliseconds(self.messages.nextDeadline()) });
-    return result.merge(.{ .deadline = time.optionalMilliseconds(self.recovery.nextExpiry()) });
+    return result.merge(.{ .deadline = time.optionalMilliseconds(self.messages.nextDeadline()) });
 }
 
 pub fn pump(
@@ -621,7 +623,7 @@ pub fn pump(
 pub fn runTurn(self: *Gossipsub, router: *Router, engine: *Engine, turn: *Turn) void {
     const now = turn.now;
     self.expireSessions(router, engine, turn);
-    self.tick(now);
+    const heartbeat_due = self.tick(now);
     const marked = @min(self.sessions.ready.len, self.options.peers_per_pump);
     var openings: usize = 0;
     for (0..marked) |_| {
@@ -643,6 +645,8 @@ pub fn runTurn(self: *Gossipsub, router: *Router, engine: *Engine, turn: *Turn) 
         }
     }
     self.finishPump(now);
+    // Received messages and local refusals can forgive promises before this heartbeat's sweep.
+    if (heartbeat_due) self.expirePromises(now.millis());
     if (@import("builtin").is_test) self.checkScheduling();
 }
 
@@ -668,7 +672,6 @@ pub fn beginPump(self: *Gossipsub, now: Now) Turn {
 
 pub fn finishPump(self: *Gossipsub, now: Now) void {
     self.maintainTopics(now);
-    self.expirePromises(now.millis());
 }
 
 /// Test builds check after every turn that the ready list holds every session that wants

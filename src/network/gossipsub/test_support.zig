@@ -265,5 +265,5 @@ pub fn control(g: *Gossipsub, index: u16, item: protobuf.Item, now: Now) void {
 pub fn heartbeat(g: *Gossipsub, now: Now) void {
     std.debug.assert(now.millis() > 0);
     g.heartbeat_at = now.millis();
-    g.tick(now);
+    if (g.tick(now)) g.expirePromises(now.millis());
 }
