@@ -174,10 +174,6 @@ pub const Messages = struct {
         return !self.seen.contains(id, now) and self.validation.find(id, now) == null;
     }
 
-    pub fn hasPayload(self: *Messages, id: MessageId) bool {
-        return self.history.get(&self.store, id) != null;
-    }
-
     pub fn gossipIds(self: *Messages, topic: u16, epoch: u64) []MessageId {
         const count = self.history.gossip(topic, self.gossip_ids, epoch);
         return self.gossip_ids[0..count];

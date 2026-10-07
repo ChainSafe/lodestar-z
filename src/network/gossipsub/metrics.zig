@@ -127,9 +127,9 @@ pub const ScorePopulations = struct {
     }
 };
 
-/// An IWANT ID absent from history, or present and then suppressed by IDONTWANT, over its
-/// retransmission limit, queued or refused for queue pressure.
-pub const IwantOutcome = enum { miss, suppressed, limited, queued, refused };
+/// An IWANT ID absent from history, or present and then over its retransmission limit,
+/// queued or refused for queue pressure.
+pub const IwantOutcome = enum { miss, limited, queued, refused };
 pub const iwant_outcome_count = @typeInfo(IwantOutcome).@"enum".fields.len;
 
 test {

@@ -36,7 +36,11 @@ pub fn receiveItem(self: *Gossipsub, session: sessions_mod.SessionRef, item: pro
                         if (!workspace.chargeWork(&self.options, ihaveWork(self, ihave.body.len))) return .credits;
                         onIhave(self, index, ihave, now);
                     },
-                    .iwant => |iwant| onIwant(self, index, iwant, now),
+                    .iwant => |iwant| {
+                        const workspace = turn.workspace(peer);
+                        if (!workspace.chargeWork(&self.options, iwantWork(self, iwant.body.len))) return .credits;
+                        onIwant(self, index, iwant, now);
+                    },
                     .graft => |name| onGraft(self, index, name, now),
                     .prune => |prune| onPrune(self, index, prune, now),
                     .idontwant => |ids| onIdontwant(self, index, ids, now),
@@ -104,9 +108,7 @@ fn ihaveWorkBound(body_len: usize, topics: usize, probes: usize, batches: usize,
     const ids: usize = @min(constants.max_ihave_ids_per_heartbeat, body_len / (constants.message_id_length + 2));
     const selected: usize = @min(ids, constants.gossip_ids_max);
     const fields: usize = @min(body_len / 2 + 1, 8193);
-    const header_work = topic_mod.topic_max_len * topic_policy.kind_count + topic_policy.boundary_max * @sizeOf(topic_mod.ForkDigest) +
-        topics * (@sizeOf(score_mod.TopicParams) + @sizeOf(score_mod.TopicCounters) + @sizeOf(score_mod.TopicWeights)) +
-        @as(usize, peers_mod.capacity) * @sizeOf(peers_mod.Row) + @sizeOf(peers_mod.PeerBook);
+    const header_work = topic_mod.topic_max_len * topic_policy.kind_count + topic_policy.boundary_max * @sizeOf(topic_mod.ForkDigest) + scoreWork(topics);
     // Each protobuf field consumes at least two bytes and at most two
     // ten-byte varints. Include a score refresh, IP population and topic
     // lookup; ID lookups include a slot read and key comparison. Selected
@@ -114,6 +116,20 @@ fn ihaveWorkBound(body_len: usize, topics: usize, probes: usize, batches: usize,
     return header_work + 20 * fields +
         Recovery.selectionWork(ids, batches, requests) + ids * probes * (@sizeOf(MessageId) + @sizeOf(u32)) +
         selected * 384;
+}
+
+fn scoreWork(topics: usize) usize {
+    return topics * (@sizeOf(score_mod.TopicParams) + @sizeOf(score_mod.TopicCounters) + @sizeOf(score_mod.TopicWeights)) +
+        @as(usize, peers_mod.capacity) * @sizeOf(peers_mod.Row) + @sizeOf(peers_mod.PeerBook);
+}
+
+fn iwantWork(self: *const Gossipsub, body_len: usize) usize {
+    const ids: usize = @min(constants.max_iwant_ids_per_rpc, body_len / (constants.message_id_length + 2));
+    const fields: usize = @min(body_len / 2 + 1, protobuf.Reader.field_limit + 1);
+    const history = &self.messages.history;
+    // Include a score refresh, one peer-column reset, and history lookup and queue metadata per ID.
+    return scoreWork(self.overlay.rows.len) + 20 * fields + history.entries.len +
+        ids * (history.index.probe_limit * (@sizeOf(MessageId) + @sizeOf(u32)) + 384);
 }
 
 fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
@@ -158,6 +174,7 @@ fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
     self.settle(index);
 }
 
+/// Explicit requests bypass the IDONTWANT hints used for unsolicited forwarding.
 fn onIwant(self: *Gossipsub, index: u16, iwant: protobuf.IdList, now: Now) void {
     if (belowGossip(self, index, now.millis())) return;
     defer self.settle(index);
@@ -168,14 +185,6 @@ fn onIwant(self: *Gossipsub, index: u16, iwant: protobuf.IdList, now: Now) void 
         examined += 1;
         if (id_bytes.len != constants.message_id_length) continue;
         const id: MessageId = id_bytes[0..constants.message_id_length].*;
-        if (!self.messages.hasPayload(id)) {
-            self.iwant_outcomes[@intFromEnum(IwantOutcome.miss)] +|= 1;
-            continue;
-        }
-        if (self.sessions.suppresses(index, id, now.millis())) {
-            self.iwant_outcomes[@intFromEnum(IwantOutcome.suppressed)] +|= 1;
-            continue;
-        }
         const outcome: IwantOutcome = switch (self.messages.serve(&self.sessions.rows[index].io.tx, self.logical(index), id, self.deliveryLimits(), now.millis())) {
             .unknown => .miss,
             .known => |known| blk: {
@@ -247,7 +256,7 @@ fn belowGossip(self: *Gossipsub, index: u16, now_ms: u64) bool {
     return self.peers.score(self.logical(index), now_ms) < self.options.score_params.gossip_threshold;
 }
 
-test "resident namespace lookup and score scans are included in IWANT work estimates" {
+test "resident namespace lookup and score scans are included in IHAVE work estimates" {
     const low = ihaveWorkBound(128, 512, 4, 1, 1);
     const high = ihaveWorkBound(128, 615, 4, 1, 1);
     try std.testing.expectEqual(@as(usize, 103) * (@sizeOf(score_mod.TopicParams) + @sizeOf(score_mod.TopicCounters) + @sizeOf(score_mod.TopicWeights)), high - low);

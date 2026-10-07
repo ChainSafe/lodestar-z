@@ -264,7 +264,7 @@ test "gossip validation finishes without allocation while shared deliveries are 
     try std.testing.expectEqual(.done, g.receiveItem(g.sessions.ref(0), .{ .message = .{ .topic = test_topic, .data = compressed[0..len] } }, &turn, &credits));
     try std.testing.expectEqual(@as(usize, 1), inbox.count);
     try std.testing.expectEqualDeep(Gossipsub.ReportOutcome{ .applied = .accept }, g.report(inbox.last().handle, .accept, now));
-    try std.testing.expect(g.messages.hasPayload(inbox.last().id));
+    try std.testing.expect(g.messages.history.get(&g.messages.store, inbox.last().id) != null);
     try std.testing.expectEqual(@as(usize, 0), g.resourceSnapshot().pending_validations);
     try std.testing.expectEqual(@as(u64, 2), g.delivery_metrics.recipients[@intFromEnum(delivery.Origin.forward)][@intFromEnum(metrics.Delivery.Outcome.pressured)]);
     const old = g.sessions.ref(1);

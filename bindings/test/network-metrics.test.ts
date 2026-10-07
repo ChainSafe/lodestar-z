@@ -75,7 +75,7 @@ test("metrics are available through startup and remain readable after close", as
       if (value === undefined) throw Error(`Missing capacity: ${name}`);
       capacities.set(name, value);
     }
-    for (const outcome of ["miss", "suppressed", "limited", "queued", "refused"]) {
+    for (const outcome of ["miss", "limited", "queued", "refused"]) {
       expect(metrics.get(`lodestar_native_gossip_iwant_ids_total{outcome="${outcome}"}`)).toBe(0);
     }
   } finally {
