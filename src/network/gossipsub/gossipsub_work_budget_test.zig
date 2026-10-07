@@ -1,4 +1,5 @@
 const topic_fixture = @import("topic_fixture.zig");
+const topic_mod = @import("topic.zig");
 const Now = @import("../types.zig").Now;
 const schedule_test_support = @import("../schedule_test_support.zig");
 const support = @import("test_support.zig");
@@ -17,6 +18,8 @@ const test_support = @import("../quic/test_support.zig");
 const turn_mod = @import("turn.zig");
 const configuration = @import("../configuration.zig");
 const policy_fixture = @import("../reqresp/policy_fixture.zig");
+const session_io = @import("session_io.zig");
+const IwantOutcome = @import("metrics.zig").IwantOutcome;
 
 test "gossip turn separates credit exhaustion from host pressure and preserves event borrows" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .work_per_pump = 1, .decompress_per_peer_bytes = 1 });
@@ -33,10 +36,9 @@ test "gossip turn separates credit exhaustion from host pressure and preserves e
     }
     const io = &g.sessions.rows[session.index].io;
     io.startRpc(writer.written());
-    const driver = @import("session_io.zig");
     var turn = Gossipsub.beginPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     var peer = Credits.peer(&g.options);
-    try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
+    try std.testing.expectEqual(Progress.credits, try session_io.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expect(io.rpc.?.item != null);
 }
 
@@ -96,12 +98,11 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     for (0..128) |_| protobuf.writeIhaveId(&writer, &id);
     const io = &g.sessions.rows[session.index].io;
     io.startRpc(writer.written());
-    const driver = @import("session_io.zig");
     var turn = turn_mod.Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }), &.{});
     var peer = Credits.peer(&g.options);
     turn.budget.work = 0;
     for (0..2) |_| {
-        try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
+        try std.testing.expectEqual(Progress.credits, try session_io.processRpc(&g, session.index, &turn, &peer));
         try std.testing.expectEqual(@as(u16, 0), io.ihave_recv);
         try std.testing.expect(io.rpc.?.item != null);
         try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
@@ -111,11 +112,11 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     try std.testing.expect(cost > writer.len);
     turn.budget.work = cost;
     peer.work = cost - 1;
-    try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
+    try std.testing.expectEqual(Progress.credits, try session_io.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expectEqual(cost, turn.budget.work);
     try std.testing.expectEqual(@as(u16, 0), io.ihave_recv);
     peer.work = cost;
-    try std.testing.expectEqual(Progress.done, try driver.processRpc(&g, session.index, &turn, &peer));
+    try std.testing.expectEqual(Progress.done, try session_io.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expectEqual(@as(usize, 0), turn.budget.work);
     try std.testing.expectEqual(@as(usize, 0), peer.work);
     try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
@@ -125,8 +126,95 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     io.startRpc(writer.written());
     turn = turn_mod.Turn.init(&g.options, turn.now, &.{});
     peer = Credits.peer(&g.options);
-    try std.testing.expectEqual(Progress.done, try driver.processRpc(&g, session.index, &turn, &peer));
+    try std.testing.expectEqual(Progress.done, try session_io.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
+}
+
+test "gossipsub IWANT work preflight defers all replies and resumes exactly once" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    const now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
+    var ids: [3]MessageId = undefined;
+    for ([_][]const u8{ "first", "second" }, 0..) |payload, i| {
+        _ = try g.publish(name, payload, now);
+        ids[i] = topic_mod.validMessageId(name, payload, .{});
+    }
+    ids[2] = @splat(7);
+    var bytes: [128]u8 = undefined;
+    var writer = protobuf.Writer.init(&bytes);
+    protobuf.beginIwantRpc(&writer, ids.len, constants.message_id_length);
+    for (&ids) |*id| protobuf.writeIwantId(&writer, id);
+    const io = &g.sessions.rows[session.index].io;
+    io.startRpc(writer.written());
+    var turn = turn_mod.Turn.init(&g.options, now, &.{});
+    var peer = Credits.peer(&g.options);
+    turn.budget.work = 0;
+    for (0..2) |_| {
+        try std.testing.expectEqual(Progress.credits, try session_io.processRpc(&g, session.index, &turn, &peer));
+        try std.testing.expect(io.rpc.?.item != null);
+        try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
+        for (g.iwant_outcomes) |count| try std.testing.expectEqual(@as(u64, 0), count);
+        try std.testing.expect(!turn.large_used);
+    }
+    turn.budget.work = g.options.work_per_pump;
+    peer.work = 0;
+    try std.testing.expectEqual(Progress.credits, try session_io.processRpc(&g, session.index, &turn, &peer));
+    try std.testing.expectEqual(g.options.work_per_pump, turn.budget.work);
+    try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
+
+    peer = Credits.peer(&g.options);
+    try std.testing.expectEqual(Progress.done, try session_io.processRpc(&g, session.index, &turn, &peer));
+    try std.testing.expect(turn.budget.work < g.options.work_per_pump);
+    try std.testing.expect(peer.work < g.options.decompress_per_peer_bytes);
+    try std.testing.expect(io.rpc.?.item == null);
+    try std.testing.expectEqual(@as(usize, 2), io.tx.data.count);
+    try std.testing.expectEqual(@as(u64, 2), g.iwant_outcomes[@intFromEnum(IwantOutcome.queued)]);
+    try std.testing.expectEqual(@as(u64, 1), g.iwant_outcomes[@intFromEnum(IwantOutcome.miss)]);
+    for (ids[0..2]) |id| {
+        const slot = g.messages.history.get(&g.messages.store, id).?;
+        try std.testing.expectEqual(@as(u8, 1), g.messages.history.countsRow(slot)[g.sessions.rows[session.index].logical.index]);
+    }
+    try std.testing.expectEqual(Progress.done, try session_io.processRpc(&g, session.index, &turn, &peer));
+    try std.testing.expectEqual(@as(usize, 2), io.tx.data.count);
+    try std.testing.expectEqual(@as(u64, 2), g.iwant_outcomes[@intFromEnum(IwantOutcome.queued)]);
+}
+
+test "gossipsub maximum IWANT shares oversized allowance with data and makes progress" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .work_per_pump = 1, .decompress_per_peer_bytes = 1 });
+    defer g.deinit();
+    const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try support.subscribe(&g, name);
+    const bytes = try std.testing.allocator.alloc(u8, 128 * 1024);
+    defer std.testing.allocator.free(bytes);
+    var writer = protobuf.Writer.init(bytes);
+    protobuf.beginIwantRpc(&writer, constants.max_iwant_ids_per_rpc, constants.message_id_length);
+    const id: MessageId = @splat(7);
+    for (0..constants.max_iwant_ids_per_rpc) |_| protobuf.writeIwantId(&writer, &id);
+    var compressed: [64]u8 = undefined;
+    const len = try snappy.raw.compress("payload", &compressed);
+    protobuf.writeMessage(&writer, compressed[0..len], name);
+    const io = &g.sessions.rows[session.index].io;
+    io.startRpc(writer.written());
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
+    var turn = Gossipsub.beginPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
+    var peer = Credits.peer(&g.options);
+    try std.testing.expectEqual(Progress.credits, try session_io.processRpc(&g, session.index, &turn, &peer));
+    try std.testing.expect(turn.large_used);
+    try std.testing.expect(io.rpc.?.item != null);
+    try std.testing.expectEqual(@as(u64, constants.max_iwant_ids_per_rpc), g.iwant_outcomes[@intFromEnum(IwantOutcome.miss)]);
+    try std.testing.expectEqual(@as(usize, 0), inbox.count);
+    turn = Gossipsub.beginPump(&g, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
+    peer = Credits.peer(&g.options);
+    try std.testing.expectEqual(Progress.done, try session_io.processRpc(&g, session.index, &turn, &peer));
+    try std.testing.expect(turn.large_used);
+    try std.testing.expectEqual(@as(u64, constants.max_iwant_ids_per_rpc), g.iwant_outcomes[@intFromEnum(IwantOutcome.miss)]);
+    try std.testing.expectEqual(@as(usize, 1), inbox.count);
+    try std.testing.expectEqualStrings("payload", inbox.last().bytes);
 }
 
 test "gossipsub IHAVE maximum advertisement shares oversized allowance with data and makes progress" {
@@ -161,7 +249,6 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
     protobuf.writeMessage(&writer, compressed[0..len], name);
     const io = &g.sessions.rows[session.index].io;
     io.startRpc(writer.written());
-    const driver = @import("session_io.zig");
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
@@ -169,20 +256,20 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
     var turn = turn_mod.Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }), &scratch);
     turn.sink = g.message_sink;
     var peer = Credits.peer(&g.options);
-    try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
+    try std.testing.expectEqual(Progress.credits, try session_io.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expect(turn.large_used);
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
     try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
     turn = turn_mod.Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }), &scratch);
     turn.sink = g.message_sink;
     peer = Credits.peer(&g.options);
-    try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
+    try std.testing.expectEqual(Progress.credits, try session_io.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expect(turn.large_used);
     try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
     turn = turn_mod.Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }), &scratch);
     turn.sink = g.message_sink;
     peer = Credits.peer(&g.options);
-    try std.testing.expectEqual(Progress.done, try driver.processRpc(&g, session.index, &turn, &peer));
+    try std.testing.expectEqual(Progress.done, try session_io.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expectEqual(@as(usize, 1), inbox.count);
     try std.testing.expectEqualStrings("payload", inbox.last().bytes);
     try std.testing.expect(turn.large_used);

@@ -22,7 +22,7 @@ pub fn writeCounters(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
     try w.enums(.{
         .name = "lodestar_native_gossip_iwant_ids_total",
         .kind = .counter,
-        .help = "Examined valid IWANT IDs by outcome: absent from history, or present and then suppressed by IDONTWANT, over the retransmission limit, queued, or refused for queue pressure",
+        .help = "Examined valid IWANT IDs by outcome: absent from history, or present and then over the retransmission limit, queued, or refused for queue pressure",
         .labels = &.{"outcome"},
     }, IwantOutcome, &g.iwant_outcomes);
     try w.scalar(.{

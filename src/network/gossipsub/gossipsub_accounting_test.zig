@@ -23,7 +23,7 @@ fn ids(out: []u8, field: u32, list: []const MessageId) []const u8 {
     return writer.written();
 }
 
-test "IWANT outcomes separate misses, suppression, the retransmission limit, queued and refused responses" {
+test "IWANT ignores IDONTWANT while preserving retransmission and queue limits" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
@@ -38,6 +38,7 @@ test "IWANT outcomes separate misses, suppression, the retransmission limit, que
     var body: [256]u8 = undefined;
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 });
     support.control(&g, peer.index, .{ .idontwant = .{ .body = ids(&body, 1, &.{known[2]}) } }, now);
+    try std.testing.expect(g.sessions.suppresses(peer.index, known[2], now.millis()));
     const unknown: MessageId = @splat(9);
     support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{ unknown, known[2], known[0], known[0], known[0], known[0] }) } }, now);
     const tx = &g.sessions.rows[peer.index].io.tx;
@@ -47,7 +48,7 @@ test "IWANT outcomes separate misses, suppression, the retransmission limit, que
         _ = tx.queueData(&g.messages.store, h, .forward, .{ .bytes = g.options.tx_peer_bytes }, 2);
     }
     support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{known[1]}) } }, now);
-    for ([_]IwantOutcome{ .miss, .suppressed, .limited, .queued, .refused }, [_]u64{ 1, 1, 1, 3, 1 }) |outcome, count| {
+    for ([_]IwantOutcome{ .miss, .limited, .queued, .refused }, [_]u64{ 1, 1, 4, 1 }) |outcome, count| {
         try std.testing.expectEqual(count, g.iwant_outcomes[@intFromEnum(outcome)]);
     }
     g.cancelWrites(g.sessions.ref(peer.index));
