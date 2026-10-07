@@ -37,7 +37,7 @@ const Node = struct {
 
     fn begin(self: *Node, now: Now) !void {
         _ = Gossipsub.beginPump(&self.core, now);
-        self.core.tick(now);
+        _ = self.core.tick(now);
     }
 };
 

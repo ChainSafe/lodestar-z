@@ -109,7 +109,7 @@ test "gossipsub IWANT promises commit on queue and start at completed control tr
     g.sessions.rows[peer.index].io.tx.cancelStream();
     support.control(&g, peer.index, .{ .ihave = .{ .topic = topic, .body = w.written() } }, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 1 }));
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
-    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1_000, .unix_s = 0 }));
+    support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 1_000, .unix_s = 0 }));
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
     const io = &g.sessions.rows[peer.index].io;
     const first = try io.tx.segment(&g.messages.store);
@@ -286,7 +286,7 @@ test "recovery owner clear releases sent and unsent attribution pins" {
     g.recovery.clear(&g.peers);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[ref.index].pins);
     g.recovery.controlSent(g.sessions.rows[peer.index].conn, 2, g.options.iwant_followup_ms, 20);
-    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 4000, .unix_s = 0 }));
+    support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 4000, .unix_s = 0 }));
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
 }
 
@@ -300,16 +300,16 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
     g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[p.index].logical, conn, token, 30_000);
     g.recovery.controlSent(.{ .index = 0, .generation = 2 }, token, 12_000, 5);
     g.recovery.controlSent(g.sessions.rows[p.index].conn, token + 1, g.options.iwant_followup_ms, 5);
-    try std.testing.expectEqual(@as(?u64, 30_000), g.recovery.nextExpiry());
+    try std.testing.expectEqual(@as(u64, 30_000), g.recovery.batches[0].expiry);
     _ = try io.tx.segment(&g.messages.store);
     try std.testing.expect(io.tx.advance(&g.messages.store, 1) == null);
-    try std.testing.expectEqual(@as(?u64, 30_000), g.recovery.nextExpiry());
+    try std.testing.expectEqual(@as(u64, 30_000), g.recovery.batches[0].expiry);
     g.writeCompleted(g.sessions.ref(p.index), io.tx.advance(&g.messages.store, 6).?, 100);
     g.recovery.controlSent(g.sessions.rows[p.index].conn, token, g.options.iwant_followup_ms, 200);
-    try std.testing.expectEqual(@as(?u64, 12_100), g.recovery.nextExpiry());
-    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 12_099, .unix_s = 0 }));
+    try std.testing.expectEqual(@as(u64, 12_100), g.recovery.batches[0].expiry);
+    support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 12_099, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
-    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 12_100, .unix_s = 0 }));
+    support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 12_100, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
     try std.testing.expectEqual(@as(u64, 1), g.counters.broken_promises);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[g.sessions.rows[p.index].logical.index].pins);
@@ -325,11 +325,11 @@ test "gossip unsent IWANT expiry refunds recovery slots without blaming the peer
     g.recovery.add(&g.peers, @splat(1), logical, conn, 1, 100);
     try std.testing.expectEqual(@as(u32, 1), g.peers.rows[logical.index].pins);
     g.recovery.controlSent(conn, 1, 3000, 100);
-    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 100, .unix_s = 0 }));
+    support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 100, .unix_s = 0 }));
     try std.testing.expectEqual(capacity, g.recovery.available());
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[logical.index].pins);
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
-    try std.testing.expectEqual(@as(?u64, null), g.recovery.nextExpiry());
+    try std.testing.expectEqual(@as(usize, 0), g.recovery.batch_len);
 }
 
 test "gossip recovery refusal restores promise slots and identity pins before returning" {
@@ -400,4 +400,61 @@ test "gossip IDONTWANT admits a burst of ids across RPCs and bounds the total" {
         try std.testing.expectEqual(index < constants.max_idontwant_per_heartbeat, g.sessions.suppresses(peer.index, id, 1));
     }
     try std.testing.expectEqual(constants.max_idontwant_per_heartbeat, g.sessions.rows[peer.index].io.idontwant_recv);
+}
+
+test "gossipsub recovery expires on heartbeats without scheduling its own wakeup" {
+    var pair: Pair = .{};
+    try pair.initOpts(.{ .random_seed = 1, .heartbeat_interval_ms = 700 }, .{ .random_seed = 2 });
+    defer pair.deinit();
+    for (0..20) |_| try pair.pumpOnce();
+    const g = pair.shared.client.gossipsub;
+    const now = pair.shared.pair.now;
+    const conn = pair.shared.handles.client;
+    const session = g.sessions.find(conn).?;
+    const peer = g.sessions.rows[session].logical;
+    const heartbeat_at = g.heartbeat_at;
+    try std.testing.expect(heartbeat_at > now.millis());
+    const expiry = heartbeat_at - 1;
+    const before = g.schedule();
+    g.recovery.add(&g.peers, @splat(1), peer, conn, 1, heartbeat_at + 1000);
+    g.recovery.controlSent(conn, 1, expiry - now.millis(), now.millis());
+    g.recovery.add(&g.peers, @splat(2), peer, conn, 2, expiry);
+    try std.testing.expectEqualDeep(before, g.schedule());
+
+    const expired = Now.fromMilliseconds(.{ .mono_ms = expiry, .unix_s = now.unixSeconds() });
+    _ = support.pumpTurn(g, &pair.shared.pair.client, expired);
+    try std.testing.expectEqual(@as(usize, 2), g.recovery.len);
+    try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
+
+    const heartbeat = Now.fromMilliseconds(.{ .mono_ms = heartbeat_at, .unix_s = now.unixSeconds() });
+    _ = support.pumpTurn(g, &pair.shared.pair.client, heartbeat);
+    try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.broken_promises);
+    try std.testing.expectEqual(@as(u32, 0), g.peers.rows[peer.index].pins);
+}
+
+test "gossipsub heartbeat processes a received message before expiring its promise" {
+    var pair: Pair = .{};
+    try pair.init();
+    defer pair.deinit();
+    try pair.connectMesh();
+    const g = pair.shared.client.gossipsub;
+    const conn = pair.shared.handles.client;
+    const peer = g.sessions.rows[g.sessions.find(conn).?].logical;
+    const now = pair.shared.pair.now;
+    const heartbeat_at = g.heartbeat_at;
+    const payload = "received on the heartbeat";
+    const id = topic_mod.validMessageId(test_topic, payload, .{});
+    g.recovery.add(&g.peers, id, peer, conn, 1, heartbeat_at + 1000);
+    g.recovery.controlSent(conn, 1, heartbeat_at - now.millis(), now.millis());
+
+    const published = try pair.shared.server.gossipsub.publish(test_topic, payload, now);
+    try std.testing.expectEqual(@as(u16, 1), published.queued);
+    _ = pair.shared.processServer(.{});
+    pair.shared.pair.advance(heartbeat_at - now.millis());
+    try pair.shared.pair.pump();
+    _ = pair.shared.processClient(.{});
+    try std.testing.expect(g.messages.wasSeen(id, heartbeat_at));
+    try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
+    try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
 }
