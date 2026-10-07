@@ -9,7 +9,7 @@ const deinitReusedEpochTransitionCache = @import("epoch_transition_cache.zig").d
 const metrics = @import("../metrics.zig");
 const preset = @import("preset").preset;
 
-test "shuffling job records completed builds" {
+test "shuffling job should record completed builds" {
     const allocator = std.testing.allocator;
     try metrics.init(allocator, std.testing.io, .{});
     defer metrics.deinit();
