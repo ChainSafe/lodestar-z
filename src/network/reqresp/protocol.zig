@@ -90,8 +90,6 @@ pub const Info = struct {
     response_max: usize,
     context_bytes: bool,
     chunks_max: u32,
-    quota_tokens: u32,
-    quota_period_ms: u64,
 };
 
 fn name(comptime protocol: Protocol) []const u8 {
@@ -143,72 +141,59 @@ pub const id_length_max: usize = blk: {
     break :blk longest;
 };
 
-const ten_seconds_ms: u64 = 10_000;
-
 fn entry(comptime protocol: Protocol) Info {
     return switch (protocol) {
-        .blocks_by_head_v1 => chunked(40, 40, consensus.MAX_REQUEST_BLOCKS_DENEB, 128),
-        .light_client_bootstrap_v1 => contextualSingle(32, 5, 15_000),
-        .light_client_updates_by_range_v1 => chunked(16, 16, consensus.MAX_REQUEST_LIGHT_CLIENT_UPDATES, 128),
-        .light_client_finality_update_v1, .light_client_optimistic_update_v1 => contextualSingle(0, 2, 12_000),
-        .status_v1 => single(ct.phase0.Status.fixed_size, ct.phase0.Status.fixed_size, 5, 15_000),
-        .status_v2 => single(ct.fulu.StatusV2.fixed_size, ct.fulu.StatusV2.fixed_size, 5, 15_000),
-        .goodbye_v1 => single(
-            ct.phase0.Goodbye.fixed_size,
-            ct.phase0.Goodbye.fixed_size,
-            1,
-            ten_seconds_ms,
-        ),
-        .ping_v1 => single(ct.phase0.Ping.fixed_size, ct.phase0.Ping.fixed_size, 2, ten_seconds_ms),
-        .metadata_v1 => single(0, ct.phase0.MetaDataV1.fixed_size, 2, 5_000),
-        .metadata_v2 => single(0, ct.altair.MetaDataV2.fixed_size, 2, 5_000),
-        .metadata_v3 => single(0, ct.fulu.MetaDataV3.fixed_size, 2, 5_000),
+        .blocks_by_head_v1 => chunked(40, 40, consensus.MAX_REQUEST_BLOCKS_DENEB),
+        .light_client_bootstrap_v1 => contextualSingle(32),
+        .light_client_updates_by_range_v1 => chunked(16, 16, consensus.MAX_REQUEST_LIGHT_CLIENT_UPDATES),
+        .light_client_finality_update_v1, .light_client_optimistic_update_v1 => contextualSingle(0),
+        .status_v1 => single(ct.phase0.Status.fixed_size, ct.phase0.Status.fixed_size),
+        .status_v2 => single(ct.fulu.StatusV2.fixed_size, ct.fulu.StatusV2.fixed_size),
+        .goodbye_v1 => single(ct.phase0.Goodbye.fixed_size, ct.phase0.Goodbye.fixed_size),
+        .ping_v1 => single(ct.phase0.Ping.fixed_size, ct.phase0.Ping.fixed_size),
+        .metadata_v1 => single(0, ct.phase0.MetaDataV1.fixed_size),
+        .metadata_v2 => single(0, ct.altair.MetaDataV2.fixed_size),
+        .metadata_v3 => single(0, ct.fulu.MetaDataV3.fixed_size),
         .blocks_by_range_v2 => chunked(
             ct.phase0.BeaconBlocksByRangeRequest.fixed_size,
             ct.phase0.BeaconBlocksByRangeRequest.fixed_size,
             consensus.MAX_REQUEST_BLOCKS,
-            128,
         ),
         .blocks_by_root_v2 => chunked(
             0,
             ct.phase0.BeaconBlockRoots.max_size,
             consensus.MAX_REQUEST_BLOCKS,
-            128,
         ),
         .blob_sidecars_by_range_v1 => chunked(
             ct.deneb.BlobSidecarsByRangeRequest.fixed_size,
             ct.deneb.BlobSidecarsByRangeRequest.fixed_size,
             constants.blob_identifiers_capacity,
-            768,
         ),
         .blob_sidecars_by_root_v1 => chunked(
             0,
             ct.deneb.BlobIdentifier.fixed_size * constants.blob_identifiers_capacity,
             constants.blob_identifiers_capacity,
-            768,
         ),
         .data_column_sidecars_by_range_v1 => chunked(
             ct.fulu.DataColumnSidecarsByRangeRequest.min_size,
             ct.fulu.DataColumnSidecarsByRangeRequest.max_size,
             preset.MAX_REQUEST_DATA_COLUMN_SIDECARS,
-            16_384,
         ),
         .data_column_sidecars_by_root_v1 => chunked(
             0,
             ct.fulu.DataColumnsByRootIdentifiers.max_size,
             preset.MAX_REQUEST_DATA_COLUMN_SIDECARS,
-            16_384,
         ),
     };
 }
 
-fn contextualSingle(request: usize, tokens: u32, period_ms: u64) Info {
-    var info = single(request, 0, tokens, period_ms);
+fn contextualSingle(request: usize) Info {
+    var info = single(request, 0);
     info.context_bytes = true;
     return info;
 }
 
-fn single(request: usize, response: usize, tokens: u32, period_ms: u64) Info {
+fn single(request: usize, response: usize) Info {
     return .{
         .request_min = request,
         .request_max = request,
@@ -216,8 +201,6 @@ fn single(request: usize, response: usize, tokens: u32, period_ms: u64) Info {
         .response_max = response,
         .context_bytes = false,
         .chunks_max = 1,
-        .quota_tokens = tokens,
-        .quota_period_ms = period_ms,
     };
 }
 
@@ -225,7 +208,6 @@ fn chunked(
     request_min: usize,
     request_max: usize,
     chunks: usize,
-    tokens: u32,
 ) Info {
     return .{
         .request_min = request_min,
@@ -234,8 +216,6 @@ fn chunked(
         .response_max = 0,
         .context_bytes = true,
         .chunks_max = @intCast(chunks),
-        .quota_tokens = tokens,
-        .quota_period_ms = ten_seconds_ms,
     };
 }
 
@@ -277,8 +257,6 @@ comptime {
         assert(bounds.response_min <= bounds.response_max);
         assert(bounds.response_max <= constants.MAX_PAYLOAD_SIZE);
         assert(bounds.chunks_max >= 1);
-        assert(bounds.quota_tokens >= 1);
-        assert(bounds.quota_period_ms >= 1);
     }
     for (ids, 0..) |candidate, index| {
         for (ids[0..index]) |earlier| assert(!std.mem.eql(u8, candidate, earlier));

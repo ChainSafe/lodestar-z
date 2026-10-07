@@ -306,7 +306,8 @@ test "core stale metadata finishes one refresh while periodic Status and later c
         for (0..80) |_| try setup.step(0);
         try std.testing.expectEqual(statuses + 1, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
         try std.testing.expectEqual(started + 1, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
-        setup.pair.advance(rr.Protocol.metadata_v1.info().quota_period_ms);
+        const requests = &setup.server.protocols.reqresp;
+        setup.pair.advance(requests.admission.limiter.options.peer[@intFromEnum(requests.request_fork)][@intFromEnum(rr.Protocol.metadata_v1)].period_ms);
         remoteSequence(&setup.server, 12);
         setup.client.peer_manager.control.connections[peer.index].ping_due_ms = setup.pair.now.millis();
         setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
