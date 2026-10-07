@@ -154,6 +154,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       spec-test-version: ${{ steps.spec-test-version.outputs.version }}
+      ssz-spec-test-version: ${{ steps.ssz-spec-test-version.outputs.version }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -175,11 +176,24 @@ jobs:
           ' build.zig.zon)
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Read SSZ spec test version
+        id: ssz-spec-test-version
+        run: |
+          version=$(awk '
+            /\.ssz_spec_test_version = \./ {in_block=1}
+            in_block && /\.default = / {
+              match($0, /"[^"]+"/)
+              print substr($0, RSTART + 1, RLENGTH - 2)
+              exit
+            }
+          ' build.zig.zon)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Restore spec tests cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ steps.spec-test-version.outputs.version }}
+          key: spec-test-data-${{ steps.spec-test-version.outputs.version }}-ssz-${{ steps.ssz-spec-test-version.outputs.version }}
       - name: Download spec tests
         run: |
           zig build run:download_spec_tests
@@ -223,7 +237,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}-ssz-${{ needs['spec-test-prep'].outputs['ssz-spec-test-version'] }}
       - name: Download generated test files
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -249,7 +263,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}-ssz-${{ needs['spec-test-prep'].outputs['ssz-spec-test-version'] }}
       - name: Download generated test files
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -275,7 +289,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}-ssz-${{ needs['spec-test-prep'].outputs['ssz-spec-test-version'] }}
       - name: Download generated test files
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -301,7 +315,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}-ssz-${{ needs['spec-test-prep'].outputs['ssz-spec-test-version'] }}
       - name: Download generated test files
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -340,7 +354,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}-ssz-${{ needs['spec-test-prep'].outputs['ssz-spec-test-version'] }}
       - name: Download generated test files
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -379,7 +393,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}-ssz-${{ needs['spec-test-prep'].outputs['ssz-spec-test-version'] }}
       - name: Download generated test files
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

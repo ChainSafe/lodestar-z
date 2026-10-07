@@ -2,4 +2,5 @@
 // This file exists as a cache key for the spec tests in CI.
 // Do not commit changes by hand.
 
-v1.7.0-alpha.11
+v1.7.0-beta.3
+ssz-specs v0.0.1.dev2
