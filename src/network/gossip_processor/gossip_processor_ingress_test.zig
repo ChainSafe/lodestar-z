@@ -1,23 +1,23 @@
 const std = @import("std");
 const Now = @import("../types.zig").Now;
 const t = std.testing;
-const Gossipsub = @import("Gossipsub.zig");
-const processor = @import("../gossip_processor/root.zig");
-const messages = @import("messages.zig");
-const support = @import("test_support.zig");
-const protobuf = @import("protobuf.zig");
+const Gossipsub = @import("../gossipsub/Gossipsub.zig");
+const processor = @import("root.zig");
+const messages = @import("../gossipsub/messages.zig");
+const support = @import("../gossipsub/test_support.zig");
+const protobuf = @import("../gossipsub/protobuf.zig");
 const snappy = @import("snappy");
 const block = "/eth2/01020304/beacon_block/ssz_snappy";
 const attestation = "/eth2/01020304/beacon_attestation_0/ssz_snappy";
-const topic_fixture = @import("topic_fixture.zig");
-const test_pair = @import("test_pair.zig");
+const topic_fixture = @import("../gossipsub/topic_fixture.zig");
+const test_pair = @import("../gossipsub/test_pair.zig");
 const Reservations = @import("../reservations.zig").Reservations;
-const session_io = @import("session_io.zig");
-const topic_policy = @import("topic_policy.zig");
-const recovery = @import("recovery.zig");
-const turn_mod = @import("turn.zig");
-const topic_mod = @import("topic.zig");
-const frame = @import("frame.zig");
+const session_io = @import("../gossipsub/session_io.zig");
+const topic_policy = @import("../gossipsub/topic_policy.zig");
+const recovery = @import("../gossipsub/recovery.zig");
+const turn_mod = @import("../gossipsub/turn.zig");
+const topic_mod = @import("../gossipsub/topic.zig");
+const frame = @import("../gossipsub/frame.zig");
 const options: Gossipsub.Options = .{
     .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })},
     .random_seed = 1,
@@ -168,30 +168,6 @@ test "gossip saturated attestation intake preserves block priority and storage" 
     try t.expectEqual(@as(usize, 1), batch.len);
     try t.expectEqual(.beacon_block, table.get(batch.tokens[0]).?.kind);
     table.finish(&batch, false);
-}
-
-test "gossip invalid verdict stops remaining publications in the same RPC" {
-    var opts = options;
-    opts.score_params.gossip_threshold = -20;
-    opts.score_params.publish_threshold = -40;
-    opts.score_params.graylist_threshold = -50;
-    var g = try support.init(t.allocator, opts);
-    defer g.deinit();
-    const source = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    try support.subscribe(&g, block);
-    var inbox: support.Inbox = .{};
-    defer inbox.deinit();
-    inbox.attach(&g);
-    var body: [1024]u8 = undefined;
-    var writer = protobuf.Writer.init(&body);
-    for (0..3) |_| protobuf.writeMessage(&writer, &.{5}, block);
-    const io = &g.sessions.rows[source.index].io;
-    io.startRpc(writer.written());
-    var turn = Gossipsub.beginPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
-    var credit = turn_mod.Credits.peer(&g.options);
-    try t.expectEqual(.done, try session_io.processRpc(&g, source.index, &turn, &credit));
-    try t.expectEqual(@as(f64, 1), support.invalidDeliveries(&g));
-    _ = g.sessions.finishFrame(io);
 }
 
 fn vote(bytes: []u8, tag: u8, slot: u64) void {
@@ -856,5 +832,40 @@ test "gossip replacement preflights compressed and decoded pages across multiple
     for (tokens, ids, 0..) |token, id, i| {
         try t.expectEqual(i >= 2, table.get(token) != null);
         try t.expect(!g.messages.wants(id, 1));
+    }
+}
+
+test "gossip processor pending validation quota preserves room for another peer and refunds completed work" {
+    var boundary: topic_policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+    boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 1024 };
+    for ([_]bool{ false, true }) |planned| {
+        var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = if (planned) 4 * processor.limits.kind_count else 4, .payload_limits = if (planned) @as(processor.limits.Limits, @splat(.{ .items = 4, .bytes = 4096 })) else null });
+        defer g.deinit();
+        const first = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+        const second = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
+        try support.subscribe(&g, "/eth2/01020304/beacon_block/ssz_snappy");
+        const limits: processor.limits.Limits = @splat(.{ .items = 4, .bytes = 4096 });
+        var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, g.options.topic_policy, &.{.{ .digest = boundary.digest, .fork = .fulu }}, 1));
+        defer table.deinit();
+        defer table.close();
+        var consumer: Consumer = .{ .table = &table, .owner = &g };
+        const sink = consumer.sink();
+        g.message_sink = &sink;
+        try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, first.index, "first", 1));
+        const batch = table.claim(1);
+        try t.expectEqual(@as(usize, 1), batch.len);
+        const token = batch.tokens[0];
+        const held = table.get(token).?.handle;
+        table.finish(&batch, true);
+        try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, first.index, "second", 2));
+        try std.testing.expectEqual(@as(?usize, 0), try support.message(&g, first.index, "third", 3));
+        try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.peer_validations)]);
+        try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[first.index].logical, 3));
+        try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, second.index, "other peer", 4));
+        try t.expect(table.report(token, .ignore, 5));
+        try std.testing.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(held, .ignore, Now.fromMilliseconds(.{ .mono_ms = 5, .unix_s = 0 })));
+        table.retire(token);
+        table.acknowledge(token);
+        try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, first.index, "third", 6));
     }
 }

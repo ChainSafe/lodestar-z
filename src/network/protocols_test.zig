@@ -209,7 +209,7 @@ test "protocol stack capabilities disabled outbound preserves stream and request
 }
 
 test "protocol stack capabilities activation preserves negotiated response context and captured ceiling" {
-    const harness = @import("reqresp/test_pair.zig");
+    const harness = @import("protocols_reqresp_test_support.zig");
     const ct = @import("consensus_types");
     const context: ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
     var setup: harness.Pair = .{};

@@ -778,4 +778,5 @@ test {
     _ = metadata_mod;
     _ = @import("gossip_processor_test.zig");
     _ = @import("gossip_processor_scheduler_test.zig");
+    _ = @import("gossip_processor_ingress_test.zig");
 }

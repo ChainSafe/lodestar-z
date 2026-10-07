@@ -191,10 +191,9 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
         try pair.shared.pair.init(resolved.limits, resolved.limits);
         defer pair.shared.pair.deinit();
         const options = resolved.core.protocols;
-        const client_local = try options.identify.makeLocal(&pair.shared.pair.client.tls.local_peer_id, &pair.shared.pair.client.local);
-        pair.shared.client = try n.Protocols.init(std.testing.allocator, options, &client_local);
+        pair.shared.client = try rr.testing.Endpoint.init(std.testing.allocator, options.reqresp, options.router);
         defer pair.shared.client.deinit();
-        defer pair.shared.client.shutdown(&pair.shared.pair.client, pair.shared.pair.now);
+        defer pair.shared.client.reqresp.cancelAll(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now);
         const local = try options.identify.makeLocal(&pair.shared.pair.server.tls.local_peer_id, &pair.shared.pair.server.local);
         owner.core.protocols = try n.Protocols.init(std.testing.allocator, options, &local);
         defer owner.core.protocols.deinit();

@@ -8,7 +8,6 @@ const topic_policy = @import("topic_policy.zig");
 const topic_fixture = @import("topic_fixture.zig");
 const MessageEvent = @import("messages.zig").MessageEvent;
 const topic_mod = @import("topic.zig");
-const policy = @import("../gossip_processor/policy.zig");
 const constants = @import("constants.zig");
 const peer_id = @import("../wire/peer_id.zig");
 const options_mod = @import("options.zig");
@@ -16,8 +15,7 @@ const layout = @import("layout.zig");
 const router_mod = @import("../router.zig");
 const session_io = @import("session_io.zig");
 
-/// A MessageSink that admits as the gossip processor does: it commits each feasible
-/// candidate and copies the message, which stays readable until `clear`.
+/// Commits physically feasible candidates and copies messages until `clear`.
 pub const Inbox = struct {
     pub const capacity = 64;
     sink: Gossipsub.MessageSink = undefined,
@@ -60,7 +58,7 @@ pub const Inbox = struct {
 
     fn admit(context: *anyopaque, candidate: *Gossipsub.MessageAdmission) bool {
         const self: *Inbox = @ptrCast(@alignCast(context));
-        if (self.full or self.count == capacity or !policy.sourceRoom(candidate) or !policy.feasible(candidate, &.{})) return false;
+        if (self.full or self.count == capacity or !candidate.feasible(&candidate.usage(&.{}))) return false;
         const topic = std.testing.allocator.dupe(u8, candidate.event.topic) catch return false;
         const bytes = std.testing.allocator.dupe(u8, candidate.event.bytes) catch {
             std.testing.allocator.free(topic);

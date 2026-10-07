@@ -6,7 +6,6 @@ const Gossipsub = @import("Gossipsub.zig");
 const support = @import("test_support.zig");
 const topic = @import("topic.zig");
 const constants = @import("constants.zig");
-const policy = @import("../gossip_processor/policy.zig");
 const topic_policy = @import("topic_policy.zig");
 const snappy = @import("snappy");
 const validation = @import("validation.zig");
@@ -29,7 +28,7 @@ test "message admission retains canonical topic bounds" {
             self.canonical = candidate.canonical;
             self.maximum = candidate.maximum_compressed;
             self.source_maximum = candidate.sourceUsage().maximum_bytes;
-            if (!policy.sourceRoom(candidate) or !policy.feasible(candidate, &.{})) return false;
+            if (!candidate.feasible(&candidate.usage(&.{}))) return false;
             candidate.commit();
             self.handle = candidate.event.handle;
             self.id = candidate.event.id;

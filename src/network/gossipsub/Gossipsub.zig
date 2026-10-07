@@ -717,7 +717,6 @@ test {
     _ = @import("gossipsub_forwarding_test.zig");
     _ = @import("gossipsub_framing_test.zig");
     _ = @import("gossipsub_history_test.zig");
-    _ = @import("gossipsub_ingress_test.zig");
     _ = @import("gossipsub_policy_test.zig");
     _ = @import("gossipsub_publication_test.zig");
     _ = @import("gossipsub_readiness_test.zig");
