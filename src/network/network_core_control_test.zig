@@ -504,7 +504,7 @@ fn previousStatus(setup: *Setup) !void {
         for (out[0..count.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualDeep(handle, chunk.request);
-                try std.testing.expect(setup.client.protocols.reqresp.consume(handle, setup.pair.now));
+                try std.testing.expect(setup.client.protocols.reqresp.consume(setup.pair.client, &setup.client.protocols.router, handle, setup.pair.now));
             },
             .done => {
                 done = true;
@@ -594,7 +594,7 @@ test "core control native Fulu serves older schemas but old Status cannot establ
                     if (protocol == .goodbye_v1) {
                         try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, chunk.bytes[0..8], .little));
                     }
-                    try std.testing.expect(setup.client.protocols.reqresp.consume(request, setup.pair.now));
+                    try std.testing.expect(setup.client.protocols.reqresp.consume(setup.pair.client, &setup.client.protocols.router, request, setup.pair.now));
                     chunks += 1;
                 },
                 .done => terminal = true,
@@ -711,11 +711,8 @@ test "core native inbound application per connection cap protects control from e
     try std.testing.expectEqual(@as(usize, 4), setup.server.protocols.reqresp.resourceSnapshot().inbound_phases[ready]);
     _ = setup.server.peer_manager.snapshots(&snapshots);
     const server_conn = snapshots[0].connection.?;
-    try std.testing.expect(setup.server.protocols.reqresp.cancel(first.?, setup.pair.now));
-    setup.server.protocols.reqresp.cleanupPending(
-        setup.pair.server,
-        &setup.server.protocols.router,
-    );
+    try std.testing.expect(setup.server.protocols.reqresp.cancel(setup.pair.server, &setup.server.protocols.router, first.?, setup.pair.now));
+
     try std.testing.expectEqual(
         @as(u16, 8),
         setup.server.protocols.reqresp.inboundApplicationOccupiedCount(server_conn),
@@ -986,7 +983,7 @@ test "core control capabilities pre-Fulu Metadata3 serves configured custody cou
                 try std.testing.expectEqualDeep(request, chunk.request);
                 const metadata = try wire.decodeMetadata(.metadata_v3, chunk.bytes, local.fork);
                 try std.testing.expectEqual(local.metadata.custody_group_count, metadata.custody_group_count);
-                try std.testing.expect(setup.client.protocols.reqresp.consume(request, setup.pair.now));
+                try std.testing.expect(setup.client.protocols.reqresp.consume(setup.pair.client, &setup.client.protocols.router, request, setup.pair.now));
                 received = true;
             },
             .done => done = true,
@@ -1315,12 +1312,12 @@ test "core control retries a start refused for want of a request slot after the 
     const peer = setup.client.peer_manager.catalog.find(&setup.server.peerId()).?;
     const row = &setup.client.peer_manager.control.connections[peer.index];
     try std.testing.expectEqual(row.ping_due_ms, schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now), setup.pair.now.millis()).?);
+    setup.pair.now.monotonic = time.milliseconds(row.ping_due_ms);
     // Requests the control does not own hold both control slots.
     var sinks: [2][wire.status_size_max]u8 = undefined;
     const ping = [_]u8{0} ** 8;
     _ = try setup.client.protocols.request(setup.pair.client, row.conn, .ping_v1, &ping, &sinks[0], .{}, setup.pair.now);
     _ = try setup.client.protocols.request(setup.pair.client, row.conn, wire.metadataProtocol(setup.client.peer_manager.local.fork), &.{}, &sinks[1], .{}, setup.pair.now);
-    setup.pair.now.monotonic = time.milliseconds(row.ping_due_ms);
     const deferred = setup.client.peer_manager.control.counters.deferred;
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(deferred + 1, setup.client.peer_manager.control.counters.deferred);

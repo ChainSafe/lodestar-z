@@ -45,7 +45,7 @@ test "reqresp attribution keeps absolute deadlines while excluding host holds an
             try std.testing.expectEqual(length, try pair.shared.pair.server.write(stream, encoded[0..length], false));
             try awaitChunk(&pair);
             if (case == .host_hold) pair.shared.pair.now.monotonic = time.milliseconds(deadline - 1);
-            try std.testing.expect(pair.shared.client.reqresp.consume(handle, pair.shared.pair.now));
+            try std.testing.expect(pair.shared.client.reqresp.consume(&pair.shared.pair.client, &pair.shared.client.router, handle, pair.shared.pair.now));
             if (case == .host_hold) try std.testing.expect(client.host_held_ms > 0);
             if (case == .native_buffer) {
                 try std.testing.expectEqual(@as(u64, 0), client.host_held_ms);
@@ -62,18 +62,20 @@ test "reqresp attribution keeps absolute deadlines while excluding host holds an
         const count = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .application = &events });
         try std.testing.expectEqual(@as(usize, 1), count.application);
         try std.testing.expectEqual(rr.Failure.timeout, events[0].failed.reason);
-        const fault = pair.shared.client.reqresp.peerFault(events[0]);
+        const fault = events[0].peerFault();
         if (case == .remote) {
             try std.testing.expectEqual(.non_completion, fault.?.kind);
             try std.testing.expect(fault.?.identity.eql(&pair.shared.pair.client.peerId(pair.shared.handles.client).?));
         } else try std.testing.expect(fault == null);
         const old = events[0];
-        _ = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .application = &events });
-        try std.testing.expect(pair.shared.client.reqresp.peerFault(old) == null);
         const next = try pair.shared.client.reqresp.request(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.handles.client, which, &(@as([64]u8, @splat(0))), sink, .{}, pair.shared.pair.now);
         try std.testing.expectEqual(handle.index, next.index);
         try std.testing.expect(next.generation != handle.generation);
-        try std.testing.expect(pair.shared.client.reqresp.peerFault(old) == null);
+        events[0] = .{ .done = .{ .request = next, .chunks = 0 } };
+        if (case == .remote) {
+            try std.testing.expectEqual(.non_completion, old.peerFault().?.kind);
+            try std.testing.expect(old.peerFault().?.identity.eql(&pair.shared.pair.client.peerId(pair.shared.handles.client).?));
+        } else try std.testing.expect(old.peerFault() == null);
     }
 }
 
@@ -94,7 +96,7 @@ test "reqresp attribution ignores locally unread incoming bodies at absolute exp
     const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &events });
     try std.testing.expectEqual(@as(usize, 1), count.control);
     try std.testing.expectEqual(rr.Failure.timeout, events[0].failed.reason);
-    try std.testing.expect(pair.shared.server.reqresp.peerFault(events[0]) == null);
+    try std.testing.expect(events[0].peerFault() == null);
 }
 
 test "reqresp attribution distinguishes local response caps intrinsic bounds and error replies" {
@@ -130,7 +132,7 @@ test "reqresp attribution distinguishes local response caps intrinsic bounds and
             try pair.pumpOnce();
             for (pair.clientEvents()) |event| if (event == .failed) {
                 try std.testing.expectEqual(handle, event.failed.request);
-                const fault = pair.shared.client.reqresp.peerFault(event);
+                const fault = event.peerFault();
                 switch (case) {
                     .intrinsic_length, .invalid_error_length, .protocol_chunks => try std.testing.expectEqual(.protocol, fault.?.kind),
                     .local_payload, .reserved_error, .rate_limit, .caller_chunks => try std.testing.expect(fault == null),
@@ -167,7 +169,7 @@ test "reqresp attribution keeps local request bounds neutral and malformed SSZ s
         for (0..40) |_| {
             try pair.pumpOnce();
             for (pair.serverEvents()) |event| if (event == .served or event == .failed) {
-                const fault = pair.shared.server.reqresp.peerFault(event);
+                const fault = event.peerFault();
                 if (case == .malformed_ssz) {
                     try std.testing.expectEqual(.protocol, fault.?.kind);
                 } else try std.testing.expect(fault == null);

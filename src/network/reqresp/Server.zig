@@ -40,17 +40,17 @@ identity: PeerId = undefined,
 execution: ?u16 = null,
 admission: InboundAdmission.State = .{},
 
-pub fn complete(self: *Server, owner: *ReqResp, index: u16, event: Event, now: Now) void {
-    owner.complete(&self.request, index, event, .{ .phase_name = @tagName(self.state), .rejection = self.rejection, .result_code = self.pending_result }, now);
+pub fn complete(self: *Server, owner: *ReqResp, engine: *Engine, router: *Router, index: u16, event: Event, now: Now) void {
+    owner.complete(engine, router, &self.request, index, event, .{ .phase_name = @tagName(self.state), .rejection = self.rejection, .result_code = self.pending_result }, now);
 }
 
-pub fn fail(self: *Server, owner: *ReqResp, index: u16, reason: Failure, now: Now) void {
-    self.complete(owner, index, .{ .failed = .{ .request = self.request.handle(index), .reason = reason, .phase = null } }, now);
+pub fn fail(self: *Server, owner: *ReqResp, engine: *Engine, router: *Router, index: u16, reason: Failure, now: Now) void {
+    self.complete(owner, engine, router, index, .{ .failed = .{ .request = self.request.handle(index), .reason = reason, .phase = null } }, now);
 }
 
-fn failIo(self: *Server, owner: *ReqResp, index: u16, err: (Engine.StreamError || codec.Error), now: Now) void {
+fn failIo(self: *Server, owner: *ReqResp, engine: *Engine, router: *Router, index: u16, err: (Engine.StreamError || codec.Error), now: Now) void {
     self.request.failure_detail = @errorName(err);
-    self.fail(owner, index, switch (err) {
+    self.fail(owner, engine, router, index, switch (err) {
         error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
         else => .transport,
     }, now);
@@ -96,7 +96,7 @@ pub fn deadline(self: *const Server, ctx: *const ReqResp) ?u64 {
     return @min(progress, total);
 }
 
-pub fn advance(self: *Server, ctx: *ReqResp, engine: *Engine, index: u16, now: Now) void {
+pub fn advance(self: *Server, ctx: *ReqResp, engine: *Engine, router: *Router, index: u16, now: Now) void {
     const request = &self.request;
     if (!request.running()) return;
     if (self.deadline(ctx)) |due| if (now.millis() >= due) {
@@ -109,7 +109,7 @@ pub fn advance(self: *Server, ctx: *ReqResp, engine: *Engine, index: u16, now: N
         if (reason == .timeout and self.state == .receiving_request and !request.protocol.isControl() and
             !request.io.unread(engine, request.stream))
             request.peer_fault = .non_completion;
-        self.fail(ctx, index, reason, now);
+        self.fail(ctx, engine, router, index, reason, now);
         return;
     };
     // A peer stop surfaces here while the host holds the slot. With an event still queued
@@ -118,7 +118,7 @@ pub fn advance(self: *Server, ctx: *ReqResp, engine: *Engine, index: u16, now: N
         _ = engine.streamCapacity(request.stream) catch |err| switch (err) {
             error.WouldBlock => 0,
             else => {
-                self.failIo(ctx, index, err, now);
+                self.failIo(ctx, engine, router, index, err, now);
                 return;
             },
         };
@@ -126,22 +126,22 @@ pub fn advance(self: *Server, ctx: *ReqResp, engine: *Engine, index: u16, now: N
     if (request.waitingHost()) return;
     switch (self.state) {
         .serving, .ready => {},
-        .receiving_request => readRequest(ctx, engine, self, index, now),
-        .writing_chunk => writeChunk(ctx, engine, self, index, now),
-        .finishing => finishStream(ctx, engine, self, index, now),
+        .receiving_request => readRequest(ctx, engine, router, self, index, now),
+        .writing_chunk => writeChunk(ctx, engine, router, self, index, now),
+        .finishing => finishStream(ctx, engine, router, self, index, now),
     }
 }
 
-fn readRequest(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: Now) void {
+fn readRequest(owner: *ReqResp, engine: *Engine, router: *Router, slot: *Server, index: u16, now: Now) void {
     const request = &slot.request;
     var reads: u32 = 0;
     while (reads < reads_per_pump_max) : (reads += 1) {
         const input = request.io.read(engine, request.stream) catch |err| {
-            slot.failIo(owner, index, err, now);
+            slot.failIo(owner, engine, router, index, err, now);
             return;
         };
         if (input.reset) {
-            slot.fail(owner, index, .stream_closed, now);
+            slot.fail(owner, engine, router, index, .stream_closed, now);
             return;
         }
         if (input.progressed) slot.progress_ms = now.millis();
@@ -195,12 +195,12 @@ fn readRequest(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now:
 
 /// The connection is authenticated before admission. Both undecided complete input and
 /// an undelivered request notification can carry its final Goodbye, including before FIN.
-pub fn closingGoodbye(self: *Server, owner: *ReqResp, engine: *Engine, index: u16, now: Now) ?u64 {
+pub fn closingGoodbye(self: *Server, owner: *ReqResp, engine: *Engine, router: *Router, index: u16, now: Now) ?u64 {
     const request = &self.request;
     assert(request.running() and request.protocol == .goodbye_v1);
     if (self.state != .receiving_request and self.state != .ready and
         (request.pendingEvent() == null or request.pendingEvent().? != .request)) return null;
-    if (self.state == .receiving_request and request.pendingEvent() == null) readRequest(owner, engine, self, index, now);
+    if (self.state == .receiving_request and request.pendingEvent() == null) readRequest(owner, engine, router, self, index, now);
     if (request.running() and self.state == .ready) {
         const bytes = request.io.decoder.payload();
         const code = control_wire.decodeScalar(bytes) catch unreachable;
@@ -280,10 +280,10 @@ fn queueChunk(
     slot.state = .writing_chunk;
 }
 
-fn writeChunk(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: Now) void {
+fn writeChunk(owner: *ReqResp, engine: *Engine, router: *Router, slot: *Server, index: u16, now: Now) void {
     const request = &slot.request;
     const flushed = request.io.flush(engine, request.stream, false) catch |err| {
-        slot.failIo(owner, index, err, now);
+        slot.failIo(owner, engine, router, index, err, now);
         return;
     };
     if (flushed != .done) {
@@ -312,6 +312,7 @@ fn writeChunk(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: 
 fn finishStream(
     owner: *ReqResp,
     engine: *Engine,
+    router: *Router,
     slot: *Server,
     index: u16,
     now: Now,
@@ -322,7 +323,7 @@ fn finishStream(
         // An error chunk ends the response, so a peer can stop the stream once it has read one.
         const answered = request.chunks > 0 or slot.pending_result != constants.result_success;
         if (err != error.StreamStopped or !answered or request.io.outbox.offset != request.io.outbox.bytes.len) {
-            slot.failIo(owner, index, err, now);
+            slot.failIo(owner, engine, router, index, err, now);
             return;
         }
         std.log.scoped(.network_reqresp).debug("response_finish_stopped request={d}:{d} connection={d}:{d} stream={d} method={s} chunks={d}", .{ index, request.generation, request.conn.index, request.conn.generation, request.stream.id, @tagName(request.protocol), request.chunks });
@@ -334,7 +335,7 @@ fn finishStream(
         return;
     }
     slot.progress_ms = now.millis();
-    slot.complete(owner, index, .{ .served = .{ .request = request.handle(index), .chunks = request.chunks } }, now);
+    slot.complete(owner, engine, router, index, .{ .served = .{ .request = request.handle(index), .chunks = request.chunks } }, now);
 }
 
 /// The coordinator has checked all capacity and handoff bounds before charging the start.
@@ -385,7 +386,7 @@ pub fn acceptPrepared(
         );
         slot.request.io.decoding = true;
     }
-    assert(slot.request.awaitingTerminal());
+    assert(slot.request.occupied());
 }
 
 pub fn respond(slot: *Server, ssz: []const u8, digest: ?[constants.context_bytes_length]u8, now: Now) void {
@@ -395,7 +396,7 @@ pub fn respond(slot: *Server, ssz: []const u8, digest: ?[constants.context_bytes
 
 pub fn responseReadiness(self: *const Server) ReqResp.ResponseReadiness {
     const request = &self.request;
-    assert(request.awaitingTerminal());
+    assert(request.occupied());
     if (!request.running()) return .terminal;
     if (request.waitingHost() or self.state != .serving) return .backpressured;
     return .ready;

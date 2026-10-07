@@ -65,8 +65,7 @@ pub const Peer = struct {
     fn admit(context: *anyopaque, candidate: *Gossip.Gossipsub.MessageAdmission) bool {
         const self: *Peer = @ptrCast(@alignCast(context));
         if (self.delivery_count == self.deliveries.len) return false;
-        const usage = candidate.usage(&.{});
-        if (!candidate.feasible(&usage)) return false;
+        if (!candidate.feasible(&.{})) return false;
         candidate.commit();
         const event = &candidate.event;
         const delivery = &self.deliveries[self.delivery_count];
@@ -173,7 +172,7 @@ pub const Peer = struct {
                 const decoded_context = self.protocols.reqresp.outbound[c.request.index].request.io.decoder.context();
                 const context_hex = if (decoded_context) |digest| std.fmt.bytesToHex(digest, .lower) else null;
                 try control.emit(self.allocator, .{ .event = "chunk", .length = c.bytes.len, .sha256 = hash(c.bytes), .context = if (context_hex) |*value| @as(?[]const u8, value) else null, .result = 0 });
-                std.debug.assert(self.protocols.reqresp.consume(c.request, self.now));
+                std.debug.assert(self.protocols.reqresp.consume(&self.transport.engine, &self.protocols.router, c.request, self.now));
             },
             .done => {
                 self.outbound = false;

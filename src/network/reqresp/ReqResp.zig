@@ -6,10 +6,10 @@
 //! - readiness grants no reservation. The binding reserves bytes before producing the next response;
 //!   respond may still return Terminal while that terminal event awaits output capacity.
 //! - pending chunk/chunk_sent notifications precede the terminal. Terminal delivery ends borrows;
-//!   the following pump recycles native slots. Cleanup closes streams without ending either lifetime.
+//!   the slot is reusable as soon as its terminal is delivered.
 //! - retainServing/releaseServing cover asynchronous host execution independently of stream lifetime.
-//! - cancel and connection events latch close intent. Raw callers drain cleanupPending before Router
-//!   work or buffer reuse; Protocols and pump provide their documented cleanup barriers.
+//! - every terminal transition detaches Router and transport ownership before returning.
+//!   Undelivered events keep their payload borrows until delivery.
 const time = @import("../time.zig");
 const std = @import("std");
 const codec = @import("codec.zig");
@@ -29,7 +29,6 @@ const ReceiveLayout = @import("ReceiveLayout.zig");
 const ServingPool = @import("ServingPool.zig");
 const index_list = @import("../index_list.zig");
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
-const PeerId = @import("../wire/peer_id.zig").PeerId;
 const route_invariant = @import("route_invariant.zig");
 
 const assert = std.debug.assert;
@@ -70,10 +69,12 @@ pub const RequestOptions = struct {
     };
 };
 
-pub const RequestPhase = @import("events.zig").RequestPhase;
-pub const RequestHandle = @import("events.zig").RequestHandle;
-pub const Failure = @import("events.zig").Failure;
-pub const Event = @import("events.zig").Event;
+const events_mod = @import("events.zig");
+pub const PeerFault = events_mod.PeerFault;
+pub const RequestPhase = events_mod.RequestPhase;
+pub const RequestHandle = events_mod.RequestHandle;
+pub const Failure = events_mod.Failure;
+pub const Event = events_mod.Event;
 
 pub const Outputs = struct { application: []Event = &.{}, control: []Event = &.{} };
 pub const OutputCounts = struct { application: usize, control: usize };
@@ -149,13 +150,9 @@ serving: ServingPool,
 links: []SlotLinks,
 /// Running slots whose next advance can progress without a new stream event.
 ready: index_list.List = .{},
-/// Slots with a stream close still to issue.
-closing: index_list.List = .{},
 /// Slots with a pending notification or an undelivered terminal, per class
 /// (application, control).
 deliver: [2]index_list.List = .{ .{}, .{} },
-/// Slots whose terminal was delivered; recycled by the next pump.
-reported: index_list.List = .{},
 /// Running slots keyed on their deadline, or on their admission eligibility while waiting
 /// for their start or tokens.
 deadlines: DeadlineHeap,
@@ -321,11 +318,11 @@ pub fn setRequestFork(self: *ReqResp, fork: config.ForkSeq) void {
 pub fn pendingCounts(self: *const ReqResp) struct { outbound: u16, inbound: u16 } {
     var out: u16 = 0;
     for (self.outbound) |*slot| {
-        if (slot.request.awaitingTerminal()) out += 1;
+        if (slot.request.occupied()) out += 1;
     }
     var in: u16 = 0;
     for (self.inbound) |*slot| {
-        if (slot.request.awaitingTerminal()) in += 1;
+        if (slot.request.occupied()) in += 1;
     }
     assert(out <= self.outbound.len);
     assert(in <= self.inbound.len);
@@ -396,7 +393,7 @@ pub fn request(
 
 pub fn negotiationResult(self: *ReqResp, router: *Router, engine: *Engine, outcome: Router.Outcome, now: Now) void {
     if (outcome.direction == .outbound) {
-        if (!self.negotiated(engine, outcome, now)) engine.closeStream(outcome.stream, 0);
+        if (!self.negotiated(engine, router, outcome, now)) engine.closeStream(outcome.stream, 0);
         return;
     }
     switch (outcome.result) {
@@ -419,12 +416,12 @@ pub fn negotiationResult(self: *ReqResp, router: *Router, engine: *Engine, outco
 }
 
 /// Hands a negotiated stream to the outbound slot waiting for it. Returns false when none is.
-pub fn negotiated(self: *ReqResp, engine: *Engine, outcome: Router.Outcome, now: Now) bool {
+pub fn negotiated(self: *ReqResp, engine: *Engine, router: *Router, outcome: Router.Outcome, now: Now) bool {
     for (self.outbound, 0..) |*slot, position| {
         if (!slot.request.running() or slot.phase != .negotiation) continue;
         if (!std.meta.eql(slot.request.stream, outcome.stream)) continue;
         const index: u16 = @intCast(position);
-        slot.negotiated(self, engine, index, outcome, now);
+        slot.negotiated(self, engine, router, index, outcome, now);
         if (slot.request.running()) self.markReady(.outbound, index);
         self.settle(index);
         return true;
@@ -535,30 +532,17 @@ pub fn responseReadiness(self: *ReqResp, handle: RequestHandle) ResponseReadines
 }
 
 /// Supply fresh owner time so host-held chunks cannot become remote timeout evidence.
-pub fn consume(self: *ReqResp, handle: RequestHandle, now: Now) bool {
+pub fn consume(self: *ReqResp, engine: *Engine, router: *Router, handle: RequestHandle, now: Now) bool {
     if (handle.direction != .outbound) return false;
     const slot = self.outboundSlot(handle) orelse return false;
-    if (!slot.consume(self, handle.index, now)) return false;
+    if (!slot.consume(self, engine, router, handle.index, now)) return false;
     if (slot.request.running()) self.markReady(.outbound, handle.index);
     self.settle(handle.index);
     return true;
 }
 
-/// The returned bytes remain valid until the pump after terminal delivery.
-pub fn errorMessage(self: *const ReqResp, handle: RequestHandle) []const u8 {
-    const record: *const RequestState = switch (handle.direction) {
-        .outbound => if (handle.index < self.outbound.len) &self.outbound[handle.index].request else return &.{},
-        .inbound => if (handle.index < self.inbound.len) &self.inbound[handle.index].request else return &.{},
-    };
-    if (record.generation != handle.generation or !record.occupied()) return &.{};
-    assert(record.error_len <= codec.error_message_max);
-    return record.error_message[0..record.error_len];
-}
-
 /// Recovers one complete Goodbye before the caller cancels the connection's requests.
-/// Reads may latch failures, so the cleanup barrier runs even outside pump.
 pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *Router, conn: Handle, now: Now) ?u64 {
-    defer self.cleanupPending(engine, router);
     if (conn.index >= self.options.connections) return null;
     const first = ReceiveLayout.first(conn.index, .goodbye_v1);
     for (first..first + constants.MAX_CONCURRENT_REQUESTS) |position| {
@@ -566,13 +550,13 @@ pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *Router, conn: Ha
         const slot = &self.inbound[index];
         if (!slot.request.running() or !std.meta.eql(slot.request.conn, conn)) continue;
         defer self.settle(self.inboundId(index));
-        if (slot.closingGoodbye(self, engine, index, now)) |code| return code;
+        if (slot.closingGoodbye(self, engine, router, index, now)) |code| return code;
     }
     return null;
 }
 
 /// Fails the connection's slots: its outbound list and its inbound block of the receive layout.
-pub fn connectionClosed(self: *ReqResp, conn: Handle, now: Now) void {
+pub fn connectionClosed(self: *ReqResp, engine: *Engine, router: *Router, conn: Handle, now: Now) void {
     if (conn.index >= self.options.connections) return;
     const list = &self.outbound_by_connection[conn.index];
     var cursor = list.head;
@@ -581,15 +565,15 @@ pub fn connectionClosed(self: *ReqResp, conn: Handle, now: Now) void {
         const index: u16 = @intCast(cursor);
         cursor = self.outbound[index].conn_link.next;
         const slot = &self.outbound[index];
-        if (!slot.request.awaitingTerminal() or !std.meta.eql(slot.request.conn, conn)) continue;
-        slot.fail(self, index, .connection_closed, now);
+        if (!slot.request.occupied() or !std.meta.eql(slot.request.conn, conn)) continue;
+        slot.fail(self, engine, router, index, .connection_closed, now);
     }
     const first = ReceiveLayout.first(conn.index, @enumFromInt(0));
     for (first..first + ReceiveLayout.slots_per_connection) |position| {
         const index: u16 = @intCast(position);
         const slot = &self.inbound[index];
-        if (!slot.request.awaitingTerminal() or !std.meta.eql(slot.request.conn, conn)) continue;
-        slot.fail(self, index, .connection_closed, now);
+        if (!slot.request.occupied() or !std.meta.eql(slot.request.conn, conn)) continue;
+        slot.fail(self, engine, router, index, .connection_closed, now);
     }
 }
 
@@ -601,13 +585,13 @@ pub fn streamReady(self: *ReqResp, route: types.Route, stream: StreamHandle) voi
 
 /// A routed stream close. A reset fails an inbound slot that is not writing its response;
 /// any other close is observed by the slot's next stream call.
-pub fn streamClosed(self: *ReqResp, route: types.Route, stream: StreamHandle, reset_code: ?u64, now: Now) void {
+pub fn streamClosed(self: *ReqResp, engine: *Engine, router: *Router, route: types.Route, stream: StreamHandle, reset_code: ?u64, now: Now) void {
     const id = self.routedSlot(route, stream) orelse return;
     if (reset_code != null and route.owner == .reqresp_inbound) {
         const index: u16 = @intCast(route.row);
         const slot = &self.inbound[index];
         if (slot.state != .writing_chunk and slot.state != .finishing) {
-            slot.fail(self, index, .stream_closed, now);
+            slot.fail(self, engine, router, index, .stream_closed, now);
             return;
         }
     }
@@ -623,31 +607,6 @@ fn routedSlot(self: *const ReqResp, route: types.Route, stream: StreamHandle) ?u
     const record = self.recordOf(id);
     if (!record.running() or !std.meta.eql(record.stream, stream)) return null;
     return id;
-}
-
-pub const PeerFault = struct {
-    identity: *const PeerId,
-    kind: RequestState.PeerFault,
-};
-
-/// Read each delivered terminal once, before the next pump recycles its slot. The identity
-/// is captured at admission, independent of connection reuse; copy it if retaining the fact.
-pub fn peerFault(self: *const ReqResp, event: Event) ?PeerFault {
-    const handle = switch (event) {
-        .failed => |e| e.request,
-        .served => |e| e.request,
-        else => return null,
-    };
-    if (handle.direction == .inbound) {
-        if (handle.index >= self.inbound.len) return null;
-        const slot = &self.inbound[handle.index];
-        if (slot.request.generation != handle.generation or slot.request.completion != .reported) return null;
-        return .{ .identity = &slot.identity, .kind = slot.request.peer_fault orelse return null };
-    }
-    if (handle.index >= self.outbound.len) return null;
-    const slot = &self.outbound[handle.index];
-    if (slot.request.generation != handle.generation or slot.request.completion != .reported) return null;
-    return .{ .identity = &slot.identity, .kind = slot.request.peer_fault orelse return null };
 }
 
 /// Includes reqresp-owned storage. Caller response sinks and Router storage are separate.
@@ -675,7 +634,7 @@ fn schedulerBytes(self: *const ReqResp) usize {
 /// Router negotiation and transport deadlines remain separate.
 pub fn schedule(self: *const ReqResp, capacities: Capacities) types.Schedule {
     return .{
-        .runnable = self.ready.len > 0 or self.closing.len > 0 or self.reported.len > 0 or
+        .runnable = self.ready.len > 0 or
             (capacities.application > 0 and self.deliver[0].len > 0) or
             (capacities.control > 0 and self.deliver[1].len > 0) or self.admission.due(),
         .deadline = time.optionalMilliseconds(if (self.deadlines.peek()) |top| top.deadline else null),
@@ -714,12 +673,10 @@ fn eventList(self: *ReqResp, which: EventList) *index_list.List {
         .none => unreachable,
         .application => &self.deliver[0],
         .control => &self.deliver[1],
-        .reported => &self.reported,
     };
 }
 
 fn wantedEvent(record: *const RequestState) EventList {
-    if (record.completion == .reported) return .reported;
     if (!record.deliverable()) return .none;
     return if (record.protocol.isControl()) .control else .application;
 }
@@ -740,14 +697,11 @@ pub fn settleSlot(self: *ReqResp, direction: types.Direction, index: u16) void {
     });
 }
 
-/// Brings the slot's closing, delivery and admission memberships and its heap key in line
+/// Brings the slot's delivery and admission memberships and its heap key in line
 /// with its state. Every change to a slot outside `advance` ends here.
 fn settle(self: *ReqResp, id: u32) void {
     const links = &self.links[id];
     const record = self.recordOf(id);
-    const closing = record.close_code != null;
-    if (closing and !links.close.linked) self.closing.append(self.links, "close", id);
-    if (!closing and links.close.linked) self.closing.remove(self.links, "close", id);
     const wanted = wantedEvent(record);
     if (wanted != links.event_list) {
         if (links.event_list != .none) self.eventList(links.event_list).remove(self.links, "event", id);
@@ -775,8 +729,29 @@ pub const CompletionInfo = struct {
     result_code: u8 = constants.result_success,
 };
 
-pub fn complete(owner: *ReqResp, record: *RequestState, index: u16, event: Event, info: CompletionInfo, now: Now) void {
-    if (!record.terminate(event)) return;
+pub fn complete(owner: *ReqResp, engine: *Engine, router: *Router, record: *RequestState, index: u16, event: Event, info: CompletionInfo, now: Now) void {
+    var terminal = event;
+    const fault: ?PeerFault = if (record.peer_fault) |kind| .{
+        .identity = switch (record.direction) {
+            .outbound => owner.outbound[index].identity,
+            .inbound => owner.inbound[index].identity,
+        },
+        .kind = kind,
+    } else null;
+    switch (terminal) {
+        .failed => |*failed| {
+            failed.peer_fault = fault;
+            if (failed.reason == .peer_error) {
+                const len = failed.reason.peer_error.message_len;
+                assert(len == record.error_len);
+                @memcpy(failed.message[0..len], record.error_message[0..len]);
+            }
+        },
+        .served => |*served| served.peer_fault = fault,
+        .done => {},
+        else => unreachable,
+    }
+    if (!record.terminate(engine, router, terminal)) return;
     owner.settleSlot(record.direction, index);
     const counts = &owner.protocol_counters[@intFromEnum(record.protocol)];
     assert(now.millis() >= record.started_ms);
@@ -809,52 +784,37 @@ fn recordFailure(owner: *ReqResp, record: *const RequestState, index: u16, event
     }
 }
 
-/// Latches one terminal result. Call cleanupPending before the next Router pump.
-pub fn cancel(self: *ReqResp, handle: RequestHandle, now: Now) bool {
+/// Detaches I/O and queues one terminal result, preserving pending chunk notifications.
+pub fn cancel(self: *ReqResp, engine: *Engine, router: *Router, handle: RequestHandle, now: Now) bool {
     if (handle.direction == .outbound) {
         const slot = self.outboundSlot(handle) orelse return false;
         if (slot.request.terminalEvent() != null) return false;
-        slot.fail(self, handle.index, .cancelled, now);
+        slot.fail(self, engine, router, handle.index, .cancelled, now);
     } else {
         const slot = self.inboundSlot(handle) orelse return false;
         if (slot.request.terminalEvent() != null) return false;
-        slot.fail(self, handle.index, .cancelled, now);
+        slot.fail(self, engine, router, handle.index, .cancelled, now);
     }
     return true;
 }
 
-/// Issues each latched stream close once, without delivering events or recycling slots.
-/// Raw owners call this after cancellation/connection events and before pumping Router
-/// or releasing request buffers. pump also drains it before and after protocol work.
-pub fn cleanupPending(self: *ReqResp, engine: *Engine, router: *Router) void {
-    var closed: usize = 0;
-    while (self.closing.pop(self.links, "close")) |id| : (closed += 1) {
-        assert(closed < self.links.len);
-        self.visits +|= 1;
-        self.recordOf(id).closePending(engine, router);
-        self.settle(id);
-    }
-}
-
 pub fn cancelApplications(self: *ReqResp, engine: *Engine, router: *Router, now: Now) void {
-    for (self.outbound, 0..) |*slot, index| if (slot.request.awaitingTerminal() and !slot.request.protocol.isControl()) {
-        _ = self.cancel(slot.request.handle(@intCast(index)), now);
+    for (self.outbound, 0..) |*slot, index| if (slot.request.occupied() and !slot.request.protocol.isControl()) {
+        _ = self.cancel(engine, router, slot.request.handle(@intCast(index)), now);
     };
-    for (self.inbound, 0..) |*slot, index| if (slot.request.awaitingTerminal() and !slot.request.protocol.isControl()) {
-        _ = self.cancel(slot.request.handle(@intCast(index)), now);
+    for (self.inbound, 0..) |*slot, index| if (slot.request.occupied() and !slot.request.protocol.isControl()) {
+        _ = self.cancel(engine, router, slot.request.handle(@intCast(index)), now);
     };
-    self.cleanupPending(engine, router);
 }
 
 /// Cancels current operations. Admission stays enabled; pump delivers notifications and terminals.
 pub fn cancelAll(self: *ReqResp, engine: *Engine, router: *Router, now: Now) void {
-    for (self.outbound, 0..) |*slot, index| if (slot.request.awaitingTerminal()) {
-        _ = self.cancel(slot.request.handle(@intCast(index)), now);
+    for (self.outbound, 0..) |*slot, index| if (slot.request.occupied()) {
+        _ = self.cancel(engine, router, slot.request.handle(@intCast(index)), now);
     };
-    for (self.inbound, 0..) |*slot, index| if (slot.request.awaitingTerminal()) {
-        _ = self.cancel(slot.request.handle(@intCast(index)), now);
+    for (self.inbound, 0..) |*slot, index| if (slot.request.occupied()) {
+        _ = self.cancel(engine, router, slot.request.handle(@intCast(index)), now);
     };
-    self.cleanupPending(engine, router);
 }
 
 pub fn pump(self: *ReqResp, engine: *Engine, router: *Router, now: Now, outputs: Outputs) OutputCounts {
@@ -867,7 +827,7 @@ pub fn pump(self: *ReqResp, engine: *Engine, router: *Router, now: Now, outputs:
     return counts;
 }
 
-/// Closes, recycles, then services the due keys and the ready slots up to
+/// Services the due keys and the ready slots up to
 /// `work_per_pump_max`, then admits `.ready` slots. Returns whether the budget ran out.
 /// A due key goes first, so runnable slots cannot hold a deadline past its time; servicing
 /// one retires its slot or moves its key into the future. A slot re-marked while serviced
@@ -875,8 +835,6 @@ pub fn pump(self: *ReqResp, engine: *Engine, router: *Router, now: Now, outputs:
 fn advance(self: *ReqResp, engine: *Engine, router: *Router, now: Now) bool {
     assert(now.millis() >= self.last_pump_ms or self.last_pump_ms == 0);
     self.last_pump_ms = now.millis();
-    self.cleanupPending(engine, router);
-    self.recycleDelivered();
     // The slots marked before this pump that are still on `ready`.
     var marked = self.ready.len;
     const keyed: usize = self.deadlines.len;
@@ -909,15 +867,13 @@ fn advance(self: *ReqResp, engine: *Engine, router: *Router, now: Now) bool {
             self.ready.remove(self.links, "ready", id);
         }
         if (id < self.outbound.len) {
-            self.outbound[id].advance(self, engine, @intCast(id), now);
-        } else self.inbound[id - self.outbound.len].advance(self, engine, @intCast(id - self.outbound.len), now);
+            self.outbound[id].advance(self, engine, router, @intCast(id), now);
+        } else self.inbound[id - self.outbound.len].advance(self, engine, router, @intCast(id - self.outbound.len), now);
         serviced += 1;
         self.settle(id);
     }
     const exhausted = serviced == self.options.work_per_pump_max;
     self.admission.promoteReady(self, now);
-    // Cleanup also covers terminal transitions made during this turn.
-    self.cleanupPending(engine, router);
     return exhausted;
 }
 
@@ -939,32 +895,25 @@ fn drain(self: *ReqResp, now: Now, events: []Event, control: bool) usize {
             events[count] = slot.deliver(control, now).?;
             if (slot.request.running() and slot.state == .finishing) self.markId(id);
         }
+        if (!self.recordOf(id).occupied()) self.retire(id);
         count += 1;
         self.settle(id);
     }
     return count;
 }
 
-fn recycleDelivered(self: *ReqResp) void {
-    var recycled: usize = 0;
-    while (self.reported.pop(self.links, "event")) |id| : (recycled += 1) {
-        assert(recycled < self.links.len);
-        self.links[id].event_list = .none;
-        self.visits +|= 1;
-        if (id < self.outbound.len) {
-            const slot = &self.outbound[id];
-            slot.request.recycleDelivered();
-            self.outbound_by_connection[slot.request.conn.index].remove(self.outbound, "conn_link", id);
-        } else {
-            const slot = &self.inbound[id - self.outbound.len];
-            if (slot.execution) |index| {
-                self.serving.retire(index);
-                self.admission.capacityReleased();
-            }
-            slot.execution = null;
-            slot.request.recycleDelivered();
+fn retire(self: *ReqResp, id: u32) void {
+    assert(!self.recordOf(id).occupied());
+    if (id < self.outbound.len) {
+        const slot = &self.outbound[id];
+        self.outbound_by_connection[slot.request.conn.index].remove(self.outbound, "conn_link", id);
+    } else {
+        const slot = &self.inbound[id - self.outbound.len];
+        if (slot.execution) |index| {
+            self.serving.retire(index);
+            self.admission.capacityReleased();
         }
-        self.settle(id);
+        slot.execution = null;
     }
 }
 
@@ -973,14 +922,13 @@ fn recycleDelivered(self: *ReqResp) void {
 /// budget to spare left no due key, and that each live stream a slot holds routes to it and
 /// back.
 fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhausted: bool) void {
-    var lengths: struct { ready: usize = 0, closing: usize = 0, events: [4]usize = @splat(0) } = .{};
+    var lengths: struct { ready: usize = 0, events: [3]usize = @splat(0) } = .{};
     for (self.links, 0..) |*links, position| {
         const id: u32 = @intCast(position);
         const record = self.recordOf(id);
         lengths.ready += @intFromBool(links.ready.linked);
-        lengths.closing += @intFromBool(links.close.linked);
         lengths.events[@intFromEnum(links.event_list)] += 1;
-        assert(links.close.linked == (record.close_code != null));
+        if (record.completion == .terminal) assert(record.stream_owner == .closed);
         assert(links.event_list == wantedEvent(record));
         assert(!links.ready.linked or record.running());
         if (!record.running()) {
@@ -996,7 +944,7 @@ fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhaus
             assert(slot.state == .ready and slot.admission.wait == .tokens and slot.admission.eligible_ms == now.millis());
         };
         if (direction == .inbound) self.admission.checkSlot(&self.inbound[index], index);
-        if (!record.awaitingTerminal() or record.stream_owner != .protocol) continue;
+        if (!record.occupied() or record.stream_owner != .protocol) continue;
         const bound = engine.route(record.stream) orelse continue;
         assert(bound.owner == (if (direction == .outbound) types.StreamOwner.reqresp_outbound else .reqresp_inbound) and bound.row == index);
         if (!record.running() or links.ready.linked) continue;
@@ -1022,10 +970,9 @@ fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhaus
             },
         }
     }
-    assert(lengths.ready == self.ready.len and lengths.closing == self.closing.len);
+    assert(lengths.ready == self.ready.len);
     assert(lengths.events[@intFromEnum(EventList.application)] == self.deliver[0].len);
     assert(lengths.events[@intFromEnum(EventList.control)] == self.deliver[1].len);
-    assert(lengths.events[@intFromEnum(EventList.reported)] == self.reported.len);
     route_invariant.check(engine, self.outbound, self.inbound) catch unreachable;
 }
 
@@ -1051,14 +998,14 @@ fn outboundSlot(self: *ReqResp, handle: RequestHandle) ?*Client {
     const slots = self.outbound;
     if (handle.index >= slots.len) return null;
     const slot = &slots[handle.index];
-    if (slot.request.generation != handle.generation or !slot.request.awaitingTerminal()) return null;
+    if (slot.request.generation != handle.generation or !slot.request.occupied()) return null;
     return slot;
 }
 fn inboundSlot(self: *ReqResp, handle: RequestHandle) ?*Server {
     const slots = self.inbound;
     if (handle.index >= slots.len) return null;
     const slot = &slots[handle.index];
-    if (slot.request.generation != handle.generation or !slot.request.awaitingTerminal()) return null;
+    if (slot.request.generation != handle.generation or !slot.request.occupied()) return null;
     return slot;
 }
 
@@ -1069,7 +1016,7 @@ pub fn outboundProtocolPendingCount(self: *const ReqResp, conn: Handle, which: P
         if (cursor == index_list.none) break;
         const slot = &self.outbound[cursor];
         cursor = slot.conn_link.next;
-        if (!slot.request.awaitingTerminal() or slot.request.protocol != which) continue;
+        if (!slot.request.occupied() or slot.request.protocol != which) continue;
         if (!std.meta.eql(slot.request.conn, conn)) continue;
         count +|= 1;
     }
@@ -1116,7 +1063,7 @@ pub fn inboundProtocolRunningCount(self: *const ReqResp, conn: Handle, which: Pr
 pub fn inboundPendingCount(self: *const ReqResp, conn: Handle) u8 {
     var count: u8 = 0;
     for (self.inboundOf(conn)) |*slot| {
-        if (!slot.request.awaitingTerminal()) continue;
+        if (!slot.request.occupied()) continue;
         if (std.meta.eql(slot.request.conn, conn)) count +|= 1;
     }
     return count;
@@ -1132,12 +1079,11 @@ pub fn forkFor(
     return null;
 }
 
-const EventList = enum(u2) { none, application, control, reported };
+const EventList = enum(u2) { none, application, control };
 
 const SlotLinks = struct {
     ready: index_list.Link = .{},
-    close: index_list.Link = .{},
-    /// On `deliver[class]` or `reported`, as `event_list` names.
+    /// On `deliver[class]`, as `event_list` names.
     event: index_list.Link = .{},
     event_list: EventList = .none,
 };

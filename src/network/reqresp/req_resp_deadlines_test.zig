@@ -74,7 +74,7 @@ test "reqresp negotiated handoff starts a fresh progress interval" {
         if (count == 0) continue;
         try std.testing.expectEqual(@as(usize, 1), count);
         setup.shared.pair.advance(2000);
-        try std.testing.expect(setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, outcomes[0], setup.shared.pair.now));
+        try std.testing.expect(setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, &setup.shared.client.router, outcomes[0], setup.shared.pair.now));
         try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
         ready = true;
         break;
@@ -82,7 +82,7 @@ test "reqresp negotiated handoff starts a fresh progress interval" {
     try std.testing.expect(ready);
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
-    try std.testing.expect(setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
+    try std.testing.expect(setup.shared.client.reqresp.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
 }
 
 test "reqresp admission wait expires as local policy and not peer timeout" {
@@ -116,7 +116,7 @@ test "reqresp admission wait expires as local policy and not peer timeout" {
     var expired = false;
     for (events[0..count]) |event| if (event == .failed) {
         try std.testing.expect(event.failed.reason == .quota_timeout);
-        try std.testing.expect(setup.shared.server.reqresp.peerFault(event) == null);
+        try std.testing.expect(event.peerFault() == null);
         expired = true;
     };
     try std.testing.expect(expired);
@@ -220,7 +220,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
         const dialed = setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes);
         for (outcomes[0..dialed]) |outcome| {
             try std.testing.expect(outcome.result == .ready);
-            negotiated = setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, outcome, setup.shared.pair.now);
+            negotiated = setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, &setup.shared.client.router, outcome, setup.shared.pair.now);
         }
         if (negotiated) break;
     }
@@ -295,7 +295,7 @@ test "reqresp sub-millisecond negotiation timeout agrees with the router deadlin
         if (router_first) {
             try std.testing.expectEqual(@as(usize, 1), setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes));
             try std.testing.expectEqual(.timeout, outcomes[0].result.failed);
-            try std.testing.expect(setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, outcomes[0], setup.shared.pair.now));
+            try std.testing.expect(setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, &setup.shared.client.router, outcomes[0], setup.shared.pair.now));
         }
         try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
         try std.testing.expectEqual(handle, events[0].failed.request);
@@ -351,7 +351,7 @@ test "reqresp absolute response includes paused host time without renewing at ch
         try std.testing.expect(held);
         const due = setup.shared.client.reqresp.outbound[handle.index].deadline().?;
         setup.shared.pair.now.monotonic = time.milliseconds(due - 1);
-        if (consume) try std.testing.expect(setup.shared.client.reqresp.consume(handle, setup.shared.pair.now));
+        if (consume) try std.testing.expect(setup.shared.client.reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
         try std.testing.expectEqual(@as(?u64, due), setup.shared.client.reqresp.outbound[handle.index].deadline());
         var events: [1]Event = undefined;
         try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &events }).application);
@@ -447,7 +447,7 @@ test "reqresp serving expires across progressing chunks without blaming host wor
             };
             for (setup.clientEvents()) |event| if (event == .chunk) {
                 received = true;
-                try std.testing.expect(setup.shared.client.reqresp.consume(outbound, setup.shared.pair.now));
+                try std.testing.expect(setup.shared.client.reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, outbound, setup.shared.pair.now));
             };
             if (sent and received) break;
         }
@@ -456,7 +456,7 @@ test "reqresp serving expires across progressing chunks without blaming host wor
     setup.shared.pair.now.monotonic = time.milliseconds(started + 160);
     try setup.pumpOnce();
     try std.testing.expectEqual(reqresp.Failure.host_timeout, firstFailure(setup.serverEvents()).?);
-    try std.testing.expect(setup.shared.server.reqresp.peerFault(setup.serverEvents()[0]) == null);
+    try std.testing.expect(setup.serverEvents()[0].peerFault() == null);
     for (0..3) |_| try setup.pumpOnce();
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
 }

@@ -183,6 +183,11 @@ test "inbound admission wide costs keep incremental credit and share identity qu
 }
 
 test "inbound admission cancellation removes each wait without refunding or spinning" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    var router = try Router.init(std.testing.allocator, .{});
+    defer router.deinit();
     const Wait = enum { start, tokens, serving };
     for ([_]Wait{ .start, .tokens, .serving }) |wait| {
         var owner = try rr.init(std.testing.allocator, options(1));
@@ -215,7 +220,7 @@ test "inbound admission cancellation removes each wait without refunding or spin
         if (wait == .tokens) try std.testing.expectEqual(@as(u128, 1), slot.admission.paid);
         const start_due = owner.admission.limiter.startAt(&identity, false, 0);
         const tokens_due = owner.admission.limiter.eligibleAt(&identity, .blocks_by_root_v2, 1, .phase0, 0);
-        try std.testing.expect(owner.cancel(slot.request.handle(index), Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 })));
+        try std.testing.expect(owner.cancel(&pair.server, &router, slot.request.handle(index), Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 })));
         if (wait == .serving) try std.testing.expect(owner.releaseServing(serving.?));
         try std.testing.expectEqual(start_due, owner.admission.limiter.startAt(&identity, false, 0));
         try std.testing.expectEqual(tokens_due, owner.admission.limiter.eligibleAt(&identity, .blocks_by_root_v2, 1, .phase0, 0));

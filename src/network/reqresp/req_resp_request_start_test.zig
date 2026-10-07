@@ -61,7 +61,7 @@ const Exchange = struct {
         try self.setup.pumpOnce();
         try self.serve(self.setup.serverEvents());
         for (self.setup.clientEvents()) |event| switch (event) {
-            .chunk => |chunk| try std.testing.expect(self.setup.shared.client.reqresp.consume(chunk.request, self.setup.shared.pair.now)),
+            .chunk => |chunk| try std.testing.expect(self.setup.shared.client.reqresp.consume(&self.setup.shared.pair.client, &self.setup.shared.client.router, chunk.request, self.setup.shared.pair.now)),
             .done => self.done += 1,
             .failed => |failed| self.client_failure = failed.reason,
             else => {},
@@ -264,7 +264,7 @@ test "reqresp request start a cancelled waiter leaves no start reserved" {
     for (&cancelled) |*handle| handle.* = try request(&setup, .blocks_by_root_v2, sink);
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(usize, 2), waitingStarts(owner));
-    for (cancelled) |handle| try std.testing.expect(setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
+    for (cancelled) |handle| try std.testing.expect(setup.shared.client.reqresp.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(usize, 2), exchange.server_failures);
     try std.testing.expectEqual(@as(u16, 0), owner.pendingCounts().inbound);
@@ -552,7 +552,7 @@ test "reqresp request start hard capacity refusal preserves an available start w
         try exchange.pumps(20);
         try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blob_sidecars_by_root_v1, .connection_capacity));
         try std.testing.expectEqual(@as(?rr.Failure, .{ .peer_error = .{ .code = 139, .message_len = "Rate limited: connection receive capacity exhausted".len } }), exchange.client_failure);
-        try std.testing.expect(owner.cancel(held, setup.shared.pair.now));
+        try std.testing.expect(owner.cancel(&setup.shared.pair.server, &setup.shared.server.router, held, setup.shared.pair.now));
         try exchange.pumps(10);
         exchange.client_failure = null;
         const blocks = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);

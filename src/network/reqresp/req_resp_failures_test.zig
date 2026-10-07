@@ -17,6 +17,7 @@ test "reqresp delivers error chunks with the peer's code and message" {
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
     var request_storage_2: [ct.phase0.Status.fixed_size]u8 = undefined;
     _ = try requestStatus(&setup, &request_storage_2, &sink);
+    var saved_failure: ?Event.Failed = null;
     var client_failure: ?reqresp.Failure = null;
     var served: ?u32 = null;
     var rounds: usize = 0;
@@ -36,9 +37,10 @@ test "reqresp delivers error chunks with the peer's code and message" {
         for (setup.clientEvents()) |event| switch (event) {
             .failed => |failure| {
                 client_failure = failure.reason;
+                saved_failure = failure;
                 try std.testing.expectEqualStrings(
                     "unavailable",
-                    setup.shared.client.reqresp.errorMessage(failure.request),
+                    failure.errorMessage(),
                 );
             },
             .chunk => return error.TestUnexpectedResult,
@@ -51,7 +53,10 @@ test "reqresp delivers error chunks with the peer's code and message" {
     try std.testing.expectEqual(@as(u8, 11), reason.peer_error.message_len);
 
     var request_storage_3: [ct.phase0.Status.fixed_size]u8 = undefined;
-    _ = try requestStatus(&setup, &request_storage_3, &sink);
+    const next = try requestStatus(&setup, &request_storage_3, &sink);
+    try std.testing.expectEqual(saved_failure.?.request.index, next.index);
+    try std.testing.expect(saved_failure.?.request.generation != next.generation);
+    try std.testing.expectEqualStrings("unavailable", saved_failure.?.errorMessage());
     client_failure = null;
     rounds = 0;
     while (rounds < 30 and client_failure == null) : (rounds += 1) {
@@ -156,7 +161,7 @@ test "reqresp retains all 256 bytes of a peer error" {
                 try std.testing.expectEqualSlices(
                     u8,
                     &message,
-                    setup.shared.client.reqresp.errorMessage(failed.request),
+                    failed.errorMessage(),
                 );
                 return;
             },
@@ -189,7 +194,7 @@ test "reqresp preserves pending chunk and reports connection closure without out
     }
     try std.testing.expect(held);
     const stream = setup.shared.client.reqresp.outbound[handle.index].request.stream;
-    setup.shared.client.reqresp.connectionClosed(setup.shared.handles.client, setup.shared.pair.now);
+    setup.shared.client.reqresp.connectionClosed(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, setup.shared.pair.now);
     _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &.{} }).control;
     try std.testing.expect(!setup.shared.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));
     var events: [1]Event = undefined;

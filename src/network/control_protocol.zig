@@ -137,14 +137,14 @@ pub const ControlProtocol = struct {
 
     /// Cancels the peer's in-flight request on this connection. Its operation stays held until
     /// the request's terminal event.
-    pub fn cancel(self: *ControlProtocol, reqresp: *rr.ReqResp, peer: t.PeerRef, conn: t.Handle, now: Now) void {
+    pub fn cancel(self: *ControlProtocol, reqresp: *rr.ReqResp, router: *Router, engine: *Engine, peer: t.PeerRef, conn: t.Handle, now: Now) void {
         if (peer.index >= self.operation_by_peer.len) return;
         const index = self.operation_by_peer[peer.index];
         if (index == no_operation) return;
         const op = &self.operations[index];
         if (!std.meta.eql(op.peer, peer) or !std.meta.eql(op.conn, conn)) return;
         op.cancelled = true;
-        _ = reqresp.cancel(op.request.?, now);
+        _ = reqresp.cancel(engine, router, op.request.?, now);
     }
 
     /// Cancels the connection's in-flight request and the responses it is being served, and
@@ -158,13 +158,12 @@ pub const ControlProtocol = struct {
         conn: t.Handle,
         now: Now,
     ) void {
-        self.cancel(reqresp, peer, conn, now);
+        self.cancel(reqresp, router, engine, peer, conn, now);
         for (self.responses) |*response| if (response.request) |request| {
             if (std.meta.eql(response.peer, peer) and std.meta.eql(response.conn, conn)) {
-                _ = reqresp.cancel(request, now);
+                _ = reqresp.cancel(engine, router, request, now);
             }
         };
-        reqresp.cleanupPending(engine, router);
     }
 
     /// Answers a peer's control request from the local state, or cancels a request it cannot
@@ -172,6 +171,8 @@ pub const ControlProtocol = struct {
     pub fn respond(
         self: *ControlProtocol,
         reqresp: *rr.ReqResp,
+        router: *Router,
+        engine: *Engine,
         peer: t.PeerRef,
         event: *const RequestEvent,
         local: *const values.LocalState,
@@ -185,12 +186,12 @@ pub const ControlProtocol = struct {
         response.conn = event.conn;
         const len: usize = switch (event.protocol) {
             .status_v1, .status_v2 => wire.encodeStatus(event.protocol, &local.status, &response.bytes) catch {
-                _ = reqresp.cancel(event.request, now);
+                _ = reqresp.cancel(engine, router, event.request, now);
                 return;
             },
             .ping_v1 => blk: {
                 _ = wire.decodeScalar(event.bytes) catch {
-                    _ = reqresp.cancel(event.request, now);
+                    _ = reqresp.cancel(engine, router, event.request, now);
                     return;
                 };
                 break :blk wire.encodeScalar(local.metadata.seq_number, &response.bytes) catch unreachable;
@@ -201,14 +202,14 @@ pub const ControlProtocol = struct {
                 local.fork,
                 &response.bytes,
             ) catch {
-                _ = reqresp.cancel(event.request, now);
+                _ = reqresp.cancel(engine, router, event.request, now);
                 return;
             },
             .goodbye_v1 => wire.encodeScalar(1, &response.bytes) catch unreachable,
             else => unreachable,
         };
         reqresp.respond(event.request, response.bytes[0..len], null, now) catch {
-            _ = reqresp.cancel(event.request, now);
+            _ = reqresp.cancel(engine, router, event.request, now);
             return;
         };
         response.request = event.request;
@@ -259,11 +260,10 @@ pub const ControlProtocol = struct {
         const op = &self.operations[index];
         switch (event) {
             .chunk => {
-                _ = reqresp.consume(op.request.?, now);
+                _ = reqresp.consume(engine, router, op.request.?, now);
                 op.received = true;
             },
             .done, .failed => {
-                reqresp.cleanupPending(engine, router);
                 op.request = null;
                 assert(self.operation_by_peer[op.peer.index] == index);
                 self.operation_by_peer[op.peer.index] = no_operation;

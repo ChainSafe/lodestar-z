@@ -1,4 +1,4 @@
-//! Terminal delivery ends application borrows; the following pump recycles the slot.
+//! Termination detaches I/O; terminal delivery ends application borrows and frees the slot.
 //! A queued response chunk survives termination until the host receives both events.
 const std = @import("std");
 const events = @import("events.zig");
@@ -15,10 +15,9 @@ const Event = events.Event;
 
 const RequestState = @This();
 
-completion: union(enum) { free, running, terminal: Event, reported } = .free,
+completion: union(enum) { free, running, terminal: Event } = .free,
 notification: union(enum) { none, pending: Event, borrowed_chunk } = .none,
 stream_owner: enum { router, protocol, closed } = .protocol,
-close_code: ?u64 = null,
 direction: types.Direction = .outbound,
 generation: u32 = 0,
 conn: Engine.Handle = undefined,
@@ -31,16 +30,10 @@ io: RequestIO = .{},
 error_message: [codec.error_message_max]u8 = undefined,
 error_len: u16 = 0,
 failure_detail: []const u8 = "none",
-peer_fault: ?PeerFault = null,
-
-pub const PeerFault = enum { protocol, non_completion };
+peer_fault: ?events.PeerFault.Kind = null,
 
 pub fn occupied(self: *const RequestState) bool {
     return self.completion != .free;
-}
-
-pub fn awaitingTerminal(self: *const RequestState) bool {
-    return self.completion == .running or self.completion == .terminal;
 }
 
 pub fn running(self: *const RequestState) bool {
@@ -80,8 +73,10 @@ pub fn deliver(self: *RequestState, control: bool) ?Event {
         return event;
     }
     if (self.terminalEvent()) |event| {
-        self.completion = .reported;
+        assert(self.stream_owner == .closed);
+        self.completion = .free;
         self.notification = .none;
+        self.io.sink = &.{};
         return event;
     }
     return null;
@@ -93,31 +88,12 @@ pub fn consume(self: *RequestState) bool {
     return true;
 }
 
-pub fn closePending(self: *RequestState, engine: *Engine, router: *Router) void {
-    if (self.close_code) |code| {
-        switch (self.stream_owner) {
-            .router => router.cancel(engine, self.stream),
-            .protocol => engine.closeStream(self.stream, code),
-            .closed => unreachable,
-        }
-        self.stream_owner = .closed;
-        self.close_code = null;
-    }
-}
-
-pub fn recycleDelivered(self: *RequestState) void {
-    assert(self.completion == .reported);
-    assert(self.stream_owner == .closed and self.notification == .none);
-    self.completion = .free;
-    self.io.sink = &.{};
-}
-
 /// A pending notification or an undelivered terminal event.
 pub fn deliverable(self: *const RequestState) bool {
     return self.notification == .pending or self.completion == .terminal;
 }
 
-pub fn terminate(self: *RequestState, event: Event) bool {
+pub fn terminate(self: *RequestState, engine: *Engine, router: *Router, event: Event) bool {
     if (!self.running()) return false;
     assert(event == .done or event == .served or event == .failed);
     self.completion = .{ .terminal = event };
@@ -125,10 +101,16 @@ pub fn terminate(self: *RequestState, event: Event) bool {
     if (self.pendingEvent()) |pending| if (pending == .request) {
         self.notification = .none;
     };
-    self.close_code = if (event == .failed) switch (event.failed.reason) {
+    const close_code = if (event == .failed) switch (event.failed.reason) {
         .timeout => constants.app_error_timeout,
         .invalid_response, .too_many_chunks, .unknown_context => constants.app_error_invalid_response,
         else => types.app_error_normal,
     } else types.app_error_normal;
+    switch (self.stream_owner) {
+        .router => router.cancel(engine, self.stream),
+        .protocol => engine.closeStream(self.stream, close_code),
+        .closed => unreachable,
+    }
+    self.stream_owner = .closed;
     return true;
 }

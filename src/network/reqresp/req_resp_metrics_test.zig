@@ -37,12 +37,12 @@ test "reqresp duration includes the final chunk hold until consume" {
     const times = &owner.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing_time;
     try std.testing.expectEqual(0, times.count);
     setup.shared.pair.now.monotonic = time.milliseconds(setup.shared.pair.now.millis() + 5000);
-    try std.testing.expect(owner.consume(handle, setup.shared.pair.now));
+    try std.testing.expect(owner.consume(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
     try std.testing.expectEqual(1, times.count);
     try std.testing.expectEqual(setup.shared.pair.now.millis() - started, times.sum);
     setup.shared.pair.now.monotonic = time.milliseconds(setup.shared.pair.now.millis() + 1000);
-    try std.testing.expect(!owner.consume(handle, setup.shared.pair.now));
-    try std.testing.expect(!owner.cancel(handle, setup.shared.pair.now));
+    try std.testing.expect(!owner.consume(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
+    try std.testing.expect(!owner.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
     try std.testing.expectEqual(1, times.count);
     try std.testing.expectEqual(5000, times.sum);
 }
@@ -60,11 +60,11 @@ test "reqresp duration uses event time for cancellation negotiation and connecti
         setup.shared.pair.now.monotonic = time.milliseconds(setup.shared.pair.now.millis() + 3000);
         const now = setup.shared.pair.now;
         switch (cause) {
-            .cancel => try std.testing.expect(owner.cancel(handle, now)),
+            .cancel => try std.testing.expect(owner.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, now)),
             .rejected, .timeout => {
                 const stream = owner.outbound[handle.index].request.stream;
                 setup.shared.client.router.cancel(&setup.shared.pair.client, stream);
-                try std.testing.expect(owner.negotiated(&setup.shared.pair.client, .{
+                try std.testing.expect(owner.negotiated(&setup.shared.pair.client, &setup.shared.client.router, .{
                     .stream = stream,
                     .direction = .outbound,
                     .owner = .reqresp,
@@ -84,7 +84,7 @@ test "reqresp duration uses event time for cancellation negotiation and connecti
         try std.testing.expectEqual(1, counts.outgoing_time.count);
         try std.testing.expectEqual(3000, counts.outgoing_time.sum);
         try std.testing.expectEqual(if (cause == .cancel) @as(u64, 0) else 1, counts.outgoing_errors);
-        try std.testing.expect(!owner.cancel(handle, now));
+        try std.testing.expect(!owner.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, now));
         try std.testing.expectEqual(1, counts.outgoing_time.count);
     }
 }
@@ -106,14 +106,14 @@ test "reqresp duration uses current time for inbound termination" {
         setup.shared.pair.now.monotonic = time.milliseconds(setup.shared.pair.now.millis() + 2000);
         const now = setup.shared.pair.now;
         switch (cause) {
-            .cancel => try std.testing.expect(owner.cancel(handle, now)),
-            .reset => owner.streamClosed(.{ .owner = .reqresp_inbound, .row = handle.index }, slot.request.stream, 7, now),
+            .cancel => try std.testing.expect(owner.cancel(&setup.shared.pair.server, &setup.shared.server.router, handle, now)),
+            .reset => owner.streamClosed(&setup.shared.pair.server, &setup.shared.server.router, .{ .owner = .reqresp_inbound, .row = handle.index }, slot.request.stream, 7, now),
             .shutdown => owner.cancelAll(&setup.shared.pair.server, &setup.shared.server.router, now),
         }
         const times = &owner.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming_time;
         try std.testing.expectEqual(1, times.count);
         try std.testing.expectEqual(now.millis() - started, times.sum);
-        try std.testing.expect(!owner.cancel(handle, now));
+        try std.testing.expect(!owner.cancel(&setup.shared.pair.server, &setup.shared.server.router, handle, now));
         try std.testing.expectEqual(1, times.count);
     }
 }

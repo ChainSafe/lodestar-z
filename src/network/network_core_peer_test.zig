@@ -360,7 +360,7 @@ test "core native saturated app requests retain partitioned borrows while contro
             request.bytes,
         );
         delivered += 1;
-        _ = setup.server.protocols.reqresp.cancel(request.request, setup.pair.now);
+        _ = setup.server.protocols.reqresp.cancel(setup.pair.server, &setup.server.protocols.router, request.request, setup.pair.now);
     }
     try std.testing.expectEqual(@as(usize, 8), delivered);
 }

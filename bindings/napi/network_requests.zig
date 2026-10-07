@@ -374,12 +374,12 @@ pub fn capture(runtime: *Runtime, events: []const rr.ReqResp.Event, now: n.Now) 
                     cell.terminal = .done;
                 },
                 .failed => |failed| {
-                    const message = core.errorMessage(handle);
+                    const message = failed.errorMessage();
                     std.debug.assert(message.len <= cell.peer_message.len);
                     @memcpy(cell.peer_message[0..message.len], message);
                     cell.peer_message_len = @intCast(message.len);
                     cell.native = null;
-                    const fault = core.protocols.reqresp.peerFault(event);
+                    const fault = failed.peer_fault;
                     cell.terminal = .{ .failed = .{ .reason = failed.reason, .phase = failed.phase, .peer_fault = if (fault) |value| value.kind else null } };
                 },
                 else => unreachable,
