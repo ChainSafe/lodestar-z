@@ -106,22 +106,17 @@ test "remembered records refresh at a served close and drop on rejection, health
     var conns: [6]t.Handle = undefined;
     for (&conns, 0..) |*conn, i| conn.* = .{ .index = @intCast(i), .generation = 1 };
     // A remote shutdown ends service without rejecting us, so it refreshes the record.
-    c.settleRejections(peers[0], conns[0], true, .shutdown, now.millis());
-    c.rememberClosed(peers[0], conns[0], true, .remote_goodbye, .shutdown, now);
+    try std.testing.expect(c.disconnect(peers[0], conns[0], .remote_goodbye, .{ .ready = true, .rejection = .shutdown }, now));
     // A close that shows the peer ineligible keeps the record as it was.
-    c.rememberClosed(peers[1], conns[1], true, .incompatible_fork, null, now);
-    c.settleRejections(peers[2], conns[2], true, .too_many_peers, now.millis());
-    c.rememberClosed(peers[2], conns[2], true, .remote_goodbye, .too_many_peers, now);
-    c.rememberClosed(peers[3], conns[3], true, .health_timeout, null, now);
-    try std.testing.expect(c.disconnect(peers[3], conns[3], .health_timeout, now.millis()));
+    try std.testing.expect(c.disconnect(peers[1], conns[1], .incompatible_fork, .{ .ready = true }, now));
+    try std.testing.expect(c.disconnect(peers[2], conns[2], .remote_goodbye, .{ .ready = true, .rejection = .too_many_peers }, now));
+    try std.testing.expect(c.disconnect(peers[3], conns[3], .health_timeout, .{ .ready = true }, now));
     // A ban during an already scheduled close forgets the peer, and the close does not restore it.
     try std.testing.expect(c.markUnavailable(peers[4], conns[4], .count_pruning));
     _ = c.report(peers[4], .fatal, now.millis());
-    c.rememberClosed(peers[4], conns[4], true, .count_pruning, null, now);
-    try std.testing.expect(c.disconnect(peers[4], conns[4], .count_pruning, now.millis()));
+    try std.testing.expect(c.disconnect(peers[4], conns[4], .count_pruning, .{ .ready = true }, now));
     // A host verdict can ban a peer after its connection closed.
-    c.rememberClosed(peers[5], conns[5], true, .transport_closed, null, now);
-    try std.testing.expect(c.disconnect(peers[5], conns[5], .transport_closed, now.millis()));
+    try std.testing.expect(c.disconnect(peers[5], conns[5], .transport_closed, .{ .ready = true }, now));
     try std.testing.expectEqual(@as(usize, 4), rememberedAt(&c, remembered.qualify_ms).len);
     try std.testing.expectEqual(t.ReputationDecision.ban, c.report(peers[5], .fatal, now.millis()).?);
     // Another identity answered at the seventh peer's endpoint.
@@ -159,7 +154,7 @@ test "replayed remembered candidates meet the rejection memory, the endpoint his
     _ = admit(&c, &known.peer, 0, .inbound, 0).admitted;
     // A connection that just closed leaves the peer's row backing off.
     const closed = admit(&c, &backoff.peer, 1, .inbound, 0).admitted.peer;
-    try std.testing.expect(c.disconnect(closed, .{ .index = 1, .generation = 1 }, .transport_closed, 0));
+    try std.testing.expect(c.disconnect(closed, .{ .index = 1, .generation = 1 }, .transport_closed, .{}, at(0)));
     c.remembered.load(&seeds, &local, unix_s, c.random.random());
     try std.testing.expectEqual(@as(usize, 1), d.replayRemembered(&c, &.{}, &.{}, at(0)));
     try std.testing.expect(c.remembered.nextReplay(unix_s) == null);
@@ -273,7 +268,7 @@ test "remembered candidates replace failed intents for known and new identities"
         var previous: ?t.PeerRef = null;
         if (known) {
             const peer = admit(&c, &incoming.peer, 0, .outbound, 0).admitted.peer;
-            try std.testing.expect(c.disconnect(peer, .{ .index = 0, .generation = 1 }, .host, 1));
+            try std.testing.expect(c.disconnect(peer, .{ .index = 0, .generation = 1 }, .host, .{}, at(1)));
             var events: [1]t.Event = undefined;
             _ = c.pollEvents(&events);
             previous = peer;

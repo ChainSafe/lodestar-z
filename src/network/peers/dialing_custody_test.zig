@@ -133,7 +133,7 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
     try std.testing.expect(q.dialFailed(&catalog, out[0].token, 1));
     const eligible = candidates[0].dial.eligible_at_ms;
-    const horizon = candidates[0].dial.history_until_ms;
+    const horizon = candidates[0].dial.replacement_after_ms;
     const failures = candidates[0].dial.failures;
     const context: t.ForkContext = .{ .custody_groups = 64 };
     var budget: u16 = 0;
@@ -145,7 +145,7 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, eligible, &out));
     try std.testing.expectEqual(@as(?u64, null), support.refreshAndWakeup(&q, &catalog, eligible, 1));
     try std.testing.expectEqual(eligible, candidates[0].dial.eligible_at_ms);
-    try std.testing.expectEqual(horizon, candidates[0].dial.history_until_ms);
+    try std.testing.expectEqual(horizon, candidates[0].dial.replacement_after_ms);
     try std.testing.expectEqual(failures, candidates[0].dial.failures);
     try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, eligible));
     candidate.hints.sequence = 2;
@@ -164,7 +164,7 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     try std.testing.expectEqual(conn, q.active[0].connection.?);
     try std.testing.expectEqual(lease, support.refreshAndWakeup(&q, &catalog, eligible, 1).?);
     try std.testing.expectEqual(failures, candidates[0].dial.failures);
-    try std.testing.expectEqual(horizon, candidates[0].dial.history_until_ms);
+    try std.testing.expectEqual(horizon, candidates[0].dial.replacement_after_ms);
     const manual: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 9 }, .port = 9999 } };
     try q.enqueue(&catalog, &candidate.peer, &.{manual}, true, eligible);
     q.configureSelection(&catalog, &wanted, true, &smaller, eligible);

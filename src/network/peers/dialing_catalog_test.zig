@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const t = @import("types.zig");
 const custody = @import("custody.zig");
 const Catalog = @import("catalog.zig").Catalog;
@@ -14,6 +15,10 @@ const support = @import("dialing_catalog_test_support.zig");
 const candidate = support.candidate;
 const admit = support.admit;
 const expire = @import("dialing_test_support.zig").expire;
+
+fn at(ms: u64) Now {
+    return Now.fromMilliseconds(.{ .mono_ms = ms, .unix_s = 0 });
+}
 
 test "peer fold candidate promotion honors established quota and outbound reserve at time zero" {
     var c = try Catalog.initWithIntents(a, opts, 2, 8, 1);
@@ -51,7 +56,7 @@ test "peer fold discovery capacity remains available while established bans and 
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
     d.accepted(&c, peer, conn, 0);
     _ = c.report(peer, .fatal, 0);
-    try std.testing.expect(c.disconnect(peer, conn, .banned, 0));
+    try std.testing.expect(c.disconnect(peer, conn, .banned, .{}, at(0)));
     const rep = c.rowFor(peer).?.reputation;
     try d.enqueueDiscovered(&c, &second, &.{}, &.{ .syncnets = 1 }, 600_000);
     var events: [1]t.Event = undefined;
@@ -151,8 +156,8 @@ test "peer fold canonical disconnect backs off once even without a dial intent" 
     const hint = try candidate(1, 1);
     const peer = admit(&c, &hint.peer, 0, .inbound, 0).admitted.peer;
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
-    try std.testing.expect(c.disconnect(peer, conn, .health_timeout, 1));
-    try std.testing.expect(!c.disconnect(peer, conn, .health_timeout, 2));
+    try std.testing.expect(c.disconnect(peer, conn, .health_timeout, .{}, at(1)));
+    try std.testing.expect(!c.disconnect(peer, conn, .health_timeout, .{}, at(2)));
     const before = c.rowFor(peer).?.dial;
     try d.enqueueDiscovered(&c, &hint, &.{}, &.{}, 2);
     try std.testing.expectEqual(before.failures, c.rowFor(peer).?.dial.failures);
@@ -171,7 +176,7 @@ test "peer fold inbound health close leaves the discovered endpoint history unto
     const peer = admit(&c, &hint.peer, 0, .inbound, 0).admitted.peer;
     c.clearHealthStrikes(peer, conn);
     try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, hint.hints.sequence, 1));
-    try std.testing.expect(c.disconnect(peer, conn, .health_timeout, 1));
+    try std.testing.expect(c.disconnect(peer, conn, .health_timeout, .{}, at(1)));
     try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, hint.hints.sequence, 1));
     try std.testing.expectEqual(@as(u8, 1), c.rowFor(peer).?.dial.failures);
 }
@@ -183,7 +188,7 @@ test "peer fold long-lived health disconnect restarts redial backoff" {
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
     const peer = admit(&c, &hint.peer, 0, .inbound, 0).admitted.peer;
     c.rowForMut(peer).?.dial.failures = 4;
-    try std.testing.expect(c.disconnect(peer, conn, .health_timeout, 300_000));
+    try std.testing.expect(c.disconnect(peer, conn, .health_timeout, .{}, at(300_000)));
     try std.testing.expectEqual(@as(u8, 1), c.rowFor(peer).?.dial.failures);
 }
 
@@ -200,7 +205,7 @@ fn zombieRound(c: *Catalog, d: *dialing.Dialing, identity: *const t.PeerId, conn
     now.* += 25_000;
     try std.testing.expect(c.cooldown(peer, conn, now.*, 60_000));
     now.* += 2_000;
-    try std.testing.expect(c.disconnect(peer, conn, .health_timeout, now.*));
+    try std.testing.expect(c.disconnect(peer, conn, .health_timeout, .{}, at(now.*)));
     var events: [4]t.Event = undefined;
     _ = c.pollEvents(&events);
     return peer;
@@ -226,7 +231,7 @@ test "peer fold zombie endpoint is blocked after two health closes across redisc
     const first: t.PeerId = .{ .bytes = @splat(9) };
     _ = admit(&c, &first, 4, .inbound, now).admitted;
     try std.testing.expect(c.find(&zombie.peer) == null);
-    try std.testing.expect(c.disconnect(c.find(&first).?, .{ .index = 4, .generation = 1 }, .host, now));
+    try std.testing.expect(c.disconnect(c.find(&first).?, .{ .index = 4, .generation = 1 }, .host, .{}, at(now)));
     var events: [1]t.Event = undefined;
     _ = c.pollEvents(&events);
     zombie.hints.sequence = 2;
@@ -257,8 +262,7 @@ fn rejectedRound(c: *Catalog, d: *dialing.Dialing, identity: *const t.PeerId, in
     try std.testing.expect(d.dialStarted(out[0].token, conn));
     const peer = admit(c, identity, conn.index, .outbound, now_ms).admitted.peer;
     d.accepted(c, peer, conn, now_ms);
-    c.settleRejections(peer, conn, false, rejection, now_ms);
-    try std.testing.expect(c.disconnect(peer, conn, .remote_goodbye, now_ms));
+    try std.testing.expect(c.disconnect(peer, conn, .remote_goodbye, .{ .rejection = rejection }, at(now_ms)));
     var events: [4]t.Event = undefined;
     _ = c.pollEvents(&events);
 }
@@ -317,11 +321,7 @@ test "peer fold early closes escalate while manual and inbound connections bypas
     try std.testing.expect(admission == .admitted);
     d.accepted(&c, admission.admitted.peer, conn, due);
     const kept = due + history.kept_connection_ms;
-    c.settleRejections(admission.admitted.peer, conn, true, null, kept - 1);
-    try std.testing.expectError(error.RecentlyRejected, d.enqueueDiscovered(&c, &gated, &.{}, &.{}, kept - 1));
-    c.settleRejections(admission.admitted.peer, conn, false, null, kept);
-    try std.testing.expectError(error.RecentlyRejected, d.enqueueDiscovered(&c, &gated, &.{}, &.{}, kept));
-    c.settleRejections(admission.admitted.peer, conn, true, null, kept);
+    try std.testing.expect(c.disconnect(admission.admitted.peer, conn, .host, .{ .ready = true }, at(kept)));
     try d.enqueueDiscovered(&c, &gated, &.{}, &.{}, kept);
     try std.testing.expectEqual(@as(u64, 3), c.rejections[@intFromEnum(t.Rejection.early_close)]);
 }
@@ -384,7 +384,7 @@ test "peer discovery known and new identities share candidate replacement and re
             if (known) {
                 const peer = admit(&c, &incoming.peer, 0, .outbound, 0).admitted.peer;
                 _ = c.report(peer, .high_tolerance, 0);
-                try std.testing.expect(c.disconnect(peer, .{ .index = 0, .generation = 1 }, .host, 1));
+                try std.testing.expect(c.disconnect(peer, .{ .index = 0, .generation = 1 }, .host, .{}, at(1)));
                 var events: [1]t.Event = undefined;
                 _ = c.pollEvents(&events);
                 previous = peer;
@@ -420,7 +420,7 @@ test "peer discovery known and new identities share candidate replacement and re
                 try std.testing.expectEqualDeep(old.?.reputation, after.reputation);
                 try std.testing.expectEqual(old.?.dial.failures, after.dial.failures);
                 try std.testing.expectEqual(old.?.dial.eligible_at_ms, after.dial.eligible_at_ms);
-                try std.testing.expectEqual(old.?.dial.history_until_ms, after.dial.history_until_ms);
+                try std.testing.expectEqual(old.?.dial.replacement_after_ms, after.dial.replacement_after_ms);
             }
         }
     }

@@ -878,7 +878,7 @@ test "application complete snapshot includes all 512 occupied disconnected rows"
         const peer = node.peer_manager.catalog.admit(&remote, &local, handle, &.{ .direction = .outbound, .endpoint = .unspecified, .now_ms = 0 }).admitted.peer;
         try std.testing.expectEqual(@as(u16, @intCast(i)), peer.index);
         _ = node.peer_manager.catalog.report(peer, .fatal, 0);
-        try std.testing.expect(node.peer_manager.catalog.disconnect(peer, handle, .host, 0));
+        try std.testing.expect(node.peer_manager.catalog.disconnect(peer, handle, .host, .{}, Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 })));
         _ = node.peer_manager.catalog.pollEvents(&events);
     }
     const snapshots = try std.testing.allocator.alloc(t.Snapshot, 512);

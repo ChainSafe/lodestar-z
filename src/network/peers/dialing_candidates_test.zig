@@ -225,7 +225,7 @@ test "peer dial confirmed equal ENR refresh renews provisional hint freshness wi
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &wanted, 300_000);
     q.configureSelection(&catalog, &wanted, false, &.{}, 300_000);
     try std.testing.expectEqual(@as(?u64, 300_000), support.refreshAndWakeup(&q, &catalog, 300_000, 1));
-    try std.testing.expectEqual(@as(u64, 600_000), candidates[0].dial.history_until_ms);
+    try std.testing.expectEqual(@as(u64, 600_000), candidates[0].dial.replacement_after_ms);
     var conflicting = candidate;
     conflicting.hints.syncnets = 2;
     try std.testing.expectError(error.StaleRecord, q.enqueueDiscovered(&catalog, &conflicting, &.{}, &wanted, 300_001));

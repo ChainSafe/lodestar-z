@@ -144,7 +144,7 @@ test "full production lane leaves catalog close pending until output resumes" {
         try std.testing.expectEqual(@as(usize, 1), count);
         lane.publish(output[0..count], i + 1);
     }
-    try std.testing.expect(catalog.disconnect(peer, handle, .host, 100));
+    try std.testing.expect(catalog.disconnect(peer, handle, .host, .{}, n.Now.fromMilliseconds(.{ .mono_ms = 100, .unix_s = 0 })));
     try std.testing.expectEqual(@as(usize, 0), catalog.pollEvents(output[0 .. 64 - lane.len]));
     try std.testing.expect(catalog.eventsPending());
     lane.commit(64);

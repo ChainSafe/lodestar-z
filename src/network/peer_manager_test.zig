@@ -8,6 +8,7 @@ const Now = @import("types.zig").Now;
 const remembered = @import("peers/remembered.zig");
 const history = @import("peers/dial_history.zig");
 const Dialing = @import("peers/dialing.zig").Dialing;
+const Engine = @import("quic/Engine.zig");
 
 const identity: t.PeerId = .{ .bytes = @splat(1) };
 const endpoint: t.Address = .{ .ip4 = .{ .octets = .{ 203, 0, 113, 1 }, .port = 9000 } };
@@ -106,7 +107,33 @@ test "peer owner qualification clears dial evidence before later proven health" 
 }
 
 test "peer owner retirement preserves remembered and rejection lifetimes and settles once" {
-    for ([_]u64{ remembered.qualify_ms - 1, remembered.qualify_ms, history.kept_connection_ms }) |lifetime| {
+    for ([_]bool{ false, true }) |ready| {
+        for ([_]u64{ remembered.qualify_ms - 1, remembered.qualify_ms, history.kept_connection_ms - 1, history.kept_connection_ms }) |lifetime| {
+            var manager = try init();
+            defer manager.deinit();
+            const key = manager.catalog.history.identityKey(&identity);
+            _ = manager.catalog.history.reject(key, .too_many_peers, 1);
+            const peer = try outbound(&manager, at(10));
+            if (ready) try qualify(&manager, at(10));
+            const now = at(10 + lifetime);
+            try std.testing.expect(manager.retireConnection(peer, conn, .host, now) != null);
+            const failures = manager.catalog.rowFor(peer).?.dial.failures;
+            const deadline = manager.catalog.rowFor(peer).?.dial.eligible_at_ms;
+            try std.testing.expect(manager.retireConnection(peer, conn, .host, now) == null);
+            try std.testing.expect(manager.transportClosed(&.{ .conn = conn, .peer_id = identity, .direction = .outbound, .reason = .{ .peer_closed = .{ .app = true, .code = 0 } } }, 129, now) == null);
+            try std.testing.expectEqual(failures, manager.catalog.rowFor(peer).?.dial.failures);
+            try std.testing.expectEqual(deadline, manager.catalog.rowFor(peer).?.dial.eligible_at_ms);
+            try std.testing.expectEqual(@as(u64, 1), manager.control.counters.closed[@intFromEnum(t.DisconnectReason.host)]);
+            var records: [remembered.capacity]remembered.Record = undefined;
+            try std.testing.expectEqual(@as(usize, @intFromBool(ready and lifetime >= remembered.qualify_ms)), manager.rememberedPeers(now, &records));
+            const block = manager.catalog.history.reject(key, .too_many_peers, now.millis());
+            try std.testing.expectEqual(@as(u64, if (ready and lifetime >= history.kept_connection_ms) 5 * 60_000 else 15 * 60_000), block);
+        }
+    }
+}
+
+test "peer owner kept connection clears old rejections before recording its final goodbye once" {
+    for ([_]u64{ history.kept_connection_ms - 1, history.kept_connection_ms }) |lifetime| {
         var manager = try init();
         defer manager.deinit();
         const key = manager.catalog.history.identityKey(&identity);
@@ -114,18 +141,17 @@ test "peer owner retirement preserves remembered and rejection lifetimes and set
         const peer = try outbound(&manager, at(10));
         try qualify(&manager, at(10));
         const now = at(10 + lifetime);
-        try std.testing.expect(manager.retireConnection(peer, conn, .host, now) != null);
-        const failures = manager.catalog.rowFor(peer).?.dial.failures;
-        const deadline = manager.catalog.rowFor(peer).?.dial.eligible_at_ms;
-        try std.testing.expect(manager.retireConnection(peer, conn, .host, now) == null);
-        try std.testing.expect(manager.transportClosed(&.{ .conn = conn, .peer_id = identity, .direction = .outbound, .reason = .{ .peer_closed = .{ .app = true, .code = 0 } } }, 129, now) == null);
-        try std.testing.expectEqual(failures, manager.catalog.rowFor(peer).?.dial.failures);
-        try std.testing.expectEqual(deadline, manager.catalog.rowFor(peer).?.dial.eligible_at_ms);
-        try std.testing.expectEqual(@as(u64, 1), manager.control.counters.closed[@intFromEnum(t.DisconnectReason.host)]);
+        const closed: @FieldType(Engine.Event, "closed") = .{ .conn = conn, .peer_id = identity, .direction = .outbound, .reason = .{ .peer_closed = .{ .app = true, .code = 0 } } };
+        try std.testing.expect(manager.transportClosed(&closed, 129, now) != null);
+        const block: u64 = if (lifetime >= history.kept_connection_ms) 5 * 60_000 else 15 * 60_000;
+        try std.testing.expectEqual(now.millis() + block, manager.catalog.history.rejectedUntil(key, now.millis()));
+        try std.testing.expect(manager.transportClosed(&closed, 129, now) == null);
+        try std.testing.expect(manager.retireConnection(peer, conn, .remote_goodbye, now) == null);
+        try std.testing.expectEqual(now.millis() + block, manager.catalog.history.rejectedUntil(key, now.millis()));
+        try std.testing.expectEqual(@as(u64, 1), manager.catalog.rejections[@intFromEnum(t.Rejection.too_many_peers)]);
+        try std.testing.expectEqual(@as(u64, 1), manager.control.counters.closed[@intFromEnum(t.DisconnectReason.remote_goodbye)]);
         var records: [remembered.capacity]remembered.Record = undefined;
-        try std.testing.expectEqual(@as(usize, @intFromBool(lifetime >= remembered.qualify_ms)), manager.rememberedPeers(now, &records));
-        const block = manager.catalog.history.reject(key, .too_many_peers, now.millis());
-        try std.testing.expectEqual(@as(u64, if (lifetime >= history.kept_connection_ms) 5 * 60_000 else 15 * 60_000), block);
+        try std.testing.expectEqual(@as(usize, 0), manager.rememberedPeers(now, &records));
     }
 }
 
