@@ -54,6 +54,7 @@ fn ProcessBeforeProcessEpochBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
+                null,
             ) catch unreachable;
             defer epoch_transition_cache.deinit();
         }
@@ -399,6 +400,7 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
+                self.io,
             ) catch unreachable;
             defer cache.deinit();
 
@@ -433,6 +435,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
+                null,
             ) catch unreachable;
             defer cache_val.deinit();
             const cache = &cache_val;
@@ -726,6 +729,7 @@ fn runBenchmark(
         cached_state.config,
         cached_state.epoch_cache,
         cached_state.state,
+        null,
     );
     defer epoch_transition_cache.deinit();
 

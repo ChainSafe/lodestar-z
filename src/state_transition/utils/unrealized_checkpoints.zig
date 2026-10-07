@@ -28,6 +28,7 @@ pub fn computeUnrealizedCheckpoints(allocator: std.mem.Allocator, cached_state: 
             cloned_state.config,
             cloned_state.epoch_cache,
             cloned_state.state,
+            null,
         );
         defer epoch_transition_cache.deinit();
 
