@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.1.0](https://github.com/ChainSafe/lodestar-z/compare/v2.0.0...v2.1.0) (2026-10-07)
+
+
+### Features
+
+* **metrics:** add sub-second epoch transition histogram buckets ([#759](https://github.com/ChainSafe/lodestar-z/issues/759)) ([bf96e24](https://github.com/ChainSafe/lodestar-z/commit/bf96e24bceccf443f04162873fc4cc88b59fc680))
+
+
+### Bug Fixes
+
+* prepare state before rewards ([#755](https://github.com/ChainSafe/lodestar-z/issues/755)) ([a1361f0](https://github.com/ChainSafe/lodestar-z/commit/a1361f038bd1c4101483307f9f70c6e100f31e8d))
+* preserve shuffling input ownership ([#753](https://github.com/ChainSafe/lodestar-z/issues/753)) ([589e23a](https://github.com/ChainSafe/lodestar-z/commit/589e23a2283474b91e58d6687573e7e5733c00b0))
+
 ## [2.0.0](https://github.com/ChainSafe/lodestar-z/compare/v1.1.0...v2.0.0) (2026-10-05)
 
 
