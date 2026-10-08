@@ -5,9 +5,171 @@ const BoolType = @import("bool.zig").BoolType;
 const ProgressiveBitListType = @import("progressive_bit_list.zig").ProgressiveBitListType;
 const Node = @import("persistent_merkle_tree").Node;
 const FixedProgressiveListType = @import("progressive_list.zig").FixedProgressiveListType;
+const FixedProgressiveListTypeWithOptions = @import("progressive_list.zig").FixedProgressiveListTypeWithOptions;
 const VariableProgressiveListType = @import("progressive_list.zig").VariableProgressiveListType;
 const UintType = @import("uint.zig").UintType;
 const FixedContainerType = @import("container.zig").FixedContainerType;
+
+test "chunked progressive type roundtrips subtree and payload boundaries" {
+    const allocator = std.testing.allocator;
+    inline for (.{ BoolType(), UintType(8), UintType(16), UintType(32), UintType(64), UintType(128), UintType(256) }) |Element| {
+        const List = FixedProgressiveListTypeWithOptions(Element, .{ .chunked_leaf = true });
+        const Plain = FixedProgressiveListType(Element);
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        var pool = try Node.Pool.init(.{
+            .page_allocator = allocator,
+            .allocator = failing.allocator(),
+            .pool_size = 2048,
+        });
+        defer pool.deinit();
+        const baseline = pool.getNodesInUse();
+        var value: List.Type = .empty;
+        defer value.deinit(allocator);
+        var out: List.Type = .empty;
+        defer out.deinit(allocator);
+        const items_per_chunk = 32 / Element.fixed_size;
+        for ([_]usize{ 0, 1, 5, 21, 22, 84, 85, 86, 149, 150, 341, 342 }) |chunks| {
+            const len = if (chunks == 0) 0 else chunks * items_per_chunk - 1;
+            try value.resize(allocator, len);
+            for (value.items, 0..) |*element, i| element.* = if (Element.kind == .bool) i % 3 == 0 else @intCast(i % 251);
+            const expected = try allocator.alloc(u8, len * Element.fixed_size);
+            defer allocator.free(expected);
+            _ = List.serializeIntoBytes(&value, expected);
+            const encoded = try allocator.alloc(u8, expected.len);
+            defer allocator.free(encoded);
+            const plain = try Plain.tree.fromValue(&pool, &value);
+            defer pool.unref(plain);
+            const root = try List.tree.fromValue(&pool, &value);
+            defer pool.unref(root);
+            const decoded = try List.tree.deserializeFromBytes(&pool, expected);
+            defer pool.unref(decoded);
+            try std.testing.expectEqualSlices(u8, plain.getRoot(&pool), root.getRoot(&pool));
+            try std.testing.expectEqualSlices(u8, plain.getRoot(&pool), decoded.getRoot(&pool));
+            try List.tree.toValue(allocator, root, &pool, &out);
+            try std.testing.expect(List.equals(&value, &out));
+            failing.fail_index = failing.alloc_index;
+            try std.testing.expectEqual(expected.len, try List.tree.serializeIntoBytes(root, &pool, encoded));
+            try std.testing.expectEqualSlices(u8, expected, encoded);
+            try std.testing.expect(!failing.has_induced_failure);
+            failing.fail_index = std.math.maxInt(usize);
+        }
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    }
+}
+
+test "chunked progressive type preserves malformed byte errors" {
+    var pool = try Node.Pool.init(.{
+        .page_allocator = std.testing.allocator,
+        .allocator = std.testing.allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+    const Bools = FixedProgressiveListTypeWithOptions(BoolType(), .{ .chunked_leaf = true });
+    const Ints = FixedProgressiveListTypeWithOptions(UintType(64), .{ .chunked_leaf = true });
+    try std.testing.expectError(error.invalidBoolean, Bools.tree.deserializeFromBytes(&pool, &.{ 0, 1, 2 }));
+    try std.testing.expectError(error.InvalidSSZ, Ints.tree.deserializeFromBytes(&pool, &.{ 0, 1, 2 }));
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "chunked progressive tree.toValue fills caller-owned out in place" {
+    const allocator = std.testing.allocator;
+    const List = FixedProgressiveListTypeWithOptions(UintType(64), .{ .chunked_leaf = true });
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+    {
+        var value: List.Type = .empty;
+        defer value.deinit(allocator);
+        try value.resize(allocator, 100);
+        for (value.items, 0..) |*element, i| element.* = i;
+        const root = try List.tree.fromValue(&pool, &value);
+        defer pool.unref(root);
+
+        var out: List.Type = .empty;
+        defer out.deinit(allocator);
+        try out.resize(allocator, 200);
+        @memset(out.items, 99);
+        const storage = out.items.ptr;
+        try List.tree.toValue(allocator, root, &pool, &out);
+        try std.testing.expectEqual(storage, out.items.ptr);
+        try std.testing.expectEqualSlices(u64, value.items, out.items);
+
+        const bad_terminator = try pool.createLeafFromUint(1);
+        const contents = try pool.createBranch(@enumFromInt(0), bad_terminator);
+        const bad_root = try pool.createBranch(contents, try pool.createLeafFromUint(1));
+        defer pool.unref(bad_root);
+        try std.testing.expectError(
+            error.InvalidTerminatorNode,
+            List.tree.toValue(allocator, bad_root, &pool, &out),
+        );
+        try std.testing.expectEqual(storage, out.items.ptr);
+
+        @memset(out.items, 99);
+        const huge_root = try pool.createBranch(
+            @enumFromInt(0),
+            try pool.createLeafFromUint(std.math.maxInt(usize)),
+        );
+        defer pool.unref(huge_root);
+        try std.testing.expectError(
+            error.InvalidSubtreeLength,
+            List.tree.toValue(allocator, huge_root, &pool, &out),
+        );
+        try std.testing.expectEqual(@as(usize, 1), out.items.len);
+        try std.testing.expectEqual(@as(u64, 99), out.items[0]);
+        try std.testing.expectError(
+            error.InvalidSubtreeLength,
+            FixedProgressiveListType(UintType(64)).tree.toValue(allocator, huge_root, &pool, &out),
+        );
+        try std.testing.expectEqual(@as(usize, 1), out.items.len);
+        try std.testing.expectEqual(@as(u64, 99), out.items[0]);
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "memory_safety: chunked progressive type construction releases partial trees" {
+    const List = FixedProgressiveListTypeWithOptions(UintType(64), .{ .chunked_leaf = true });
+    var value: List.Type = .empty;
+    defer value.deinit(std.testing.allocator);
+    try value.resize(std.testing.allocator, 600);
+    for (value.items, 0..) |*element, i| element.* = i;
+    try expectProgressiveFromValuePoolExhaustionReclaimsNodes(List, &value, 128);
+    const bytes = try std.testing.allocator.alloc(u8, List.serializedSize(&value));
+    defer std.testing.allocator.free(bytes);
+    _ = List.serializeIntoBytes(&value, bytes);
+    inline for (.{ false, true }) |serialized| {
+        var saw_failure = false;
+        var saw_success = false;
+        for (0..16) |failure_index| {
+            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+            var pool = try Node.Pool.init(.{
+                .page_allocator = std.testing.allocator,
+                .allocator = failing.allocator(),
+                .pool_size = 128,
+            });
+            defer pool.deinit();
+            const baseline = pool.getNodesInUse();
+            failing.fail_index = failing.alloc_index + failure_index;
+            const result = if (serialized) List.tree.deserializeFromBytes(&pool, bytes) else List.tree.fromValue(&pool, &value);
+            if (result) |root| {
+                pool.unref(root);
+                saw_success = true;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expect(failing.has_induced_failure);
+                saw_failure = true;
+            }
+            try std.testing.expectEqual(baseline, pool.getNodesInUse());
+            if (saw_success) break;
+        }
+        try std.testing.expect(saw_failure);
+        try std.testing.expect(saw_success);
+    }
+}
 
 test "ListType - sanity" {
     const allocator = std.testing.allocator;

@@ -2,10 +2,26 @@ const std = @import("std");
 const hashOne = @import("hashing").hashOne;
 const Depth = @import("hashing").Depth;
 const Node = @import("persistent_merkle_tree").Node;
+const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 
 const base_count = 1;
 const scaling_factor = 4;
+
+/// Subtree `i` holds `4^i` chunks at depth `2i` below its root. Every progressive type mixes its
+/// contents root in one level below the type root, and subtree `i` hangs `i + 1` spine levels below
+/// the contents root, so its chunks sit at depth `3i + 2`, which must stay addressable by a gindex.
+/// The chunk count `4^i` must also fit in a `usize`.
+pub const max_tree_subtrees = @min(
+    (@import("hashing").max_depth - 2) / 3,
+    (@bitSizeOf(usize) - 1) / 2,
+) + 1;
+pub const max_tree_chunks = blk: {
+    var total: usize = 0;
+    for (0..max_tree_subtrees) |i| total += @as(usize, 1) << @intCast(2 * i);
+    break :blk total;
+};
+pub const zero_leaf_bytes: [ChunkedLeaf.K * 32]u8 = @splat(0);
 
 pub fn chunkGindex(chunk_i: usize) Gindex {
     const subtree_i = subtreeIndex(chunk_i);
@@ -114,46 +130,87 @@ pub const NodeIterator = struct {
     pool: *Node.Pool,
     spine: Node.Id,
     remaining: usize,
+    chunked_leaf: bool = false,
     subtree_remaining: usize = 0,
     subtree_index: usize = 0,
+    leaf_offset: Depth = 0,
     iterator: Node.DepthIterator = undefined,
 
     pub fn init(pool: *Node.Pool, root: Node.Id, count: usize) !NodeIterator {
-        const max_subtrees = @min((@import("hashing").max_depth - 1) / 3, (@bitSizeOf(usize) - 1) / 2) + 1;
-        const max_chunks = comptime blk: {
-            var total: usize = 0;
-            for (0..max_subtrees) |i| total += @as(usize, 1) << @intCast(2 * i);
-            break :blk total;
-        };
-        if (count > max_chunks) return error.InvalidSubtreeLength;
+        if (count > max_tree_chunks) return error.InvalidSubtreeLength;
         return .{ .pool = pool, .spine = root, .remaining = count };
     }
 
+    /// Subtrees of at least `ChunkedLeaf.K` chunks store each run of K chunks in one chunked leaf.
+    pub fn initChunkedLeaf(pool: *Node.Pool, root: Node.Id, count: usize) !NodeIterator {
+        var it = try init(pool, root, count);
+        it.chunked_leaf = true;
+        return it;
+    }
+
     pub fn next(self: *NodeIterator) !?Node.Id {
+        std.debug.assert(!self.chunked_leaf);
         if (self.remaining == 0) {
-            if (!std.mem.eql(u8, self.spine.getRoot(self.pool), &@as([32]u8, @splat(0)))) {
-                return error.InvalidTerminatorNode;
-            }
+            try self.checkTerminator();
             return null;
         }
-        if (self.subtree_remaining == 0) {
-            const subtree_depth: Depth = @intCast(2 * self.subtree_index);
-            const subtree_length = @as(usize, 1) << @intCast(subtree_depth);
-            const subtree_root = if (@intFromEnum(self.spine) == 0)
-                @as(Node.Id, @enumFromInt(subtree_depth))
-            else blk: {
-                const left = try self.spine.getLeft(self.pool);
-                self.spine = try self.spine.getRight(self.pool);
-                break :blk left;
-            };
-            self.iterator = Node.DepthIterator.init(self.pool, subtree_root, subtree_depth, 0);
-            self.subtree_remaining = @min(subtree_length, self.remaining);
-            self.subtree_index += 1;
-        }
+        if (self.subtree_remaining == 0) try self.enterSubtree();
         const node = try self.iterator.next();
         self.subtree_remaining -= 1;
         self.remaining -= 1;
         return node;
+    }
+
+    /// Borrows the packed bytes of the next leaf. Pool mutations invalidate the slice.
+    pub fn nextBytes(self: *NodeIterator) !?[]const u8 {
+        if (self.remaining == 0) {
+            try self.checkTerminator();
+            return null;
+        }
+        if (self.subtree_remaining == 0) try self.enterSubtree();
+        const node = try self.iterator.next();
+        if (self.leaf_offset == 0) {
+            self.subtree_remaining -= 1;
+            self.remaining -= 1;
+            return node.getRoot(self.pool);
+        }
+        const leaf_chunks = @as(usize, 1) << @intCast(self.leaf_offset);
+        const chunk_count = @min(leaf_chunks, self.subtree_remaining);
+        self.subtree_remaining -= chunk_count;
+        self.remaining -= chunk_count;
+        const len = chunk_count * 32;
+        if (node.getState(self.pool).isZero()) return zero_leaf_bytes[0..len];
+        return std.mem.asBytes(try node.getChunkedLeafChunks(self.pool))[0..len];
+    }
+
+    fn checkTerminator(self: *const NodeIterator) !void {
+        if (!std.mem.eql(u8, self.spine.getRoot(self.pool), zero_leaf_bytes[0..32])) {
+            return error.InvalidTerminatorNode;
+        }
+    }
+
+    fn enterSubtree(self: *NodeIterator) !void {
+        const subtree_depth: Depth = @intCast(2 * self.subtree_index);
+        const subtree_length = @as(usize, 1) << @intCast(subtree_depth);
+        self.leaf_offset = if (self.chunked_leaf and subtree_depth >= ChunkedLeaf.k_log2)
+            ChunkedLeaf.k_log2
+        else
+            0;
+        const subtree_root = if (@intFromEnum(self.spine) == 0)
+            @as(Node.Id, @enumFromInt(subtree_depth))
+        else blk: {
+            const left = try self.spine.getLeft(self.pool);
+            self.spine = try self.spine.getRight(self.pool);
+            break :blk left;
+        };
+        self.iterator = Node.DepthIterator.init(
+            self.pool,
+            subtree_root,
+            subtree_depth - self.leaf_offset,
+            0,
+        );
+        self.subtree_remaining = @min(subtree_length, self.remaining);
+        self.subtree_index += 1;
     }
 };
 
@@ -225,11 +282,10 @@ pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, no
 }
 
 pub fn fillWithContents(_: std.mem.Allocator, pool: *Node.Pool, nodes: []Node.Id) !Node.Id {
-    const max_subtrees = @min((@import("hashing").max_depth - 1) / 3, (@bitSizeOf(usize) - 1) / 2) + 1;
-    var subtree_starts: [max_subtrees]usize = undefined;
+    var subtree_starts: [max_tree_subtrees]usize = undefined;
     var subtree_count: usize = 0;
     var pos: usize = 0;
-    for (0..max_subtrees) |i| {
+    for (0..max_tree_subtrees) |i| {
         if (pos == nodes.len) break;
         subtree_starts[i] = pos;
         pos += @min(@as(usize, 1) << @intCast(2 * i), nodes.len - pos);

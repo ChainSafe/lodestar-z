@@ -306,6 +306,12 @@
                 .imports = .{ .persistent_merkle_tree, .ssz, .zbench },
             },
         },
+        .bench_progressive_list_basic = .{
+            .root_module = .{
+                .root_source_file = "bench/ssz/progressive_list_basic.zig",
+                .imports = .{ .persistent_merkle_tree, .ssz },
+            },
+        },
         .bench_merkle_gindex = .{
             .root_module = .{
                 .root_source_file = "bench/ssz/gindex.zig",
