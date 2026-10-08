@@ -60,13 +60,13 @@ since it puts the burden of validation on the maintainer.
 
 ## Developer Usage
 
-Building the network addon also requires CMake and the Rust toolchain pinned in
+Building the network addon also requires CMake 3.22+, libclang, and the Rust toolchain pinned in
 `rust-toolchain.toml`. Run `rustup toolchain install` once, then build with
-`scripts/zig-cross.sh zig build build-lib:bindings -Doptimize=ReleaseSafe`.
-The wrapper builds quiche with its Cargo lockfile and supplies Zig's target compilers.
+`zig build build-lib:bindings -Doptimize=ReleaseSafe`.
+The quiche-zig dependency builds quiche with its Cargo lockfile and supplies Zig's target compilers.
 For all release targets, first run
 `rustup target add $(node -p 'require("./package.json").zapi.targets.join(" ")')`,
-then `scripts/zig-cross.sh pnpm zapi build-artifacts --optimize ReleaseSafe`.
+then `pnpm zapi build-artifacts --optimize ReleaseSafe`.
 
 We currently host all zig packages and napi bindings in [this repository](https://github.com/ChainSafe/lodestar-z)
 as a [monorepo](https://en.wikipedia.org/wiki/Monorepo).

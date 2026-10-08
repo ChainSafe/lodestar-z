@@ -602,7 +602,7 @@ jobs:
           pnpm typecheck:leveldb
       - name: Build bindings
         run: |
-          scripts/zig-cross.sh zig build build-lib:bindings -Doptimize=ReleaseSafe
+          zig build build-lib:bindings -Doptimize=ReleaseSafe
       - name: Restore era files cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -642,7 +642,7 @@ jobs:
           pnpm install --frozen-lockfile --ignore-scripts
       - name: Build release artifacts
         run: |
-          scripts/zig-cross.sh pnpm zapi build-artifacts --optimize ReleaseSafe
+          pnpm zapi build-artifacts --optimize ReleaseSafe
 
   # metrics_stf depends on httpz, which is temporarily disabled for Zig 0.16 migration
   # build-examples:
