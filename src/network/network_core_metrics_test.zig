@@ -120,6 +120,7 @@ const contract = [_]Series{
     .{ .name = "gossipsub_msg_forward_count_total", .kind = "counter", .labels = &.{"topic"} },
     .{ .name = "gossipsub_data_recipients_total", .kind = "counter", .labels = &.{ "origin", "outcome" } },
     .{ .name = "gossipsub_queue_drops_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "gossipsub_ihave_budget_skipped_total", .kind = "counter" },
     .{ .name = "gossipsub_retention_refusals_total", .kind = "counter", .labels = &.{"topic"} },
     .{ .name = "gossipsub_iwant_rcv_dont_have_msgids_total", .kind = "counter" },
     .{ .name = "gossipsub_iwant_known_msgids_total", .kind = "counter", .labels = &.{"outcome"} },
@@ -333,6 +334,7 @@ test "metrics preserve outgoing queue refusals across session retirement and reu
     defer f.deinit();
     const g = f.node.protocols.gossipsub;
     const first = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    g.counters.ihave_budget_skipped = 7;
     g.sessions.rows[first.index].io.tx.drops[0] = 3;
     try contains(try f.render(true), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 3\n");
     const conn = g.sessions.rows[first.index].conn;
@@ -345,6 +347,7 @@ test "metrics preserve outgoing queue refusals across session retirement and reu
     try contains(try f.render(true), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 5\n");
     g.connectionClosed(g.sessions.rows[next.index].conn);
     try contains(try f.render(false), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 5\n");
+    try contains(try f.render(false), "gossipsub_ihave_budget_skipped_total 7\n");
 }
 
 test "metrics render retained usable coverage and suppress deficits when stopped" {

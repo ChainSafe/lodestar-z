@@ -7,6 +7,11 @@ const StorageRefusal = @import("messages.zig").StorageRefusal;
 const IwantOutcome = @import("metrics.zig").IwantOutcome;
 
 pub fn writeCounters(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
+    try w.scalar(.{
+        .name = "gossipsub_ihave_budget_skipped_total",
+        .kind = .counter,
+        .help = "Topic advertisements skipped because they exceeded a peer's heartbeat byte or message-ID budget",
+    }, g.counters.ihave_budget_skipped);
     try w.enums(.{
         .name = "gossipsub_storage_refusals_total",
         .kind = .counter,

@@ -368,7 +368,7 @@ test "gossip batches more than ten topic advertisements into one RPC" {
     const tx = &g.sessions.rows[peer.index].io.tx;
     for (0..20) |index| {
         const id: MessageId = @splat(@intCast(index));
-        tx.gossipTopic(test_topic, &.{id});
+        try std.testing.expect(tx.gossipTopic(test_topic, &.{id}));
     }
     try std.testing.expectEqual(@as(usize, 0), tx.control.count);
     try std.testing.expect(tx.finishGossip(1));
@@ -384,6 +384,114 @@ test "gossip batches more than ten topic advertisements into one RPC" {
         try std.testing.expect(try ids.next() == null);
     }
     try std.testing.expect(try reader.next() == null);
+}
+
+test "gossip full attestation advertisements fit the control queue including framing" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const tx = &g.sessions.rows[peer.index].io.tx;
+    const ids: [constants.gossip_ids_max]MessageId = @splat(@splat(1));
+    var admitted: usize = 0;
+    for (0..64) |subnet| {
+        var name: [topic_mod.topic_max_len]u8 = undefined;
+        const canonical = topic_mod.buildCanonical(.{ .digest = .{ 1, 2, 3, 4 }, .name = .{ .kind = .beacon_attestation, .subnet = @intCast(subnet) } }, &name);
+        admitted += @intFromBool(tx.gossipTopic(canonical, &ids));
+    }
+    try std.testing.expectEqual(@as(usize, 9), admitted);
+    try std.testing.expectEqual(@as(usize, 0), tx.control.used);
+    try std.testing.expect(tx.finishGossip(1));
+    try std.testing.expectEqual(@as(usize, 1), tx.control.count);
+    try std.testing.expect(!tx.pressure_pending);
+    try std.testing.expectEqual(@as(u64, 0), tx.drops[@intFromEnum(outbox.DropReason.control_bytes)]);
+    var framed = protobuf.Reader.init(tx.control.segment());
+    const length = try framed.varint();
+    try std.testing.expectEqual(tx.control.used, protobuf.varintLen(length) + length);
+    var reader = protobuf.RpcReader.init(tx.control.segment()[protobuf.varintLen(length)..]);
+    for (0..admitted) |subnet| {
+        const item = (try reader.next()).?;
+        try std.testing.expectEqual(@as(u16, @intCast(subnet)), topic_mod.parseCanonical(item.ihave.topic).?.name.subnet);
+        var advertised = item.ihave.ids();
+        for (ids) |id| try std.testing.expectEqualSlices(u8, &id, (try advertised.next()).?);
+        try std.testing.expect(try advertised.next() == null);
+    }
+    try std.testing.expect(try reader.next() == null);
+}
+
+test "gossip advertisement budget includes exact framing boundaries and queue pressure stays separate" {
+    const ids: [constants.gossip_ids_max]MessageId = @splat(@splat(1));
+    for ([_]usize{ 1, 3, 4, 5, constants.gossip_ids_max }) |count| {
+        const rpc_len = protobuf.ihaveRpcSize(test_topic, count, constants.message_id_length);
+        const frame_len = protobuf.varintLen(rpc_len) + rpc_len;
+        for (0..2) |short_by| {
+            var options = resource_options;
+            options.control_bytes = frame_len - short_by;
+            var g = try support.init(std.testing.allocator, options);
+            defer g.deinit();
+            const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+            const tx = &g.sessions.rows[peer.index].io.tx;
+            try std.testing.expectEqual(short_by == 0, tx.gossipTopic(test_topic, ids[0..count]));
+            try std.testing.expect(!tx.gossipTopic(test_topic, ids[0..count]));
+            try std.testing.expect(!tx.pressure_pending);
+            try std.testing.expectEqual(@as(u64, 0), tx.drops[@intFromEnum(outbox.DropReason.control_bytes)]);
+            try std.testing.expectEqual(short_by == 0, tx.finishGossip(1));
+            if (short_by != 0) continue;
+            try std.testing.expectEqual(frame_len, tx.control.used);
+            // A staged batch fits by itself, but a still-queued batch can prevent its submission.
+            try std.testing.expect(tx.gossipTopic(test_topic, ids[0..count]));
+            try std.testing.expect(!tx.finishGossip(2));
+            try std.testing.expect(tx.pressure_pending);
+            try std.testing.expectEqual(@as(u64, 1), tx.drops[@intFromEnum(outbox.DropReason.control_bytes)]);
+            try std.testing.expectEqual(@as(usize, 0), tx.gossip_len);
+            try std.testing.expectEqual(@as(usize, 0), tx.gossip_ids);
+        }
+    }
+}
+
+test "gossip bounded advertisements vary the first active topic across heartbeats" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .control_bytes = 100, .mcache_capacity = 3 });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const row = &g.sessions.rows[peer.index];
+    row.outbound = .{ .live = .{ .stream = .{ .conn = row.conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
+    const names = [_][]const u8{
+        "/eth2/01020304/beacon_block/ssz_snappy",
+        "/eth2/01020304/beacon_attestation_63/ssz_snappy",
+        "/eth2/01020304/data_column_sidecar_127/ssz_snappy",
+    };
+    for (names) |name| {
+        try std.testing.expect(support.activate(&g, name) != null);
+        try std.testing.expect(g.overlay.peerSubscription(&g.overlayContext(0), peer.index, name, true) != null);
+    }
+    var advertised = std.StaticBitSet(names.len).empty;
+    for (0..32) |heartbeat| {
+        const now = Now.fromMilliseconds(.{ .mono_ms = 1 + heartbeat * 1000, .unix_s = 0 });
+        row.io.tx.cancelStream();
+        for (names, 0..) |name, index| {
+            var id: MessageId = @splat(@intCast(index));
+            std.mem.writeInt(u32, id[0..4], @intCast(heartbeat), .little);
+            try std.testing.expect(g.messages.publish(id, support.activate(&g, name).?, name, "payload", now.millis(), g.cycle.epoch) != null);
+        }
+        support.heartbeat(&g, now);
+        for (0..g.overlay.rows.len) |_| {
+            if (!g.cycle.isActive()) break;
+            g.maintainTopics(now);
+        }
+        try std.testing.expect(!g.cycle.isActive());
+        try std.testing.expectEqual(@as(usize, 1), row.io.tx.control.count);
+        try std.testing.expect(!row.io.tx.pressure_pending);
+        var framed = protobuf.Reader.init(row.io.tx.control.segment());
+        const length = try framed.varint();
+        var reader = protobuf.RpcReader.init(row.io.tx.control.segment()[protobuf.varintLen(length)..]);
+        const item = (try reader.next()).?;
+        for (names, 0..) |name, index| {
+            if (std.mem.eql(u8, name, item.ihave.topic)) advertised.set(index);
+        }
+        try std.testing.expect(try reader.next() == null);
+    }
+    try std.testing.expectEqual(names.len, advertised.count());
+    try std.testing.expectEqual(@as(u64, 64), g.counters.ihave_budget_skipped);
+    try std.testing.expectEqual(@as(u64, 0), row.io.tx.drops[@intFromEnum(outbox.DropReason.control_bytes)]);
 }
 
 test "gossip IDONTWANT admits a burst of ids across RPCs and bounds the total" {

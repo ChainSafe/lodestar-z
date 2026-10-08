@@ -208,15 +208,16 @@ pub const Outbox = struct {
     }
 
     /// Accumulates the heartbeat's topic advertisements into one control RPC per peer.
-    pub fn gossipTopic(self: *Outbox, name: []const u8, ids: []const topic.MessageId) void {
+    /// Returns false when this advertisement exceeds the heartbeat's byte or ID budget.
+    pub fn gossipTopic(self: *Outbox, name: []const u8, ids: []const topic.MessageId) bool {
+        assert(name.len <= topic.topic_max_len and ids.len <= constants.gossip_ids_max);
         const body_len = wire.bytesFieldSize(1, name.len) + ids.len * wire.bytesFieldSize(2, constants.message_id_length);
         const entry_len = wire.bytesFieldSize(1, body_len);
+        const rpc_len = wire.bytesFieldSize(3, self.gossip_len + entry_len);
+        const frame_len = protobuf.varintLen(rpc_len) + rpc_len;
         if (self.gossip_ids + ids.len > constants.max_ihave_ids_per_heartbeat or
-            self.gossip.len < 10 or entry_len > self.gossip.len - 10 - self.gossip_len)
-        {
-            self.dropped(.control_bytes);
-            return;
-        }
+            frame_len > self.control.bytes.len or
+            self.gossip.len < 10 or entry_len > self.gossip.len - 10 - self.gossip_len) return false;
         var writer = protobuf.Writer.init(self.gossip[10 + self.gossip_len ..]);
         writer.tag(1, protobuf.wire_len);
         writer.varint(body_len);
@@ -224,6 +225,7 @@ pub const Outbox = struct {
         for (ids) |id| protobuf.writeIhaveId(&writer, &id);
         self.gossip_len += writer.len;
         self.gossip_ids += ids.len;
+        return true;
     }
 
     pub fn finishGossip(self: *Outbox, now_ms: u64) bool {
@@ -235,6 +237,7 @@ pub const Outbox = struct {
         writer.varint(self.gossip_len);
         const begin = 10 - writer.len;
         @memcpy(self.gossip[begin..10], writer.written());
+        assert(writer.len + self.gossip_len <= self.control.bytes.len);
         const result = self.appendControl(self.gossip[begin .. 10 + self.gossip_len], false, now_ms);
         self.gossip_len = 0;
         self.gossip_ids = 0;
