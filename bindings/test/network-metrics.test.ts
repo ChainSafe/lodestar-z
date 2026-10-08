@@ -121,6 +121,13 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
         expect(left.get('lodestar_peer_dial_selections_total{source="manual"}')).toBe(1);
         expect(left.get('lodestar_peer_dial_selections_total{source="discovery"}')).toBe(0);
         expect(left.get(outgoing)).toBe(1);
+        for (const stage of ["opened", "closed"]) {
+          expect(left.get(`beacon_reqresp_outgoing_${stage}_streams_total{method="beacon_blocks_by_root"}`)).toBe(1);
+          expect(right.get(`beacon_reqresp_incoming_${stage}_streams_total{method="beacon_blocks_by_root"}`)).toBe(1);
+        }
+        expect(left.get("beacon_reqresp_dial_errors_total")).toBe(0);
+        expect(left.get("lodestar_peer_long_lived_attnets_count_count")).toBe(1);
+        expect(left.get("lodestar_peer_column_group_count_count")).toBe(1);
         expect(
           left.get('beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method="beacon_blocks_by_root"}')
         ).toBe(1);
@@ -146,6 +153,12 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
     expect(samples(await pair.left.getMetrics()).get("libp2p_peers")).toBe(0);
     expect(samples(await pair.left.getMetrics()).get('lodestar_peer_dial_outcomes_total{outcome="connected"}')).toBe(1);
     expect(samples(await pair.left.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
+    expect(samples(await pair.left.getMetrics()).get("lodestar_peer_long_lived_attnets_count_count")).toBe(0);
+    expect(
+      samples(await pair.left.getMetrics()).get(
+        'beacon_reqresp_outgoing_closed_streams_total{method="beacon_blocks_by_root"}'
+      )
+    ).toBe(1);
   } finally {
     await Promise.all([pair.left.stop(), pair.right.close()]);
   }

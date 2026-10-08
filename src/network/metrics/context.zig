@@ -22,7 +22,7 @@ pub const Context = struct {
         result.socket_drops[0] = owner.transport.sockets.drops();
         if (owner.discovery) |discovery| result.socket_drops[1] = discovery.transport.sockets.drops();
         if (!running) return result;
-        result.population = .collect(&owner.peer_manager.catalog, now.millis());
+        result.population = .collect(&owner.peer_manager.catalog, owner.protocols.gossipsub, now.millis());
         return result;
     }
 

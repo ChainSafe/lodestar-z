@@ -139,6 +139,13 @@ pub fn writeDiscoveryCounters(manager: *const PeerManager, discovery_owner: ?*co
     const datagram_rejections = if (discovery_owner) |d| d.datagram_rejections else @as([Discovery.datagram_rejection_count]u64, @splat(0));
     const queries = try w.family(.{ .name = "lodestar_discovery_find_node_query_requests_total", .kind = .counter, .help = "Foreground discovery queries started", .labels = &.{"action"} });
     try queries.sample(.{"start"}, discovery_counts.lookups_started);
+    const query_time = try w.histograms(.{
+        .name = "lodestar_discovery_find_node_query_time_seconds",
+        .kind = .histogram,
+        .help = "Foreground discovery lookup duration in seconds, excluding cancelled walks",
+        .unit = .seconds,
+    }, @TypeOf(discovery_counts.lookup_time));
+    try query_time.histogram(.{}, &discovery_counts.lookup_time);
     try w.scalar(.{ .name = "lodestar_discovery_candidates_published_total", .kind = .counter, .help = "Authenticated discovery candidates handed to peer selection" }, discovery_counts.candidates_published);
     try w.enums(.{
         .name = "lodestar_discovery_candidate_rejections_total",

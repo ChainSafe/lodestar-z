@@ -10,6 +10,7 @@ const advertisement = @import("../advertisement.zig");
 const Sockets = @import("udp").Sockets;
 const KeyPair = @import("../wire/keys.zig").KeyPair;
 const types_mod = @import("../types.zig");
+const Histogram = @import("../metrics/histogram.zig").Duration;
 
 const Storage = struct {
     observations: d.AddressVotes,
@@ -42,6 +43,7 @@ pub const Discovery = struct {
     pub const Counters = struct {
         lookups_started: u64 = 0,
         candidates_published: u64 = 0,
+        lookup_time: Histogram(&.{ 5_000, 60_000 }) = .{},
     };
     pub const Options = struct {
         quic_mode: d.types.Mode = .dual,
@@ -299,6 +301,7 @@ pub const Discovery = struct {
         self.consumeEvent(progress, out, &result);
         if (self.lookup) |*lookup| if (lookup.isFinished()) {
             self.lookup_finishes[@intFromEnum(lookup.finishReason().?)] +|= 1;
+            self.counters.lookup_time.observe(progress.now_ms -| self.lookup_started_ms);
             std.log.scoped(.network_discovery).debug("lookup_completed reason={s} queried={d} candidates={d} published={d} elapsed_ms={d}", .{ @tagName(lookup.finishReason().?), lookup.queries_started, lookup.candidateCount(), self.counters.candidates_published -| self.lookup_published, progress.now_ms -| self.lookup_started_ms });
             self.lookup = null;
             self.empty_lookups = if (self.counters.candidates_published == self.lookup_published) @min(self.empty_lookups +| 1, 6) else 0;
