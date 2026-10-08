@@ -1,3 +1,8 @@
+/**
+ * Mirrors `ere_verifier_new`'s discriminants.
+ *
+ * Source: https://github.com/eth-act/ere/blob/332d8b1206a85b111b4051d2f8e7162ed3b3bb33/bindings/c/src/lib.rs#L27-L32
+ */
 export declare const ZKVM_KIND: {
   readonly openvm: 0;
   readonly sp1: 1;
@@ -10,7 +15,11 @@ export type ZkvmKindValue = (typeof ZKVM_KIND)[keyof typeof ZKVM_KIND];
 /** False on targets without a prebuilt ere verifier library; registration then throws. */
 export declare const EXECUTION_PROOF_VERIFIER_AVAILABLE: boolean;
 
-/** EIP-8025 `MAX_PROOF_SIZE` in bytes. */
+/**
+ * EIP-8025 `MAX_PROOF_SIZE` in bytes.
+ *
+ * Spec: https://github.com/ethereum/consensus-specs/blob/a06852f7fad3d6c4557808f48ad7a32ed7cbf996/specs/_features/eip8025/beacon-chain.md#L74
+ */
 export declare const EXECUTION_PROOF_MAX_SIZE: 4194304;
 
 /**
