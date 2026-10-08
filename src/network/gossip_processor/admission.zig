@@ -1,12 +1,11 @@
 const std = @import("std");
-const Now = @import("../types.zig").Now;
 const processor = @import("root.zig");
 const gossip = @import("../gossipsub/root.zig");
 const storage = @import("../gossipsub/message_store.zig");
 const none = @import("../index_list.zig").none;
 const assert = std.debug.assert;
 
-pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candidate: *gossip.Gossipsub.MessageAdmission, now: u64, received_at: u64, slot: u64) bool {
+pub fn admit(table: *processor.GossipProcessor, candidate: *gossip.Gossipsub.MessageAdmission, now: u64, received_at: u64, slot: u64) bool {
     const message = &candidate.event;
     if (table.closed or now >= message.deadline or table.order == std.math.maxInt(u64)) return false;
     const topic = candidate.canonical;
@@ -40,7 +39,7 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
         processor_full = !capacityAfter(table, kind, message.bytes.len, tokens[0..count]);
         if (!processor_full and candidate.feasible(handles[0..count])) {
             for (tokens[0..count], handles[0..count]) |token, handle| {
-                table.outcome(owner.report(handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = now, .unix_s = 0 })));
+                table.outcome(candidate.discardVictim(handle));
                 table.retire(token);
             }
             candidate.commit();

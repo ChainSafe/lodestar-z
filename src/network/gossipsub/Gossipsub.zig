@@ -326,7 +326,7 @@ pub fn publishWithOptions(self: *Gossipsub, topic_str: []const u8, ssz: []const 
 }
 
 pub fn messageContext(self: *Gossipsub) messages_mod.Context {
-    return .{ .overlay = self.overlay, .peers = &self.peers, .options = &self.options, .epoch = self.cycle.epoch };
+    return .{ .overlay = self.overlay, .peers = &self.peers, .options = &self.options, .epoch = self.cycle.epoch, .topic_metrics = &self.topic_metrics, .validation_time = &self.validation_time };
 }
 
 pub fn report(self: *Gossipsub, handle: ValidationHandle, verdict: Verdict, now: Now) ReportOutcome {
@@ -335,19 +335,9 @@ pub fn report(self: *Gossipsub, handle: ValidationHandle, verdict: Verdict, now:
     const result = self.messages.report(&context, handle, verdict, now.millis());
     if (result == .applied) {
         const applied = &result.applied;
-        const counts = self.topic_metrics.get(applied.topicString());
-        switch (applied.verdict) {
-            .accept => counts.accepted +|= 1,
-            .reject => counts.rejected +|= 1,
-            .ignore => counts.ignored +|= 1,
-        }
-        self.validation_time.observe(now.millis() -| applied.admitted_ms);
-        if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, applied.id, @tagName(verdict), applied.topicString(), logging.peer(&applied.source), now.millis() -| applied.admitted_ms });
         if (applied.forward) |forward| {
-            if (self.deliver(self.overlay.mesh(forward.topic), forward.message, forward.source, now.millis()).queued > 0) counts.forwarded +|= 1;
+            if (self.deliver(self.overlay.mesh(forward.topic), forward.message, forward.source, now.millis()).queued > 0) self.topic_metrics.get(applied.topicString()).forwarded +|= 1;
         }
-    } else {
-        std.log.scoped(.network_gossip).debug("validation_report_refused validation={d}:{d} verdict={s} reason={s}", .{ handle.index, handle.generation, @tagName(verdict), @tagName(result) });
     }
     return result.outcome();
 }

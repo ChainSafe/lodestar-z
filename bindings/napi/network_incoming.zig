@@ -306,7 +306,7 @@ pub const Table = struct {
     }
 };
 
-fn rejection(err: anyerror) !Rejection {
+fn rejection(err: rr.ReqResp.RespondError) error{ Terminal, StaleHandle, Busy }!Rejection {
     return switch (err) {
         error.InvalidContext => .invalid_context,
         error.UnknownFork => .unknown_fork,
@@ -314,7 +314,9 @@ fn rejection(err: anyerror) !Rejection {
         error.ChunkTooSmall => .chunk_too_small,
         error.TooManyChunks => .too_many_chunks,
         error.InvalidError => .invalid_error,
-        else => err,
+        error.Terminal => error.Terminal,
+        error.StaleHandle => error.StaleHandle,
+        error.Busy => error.Busy,
     };
 }
 fn failure(reason: rr.ReqResp.Failure) !Failure {
@@ -404,9 +406,17 @@ pub fn applyPending(runtime: *Runtime, now: n.Now) !bool {
                 cell.action = .submitted;
             },
             .fail => {
-                core.respondError(cell.handle, cell.error_status, cell.error_message[0..cell.error_len], now) catch |err| {
-                    if (err == error.Terminal) continue;
-                    return err;
+                core.respondError(cell.handle, cell.error_status, cell.error_message[0..cell.error_len], now) catch |err| switch (err) {
+                    error.Terminal => continue,
+                    error.StaleHandle,
+                    error.Busy,
+                    error.InvalidError,
+                    error.InvalidContext,
+                    error.UnknownFork,
+                    error.ChunkTooLarge,
+                    error.ChunkTooSmall,
+                    error.TooManyChunks,
+                    => return err,
                 };
                 cell.action = .submitted;
             },

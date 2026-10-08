@@ -93,7 +93,7 @@ pub const Ingress = struct {
         defer runtime.unlock();
         if (runtime.bridge.stop or self.failure != null) return false;
         const core = &runtime.owner.?.core;
-        const accepted = runtime.bridge.gossip.?.admit(core.protocols.gossipsub, candidate, candidate.event.admitted_ms, received_at, core.current_slot);
+        const accepted = runtime.bridge.gossip.?.admit(candidate, candidate.event.admitted_ms, received_at, core.current_slot);
         runtime.notifyIfReadyLocked();
         return accepted;
     }

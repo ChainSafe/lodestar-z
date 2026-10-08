@@ -6,6 +6,27 @@ const Control = @import("control.zig").Control;
 const rr = @import("../reqresp/root.zig");
 const Now = @import("../types.zig").Now;
 
+test "control disconnect returns the original closing state and refuses stale connections" {
+    const a = std.testing.allocator;
+    var catalog = try Catalog.init(a, .{ .capacity = 1, .outbound_reserve = 0, .target_peers = 1, .max_peers = 1, .min_outbound = 0 }, 1, 0);
+    defer catalog.deinit(a);
+    var control = try Control.init(a, .{}, 1);
+    defer control.deinit(a);
+    const now = Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 });
+    const conn: t.Handle = .{ .index = 0, .generation = 1 };
+    const peer = catalog.admit(&.{ .bytes = @splat(1) }, &.{ .bytes = @splat(0) }, conn, &.{ .direction = .inbound, .endpoint = .unspecified, .now_ms = now.millis() }).admitted.peer;
+    control.connected(&catalog, peer, conn, .inbound, now);
+    try std.testing.expect(control.disconnect(&catalog, peer, .{ .index = 0, .generation = 2 }, .host, now) == null);
+    const closing = control.disconnect(&catalog, peer, conn, .host, now).?;
+    try std.testing.expectEqual(t.DisconnectReason.host, closing.reason);
+    try std.testing.expectEqual(@as(u64, 2010), closing.deadline_ms);
+    closing.sent = true;
+    const repeated = control.disconnect(&catalog, peer, conn, .remote_goodbye, Now.fromMilliseconds(.{ .mono_ms = 20, .unix_s = 0 })).?;
+    try std.testing.expectEqual(Control.Closing{ .reason = .host, .deadline_ms = 2010, .sent = true }, repeated.*);
+    control.retire(peer, conn);
+    try std.testing.expect(control.disconnect(&catalog, peer, conn, .host, now) == null);
+}
+
 test "control repeated Status intent preserves the first due time" {
     var control = try Control.init(std.testing.allocator, .{}, 2);
     defer control.deinit(std.testing.allocator);

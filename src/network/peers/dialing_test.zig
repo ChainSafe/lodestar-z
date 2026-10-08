@@ -544,4 +544,15 @@ test "peer dial scheduling observes dirty intents without applying them" {
     try std.testing.expectEqual(@as(u32, 0), catalog.dial.dirty_count);
     try std.testing.expect(!queue.schedule(&catalog, 0).runnable);
     try std.testing.expect(queue.schedule(&catalog, 1).due(time.milliseconds(100)));
+    const ref = catalog.find(&peer).?;
+    try std.testing.expect(catalog.edit(.{ .index = ref.index, .generation = ref.generation + 1 }) == null);
+    try std.testing.expect(catalog.rowFor(ref) != null);
+    try std.testing.expect(!queue.schedule(&catalog, 0).runnable);
+    catalog.edit(ref).?.dial.deferUntil(200);
+    try std.testing.expect(queue.schedule(&catalog, 0).runnable);
+    var selected: [1]mod.Dialing.SelectedDial = undefined;
+    try std.testing.expectEqual(@as(usize, 0), queue.poll(&catalog, 199, &selected));
+    try std.testing.expect(!queue.schedule(&catalog, 0).runnable);
+    try std.testing.expectEqual(@as(usize, 1), queue.poll(&catalog, 200, &selected));
+    try std.testing.expect(selected[0].peer.eql(&peer));
 }

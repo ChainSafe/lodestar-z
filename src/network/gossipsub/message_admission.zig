@@ -126,6 +126,12 @@ pub const Admission = struct {
         return false;
     }
 
+    /// Ignore a victim included in the successful preflight, before committing its replacement.
+    pub fn discardVictim(self: *Admission, handle: validation.Handle) validation.Outcome {
+        assert(!self.committed);
+        return self.messages.report(self.context, handle, .ignore, self.event.admitted_ms).outcome();
+    }
+
     pub fn commit(self: *Admission) void {
         assert(!self.committed);
         const owner = self.messages;

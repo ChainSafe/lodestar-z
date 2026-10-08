@@ -663,9 +663,9 @@ test "peer catalog uses empty established slots before reclaiming disconnected i
             var c = try Catalog.initWithIntents(std.testing.allocator, options, 2, 4, 0);
             defer c.deinit(std.testing.allocator);
             const peer = try c.retainIntent(&remote);
-            c.rowForMut(peer).?.dial.automatic = true;
-            c.rowForMut(peer).?.dial.addresses = .{ .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9001 } }, .unspecified };
-            c.rowForMut(peer).?.dial.address_count = 1;
+            c.edit(peer).?.dial.automatic = true;
+            c.edit(peer).?.dial.addresses = .{ .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9001 } }, .unspecified };
+            c.edit(peer).?.dial.address_count = 1;
             try std.testing.expectEqual(peer, admit(&c, &remote, first, direction, 0).admitted.peer);
             try std.testing.expect(c.disconnect(peer, first, .transport_closed, .{}, at(1)));
             var events: [3]t.Event = undefined;
