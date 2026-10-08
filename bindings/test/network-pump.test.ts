@@ -1275,10 +1275,10 @@ it("stops log delivery with a final drain when native closes", async () => {
   node.runtime.drainLogs.mockReturnValue({...noLogs, more: true});
   node.closed.resolve({reason: "requested"});
   await macrotask();
-  expect(node.runtime.drainLogs).toHaveBeenCalledTimes(4);
+  expect(node.runtime.drainLogs).toHaveBeenCalledTimes(8);
   expect(vi.getTimerCount()).toBe(0);
   vi.advanceTimersByTime(2500);
-  expect(node.runtime.drainLogs).toHaveBeenCalledTimes(4);
+  expect(node.runtime.drainLogs).toHaveBeenCalledTimes(8);
 });
 
 it("subscribes before the initial snapshot and keeps recovery reported during that read", async () => {

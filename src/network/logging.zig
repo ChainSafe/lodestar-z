@@ -3,9 +3,9 @@ const prom = @import("metrics/registry.zig");
 const peer_id = @import("wire/peer_id.zig");
 
 pub const Scope = enum { network_runtime, network_core, network_quic, network_peers, network_reqresp, network_reqresp_errors, network_gossip, network_mesh, network_discovery, network_bridge, network_gossip_errors };
-pub const capacity = 128;
+pub const capacity = 2048;
 pub const message_capacity = 768;
-pub const drain_max = 32;
+pub const drain_max = 256;
 const scope_count = @typeInfo(Scope).@"enum".fields.len;
 const level_count = @typeInfo(std.log.Level).@"enum".fields.len;
 pub const scope_levels: []const std.log.ScopeLevel = &.{
@@ -96,16 +96,16 @@ pub const Sink = struct {
             self.window_levels = @splat(0);
             self.window_scopes = @splat(@splat(0));
         }
-        const per_level = [_]u16{ 8, 16, 16, 64 };
-        if (self.window_levels[l] == per_level[l] or self.window_scopes[s][l] == 8) {
+        const per_level = [_]u16{ 128, 256, 256, 1024 };
+        if (self.window_levels[l] == per_level[l] or self.window_scopes[s][l] == 128) {
             counts.suppressed +|= 1;
             return;
         }
         self.window_levels[l] += 1;
         self.window_scopes[s][l] += 1;
         const reserve: u16 = switch (level) {
-            .debug => 32,
-            .info => 16,
+            .debug => 512,
+            .info => 256,
             .warn, .err => 0,
         };
         if (self.len >= capacity - reserve) {

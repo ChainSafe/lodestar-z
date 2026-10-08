@@ -1,8 +1,8 @@
 /** Native log records delivered to the host every `LOG_MS`, at most `LOG_RECORDS` per delivery. */
-export const LOG_MS = 250;
-export const LOG_RECORDS = 32;
+export const LOG_MS = 100;
+export const LOG_RECORDS = 256;
 /** Deliveries of the final drain once native closed. */
-const LOG_FINAL = 4;
+const LOG_FINAL = 8;
 /** Record loss is reported at most this often, with every loss since the last report. */
 const LOG_LOSS_MS = 30000;
 export const LOG_ERRORS_NAME = "lodestar_native_log_delivery_errors_total";

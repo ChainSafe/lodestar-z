@@ -28,7 +28,7 @@ export class NativeRuntime {
   getMetrics() {
     return this.#native.getMetrics();
   }
-  drainLogs(maxRecords = 32) {
+  drainLogs(maxRecords = 256) {
     return this.#native.drainLogs(maxRecords);
   }
   setLogLevel(level) {

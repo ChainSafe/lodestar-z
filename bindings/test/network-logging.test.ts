@@ -9,8 +9,8 @@ async function drain(
   runtime: Pick<NativeNetworkApplicationRuntime, "drainLogs"> | Pick<PeerRuntime, "drainLogs">
 ): Promise<NativeLogRecord[]> {
   const records: NativeLogRecord[] = [];
-  for (let i = 0; i < 4; i++) {
-    const batch = await runtime.drainLogs(32);
+  for (let i = 0; i < 8; i++) {
+    const batch = await runtime.drainLogs(256);
     records.push(...batch.records);
     if (!batch.more) return records;
   }
@@ -115,7 +115,7 @@ test("native logging rejects malformed controls and honors off", async () => {
     for (const level of ["debug-extra", "info-extra", "error-extra", "", "trace", "DEBUG", "debug\0", null, 0]) {
       expect(() => Reflect.apply(runtime.setLogLevel, runtime, [level])).toThrow("InvalidNetworkLogLevel");
     }
-    for (const limit of [0, -1, 33, 1.5, NaN, Infinity, "1", null]) {
+    for (const limit of [0, -1, 257, 1.5, NaN, Infinity, "1", null]) {
       expect(() => Reflect.apply(runtime.drainLogs, runtime, [limit])).toThrow("InvalidDrainLimit");
     }
     runtime.setLogLevel("off");
