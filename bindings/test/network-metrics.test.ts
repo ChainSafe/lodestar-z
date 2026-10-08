@@ -135,6 +135,7 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
         expect(left.get(incoming)).toBe(0);
         expect(right.get(incoming)).toBe(1);
         expect(right.get(outgoing)).toBe(0);
+        expect(right.get('beacon_reqresp_incoming_requests_error_total{method="beacon_blocks_by_root"}')).toBe(0);
       },
       {timeout: 5000}
     );
@@ -148,4 +149,31 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
   } finally {
     await Promise.all([pair.left.stop(), pair.right.close()]);
   }
+}, 20000);
+
+test("incoming error responses use the request error metric exactly once", async () => {
+  const pair = await incomingPair();
+  const incomingErrors = 'beacon_reqresp_incoming_requests_error_total{method="beacon_blocks_by_root"}';
+  const outgoingErrors = 'beacon_reqresp_outgoing_requests_error_total{method="beacon_blocks_by_root"}';
+  let expected = 0;
+  try {
+    for (const status of [2, 3]) {
+      const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
+      const rejected = expect(stream.next()).rejects.toMatchObject({peerStatus: status, reason: "peer_error"});
+      const request = await takeIncoming(pair.right);
+      await request.fail(status, new TextEncoder().encode("Unavailable"));
+      await rejected;
+      expected++;
+      await vi.waitFor(
+        async () => {
+          expect(samples(pair.right.getMetrics()).get(incomingErrors), `response status ${status}`).toBe(expected);
+          expect(samples(await pair.left.getMetrics()).get(outgoingErrors), `response status ${status}`).toBe(expected);
+        },
+        {timeout: 5000}
+      );
+    }
+  } finally {
+    await Promise.all([pair.left.stop(), pair.right.close()]);
+  }
+  expect(samples(pair.right.getMetrics()).get(incomingErrors)).toBe(expected);
 }, 20000);

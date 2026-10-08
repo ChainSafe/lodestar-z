@@ -74,17 +74,6 @@ export class IncomingRecord {
       // Runtime teardown also releases native serving capacity.
     }
   }
-
-  /** Cancels a stream no facade serves, and returns its slot. */
-  abandon() {
-    this.#released = true;
-    try {
-      this.route.deref()?.incomingTerminal(this.handle, 2, undefined, undefined);
-      this.route.deref()?.incomingRelease(this.handle);
-    } catch {
-      // Runtime teardown also releases native serving capacity.
-    }
-  }
 }
 
 export class NativeIncoming {

@@ -642,7 +642,10 @@ export interface NativeNetwork {
   updateStatus(status: NetworkStatusUpdate): Promise<void>;
   /** Copies `root` before returning. Throws InvalidNetworkBytes unless it is a 32-byte Uint8Array. */
   blockImported(root: Uint8Array): void;
-  /** Throws, queueing nothing, for a malformed peer id or an unknown action. */
+  /**
+   * Coalesces up to 512 distinct peer/action pairs between exchanges. Reports for additional pairs are dropped and
+   * counted in lodestar_peers_report_peer_dropped_total. Throws, queueing nothing, for a malformed peer id or unknown action.
+   */
   reportPeer(peerId: PeerIdStr, action: NativePeerAction): void;
   dropQueuedGossip(): void;
   /**
@@ -652,6 +655,7 @@ export interface NativeNetwork {
   stopDelivery(): void;
   /** Copies admitted input. Admission pressure rejects with admission_full before any publication. */
   publish(topic: string, data: Uint8Array, options?: NativeGossipPublishOptions): Promise<NativeGossipPublishResult>;
+  /** Throws synchronously for invalid input, admission refusal or a closed network; admitted failures reject next(). */
   request(
     peerId: PeerIdStr,
     protocol: NativeRequestProtocolId,
@@ -673,8 +677,8 @@ export interface NativeNetwork {
   /** Remembered peers for the host to persist. Take the final snapshot before close, which refuses it. */
   getRememberedPeers(): Promise<NativeRememberedPeersSnapshot>;
   /**
-   * Prometheus text: the owner's families, rendered once per second, the drain burst histogram and the log delivery
-   * errors.
+   * Prometheus text: the owner's families, rendered once per second, the drain burst histogram, dropped peer reports
+   * and log delivery errors.
    */
   metrics(): string;
   /** Selects the threshold native records are kept at from now on. */

@@ -426,6 +426,7 @@ test("the facade validates its host, starts without host callbacks and hides the
     expect(rendered).toEqual([
       ...native,
       "lodestar_network_drain_burst_seconds",
+      "lodestar_peers_report_peer_dropped_total",
       "lodestar_network_log_delivery_errors_total",
       "lodestar_network_log_drain_errors_total",
     ]);

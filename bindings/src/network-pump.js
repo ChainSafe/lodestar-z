@@ -38,6 +38,7 @@ const SERVING_MAX = 32;
 /** Maximum serving starts handed to the host per turn. */
 const SERVING_STARTS = 8;
 export const BURST_NAME = "lodestar_network_drain_burst_seconds";
+const REPORTS_DROPPED_NAME = "lodestar_peers_report_peer_dropped_total";
 export const BURST_BUCKETS = Object.freeze([0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2]);
 const VERDICTS = new Set(["accept", "reject", "ignore"]);
 const noop = () => undefined;
@@ -155,10 +156,6 @@ export class NativePump {
   #burst = {buckets: new Array(BURST_BUCKETS.length).fill(0), count: 0, sum: 0};
   /** @type {LogDelivery | null} */
   #logs = null;
-  /** Peer penalties dropped because the coalescing table was full. */
-  get reportsDropped() {
-    return this.#actions.reportsDropped;
-  }
 
   /**
    * @param {Host} host
@@ -677,7 +674,7 @@ export class NativePump {
 
   /**
    * The drain burst histogram, whose duration includes intervening event-loop work, and separate counters for
-   * undelivered log records and failed log drains, in exposition format.
+   * dropped peer reports, undelivered log records and failed log drains, in exposition format.
    */
   metrics() {
     const {buckets, sum, count} = this.#burst;
@@ -688,6 +685,11 @@ export class NativePump {
     for (let i = 0; i < BURST_BUCKETS.length; i++)
       lines.push(`${BURST_NAME}_bucket{le="${BURST_BUCKETS[i]}"} ${buckets[i]}`);
     lines.push(`${BURST_NAME}_bucket{le="+Inf"} ${count}`, `${BURST_NAME}_sum ${sum}`, `${BURST_NAME}_count ${count}`);
+    lines.push(
+      `# HELP ${REPORTS_DROPPED_NAME} Peer reports dropped because the binding's pending report table was full`,
+      `# TYPE ${REPORTS_DROPPED_NAME} counter`,
+      `${REPORTS_DROPPED_NAME} ${this.#actions.reportsDropped}`
+    );
     assert(this.#logs !== null);
     return `${lines.join("\n")}\n${this.#logs.metrics()}`;
   }
