@@ -26,6 +26,8 @@ pub const MAX_PROOF_SIZE: u32 = @intCast(Verifier.max_proof_bytes);
 /// False on targets without a prebuilt ere verifier library.
 pub const available: bool = Verifier.available;
 
+/// The identifier of the proof system, guest program, and version associated with an execution proof.
+///
 /// Spec: https://github.com/ethereum/consensus-specs/blob/a06852f7fad3d6c4557808f48ad7a32ed7cbf996/specs/_features/eip8025/beacon-chain.md#new-prooftype
 const ProofType = u8;
 
