@@ -26,13 +26,11 @@ pub const MAX_PROOF_SIZE: u32 = @intCast(Verifier.max_proof_bytes);
 /// False on targets without a prebuilt ere verifier library.
 pub const available: bool = Verifier.available;
 
-/// `ProofType` is a uint8.
-///
-/// Spec: https://github.com/ethereum/consensus-specs/blob/a06852f7fad3d6c4557808f48ad7a32ed7cbf996/specs/_features/eip8025/beacon-chain.md#L59
-const max_proof_types = 256;
+/// Spec: https://github.com/ethereum/consensus-specs/blob/a06852f7fad3d6c4557808f48ad7a32ed7cbf996/specs/_features/eip8025/beacon-chain.md#new-prooftype
+const ProofType = u8;
 
 const State = struct {
-    verifiers: [max_proof_types]?Verifier = @splat(null),
+    verifiers: [std.math.maxInt(ProofType) + 1]?Verifier = @splat(null),
 
     pub fn deinit(self: *State) void {
         for (&self.verifiers) |*slot| {
@@ -44,10 +42,8 @@ const State = struct {
 
 pub var state: State = .{};
 
-fn proofTypeIndex(proof_type: js.Number) !u8 {
-    const raw = try proof_type.toU32Exact();
-    if (raw >= max_proof_types) return error.InvalidProofType;
-    return @intCast(raw);
+fn proofTypeIndex(proof_type: js.Number) !ProofType {
+    return std.math.cast(ProofType, try proof_type.toU32Exact()) orelse error.InvalidProofType;
 }
 
 fn zkvmKindFromNumber(zkvm_kind: js.Number) !Verifier.ZkvmKind {
