@@ -62,7 +62,7 @@
             .hash = "zio-0.14.0-xHbVVPxFHgBCop4CvfF4u360kzWlHD4FS8Ud-RIkPcZ7",
         },
         .ere = .{
-            .url = "git+https://github.com/ChainSafe/ere.zig#29781c4484d3ec3402d217d5df74a30d6ec5b7f7",
+            .url = "git+https://github.com/ChainSafe/ere.zig#8f7a85004983089d25afff22a80b8b9ca5e1b6d3",
             .hash = "ere_zig-0.1.0-UBcsLY02AACvO3q1mTXI97rWKWElKKCOHi803qo13jln",
         },
     },
