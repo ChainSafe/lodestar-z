@@ -16,6 +16,72 @@ const test_pair = @import("test_pair.zig");
 const topic_fixture = @import("topic_fixture.zig");
 const protobuf = @import("protobuf.zig");
 
+fn publicationLimits() !Gossipsub.Options {
+    var limits: gossip_limits.Limits = @splat(.{ .items = 2, .bytes = 4096 });
+    limits[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .items = 8, .bytes = 24 * 1024 * 1024 };
+    var options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 3, .retained_capacity = 4, .retained_outbound_reserve = 1 };
+    try options.setPayloadLimits(&limits);
+    return options;
+}
+
+test "publication uses history capacity while remote block validation is full" {
+    var options = try publicationLimits();
+    var boundary: topic_policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+    boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 4096 };
+    options.topic_policy = &.{boundary};
+    var g = try support.init(std.testing.allocator, options);
+    defer g.deinit();
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
+    try support.subscribe(&g, test_topic);
+    for (0..2) |index| {
+        const peer = support.addPeer(&g, .{ .index = @intCast(index), .generation = 1 }, .v1_2).?;
+        for (0..4) |item| {
+            const body = [_]u8{@intCast(index * 4 + item)};
+            try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, peer.index, &body, 1));
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 8), g.messages.pendingValidations());
+    try std.testing.expect(g.messages.store.canReserve(64));
+    _ = try g.publish(test_topic, "local", Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
+    try std.testing.expectEqual(@as(usize, 8), g.messages.pendingValidations());
+    try std.testing.expectEqual(@as(usize, 1), g.messages.history.count);
+    try std.testing.expect(g.messages.wasSeen(topic_mod.validMessageId(test_topic, "local", .{}), 2));
+}
+
+test "publication queues despite a full ordinary block allowance" {
+    var options = try publicationLimits();
+    var boundary: topic_policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+    boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 4096 };
+    options.topic_policy = &.{boundary};
+    var g = try support.init(std.testing.allocator, options);
+    defer g.deinit();
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
+    try support.subscribe(&g, test_topic);
+    const sender = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const recipient = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
+    const t = g.overlay.findTopic(test_topic).?;
+    _ = g.overlay.peerSubscription(&g.overlayContext(0), recipient.index, test_topic, true);
+    g.overlay.rows[t].mesh.set(recipient.index);
+    g.markDirect(g.sessions.rows[recipient.index].conn);
+    for (0..2) |index| {
+        const body = [_]u8{@intCast(index)};
+        try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, sender.index, &body, 1));
+        _ = g.report(inbox.last().handle, .accept, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
+    }
+    const queue = &g.sessions.rows[recipient.index].io.tx.data;
+    try std.testing.expectEqual(@as(usize, 2), queue.count);
+    try std.testing.expectEqual(@as(usize, 0), queue.local_bytes);
+    try std.testing.expect(queue.bytes < g.options.tx_peer_bytes - g.options.tx_local_bytes);
+    const outcome = try g.publishWithOptions(test_topic, "local", .{ .allow_zero_peers = false }, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }));
+    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, outcome);
+    try std.testing.expect(g.messages.wasSeen(topic_mod.validMessageId(test_topic, "local", .{}), 3));
+    try std.testing.expectError(error.Duplicate, g.publish(test_topic, "local", Now.fromMilliseconds(.{ .mono_ms = 4, .unix_s = 0 })));
+}
+
 test "publication refusal retry duplicate and exact expiry preserve admission" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .seen_ttl_ms = 100, .mcache_capacity = 2, .seen_capacity = 2 });
     defer g.deinit();

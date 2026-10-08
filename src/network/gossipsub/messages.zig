@@ -194,12 +194,13 @@ pub const Messages = struct {
     }
 
     pub fn publish(self: *Messages, id: MessageId, topic: u16, name: []const u8, compressed: []const u8, now: u64, epoch: u64) ?storage.Handle {
-        const handle = self.history.admitPayload(&self.store, id, name, compressed) orelse return null;
-        if (!self.retain(handle)) {
-            self.store.seal(handle);
+        const handle = self.history.admitPublication(&self.store, id, name, compressed, topic, epoch) catch |err| {
+            if (err == error.Retention) {
+                const kind = topic_mod.parseCanonical(name).?.name.kind;
+                self.retention_refusals[@intFromEnum(kind)] +|= 1;
+            }
             return null;
-        }
-        self.history.put(&self.store, handle, topic, epoch);
+        };
         self.store.seal(handle);
         std.debug.assert(self.seen.add(id, now));
         return handle;
@@ -323,7 +324,7 @@ pub const Messages = struct {
                 if (verdict == .reject) context.peers.invalid(d.peer, entry.topic) else if (d.eligible) context.peers.scores.creditMesh(d.peer.index, entry.topic);
             }
         }
-        self.validation.finish(&self.store, handle, verdict, now);
+        self.validation.finish(&self.store, context.peers, handle, verdict, now);
         return .{ .applied = result };
     }
 

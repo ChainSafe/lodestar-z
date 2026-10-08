@@ -11,6 +11,9 @@ const bucket_count = mcache.indexCapacity(constants.promises_cap);
 const outbox_mod = @import("outbox.zig");
 const mcache = @import("mcache.zig");
 
+/// Every retained identity keeps room for recovery even when other identities borrow the rest.
+pub const promises_reserved_per_peer = 8;
+
 pub const promises_per_peer = constants.max_ihave_per_heartbeat * constants.gossip_ids_max;
 
 /// `next` links a batch's requests, or the free slots; `bucket_next` and `bucket_prev` link the
@@ -43,7 +46,8 @@ pub const Recovery = struct {
     armed: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) !Recovery {
-        comptime assert(promises_per_peer < constants.promises_cap and constants.promises_cap < none);
+        comptime assert(promises_per_peer < constants.promises_cap and constants.promises_cap < none and
+            promises_reserved_per_peer * constants.retained_peers_cap <= constants.promises_cap / 2);
         const requests = try allocator.alloc(Request, constants.promises_cap);
         errdefer allocator.free(requests);
         const batches = try allocator.alloc(Batch, constants.promises_cap);
@@ -85,7 +89,7 @@ pub const Recovery = struct {
 
     pub const Selection = struct { count: usize, capacity: usize };
 
-    pub fn filterPending(self: *const Recovery, peer: PeerRef, ids: []MessageId) error{PeerCapacity}!Selection {
+    pub fn filterPending(self: *const Recovery, peers: *const Peers, peer: PeerRef, ids: []MessageId) error{PeerCapacity}!Selection {
         assert(ids.len <= constants.max_ihave_ids_per_heartbeat);
         std.sort.heap(MessageId, ids, {}, lessThan);
         var unique: usize = 0;
@@ -95,10 +99,11 @@ pub const Recovery = struct {
             unique += 1;
         }
         var requested = std.StaticBitSet(constants.max_ihave_ids_per_heartbeat).empty;
-        var pending: usize = 0;
+        assert(peers.matches(peer));
+        var pending: [constants.retained_peers_cap]u16 = @splat(0);
         for (self.batches[0..self.batch_len]) |batch| {
+            pending[batch.peer.index] += batch.count;
             if (!std.meta.eql(batch.peer, peer)) continue;
-            pending += batch.count;
             var slot = batch.head;
             for (0..batch.count) |_| {
                 const request = self.requests[slot];
@@ -107,8 +112,12 @@ pub const Recovery = struct {
             }
             assert(slot == none);
         }
-        if (pending >= promises_per_peer) return error.PeerCapacity;
-        const capacity = @min(self.available(), promises_per_peer - pending);
+        var protected: usize = 0;
+        for (pending[0..peers.rows.len], 0..) |used, index| {
+            if (index != peer.index) protected += promises_reserved_per_peer -| used;
+        }
+        const capacity = @min(self.available() -| protected, promises_per_peer -| pending[peer.index]);
+        if (capacity == 0) return error.PeerCapacity;
         var count: usize = 0;
         for (ids[0..unique], 0..) |id, index| {
             if (requested.isSet(index)) continue;
@@ -124,7 +133,7 @@ pub const Recovery = struct {
         // Heap construction and removal visit at most 3n/2 paths. Each level
         // compares two ID pairs and swaps three IDs. Include deduplication,
         // compaction, binary-search comparisons and the batch/bitset scans.
-        return 16 * ids * (levels + 1) * @sizeOf(MessageId) +
+        return 2 * @sizeOf([constants.retained_peers_cap]u16) + 16 * ids * (levels + 1) * @sizeOf(MessageId) +
             requests * (levels + 1) * 2 * @sizeOf(MessageId) +
             batches * @sizeOf(Batch) + @sizeOf(std.StaticBitSet(constants.max_ihave_ids_per_heartbeat));
     }

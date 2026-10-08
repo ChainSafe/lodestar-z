@@ -10,6 +10,62 @@ const support = @import("dialing_test_support.zig");
 const discovered = support.discovered;
 const initCatalog = support.initCatalog;
 
+test "discovery candidate diversity bypasses grace without concentrating the next replacement" {
+    for ([_]bool{ false, true }) |ipv6| {
+        var q = try mod.Dialing.init(.{ .capacity = 4, .concurrent_max = 1, .seed = 4 });
+        var catalog = try initCatalog(a, q.options);
+        defer catalog.deinit(a);
+        for (1..5) |tag| {
+            var candidate = try discovered(@intCast(tag), 1);
+            candidate.addresses[0] = candidateAddress(ipv6, 1, @intCast(tag));
+            try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{ .syncnets = 1 }, 0);
+        }
+        var same_prefix = try discovered(5, 1);
+        same_prefix.addresses[0] = candidateAddress(ipv6, 1, 5);
+        try std.testing.expectError(error.Capacity, q.enqueueDiscovered(&catalog, &same_prefix, &.{}, &.{ .syncnets = 1 }, 1));
+        var diverse = try discovered(6, 1);
+        diverse.addresses[0] = candidateAddress(ipv6, 2, 1);
+        try q.enqueueDiscovered(&catalog, &diverse, &.{}, &.{ .syncnets = 1 }, 1);
+        const retained = catalog.find(&diverse.peer).?;
+        try std.testing.expectEqual(@as(u16, 4), catalog.intent_count);
+        try std.testing.expectError(error.Capacity, q.enqueueDiscovered(&catalog, &same_prefix, &.{}, &.{ .syncnets = 1 }, 2));
+        try q.enqueueDiscovered(&catalog, &same_prefix, &.{}, &.{ .syncnets = 1 }, catalog_mod.Catalog.replacement_grace_ms);
+        try std.testing.expect(catalog.rowFor(retained) != null);
+    }
+}
+
+test "discovery diversity preserves active dials manual candidates and better coverage" {
+    for ([_]enum { active, manual, useful }{ .active, .manual, .useful }) |protected| {
+        var q = try mod.Dialing.init(.{ .capacity = 2, .concurrent_max = 2, .seed = 4 });
+        var catalog = try initCatalog(a, q.options);
+        defer catalog.deinit(a);
+        for (1..3) |tag| {
+            const candidate = try discovered(@intCast(tag), 1);
+            if (protected == .manual) {
+                try q.enqueue(&catalog, &candidate.peer, &.{address}, false, 0);
+            } else try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{ .syncnets = 1 }, 0);
+        }
+        if (protected == .active) {
+            var selected: [2]mod.Dialing.SelectedDial = undefined;
+            try std.testing.expectEqual(@as(usize, 2), q.poll(&catalog, 0, &selected));
+        }
+        var diverse = try discovered(3, if (protected == .useful) 0 else 1);
+        diverse.addresses[0] = candidateAddress(false, 2, 1);
+        try std.testing.expectError(error.Capacity, q.enqueueDiscovered(&catalog, &diverse, &.{}, &.{ .syncnets = 1 }, 1));
+        try std.testing.expectEqual(@as(u16, 2), catalog.intent_count);
+    }
+}
+
+fn candidateAddress(ipv6: bool, subnet: u8, host: u8) t.Address {
+    if (!ipv6) return .{ .ip4 = .{ .octets = .{ 192, 0, subnet, host }, .port = 9000 + @as(u16, host) } };
+    var octets: [16]u8 = @splat(0);
+    octets[0] = 0x20;
+    octets[1] = 0x01;
+    octets[5] = subnet;
+    octets[15] = host;
+    return .{ .ip6 = .{ .octets = octets, .port = 9000 + @as(u16, host) } };
+}
+
 test "connected discovery peers preserve records without occupying candidate capacity" {
     for ([_]bool{ false, true }) |discovered_first| {
         var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });

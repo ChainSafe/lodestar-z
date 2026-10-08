@@ -218,7 +218,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
         var pins: [4]u32 = @splat(0);
         for (g.messages.validation.recent) |*record| {
             records_pending += @intFromBool(record.state == .pending);
-            if (!record.pinned) continue;
+            if (record.state != .pending) continue;
             try std.testing.expect(g.peers.matches(record.source));
             pins[record.source.index] += 1;
             for (record.duplicates[0..record.duplicate_len]) |*duplicate| {
@@ -245,8 +245,8 @@ test "gossip validation finishes without allocation while shared deliveries are 
         g.overlay.rows[topic].mesh.set(i);
         const count: usize = if (i == 0) delivery.per_peer_limit else delivery.per_peer_reserve;
         const tx = &g.sessions.rows[i].io.tx;
-        for (0..count) |_| {
-            const origin: delivery.Origin = if (tx.data.full()) .publication else .forward;
+        for (0..count) |item| {
+            const origin: delivery.Origin = if (item >= count - g.options.tx_local_descriptors) .publication else .forward;
             try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, message, origin, .{ .bytes = g.options.tx_peer_bytes }, 0));
         }
     }

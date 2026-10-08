@@ -10,6 +10,51 @@ const storage = @import("message_store.zig");
 const constants = @import("constants.zig");
 const topic = @import("topic.zig");
 const topic_policy = @import("topic_policy.zig");
+const gossip_limits = @import("../gossip_limits.zig");
+
+test "gossip full pending kind refuses admission without evicting history" {
+    const names = [_][]const u8{
+        "/eth2/01020304/beacon_block/ssz_snappy",
+        "/eth2/01020304/beacon_aggregate_and_proof/ssz_snappy",
+        "/eth2/01020304/beacon_attestation_0/ssz_snappy",
+        "/eth2/01020304/proposer_slashing/ssz_snappy",
+        "/eth2/01020304/attester_slashing/ssz_snappy",
+        "/eth2/01020304/voluntary_exit/ssz_snappy",
+        "/eth2/01020304/sync_committee_contribution_and_proof/ssz_snappy",
+        "/eth2/01020304/sync_committee_0/ssz_snappy",
+        "/eth2/01020304/light_client_finality_update/ssz_snappy",
+        "/eth2/01020304/light_client_optimistic_update/ssz_snappy",
+        "/eth2/01020304/bls_to_execution_change/ssz_snappy",
+        "/eth2/01020304/blob_sidecar_0/ssz_snappy",
+        "/eth2/01020304/data_column_sidecar_0/ssz_snappy",
+    };
+    const limits: gossip_limits.Limits = @splat(.{ .items = 2, .bytes = 1024 * 1024 });
+    var store = try storage.Store.init(std.testing.allocator, 2 * gossip_limits.items(&limits), 2 * gossip_limits.bytes(&limits));
+    defer store.deinit(std.testing.allocator);
+    store.limits = limits;
+    var history = try History.init(std.testing.allocator, gossip_limits.items(&limits), 1, 13);
+    defer history.deinit(std.testing.allocator);
+    const payload = [_]u8{9} ** (storage.inline_bytes + 1);
+    var pending: [26]storage.Handle = undefined;
+    for (names, 0..) |name, i| {
+        try std.testing.expectEqual(@as(topic.Kind, @enumFromInt(i)), topic.parseCanonical(name).?.name.kind);
+        for (0..2) |j| {
+            const cached = store.put(@splat(@intCast(4 * i + 2 * j)), name, &payload).?;
+            history.put(&store, cached, @intCast(i), 0);
+            store.seal(cached);
+            pending[2 * i + j] = store.put(@splat(@intCast(4 * i + 2 * j + 1)), name, &payload).?;
+            store.retainValidation(pending[2 * i + j]);
+            store.seal(pending[2 * i + j]);
+        }
+    }
+    try std.testing.expectEqual(store.entries.len, store.used_entries);
+    const free_pages = store.free_pages;
+    try std.testing.expectEqual(@as(usize, 26), history.count);
+    try std.testing.expect(history.admitPayload(&store, @splat(255), names[0], &payload) == null);
+    try std.testing.expectEqual(@as(usize, 26), history.count);
+    try std.testing.expectEqual(free_pages, store.free_pages);
+    for (pending) |handle| store.releaseValidation(handle);
+}
 
 test "gossip history visits only matching topics through eviction and replacement" {
     const a = std.testing.allocator;

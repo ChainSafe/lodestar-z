@@ -33,14 +33,14 @@ pub const Receipt = struct { origin: Origin };
 
 const Slot = struct { tx: Transmission = undefined, next: u32 = none };
 
-/// Empty queues retain a protected share of the pool. Above that share, a queue
-/// can use only unreserved slots, up to its per-peer limit. Control uses no slots.
+/// Each queue protects its initial descriptors and unused local reservation.
+/// Other work borrows unreserved slots, up to the per-peer limit. Control uses no slots.
 pub const Pool = struct {
     slots: []Slot,
     free: u32 = 0,
     available: usize,
     protected: usize,
-    /// Each peer's descriptors that only local publications may use.
+    /// The part of each peer's protected share that only local publications may use.
     local_descriptors: usize = 0,
 
     pub fn capacity(peers: usize, validations: usize) usize {
@@ -66,31 +66,37 @@ pub const Pool = struct {
         return count * @sizeOf(Slot);
     }
 
-    fn acquire(self: *Pool, queued: usize) ?u32 {
+    fn reserved(self: *const Pool, queued: usize, local: usize) usize {
+        assert(local <= queued and self.local_descriptors <= per_peer_reserve);
+        return @max(per_peer_reserve -| queued, self.local_descriptors -| local);
+    }
+
+    fn acquire(self: *Pool, queued: usize, local: usize, class: Class) ?u32 {
         assert(self.available >= self.protected and queued < per_peer_limit);
-        if (queued >= per_peer_reserve and self.available == self.protected) return null;
+        const taken = self.reserved(queued, local) - self.reserved(queued + 1, local + @intFromBool(class == .local));
+        if (taken == 0 and self.available == self.protected) return null;
         assert(self.free != none);
         const slot = self.free;
         self.free = self.slots[slot].next;
         self.slots[slot].next = none;
         self.available -= 1;
-        if (queued < per_peer_reserve) self.protected -= 1;
+        self.protected -= taken;
         return slot;
     }
 
-    fn release(self: *Pool, slot: u32, queued: usize) void {
+    fn release(self: *Pool, slot: u32, queued: usize, local: usize, class: Class) void {
         assert(queued > 0 and queued <= per_peer_limit and slot < self.slots.len);
         self.slots[slot].next = self.free;
         self.free = slot;
         self.available += 1;
-        if (queued <= per_peer_reserve) self.protected += 1;
+        self.protected += self.reserved(queued - 1, local - @intFromBool(class == .local)) - self.reserved(queued, local);
         assert(self.available >= self.protected and self.available <= self.slots.len);
     }
 };
 
 /// Local publications queue apart from ordinary frames, which are forwards and IWANT responses.
 /// Both classes share the peer's descriptor and byte limits and the pool's per-peer protected
-/// share, which follows the combined count.
+/// share. Its unused local reservation remains protected when other peers exhaust the pool.
 pub const Class = enum { local, ordinary };
 
 /// Per-peer byte limits. Ordinary frames leave the unused part of the local reserve, and of the
@@ -111,8 +117,8 @@ pub const Queue = struct {
     count: usize = 0,
     bytes: usize = 0,
     local_bytes: usize = 0,
-    kind_entries: [gossip_limits.kind_count]usize = @splat(0),
-    kind_bytes: [gossip_limits.kind_count]usize = @splat(0),
+    ordinary_kind_entries: [gossip_limits.kind_count]usize = @splat(0),
+    ordinary_kind_bytes: [gossip_limits.kind_count]usize = @splat(0),
     /// The class of the frame being written. It stays chosen until the frame completes, so
     /// frames never interleave.
     current: ?Class = null,
@@ -134,17 +140,17 @@ pub const Queue = struct {
         assert(!entry.provisional and entry.history and self.bytes <= limits.bytes);
         assert(self.pool.local_descriptors < per_peer_limit and limits.local_bytes <= limits.bytes);
         const kind = @intFromEnum(entry.kind);
-        if (store.limits) |allowances| {
+        const class = classOf(origin);
+        if (class == .ordinary) if (store.limits) |allowances| {
             const allowance = allowances[kind];
             // A recipient may queue a quarter of a kind, or one maximum-sized message.
-            if (self.kind_entries[kind] >= @max(1, allowance.items / 4)) return error.Descriptors;
-            if (self.kind_entries[kind] > 0 and entry.len > allowance.bytes / 4 -| self.kind_bytes[kind]) return error.Bytes;
-        }
-        const class = classOf(origin);
+            if (self.ordinary_kind_entries[kind] >= @max(1, allowance.items / 4)) return error.Descriptors;
+            if (self.ordinary_kind_entries[kind] > 0 and entry.len > allowance.bytes / 4 -| self.ordinary_kind_bytes[kind]) return error.Bytes;
+        };
         const reserved_bytes = if (class == .local) 0 else limits.local_bytes -| self.local_bytes;
         if (if (class == .local) self.count >= per_peer_limit else self.full()) return error.Descriptors;
         if (entry.len + reserved_bytes > limits.bytes - self.bytes) return error.Bytes;
-        const slot = self.pool.acquire(self.count) orelse return error.PoolFull;
+        const slot = self.pool.acquire(self.count, self.classCount(.local), class) orelse return error.PoolFull;
         self.pool.slots[slot].tx = .{
             .message = message,
             .enqueued_ms = now,
@@ -158,8 +164,10 @@ pub const Queue = struct {
         if (fifo.tail == none) fifo.head = slot else self.pool.slots[fifo.tail].next = slot;
         fifo.tail = slot;
         self.count += 1;
-        self.kind_entries[kind] += 1;
-        self.kind_bytes[kind] += entry.len;
+        if (class == .ordinary) {
+            self.ordinary_kind_entries[kind] += 1;
+            self.ordinary_kind_bytes[kind] += entry.len;
+        }
         self.origins[@intFromEnum(origin)] += 1;
         self.bytes += entry.len;
         if (class == .local) self.local_bytes += entry.len;
@@ -233,14 +241,16 @@ pub const Queue = struct {
         const slot = fifo.head;
         const tx = &self.pool.slots[slot].tx;
         const len = tx.len;
-        self.kind_entries[@intFromEnum(tx.kind)] -= 1;
-        self.kind_bytes[@intFromEnum(tx.kind)] -= len;
+        if (class == .ordinary) {
+            self.ordinary_kind_entries[@intFromEnum(tx.kind)] -= 1;
+            self.ordinary_kind_bytes[@intFromEnum(tx.kind)] -= len;
+        }
         fifo.head = self.pool.slots[slot].next;
         if (fifo.head == none) fifo.tail = none;
+        self.pool.release(slot, self.count, self.classCount(.local), class);
         self.origins[@intFromEnum(tx.origin)] -= 1;
         self.bytes -= len;
         if (class == .local) self.local_bytes -= len;
-        self.pool.release(slot, self.count);
         self.count -= 1;
     }
 
