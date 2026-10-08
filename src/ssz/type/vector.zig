@@ -584,10 +584,6 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
             }
 
             var elements = try VariableElementIterator(Self).init(data);
-            errdefer {
-                Self.deinit(allocator, out);
-                out.* = default_value;
-            }
 
             var i: usize = 0;
             while (try elements.next()) |element_bytes| : (i += 1) {
