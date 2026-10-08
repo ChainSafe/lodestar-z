@@ -754,6 +754,7 @@ pub fn complete(owner: *ReqResp, engine: *Engine, router: *Router, record: *Requ
     if (!record.terminate(engine, router, terminal)) return;
     owner.settleSlot(record.direction, index);
     const counts = &owner.protocol_counters[@intFromEnum(record.protocol)];
+    if (record.direction == .outbound and owner.outbound[index].phase != .negotiation) counts.outgoing_closed +|= 1;
     assert(now.millis() >= record.started_ms);
     const duration_ms = now.millis() - record.started_ms;
     if (event == .served and info.result_code != constants.result_success) {

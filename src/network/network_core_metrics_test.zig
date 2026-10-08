@@ -7,6 +7,7 @@ const metrics = @import("metrics/export.zig");
 const policy = @import("gossipsub/topic_policy.zig");
 const protocol = @import("reqresp/root.zig").Protocol;
 const AdmissionRefusal = @import("reqresp/metrics.zig").AdmissionRefusal;
+const ErrorReason = @import("reqresp/metrics.zig").ErrorReason;
 const KeyPair = @import("wire/keys.zig").KeyPair;
 const logging = @import("logging.zig");
 const types = @import("peers/types.zig");
@@ -76,6 +77,11 @@ const contract = [_]Series{
     .{ .name = "lodestar_peers_by_direction_count", .kind = "gauge", .labels = &.{"direction"} },
     .{ .name = "lodestar_peers_by_client_count", .kind = "gauge", .labels = &.{"client"} },
     .{ .name = "lodestar_peer_connection_seconds", .kind = "histogram" },
+    .{ .name = "lodestar_peer_long_lived_attnets_count", .kind = "histogram" },
+    .{ .name = "lodestar_peer_column_group_count", .kind = "histogram" },
+    .{ .name = "lodestar_app_peer_score", .kind = "histogram", .labels = &.{"client"} },
+    .{ .name = "lodestar_gossip_score_by_client", .kind = "histogram", .labels = &.{"client"} },
+    .{ .name = "lodestar_gossip_mesh_peers_by_client_count", .kind = "gauge", .labels = &.{"client"} },
     .{ .name = "lodestar_peer_connected_total", .kind = "counter", .labels = &.{ "direction", "status" } },
     .{ .name = "lodestar_peer_goodbye_received_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "lodestar_peer_closes_total", .kind = "counter", .labels = &.{"reason"} },
@@ -98,6 +104,7 @@ const contract = [_]Series{
     .{ .name = "lodestar_discv5_kad_table_size", .kind = "gauge" },
     .{ .name = "lodestar_discv5_active_session_count", .kind = "gauge" },
     .{ .name = "lodestar_discovery_find_node_query_requests_total", .kind = "counter", .labels = &.{"action"} },
+    .{ .name = "lodestar_discovery_find_node_query_time_seconds", .kind = "histogram" },
     .{ .name = "lodestar_discovery_lookup_finishes_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "lodestar_discovery_candidates_published_total", .kind = "counter" },
     .{ .name = "lodestar_discovery_candidate_rejections_total", .kind = "counter", .labels = &.{"reason"} },
@@ -157,6 +164,11 @@ const contract = [_]Series{
     .{ .name = "beacon_reqresp_incoming_requests_error_total", .kind = "counter", .labels = &.{"method"} },
     .{ .name = "beacon_reqresp_incoming_request_handler_time_seconds", .kind = "histogram", .labels = &.{"method"} },
     .{ .name = "beacon_reqresp_outgoing_requests_total", .kind = "counter", .labels = &.{"method"} },
+    .{ .name = "beacon_reqresp_outgoing_opened_streams_total", .kind = "counter", .labels = &.{"method"} },
+    .{ .name = "beacon_reqresp_outgoing_closed_streams_total", .kind = "counter", .labels = &.{"method"} },
+    .{ .name = "beacon_reqresp_incoming_opened_streams_total", .kind = "counter", .labels = &.{"method"} },
+    .{ .name = "beacon_reqresp_incoming_closed_streams_total", .kind = "counter", .labels = &.{"method"} },
+    .{ .name = "beacon_reqresp_dial_errors_total", .kind = "counter" },
     .{ .name = "beacon_reqresp_outgoing_requests_error_total", .kind = "counter", .labels = &.{"method"} },
     .{ .name = "beacon_reqresp_outgoing_requests_error_reason_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "beacon_reqresp_outgoing_request_roundtrip_time_seconds", .kind = "histogram", .labels = &.{"method"} },
@@ -245,6 +257,12 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     node.peer_manager.control.counters.closed[0] = 17;
     node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing = 4;
     node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing = 5;
+    node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing_opened = 3;
+    node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing_opened = 4;
+    node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing_closed = 2;
+    node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing_closed = 1;
+    node.protocols.reqresp.outgoing_error_reasons[@intFromEnum(ErrorReason.REQUEST_ERROR_DIAL_ERROR)] = 2;
+    node.protocols.reqresp.outgoing_error_reasons[@intFromEnum(ErrorReason.REQUEST_ERROR_DIAL_TIMEOUT)] = 3;
     node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].admission_refusals[@intFromEnum(AdmissionRefusal.peer_quota)] = 2;
     node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].admission_refusals[@intFromEnum(AdmissionRefusal.global_quota)] = 3;
     node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].admission_refusals[@intFromEnum(AdmissionRefusal.connection_capacity)] = 7;
@@ -261,6 +279,9 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     try contains(output, closes);
     try contains(output, "lodestar_peer_outbound_deficit_count 7\n");
     try contains(output, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n");
+    try contains(output, "beacon_reqresp_outgoing_opened_streams_total{method=\"status\"} 7\n");
+    try contains(output, "beacon_reqresp_outgoing_closed_streams_total{method=\"status\"} 3\n");
+    try contains(output, "beacon_reqresp_dial_errors_total 5\n");
     try contains(output, "beacon_reqresp_rate_limiter_errors_total{method=\"status\"} 5\n");
     try contains(output, "beacon_reqresp_admission_refusals_total{method=\"status\",reason=\"connection_capacity\"} 7\n");
     try contains(output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method=\"status\"} 2\n");
@@ -276,6 +297,9 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     try contains(stopped, "lodestar_peer_outbound_deficit_count 0\n");
     try contains(stopped, closes);
     try contains(stopped, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n");
+    try contains(stopped, "beacon_reqresp_outgoing_opened_streams_total{method=\"status\"} 7\n");
+    try contains(stopped, "beacon_reqresp_outgoing_closed_streams_total{method=\"status\"} 3\n");
+    try contains(stopped, "beacon_reqresp_dial_errors_total 5\n");
     try contains(stopped, "lodestar_gossip_validation_expired_executing_count 0\n");
 }
 
@@ -475,17 +499,23 @@ test "metrics export cumulative discovery lookups and datagram rejections" {
     defer f.deinit();
     const coordinator = f.node.discovery.?;
     coordinator.counters.lookups_started = 5;
+    coordinator.counters.lookup_time.observe(2_500);
+    coordinator.counters.lookup_time.observe(7_500);
     const d = @import("discv5");
     coordinator.datagram_rejections[@intFromEnum(d.types.RejectReason.invalid_handshake)] = 3;
     _ = coordinator.consume(&.{ .datagram = .{ .rejected = .record_admission_limited } }, &.{}, &.{});
     _ = coordinator.consume(&.{ .datagram = .{ .rejected = .admission_limited } }, &.{}, &.{});
     const output = try f.render(true);
     try contains(output, "lodestar_discovery_find_node_query_requests_total{action=\"start\"} 5\n");
+    try contains(output, "lodestar_discovery_find_node_query_time_seconds_count 2\n");
+    try contains(output, "lodestar_discovery_find_node_query_time_seconds_sum 10\n");
+    try contains(output, "lodestar_discovery_find_node_query_time_seconds_bucket{le=\"5\"} 1\n");
     try contains(output, "lodestar_discovery_datagram_rejections_total{stage=\"handshake\",reason=\"invalid_handshake\"} 3\n");
     try contains(output, "lodestar_discovery_datagram_rejections_total{stage=\"record\",reason=\"record_admission_limited\"} 1\n");
     try contains(output, "lodestar_discovery_datagram_rejections_total{stage=\"admission\",reason=\"admission_limited\"} 1\n");
     try contains(output, "lodestar_discovery_datagram_rejections_total{stage=\"record\",reason=\"invalid_record\"} 0\n");
     try contains(try f.render(false), "lodestar_discovery_find_node_query_requests_total{action=\"start\"} 5\n");
+    try contains(try f.render(false), "lodestar_discovery_find_node_query_time_seconds_count 2\n");
 }
 
 test "metrics export stock per-topic gossipsub peer gauges under full topic strings" {
@@ -624,4 +654,22 @@ test "core metrics aggregate subnets and count distinct mesh peers" {
     const context = metrics.Context.init(&pair.client, pair.client.last_now, true);
     try std.testing.expectEqual(@as(usize, 3), mesh_count);
     try std.testing.expectEqual(@as(usize, 1), context.population.count);
+    var mesh_peers: usize = 0;
+    var scored_peers: usize = 0;
+    for (context.population.mesh_clients, context.population.gossip_scores) |meshed, gossip_score| {
+        mesh_peers += meshed;
+        scored_peers += gossip_score.count;
+    }
+    try std.testing.expectEqual(@as(usize, 1), mesh_peers);
+    try std.testing.expectEqual(@as(usize, 1), scored_peers);
+    const again = metrics.Context.init(&pair.client, pair.client.last_now, true);
+    try std.testing.expectEqualDeep(context.population, again.population);
+    const stopped = metrics.Context.init(&pair.client, pair.client.last_now, false);
+    try std.testing.expectEqual(@as(usize, 0), stopped.population.count);
+    try std.testing.expectEqual(@as(u64, 0), stopped.population.attnets.count);
+    for (stopped.population.mesh_clients, stopped.population.scores, stopped.population.gossip_scores) |meshed, app, gossip| {
+        try std.testing.expectEqual(@as(u16, 0), meshed);
+        try std.testing.expectEqual(@as(u64, 0), app.count);
+        try std.testing.expectEqual(@as(u64, 0), gossip.count);
+    }
 }

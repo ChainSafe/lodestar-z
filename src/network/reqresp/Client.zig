@@ -282,6 +282,7 @@ pub fn negotiated(slot: *Client, owner: *ReqResp, engine: *Engine, router: *Rout
             request.io.buffered_end = ready.leftover.len;
             request.io.fin_seen = ready.fin;
             slot.phase = .request;
+            owner.protocol_counters[@intFromEnum(request.protocol)].outgoing_opened +|= 1;
             slot.phase_deadline_ms = now.deadlineMilliseconds(slot.timeouts.request);
             request.io.writer = codec.ChunkWriter.initRequest(request.io.payload);
             request.io.writing = request.protocol.info().request_max > 0;

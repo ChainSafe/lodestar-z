@@ -392,6 +392,7 @@ test "peer discovery empty lookup backs off and counts completion once" {
         const deadline = network.now_ms + delay;
         try std.testing.expectEqual(@as(?u64, deadline), schedule_test_support.wakeupMilliseconds(controller.schedule(network.now_ms), network.now_ms));
         try std.testing.expectEqual(completed, controller.lookup_finishes[@intFromEnum(d.Lookup.FinishReason.exhausted)]);
+        try std.testing.expectEqual(completed, controller.counters.lookup_time.count);
         network.now_ms = deadline - 1;
         _ = try support.advance(controller, host.io(), network.now_ms, &out);
         try std.testing.expectEqual(completed, controller.counters.lookups_started);
@@ -399,6 +400,7 @@ test "peer discovery empty lookup backs off and counts completion once" {
         network.now_ms = deadline;
     }
     try std.testing.expectEqual(@as(u64, 0), controller.counters.candidates_published);
+    try std.testing.expectEqual(@as(u128, 0), controller.counters.lookup_time.sum);
     try std.testing.expectEqual(@as(usize, 0), host.sends);
 }
 

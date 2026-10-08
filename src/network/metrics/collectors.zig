@@ -14,6 +14,7 @@ pub const registry = prom.Registry(Context, .{
     writePeers,
     writeTopics,
     writeRequests,
+    writeRequestStreams,
     writeRequestTimes,
     writeGossip,
     writeGossipScores,
@@ -216,6 +217,47 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .help = "Occupied incoming request slots by current phase, including terminal owners awaiting recycling",
         .labels = &.{"phase"},
     }, rr.ReqResp.metrics.InboundPhase, &self.live(self.owner.protocols.reqresp.resourceSnapshot().inbound_phases));
+}
+
+fn writeRequestStreams(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    inline for (.{ "outgoing", "incoming" }) |direction| {
+        const opened = try w.family(.{
+            .name = "beacon_reqresp_" ++ direction ++ "_opened_streams_total",
+            .kind = .counter,
+            .help = "Negotiated " ++ direction ++ " request streams admitted to reqresp by method",
+            .labels = &.{"method"},
+        });
+        const closed = try w.family(.{
+            .name = "beacon_reqresp_" ++ direction ++ "_closed_streams_total",
+            .kind = .counter,
+            .help = "Admitted " ++ direction ++ " request streams terminated by method, including cancellation",
+            .labels = &.{"method"},
+        });
+        for (rr.protocol.methods, 0..) |method, index| {
+            if (!firstMethod(index)) continue;
+            var opened_count: u64 = 0;
+            var closed_count: u64 = 0;
+            for (rr.protocol.methods, &self.owner.protocols.reqresp.protocol_counters) |candidate, *values| {
+                if (!std.mem.eql(u8, candidate, method)) continue;
+                if (comptime std.mem.eql(u8, direction, "outgoing")) {
+                    opened_count +|= values.outgoing_opened;
+                    closed_count +|= values.outgoing_closed;
+                } else {
+                    opened_count +|= values.incoming;
+                    closed_count +|= values.incoming_time.count;
+                }
+            }
+            try opened.sample(.{method}, opened_count);
+            try closed.sample(.{method}, closed_count);
+        }
+    }
+    const reasons = &self.owner.protocols.reqresp.outgoing_error_reasons;
+    try w.scalar(.{
+        .name = "beacon_reqresp_dial_errors_total",
+        .kind = .counter,
+        .help = "Outgoing requests failing protocol negotiation, including negotiation timeouts",
+    }, reasons[@intFromEnum(rr.ReqResp.metrics.ErrorReason.REQUEST_ERROR_DIAL_ERROR)] +|
+        reasons[@intFromEnum(rr.ReqResp.metrics.ErrorReason.REQUEST_ERROR_DIAL_TIMEOUT)]);
 }
 
 fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {

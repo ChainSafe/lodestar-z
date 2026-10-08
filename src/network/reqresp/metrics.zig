@@ -5,6 +5,7 @@ const rr = @import("events.zig");
 pub const OutgoingTime = Histogram(&.{ 100, 200, 500, 1000, 5000, 10000, 15000, 60000 });
 pub const IncomingTime = Histogram(&.{ 100, 200, 500, 1000, 5000, 10000 });
 pub const ErrorReason = enum {
+    REQUEST_ERROR_DIAL_ERROR,
     REQUEST_ERROR_DIAL_TIMEOUT,
     REQUEST_ERROR_REQUEST_TIMEOUT,
     REQUEST_ERROR_RESP_TIMEOUT,
@@ -23,7 +24,8 @@ pub const ErrorReason = enum {
                 .request => .REQUEST_ERROR_REQUEST_TIMEOUT,
                 .response => .REQUEST_ERROR_RESP_TIMEOUT,
             },
-            .negotiation_failed => |failure| if (failure == .timeout) .REQUEST_ERROR_DIAL_TIMEOUT else .REQUEST_ERROR_REQUEST_ERROR,
+            .negotiation_failed => |failure| if (failure == .timeout) .REQUEST_ERROR_DIAL_TIMEOUT else .REQUEST_ERROR_DIAL_ERROR,
+            .negotiation_rejected => .REQUEST_ERROR_DIAL_ERROR,
             .invalid_response, .too_many_chunks, .unknown_context => .REQUEST_ERROR_INVALID_RESPONSE_SSZ,
             .empty_response => .REQUEST_ERROR_EMPTY_RESPONSE,
             .peer_error => |err| switch (err.code) {
@@ -52,6 +54,8 @@ pub const inbound_phase_count = @typeInfo(InboundPhase).@"enum".fields.len;
 
 pub const ProtocolCounters = struct {
     outgoing: u64 = 0,
+    outgoing_opened: u64 = 0,
+    outgoing_closed: u64 = 0,
     incoming: u64 = 0,
     outgoing_errors: u64 = 0,
     incoming_errors: u64 = 0,
@@ -61,6 +65,8 @@ pub const ProtocolCounters = struct {
 };
 
 test "request error labels match host timeout phases and response status mapping" {
+    try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_DIAL_ERROR, ErrorReason.fromFailure(.negotiation_rejected, .negotiation));
+    try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_DIAL_ERROR, ErrorReason.fromFailure(.{ .negotiation_failed = .malformed }, .negotiation));
     try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_DIAL_TIMEOUT, ErrorReason.fromFailure(.timeout, .negotiation));
     try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_DIAL_TIMEOUT, ErrorReason.fromFailure(.{ .negotiation_failed = .timeout }, .negotiation));
     try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_REQUEST_TIMEOUT, ErrorReason.fromFailure(.timeout, .request));

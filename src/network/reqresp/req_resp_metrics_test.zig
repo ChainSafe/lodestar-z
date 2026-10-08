@@ -14,6 +14,8 @@ test "reqresp duration includes the final chunk hold until consume" {
     const reply = harness.statusBytes(9);
     const started = setup.shared.pair.now.millis();
     const handle = try harness.requestStatus(&setup, &request, &sink);
+    const counts = &setup.shared.client.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)];
+    try std.testing.expectEqual(0, counts.outgoing_opened);
     var got_chunk = false;
     for (0..30) |_| {
         try setup.pumpOnce();
@@ -33,6 +35,8 @@ test "reqresp duration includes the final chunk hold until consume" {
         if (got_chunk) break;
     }
     try std.testing.expect(got_chunk);
+    try std.testing.expectEqual(1, counts.outgoing_opened);
+    try std.testing.expectEqual(0, counts.outgoing_closed);
     const owner = &setup.shared.client.reqresp;
     const times = &owner.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing_time;
     try std.testing.expectEqual(0, times.count);
@@ -45,6 +49,7 @@ test "reqresp duration includes the final chunk hold until consume" {
     try std.testing.expect(!owner.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
     try std.testing.expectEqual(1, times.count);
     try std.testing.expectEqual(5000, times.sum);
+    try std.testing.expectEqual(1, counts.outgoing_closed);
 }
 
 test "reqresp duration uses event time for cancellation negotiation and connection failure" {
@@ -84,9 +89,29 @@ test "reqresp duration uses event time for cancellation negotiation and connecti
         try std.testing.expectEqual(1, counts.outgoing_time.count);
         try std.testing.expectEqual(3000, counts.outgoing_time.sum);
         try std.testing.expectEqual(if (cause == .cancel) @as(u64, 0) else 1, counts.outgoing_errors);
+        try std.testing.expectEqual(0, counts.outgoing_opened);
+        try std.testing.expectEqual(0, counts.outgoing_closed);
         try std.testing.expect(!owner.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, now));
         try std.testing.expectEqual(1, counts.outgoing_time.count);
     }
+}
+
+test "reqresp stream metrics close a negotiated request exactly once on cancellation" {
+    var setup: harness.Pair = .{};
+    try setup.init(.{}, .{});
+    defer setup.deinit();
+    var request: [ct.phase0.Status.fixed_size]u8 = undefined;
+    var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
+    const handle = try harness.requestStatus(&setup, &request, &sink);
+    try harness.waitForRequest(&setup);
+    const owner = &setup.shared.client.reqresp;
+    const counts = &owner.protocol_counters[@intFromEnum(Protocol.status_v1)];
+    try std.testing.expectEqual(1, counts.outgoing_opened);
+    try std.testing.expectEqual(0, counts.outgoing_closed);
+    try std.testing.expect(owner.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
+    try std.testing.expectEqual(1, counts.outgoing_closed);
+    try std.testing.expect(!owner.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
+    try std.testing.expectEqual(1, counts.outgoing_closed);
 }
 
 test "reqresp duration uses current time for inbound termination" {
