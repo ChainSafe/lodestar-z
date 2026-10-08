@@ -7,8 +7,53 @@ const Overlay = @import("overlay.zig").Overlay;
 const Sessions = @import("sessions.zig").Sessions;
 const PeerSet = @import("sessions.zig").PeerSet;
 const histogram = @import("../metrics/histogram.zig");
+const RpcCounts = @import("protobuf_schema.zig").RpcCounts;
 
 pub const ValidationTime = histogram.Duration(&.{ 10, 30, 100, 300, 1000, 3000, 10000 });
+
+/// Received schema-valid RPCs or RPCs admitted to outbound queues. Bytes exclude the length
+/// prefix. A send admission is not a delivery acknowledgement and survives later cancellation.
+pub const RpcCounters = struct {
+    bytes: u64 = 0,
+    count: u64 = 0,
+    subscription: u64 = 0,
+    message: u64 = 0,
+    control: u64 = 0,
+    ihave: u64 = 0,
+    iwant: u64 = 0,
+    graft: u64 = 0,
+    prune: u64 = 0,
+    idontwant: u64 = 0,
+
+    pub fn record(self: *RpcCounters, bytes: usize, counts: *const RpcCounts) void {
+        self.bytes +|= bytes;
+        self.count +|= 1;
+        inline for (std.meta.fields(RpcCounts)) |field| @field(self, field.name) +|= @field(counts, field.name);
+    }
+
+    pub fn add(self: *RpcCounters, other: *const RpcCounters) void {
+        inline for (std.meta.fields(RpcCounters)) |field| @field(self, field.name) +|= @field(other, field.name);
+    }
+
+    pub fn write(self: *const RpcCounters, comptime direction: enum { recv, sent }, w: *prom.Encoder) prom.Error!void {
+        inline for (.{
+            .{ "bytes", "Protobuf body bytes excluding the stream length prefix" },
+            .{ "count", "RPC frames" },
+            .{ "subscription", "Subscription entries" },
+            .{ "message", "Message copies, including duplicates" },
+            .{ "control", "RPC frames containing control" },
+            .{ "ihave", "IHAVE entries, not message IDs" },
+            .{ "iwant", "IWANT entries, not message IDs" },
+            .{ "graft", "GRAFT entries, independent of mesh admission" },
+            .{ "prune", "PRUNE entries, independent of mesh membership" },
+            .{ "idontwant", "IDONTWANT entries, not message IDs" },
+        }) |field| try w.scalar(.{
+            .name = "gossipsub_rpc_" ++ @tagName(direction) ++ "_" ++ field[0] ++ "_total",
+            .kind = .counter,
+            .help = field[1] ++ (if (direction == .recv) " received in schema-valid RPCs" else " admitted to outbound queues; not remote delivery"),
+        }, @field(self, field[0]));
+    }
+};
 
 /// Data frame recipients by delivery origin: selected, then queued, pressured or unavailable;
 /// queued frames later complete when QUIC accepts their last byte, which is not delivery, or are
@@ -42,6 +87,7 @@ pub const Counters = struct {
     received: u64 = 0,
     duplicate: u64 = 0,
     published: u64 = 0,
+    published_bytes: u64 = 0,
     accepted: u64 = 0,
     rejected: u64 = 0,
     ignored: u64 = 0,

@@ -52,6 +52,8 @@ msg_scratch: []u8,
 recovery: Recovery,
 counters: Counters = .{},
 topic_metrics: metrics.Topics = .{},
+rpc_received: metrics.RpcCounters = .{},
+retired_rpc_sent: metrics.RpcCounters = .{},
 iwant_outcomes: [metrics.iwant_outcome_count]u64 = @splat(0),
 delivery_metrics: metrics.Delivery = .{},
 validation_time: metrics.ValidationTime = .{},
@@ -275,6 +277,8 @@ pub fn connectionClosed(self: *Gossipsub, conn: Handle) void {
     self.overlay.peerDisconnected(&context, index);
     for (&self.retired_queue_drops, self.sessions.rows[index].io.tx.drops) |*total, value| total.* +|= value;
     self.sessions.rows[index].io.tx.drops = @splat(0);
+    self.retired_rpc_sent.add(&self.sessions.rows[index].io.tx.rpc_sent);
+    self.sessions.rows[index].io.tx.rpc_sent = .{};
     self.sessions.removePeer(index);
 }
 
@@ -322,6 +326,7 @@ pub fn publishWithOptions(self: *Gossipsub, topic_str: []const u8, ssz: []const 
     self.topic_metrics.get(topic_str).published +|= 1;
     _ = self.recovery.resolve(&self.peers, id);
     const result = self.deliver(&recipients, h, null, now_ms);
+    self.topic_metrics.get(topic_str).published_bytes +|= @as(u64, result.queued) * @as(u64, clen);
     return result;
 }
 

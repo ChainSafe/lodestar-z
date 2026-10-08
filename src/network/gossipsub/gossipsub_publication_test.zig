@@ -142,11 +142,14 @@ test "publication recipient policy tops up without graft and accounts unique sha
     const id = topic_mod.validMessageId(test_topic, "short mesh", .{});
     const h = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
     try std.testing.expectEqual(@as(usize, 1), g.messages.store.used_entries);
+    const first_bytes = @as(u64, g.messages.store.get(h).?.len) * 8;
+    try std.testing.expectEqual(first_bytes, g.topic_metrics.get(test_topic).published_bytes);
     for (g.sessions.rows[0..12], 0..) |*peer, index| {
         const io = &peer.io;
         try std.testing.expectEqual(@as(usize, 0), io.tx.critical.used);
         if (index == 0 or (index >= 2 and index <= 8)) {
             try std.testing.expectEqual(@as(usize, 1), io.tx.data.count);
+            try std.testing.expectEqual(@as(u64, 1), io.tx.rpc_sent.message);
             try std.testing.expectEqual(h, (try io.tx.data.next(&g.messages.store)).?.message);
         } else try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
         io.tx.cancelStream();
@@ -157,8 +160,13 @@ test "publication recipient policy tops up without graft and accounts unique sha
         const origin: delivery.Origin = if (full.data.full()) .publication else .forward;
         try std.testing.expectEqual(.queued, full.queueData(&g.messages.store, h, origin, .{ .bytes = g.options.tx_peer_bytes }, 2));
     }
+    const full_messages = full.rpc_sent.message;
     const flood = try g.publishWithOptions(test_topic, "flood", .{ .flood = true }, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 7, .queued = 6, .pressured = 1 }, flood);
+    try std.testing.expectEqual(full_messages, full.rpc_sent.message);
+    const flood_id = topic_mod.validMessageId(test_topic, "flood", .{});
+    const flood_h = g.messages.history.message(g.messages.history.get(&g.messages.store, flood_id).?);
+    try std.testing.expectEqual(first_bytes + @as(u64, g.messages.store.get(flood_h).?.len) * 6, g.topic_metrics.get(test_topic).published_bytes);
 }
 
 test "publication failed history admission retains payloads and recovery attribution" {
@@ -348,7 +356,9 @@ test "publication priority belongs to each attempt: an IWANT for our publication
         g.advanceWrite(g.sessions.ref(peer.index), segment.len, 3);
     }
     _ = try g.publish(test_topic, "cancelled", Now.fromMilliseconds(.{ .mono_ms = 4, .unix_s = 0 }));
+    try std.testing.expectEqual(@as(u64, 3), io.tx.rpc_sent.message);
     g.cancelWrites(g.sessions.ref(peer.index));
+    try std.testing.expectEqual(@as(u64, 3), io.tx.rpc_sent.message);
     const recipients = &g.delivery_metrics.recipients;
     const publication = recipients[@intFromEnum(Origin.publication)];
     const iwant = recipients[@intFromEnum(Origin.iwant)];

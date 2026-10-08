@@ -16,6 +16,10 @@ const delivery = @import("delivery.zig");
 const StorageRefusal = @import("messages.zig").StorageRefusal;
 const topic_policy = @import("topic_policy.zig");
 const turn_mod = @import("turn.zig");
+const session_io = @import("session_io.zig");
+const outbox = @import("outbox.zig");
+const frame = @import("frame.zig");
+const RpcCounters = @import("metrics.zig").RpcCounters;
 
 fn ids(out: []u8, field: u32, list: []const MessageId) []const u8 {
     var writer = protobuf.Writer.init(out);
@@ -92,4 +96,131 @@ test "gossip counts each consumed message once by topic kind and never on a work
     try std.testing.expectEqual(@as(u64, 2), g.topic_metrics.counts[topic_policy.kind_count].received);
     try std.testing.expectEqual(@as(u64, 4), counts.received);
     for (g.topic_metrics.counts) |kind| try std.testing.expectEqual(@as(u64, 0), kind.published);
+}
+
+test "gossip RPC receive metrics count complete validated frames before handling and survive retries" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
+    var body: [128]u8 = undefined;
+    var control: [512]u8 = undefined;
+    var cw = protobuf.Writer.init(&control);
+    var item = protobuf.Writer.init(&body);
+    item.bytesField(1, "unknown");
+    item.bytesField(2, &(@as(MessageId, @splat(1))));
+    item.bytesField(2, &(@as(MessageId, @splat(2))));
+    cw.bytesField(1, item.written());
+    cw.bytesField(1, item.written());
+    item = protobuf.Writer.init(&body);
+    item.bytesField(1, &(@as(MessageId, @splat(3))));
+    cw.bytesField(2, item.written());
+    cw.bytesField(5, item.written());
+    item = protobuf.Writer.init(&body);
+    item.bytesField(1, "unknown");
+    cw.bytesField(3, item.written());
+    cw.bytesField(4, item.written());
+    var bytes: [1024]u8 = undefined;
+    var writer = protobuf.Writer.init(&bytes);
+    protobuf.writeSubscription(&writer, true, "unknown");
+    protobuf.writeSubscription(&writer, false, "unknown");
+    protobuf.writeMessage(&writer, "same", "unknown");
+    protobuf.writeMessage(&writer, "same", "unknown");
+    writer.bytesField(3, cw.written());
+    const io = &g.sessions.rows[peer.index].io;
+    io.startRpc(writer.written());
+    var turn = turn_mod.Turn.init(&g.options, now, g.msg_scratch);
+    var credits = Credits.peer(&g.options);
+    turn.budget.fields = 1;
+    try std.testing.expectEqual(Progress.credits, try session_io.processRpc(&g, peer.index, &turn, &credits));
+    try std.testing.expectEqualDeep(RpcCounters{}, g.rpc_received);
+
+    const expected: RpcCounters = .{ .count = 1, .bytes = writer.len, .subscription = 2, .message = 2, .control = 1, .ihave = 2, .iwant = 1, .graft = 1, .prune = 1, .idontwant = 1 };
+    for (0..32) |_| {
+        turn = turn_mod.Turn.init(&g.options, now, g.msg_scratch);
+        credits = Credits.peer(&g.options);
+        credits.items = 1;
+        const result = try session_io.processRpc(&g, peer.index, &turn, &credits);
+        try std.testing.expectEqualDeep(expected, g.rpc_received);
+        if (result == .done) break;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 2), g.topic_metrics.get("unknown").received);
+    turn = turn_mod.Turn.init(&g.options, now, g.msg_scratch);
+    credits = Credits.peer(&g.options);
+    try std.testing.expectEqual(Progress.done, try session_io.processRpc(&g, peer.index, &turn, &credits));
+    try std.testing.expectEqualDeep(expected, g.rpc_received);
+
+    io.finishFrame();
+    writer.bytes(&.{ 0x1a, 0 });
+    io.startRpc(writer.written());
+    turn = turn_mod.Turn.init(&g.options, now, g.msg_scratch);
+    credits = Credits.peer(&g.options);
+    try std.testing.expectError(error.DuplicateField, session_io.processRpc(&g, peer.index, &turn, &credits));
+    try std.testing.expectEqualDeep(expected, g.rpc_received);
+
+    io.finishFrame();
+    io.startRpc(&.{ 0x1a, 0 });
+    try std.testing.expectEqual(Progress.done, try session_io.processRpc(&g, peer.index, &turn, &credits));
+    try std.testing.expectEqual(@as(u64, 2), g.rpc_received.count);
+    try std.testing.expectEqual(@as(u64, 2), g.rpc_received.control);
+    try std.testing.expectEqual(expected.bytes + 2, g.rpc_received.bytes);
+    g.connectionClosed(g.sessions.rows[peer.index].conn);
+    try std.testing.expectEqual(@as(u64, 2), g.rpc_received.count);
+}
+
+test "gossip RPC send metrics count admitted controls and batches without counting partial writes or refusals" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const tx = &g.sessions.rows[peer.index].io.tx;
+    const message_ids = [_]MessageId{ @splat(1), @splat(2) };
+    const controls = [_]outbox.Control{
+        .{ .subscription = .{ .topic = test_topic, .subscribed = true } },
+        .{ .graft = test_topic },
+        .{ .prune = .{ .topic = test_topic, .backoff_s = 60 } },
+        .{ .ihave = .{ .topic = test_topic, .ids = &message_ids } },
+        .{ .iwant = &message_ids },
+        .{ .idontwant = &message_ids },
+    };
+    for (&controls) |*control| try std.testing.expect(tx.submit(control, &g.sessions.control_scratch, 1) != null);
+    try std.testing.expect(tx.gossipTopic(test_topic, &message_ids));
+    try std.testing.expect(tx.gossipTopic(test_topic, &message_ids));
+    try std.testing.expectEqual(@as(u64, 6), tx.rpc_sent.count);
+    try std.testing.expect(tx.finishGossip(1));
+    const admitted = tx.rpc_sent;
+    var expected: RpcCounters = .{ .count = 7, .subscription = 1, .control = 6, .ihave = 3, .iwant = 1, .graft = 1, .prune = 1, .idontwant = 1 };
+    var reader: frame.Reader = .{};
+    var body: [1024]u8 = undefined;
+    var frames: usize = 0;
+    for (0..4096) |_| {
+        const segment = try tx.segment(&g.messages.store);
+        if (segment.len == 0) break;
+        const decoded = try reader.feed(segment[0..1], &body);
+        _ = tx.advance(&g.messages.store, 1);
+        if (decoded.frame) |rpc| {
+            frames += 1;
+            expected.bytes += rpc.len;
+        }
+        try std.testing.expectEqualDeep(admitted, tx.rpc_sent);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 7), frames);
+    try std.testing.expectEqualDeep(expected, tx.rpc_sent);
+    for (0..outbox.control_frames + 1) |_| {
+        if (tx.submit(&controls[4], &g.sessions.control_scratch, 2) == null) break;
+    } else return error.TestUnexpectedResult;
+    const full = tx.rpc_sent;
+    try std.testing.expect(tx.submit(&controls[4], &g.sessions.control_scratch, 2) == null);
+    try std.testing.expect(tx.gossipTopic(test_topic, &message_ids));
+    try std.testing.expect(!tx.finishGossip(2));
+    try std.testing.expectEqualDeep(full, tx.rpc_sent);
+    g.cancelWrites(peer);
+    tx.startSession();
+    try std.testing.expectEqualDeep(full, tx.rpc_sent);
+    try std.testing.expect(!tx.finishGossip(3));
+    g.connectionClosed(g.sessions.rows[peer.index].conn);
+    try std.testing.expectEqualDeep(full, g.retired_rpc_sent);
+    try std.testing.expectEqualDeep(RpcCounters{}, tx.rpc_sent);
+    const reused = support.addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
+    try std.testing.expectEqual(peer.index, reused.index);
+    try std.testing.expectEqualDeep(RpcCounters{}, g.sessions.rows[reused.index].io.tx.rpc_sent);
 }

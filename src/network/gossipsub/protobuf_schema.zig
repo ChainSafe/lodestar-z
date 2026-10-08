@@ -8,6 +8,17 @@ const Cursor = @import("protobuf_cursor.zig").Cursor;
 pub const Error = pb.Error || error{ DuplicateField, MissingField, InvalidBoolean, InvalidUtf8, LengthLimit, OccurrenceLimit, MetadataLimit };
 pub const Shape = enum { rpc, subscription, message, control, ihave, iwant, graft, prune, idontwant };
 
+pub const RpcCounts = struct {
+    subscription: u32 = 0,
+    message: u32 = 0,
+    control: u32 = 0,
+    ihave: u32 = 0,
+    iwant: u32 = 0,
+    graft: u32 = 0,
+    prune: u32 = 0,
+    idontwant: u32 = 0,
+};
+
 const ids_per_list = constants.max_iwant_ids_per_rpc;
 pub const ids_per_rpc = 3 * ids_per_list;
 pub const fields_per_rpc = 3 * constants.max_subscriptions_per_rpc + 3 * constants.max_publish_per_rpc + 4 * constants.max_control_per_rpc + ids_per_rpc + 2;
@@ -155,6 +166,8 @@ pub const Validator = struct {
     metadata: usize = 0,
     controls: usize = 0,
     ids: usize = 0,
+    /// Complete only after advance returns true.
+    rpc_counts: RpcCounts = .{},
 
     pub fn init(shape: Shape, view: *const receive.View) Validator {
         var self: Validator = .{};
@@ -170,6 +183,21 @@ pub const Validator = struct {
             var entry = self.stack[index];
             if (entry.cursor.cursor.pos == entry.cursor.end) {
                 try entry.finish();
+                switch (entry.shape) {
+                    .rpc => {
+                        self.rpc_counts.subscription = entry.counts[1];
+                        self.rpc_counts.message = entry.counts[2];
+                        self.rpc_counts.control = entry.counts[3];
+                    },
+                    .control => {
+                        self.rpc_counts.ihave = entry.counts[1];
+                        self.rpc_counts.iwant = entry.counts[2];
+                        self.rpc_counts.graft = entry.counts[3];
+                        self.rpc_counts.prune = entry.counts[4];
+                        self.rpc_counts.idontwant = entry.counts[5];
+                    },
+                    else => {},
+                }
                 self.depth -= 1;
                 continue;
             }

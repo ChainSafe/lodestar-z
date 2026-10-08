@@ -74,6 +74,23 @@ test("metrics are available through startup and remain readable after close", as
       capacities.set(name, value);
     }
     expect(metrics.get("gossipsub_iwant_rcv_dont_have_msgids_total")).toBe(0);
+    for (const direction of ["recv", "sent"]) {
+      for (const field of [
+        "bytes",
+        "count",
+        "subscription",
+        "message",
+        "control",
+        "ihave",
+        "iwant",
+        "graft",
+        "prune",
+        "idontwant",
+      ]) {
+        expect(metrics.get(`gossipsub_rpc_${direction}_${field}_total`)).toBe(0);
+      }
+    }
+    expect(metrics.get('gossipsub_msg_publish_bytes_total{topic="beacon_block"}')).toBe(0);
     for (const outcome of ["limited", "queued", "refused"]) {
       expect(metrics.get(`gossipsub_iwant_known_msgids_total{outcome="${outcome}"}`)).toBe(0);
     }

@@ -7,6 +7,10 @@ const StorageRefusal = @import("messages.zig").StorageRefusal;
 const IwantOutcome = @import("metrics.zig").IwantOutcome;
 
 pub fn writeCounters(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
+    try g.rpc_received.write(.recv, w);
+    var sent = g.retired_rpc_sent;
+    for (g.sessions.rows) |*row| sent.add(&row.io.tx.rpc_sent);
+    try sent.write(.sent, w);
     try w.scalar(.{
         .name = "gossipsub_ihave_budget_skipped_total",
         .kind = .counter,
@@ -78,6 +82,7 @@ pub fn writeMessages(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
         .{ "gossipsub_msg_received_prevalidation_total", "received", "Decoded gossip messages consumed from peers by topic kind, including ignored, invalid, duplicate and storage-refused messages" },
         .{ "gossipsub_pre_validation_duplicate_total", "duplicate", "Received gossip messages already seen or awaiting validation by topic kind" },
         .{ "gossipsub_msg_publish_count_total", "published", "Local publications admitted to gossip history by topic kind, including those without recipients" },
+        .{ "gossipsub_msg_publish_bytes_total", "published_bytes", "Compressed local publication payload bytes multiplied by successfully queued recipients, by topic kind" },
         .{ "gossipsub_accepted_messages_total", "accepted", "Applied accept verdicts by topic kind" },
         .{ "gossipsub_rejected_messages_total", "rejected", "Applied reject verdicts by topic kind" },
         .{ "gossipsub_ignored_messages_total", "ignored", "Applied ignore verdicts by topic kind" },
