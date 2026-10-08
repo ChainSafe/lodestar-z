@@ -8,35 +8,44 @@ const IwantOutcome = @import("metrics.zig").IwantOutcome;
 
 pub fn writeCounters(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
     try w.enums(.{
-        .name = "lodestar_native_gossipsub_storage_refusals_total",
+        .name = "gossipsub_storage_refusals_total",
         .kind = .counter,
         .help = "Gossip storage admission attempts refused by bounded resource reason",
         .labels = &.{"reason"},
     }, StorageRefusal, &g.messages.storage_refusals);
     try w.enums(.{
-        .name = "lodestar_native_gossip_retention_refusals_total",
+        .name = "gossipsub_retention_refusals_total",
         .kind = .counter,
         .help = "Accepted or published messages neither cached nor forwarded because their kind's retention allowance stayed full",
-        .labels = &.{"kind"},
+        .labels = &.{"topic"},
     }, gossip.topic.Kind, &g.messages.retention_refusals);
-    try w.enums(.{
-        .name = "lodestar_native_gossip_iwant_ids_total",
+    try w.scalar(.{
+        .name = "gossipsub_iwant_rcv_dont_have_msgids_total",
         .kind = .counter,
-        .help = "Examined valid IWANT IDs by outcome: absent from history, or present and then over the retransmission limit, queued, or refused for queue pressure",
+        .help = "Requested IWANT message IDs absent from history",
+    }, g.iwant_outcomes[@intFromEnum(IwantOutcome.miss)]);
+    const iwant = try w.family(.{
+        .name = "gossipsub_iwant_known_msgids_total",
+        .kind = .counter,
+        .help = "Requested IWANT message IDs present in history by response outcome",
         .labels = &.{"outcome"},
-    }, IwantOutcome, &g.iwant_outcomes);
+    });
+    inline for (std.meta.fields(IwantOutcome)) |outcome| {
+        if (comptime outcome.value != @intFromEnum(IwantOutcome.miss))
+            try iwant.sample(.{outcome.name}, g.iwant_outcomes[outcome.value]);
+    }
     try w.scalar(.{
         .name = "gossipsub_iwant_promise_broken",
         .kind = .counter,
         .help = "Randomly sampled IWANT batch promises that expired without their sampled message",
     }, g.counters.broken_promises);
     try w.scalar(.{
-        .name = "lodestar_native_gossip_iwant_promises_started_total",
+        .name = "gossipsub_iwant_promise_sent_total",
         .kind = .counter,
         .help = "Randomly sampled IWANT batch promises armed when the request's send completed with its sample outstanding; local cancellation can remove one before it expires",
     }, g.recovery.armed);
     try w.enums(.{
-        .name = "lodestar_native_gossip_behaviour_penalties_total",
+        .name = "gossipsub_behaviour_penalties_total",
         .kind = .counter,
         .help = "Behaviour penalty units applied to peers by protocol violation",
         .labels = &.{"reason"},
@@ -61,9 +70,9 @@ pub fn writeScores(g: *const Gossipsub, running: bool, now_ms: u64, w: *prom.Enc
 
 pub fn writeMessages(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
     inline for (.{
-        .{ "lodestar_native_gossip_messages_received_total", "received", "Decoded gossip messages consumed from peers by topic kind, including ignored, invalid, duplicate and storage-refused messages" },
-        .{ "lodestar_native_gossip_messages_duplicate_total", "duplicate", "Received gossip messages already seen or awaiting validation by topic kind" },
-        .{ "lodestar_native_gossip_messages_published_total", "published", "Local publications admitted to gossip history by topic kind, including those without recipients" },
+        .{ "gossipsub_msg_received_prevalidation_total", "received", "Decoded gossip messages consumed from peers by topic kind, including ignored, invalid, duplicate and storage-refused messages" },
+        .{ "gossipsub_pre_validation_duplicate_total", "duplicate", "Received gossip messages already seen or awaiting validation by topic kind" },
+        .{ "gossipsub_msg_publish_count_total", "published", "Local publications admitted to gossip history by topic kind, including those without recipients" },
         .{ "gossipsub_accepted_messages_total", "accepted", "Applied accept verdicts by topic kind" },
         .{ "gossipsub_rejected_messages_total", "rejected", "Applied reject verdicts by topic kind" },
         .{ "gossipsub_ignored_messages_total", "ignored", "Applied ignore verdicts by topic kind" },
@@ -83,7 +92,7 @@ pub fn writeQueueDrops(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
         total.* +|= value;
     };
     try w.enums(.{
-        .name = "lodestar_native_gossip_queue_drops_total",
+        .name = "gossipsub_queue_drops_total",
         .kind = .counter,
         .help = "Gossip queue admissions refused by resource limit, including mesh control",
         .labels = &.{"reason"},

@@ -22,18 +22,34 @@ pub const empty: Snapshot = .{};
 
 /// Renders processor series. Processor gauges read zero once the owner stops.
 pub fn write(snapshot: *const Snapshot, running: bool, w: *prom.Encoder) prom.Error!void {
-    const items = try w.family(.{ .name = "lodestar_native_gossip_processor_items", .kind = .gauge, .help = "Gossip processor items per kind queued for the host, waiting for a dependency, awaiting a host dependency check, or executing on the host", .labels = &.{ "kind", "state" } });
-    for (snapshot.items, 0..) |states, k| for (states, 0..) |count, s| {
-        try items.sample(.{ @tagName(@as(Kind, @enumFromInt(k))), @tagName(@as(processor.GossipProcessor.Occupancy, @enumFromInt(s))) }, if (running) count else 0);
-    };
-    const refusals = try w.family(.{ .name = "lodestar_native_gossip_processor_refusals_total", .kind = .counter, .help = "Gossip messages the processor refused per kind: kind or shared store capacity, the source's share, slot or fork eligibility, or dependency waiting room", .labels = &.{ "kind", "reason" } });
+    inline for (.{
+        .{ "lodestar_gossip_validation_queue_length", .queued, "Gossip messages queued for validation" },
+        .{ "lodestar_gossip_validation_waiting_block_count", .waiting, "Gossip messages waiting for an unknown block" },
+        .{ "lodestar_gossip_validation_dependency_checks_count", .checking, "Gossip messages awaiting a host dependency check" },
+        .{ "lodestar_gossip_validation_queue_concurrency", .executing, "Gossip messages executing on the host" },
+    }) |metric| {
+        const items = try w.family(.{ .name = metric[0], .kind = .gauge, .help = metric[2], .labels = &.{"topic"} });
+        for (snapshot.items, 0..) |states, k| {
+            try items.sample(.{@tagName(@as(Kind, @enumFromInt(k)))}, if (running) states[@intFromEnum(@as(processor.GossipProcessor.Occupancy, metric[1]))] else 0);
+        }
+    }
+    var waiting: u64 = 0;
+    for (snapshot.items) |states| waiting += states[@intFromEnum(processor.GossipProcessor.Occupancy.waiting)];
+    try w.scalar(.{
+        .name = "lodestar_awaiting_block_gossip_messages_per_slot_total",
+        .kind = .gauge,
+        .help = "Current gossip messages waiting for an unknown block",
+    }, if (running) waiting else 0);
+    const refusals = try w.family(.{ .name = "lodestar_gossip_validation_refusals_total", .kind = .counter, .help = "Gossip messages refused by topic and admission reason", .labels = &.{ "topic", "reason" } });
     for (snapshot.refusals, 0..) |reasons, k| for (reasons, 0..) |count, reason| {
         try refusals.sample(.{ @tagName(@as(Kind, @enumFromInt(k))), @tagName(@as(processor.GossipProcessor.Refusal, @enumFromInt(reason))) }, count);
     };
-    const limit = try w.family(.{ .name = "lodestar_native_gossip_processor_execution_credit_limit", .kind = .gauge, .help = "Execution credits per kind, in items and bytes", .labels = &.{ "kind", "credit" } });
-    for (snapshot.execution, 0..) |value, k| {
-        try limit.sample(.{ @tagName(@as(Kind, @enumFromInt(k))), "items" }, value.items);
-        try limit.sample(.{ @tagName(@as(Kind, @enumFromInt(k))), "bytes" }, value.bytes);
+    inline for (.{
+        .{ "lodestar_gossip_validation_concurrency_limit", "items", "Maximum gossip messages executing per topic" },
+        .{ "lodestar_gossip_validation_execution_limit_bytes", "bytes", "Maximum bytes of gossip messages executing per topic" },
+    }) |metric| {
+        const limit = try w.family(.{ .name = metric[0], .kind = .gauge, .help = metric[2], .labels = &.{"topic"} });
+        for (snapshot.execution, 0..) |value, k| try limit.sample(.{@tagName(@as(Kind, @enumFromInt(k)))}, @field(value, metric[1]));
     }
 }
 
@@ -43,7 +59,10 @@ test "processor snapshot renders occupancy, refusals and execution limits" {
     defer table.deinit();
     var snapshot: Snapshot = .{};
     snapshot.captureProcessor(&table);
+    snapshot.items[@intFromEnum(Kind.beacon_attestation)][@intFromEnum(processor.GossipProcessor.Occupancy.queued)] = 3;
     snapshot.items[@intFromEnum(Kind.beacon_attestation)][@intFromEnum(processor.GossipProcessor.Occupancy.waiting)] = 5;
+    snapshot.items[@intFromEnum(Kind.beacon_attestation)][@intFromEnum(processor.GossipProcessor.Occupancy.checking)] = 7;
+    snapshot.items[@intFromEnum(Kind.beacon_attestation)][@intFromEnum(processor.GossipProcessor.Occupancy.executing)] = 2;
     snapshot.refusals[@intFromEnum(Kind.data_column_sidecar)][@intFromEnum(processor.GossipProcessor.Refusal.source_full)] = 2;
     var buffer: [256 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -51,13 +70,18 @@ test "processor snapshot renders occupancy, refusals and execution limits" {
     try write(&snapshot, true, &encoder);
     const output = writer.buffered();
     for ([_][]const u8{
-        "lodestar_native_gossip_processor_items{kind=\"beacon_attestation\",state=\"waiting\"} 5\n",
-        "lodestar_native_gossip_processor_refusals_total{kind=\"data_column_sidecar\",reason=\"source_full\"} 2\n",
-        "lodestar_native_gossip_processor_execution_credit_limit{kind=\"data_column_sidecar\",credit=\"items\"} 2\n",
-        "lodestar_native_gossip_processor_execution_credit_limit{kind=\"data_column_sidecar\",credit=\"bytes\"} 4096\n",
+        "lodestar_gossip_validation_queue_length{topic=\"beacon_attestation\"} 3\n",
+        "lodestar_gossip_validation_waiting_block_count{topic=\"beacon_attestation\"} 5\n",
+        "lodestar_awaiting_block_gossip_messages_per_slot_total 5\n",
+        "lodestar_gossip_validation_dependency_checks_count{topic=\"beacon_attestation\"} 7\n",
+        "lodestar_gossip_validation_queue_concurrency{topic=\"beacon_attestation\"} 2\n",
+        "lodestar_gossip_validation_refusals_total{topic=\"data_column_sidecar\",reason=\"source_full\"} 2\n",
+        "lodestar_gossip_validation_concurrency_limit{topic=\"data_column_sidecar\"} 2\n",
+        "lodestar_gossip_validation_execution_limit_bytes{topic=\"data_column_sidecar\"} 4096\n",
     }) |expected| try std.testing.expect(std.mem.find(u8, output, expected) != null);
     writer = std.Io.Writer.fixed(&buffer);
     encoder = .{ .writer = &writer };
     try write(&snapshot, false, &encoder);
-    try std.testing.expect(std.mem.find(u8, writer.buffered(), "state=\"waiting\"} 5\n") == null);
+    try std.testing.expect(std.mem.find(u8, writer.buffered(), "lodestar_gossip_validation_waiting_block_count{topic=\"beacon_attestation\"} 0\n") != null);
+    try std.testing.expect(std.mem.find(u8, writer.buffered(), "lodestar_gossip_validation_refusals_total{topic=\"data_column_sidecar\",reason=\"source_full\"} 2\n") != null);
 }

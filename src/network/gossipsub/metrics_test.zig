@@ -29,11 +29,11 @@ test "score populations count cumulative gates, distinct mesh peers and empty sc
     const PeerState = @import("score.zig").PeerScore.PeerState;
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .score_params = .{ .behaviour_threshold = 0, .behaviour_weight = -1, .gossip_threshold = -4, .publish_threshold = -9, .graylist_threshold = -16 } });
     defer g.deinit();
-    var buffer: [4096]u8 = undefined;
+    var buffer: [8192]u8 = undefined;
     const empty = try render(&ScorePopulations.collect(&g.peers, g.overlay, g.sessions, 1), &buffer);
-    try std.testing.expect(std.mem.find(u8, empty, "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"all\"} 0\n") != null);
-    try std.testing.expect(std.mem.find(u8, empty, "# TYPE lodestar_native_gossip_score gauge\n") != null);
-    try std.testing.expect(std.mem.find(u8, empty, "lodestar_native_gossip_score{") == null);
+    try std.testing.expect(std.mem.find(u8, empty, "lodestar_gossip_mesh_peer_score_by_threshold_count{threshold=\"all\"} 0\n") != null);
+    try std.testing.expect(std.mem.find(u8, empty, "lodestar_gossip_score_avg_min_max_avg 0\n") != null);
+    try std.testing.expect(std.mem.find(u8, empty, "lodestar_gossip_mesh_score_avg_min_max_avg 0\n") != null);
     const names = [_][]const u8{ "/eth2/01020304/beacon_block/ssz_snappy", "/eth2/01020304/voluntary_exit/ssz_snappy" };
     for (names) |name| try support.subscribe(&g, name);
     // Behaviour b scores -b^2: the peers sit on each gate, between gates and below the lowest.
@@ -55,23 +55,23 @@ test "score populations count cumulative gates, distinct mesh peers and empty sc
     try std.testing.expectEqual(calculations, g.peers.scores.calculations);
     const output = try render(&populations, &buffer);
     for ([_][]const u8{
-        "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"all\"} 6\n",
-        "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"nonnegative\"} 1\n",
-        "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"gossip\"} 3\n",
-        "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"publish\"} 4\n",
-        "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"graylist\"} 5\n",
-        "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"all\"} 3\n",
-        "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"nonnegative\"} 0\n",
-        "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"gossip\"} 2\n",
-        "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"publish\"} 3\n",
-        "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"graylist\"} 3\n",
-        "lodestar_native_gossip_score{scope=\"connected\",stat=\"min\"} -25\n",
-        "lodestar_native_gossip_score{scope=\"connected\",stat=\"max\"} 0\n",
-        "lodestar_native_gossip_score{scope=\"mesh\",stat=\"min\"} -9\n",
-        "lodestar_native_gossip_score{scope=\"mesh\",stat=\"mean\"} -4.416666666666667\n",
-        "lodestar_native_gossip_score{scope=\"mesh\",stat=\"max\"} -0.25\n",
+        "lodestar_gossip_peer_score_by_threshold_count{threshold=\"all\"} 6\n",
+        "lodestar_gossip_peer_score_by_threshold_count{threshold=\"mesh\"} 1\n",
+        "lodestar_gossip_peer_score_by_threshold_count{threshold=\"gossip\"} 3\n",
+        "lodestar_gossip_peer_score_by_threshold_count{threshold=\"publish\"} 4\n",
+        "lodestar_gossip_peer_score_by_threshold_count{threshold=\"graylist\"} 5\n",
+        "lodestar_gossip_mesh_peer_score_by_threshold_count{threshold=\"all\"} 3\n",
+        "lodestar_gossip_mesh_peer_score_by_threshold_count{threshold=\"mesh\"} 0\n",
+        "lodestar_gossip_mesh_peer_score_by_threshold_count{threshold=\"gossip\"} 2\n",
+        "lodestar_gossip_mesh_peer_score_by_threshold_count{threshold=\"publish\"} 3\n",
+        "lodestar_gossip_mesh_peer_score_by_threshold_count{threshold=\"graylist\"} 3\n",
+        "lodestar_gossip_score_avg_min_max_min -25\n",
+        "lodestar_gossip_score_avg_min_max_max 0\n",
+        "lodestar_gossip_mesh_score_avg_min_max_min -9\n",
+        "lodestar_gossip_mesh_score_avg_min_max_avg -4.416666666666667\n",
+        "lodestar_gossip_mesh_score_avg_min_max_max -0.25\n",
     }) |line| try std.testing.expect(std.mem.find(u8, output, line) != null);
     var mean: [96]u8 = undefined;
-    const connected_mean = try std.fmt.bufPrint(&mean, "lodestar_native_gossip_score{{scope=\"connected\",stat=\"mean\"}} {d}\n", .{@as(f64, -54.25) / 6});
+    const connected_mean = try std.fmt.bufPrint(&mean, "lodestar_gossip_score_avg_min_max_avg {d}\n", .{@as(f64, -54.25) / 6});
     try std.testing.expect(std.mem.find(u8, output, connected_mean) != null);
 }

@@ -40,7 +40,7 @@ test("incoming cancellation retains execution until host work retires", async ()
     await incoming.cancel();
     await pending;
 
-    const retiring = () => metricValue(pair.right.getMetrics(), "lodestar_native_reqresp_resources_retiring");
+    const retiring = () => metricValue(pair.right.getMetrics(), "beacon_reqresp_retiring_count");
     await expect.poll(retiring, {timeout: 5000}).toBe(1);
     retire();
     await expect.poll(retiring, {timeout: 5000}).toBe(0);
@@ -344,8 +344,7 @@ test("terminal before take never exposes a retired request", async () => {
   try {
     const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
     const pending = stream.next().catch(() => undefined);
-    const waiting = () =>
-      metricValue(pair.right.getMetrics(), 'lodestar_native_reqresp_inbound_occupied{phase="waiting_host"}');
+    const waiting = () => metricValue(pair.right.getMetrics(), 'beacon_reqresp_incoming_count{phase="waiting_host"}');
     await expect.poll(waiting, {timeout: 5000}).toBe(1);
     await stream.return?.();
     await pair.left.disconnect(pair.remote.peerId);
@@ -424,7 +423,7 @@ test("a permission the stream's end overtakes arrives with the close and settles
     await stream.return?.();
     await pending;
     await expect
-      .poll(() => metricValue(pair.right.getMetrics(), "lodestar_native_reqresp_resources_retiring"), {timeout: 5000})
+      .poll(() => metricValue(pair.right.getMetrics(), "beacon_reqresp_retiring_count"), {timeout: 5000})
       .toBe(1);
     expect(await incomingCompleted(pair.right)).toMatchObject({
       closed: true,
@@ -453,7 +452,7 @@ test("an acknowledgement due with the stream's close arrives in one completion a
     expect((await first).value?.data).toEqual(data);
     await stream.return?.();
     await expect
-      .poll(() => metricValue(pair.right.getMetrics(), "lodestar_native_reqresp_resources_retiring"), {timeout: 5000})
+      .poll(() => metricValue(pair.right.getMetrics(), "beacon_reqresp_retiring_count"), {timeout: 5000})
       .toBe(1);
     const completion = await incomingCompleted(pair.right);
     expect(completion).toEqual({closed: true, family: "incoming", handle: expect.anything(), response: {}});

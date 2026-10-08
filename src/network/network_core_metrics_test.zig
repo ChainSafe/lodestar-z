@@ -6,6 +6,7 @@ const NetworkCore = @import("network_core.zig").NetworkCore;
 const metrics = @import("metrics/export.zig");
 const policy = @import("gossipsub/topic_policy.zig");
 const protocol = @import("reqresp/root.zig").Protocol;
+const AdmissionRefusal = @import("reqresp/metrics.zig").AdmissionRefusal;
 const KeyPair = @import("wire/keys.zig").KeyPair;
 const logging = @import("logging.zig");
 const types = @import("peers/types.zig");
@@ -66,42 +67,41 @@ const Series = struct {
     labels: []const []const u8 = &.{},
 };
 
-/// The measurement contract: exactly the native families the durable metrics manifest keeps, which
-/// the feat4 scorecard reads. Adding, removing or renaming one needs the same change in that manifest.
+/// Metric families and label names exposed by the network owner.
 const contract = [_]Series{
     // Peers
     .{ .name = "libp2p_peers", .kind = "gauge" },
-    .{ .name = "lodestar_native_network_relevant_peers", .kind = "gauge" },
-    .{ .name = "lodestar_native_peer_below_target", .kind = "gauge" },
+    .{ .name = "lodestar_peers_relevant_count", .kind = "gauge" },
+    .{ .name = "lodestar_peers_below_target_bool", .kind = "gauge" },
     .{ .name = "lodestar_peers_by_direction_count", .kind = "gauge", .labels = &.{"direction"} },
     .{ .name = "lodestar_peers_by_client_count", .kind = "gauge", .labels = &.{"client"} },
     .{ .name = "lodestar_peer_connection_seconds", .kind = "histogram" },
     .{ .name = "lodestar_peer_connected_total", .kind = "counter", .labels = &.{ "direction", "status" } },
     .{ .name = "lodestar_peer_goodbye_received_total", .kind = "counter", .labels = &.{"reason"} },
-    .{ .name = "lodestar_native_peer_closes_total", .kind = "counter", .labels = &.{"reason"} },
-    .{ .name = "lodestar_native_peer_health_failures_total", .kind = "counter", .labels = &.{"probe"} },
-    .{ .name = "lodestar_native_peer_rejections_total", .kind = "counter", .labels = &.{"kind"} },
-    .{ .name = "lodestar_native_peer_dial_selections_total", .kind = "counter", .labels = &.{"source"} },
-    .{ .name = "lodestar_native_peer_dial_outcomes_total", .kind = "counter", .labels = &.{"outcome"} },
-    .{ .name = "lodestar_native_peer_dial_time_seconds", .kind = "histogram", .labels = &.{"outcome"} },
-    .{ .name = "lodestar_native_peer_dial_retries_total", .kind = "counter", .labels = &.{"previous"} },
-    .{ .name = "lodestar_native_dial_recent_failures_refused_total", .kind = "counter", .labels = &.{"reason"} },
-    .{ .name = "lodestar_native_peer_dial_funnel_total", .kind = "counter", .labels = &.{ "origin", "stage" } },
-    .{ .name = "lodestar_native_remembered_peers", .kind = "gauge" },
-    .{ .name = "lodestar_native_remembered_peer_seeds_total", .kind = "counter", .labels = &.{"outcome"} },
-    .{ .name = "lodestar_native_remembered_peer_replays_total", .kind = "counter", .labels = &.{"outcome"} },
-    .{ .name = "lodestar_native_peer_outbound_deficit", .kind = "gauge" },
+    .{ .name = "lodestar_peer_closes_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "lodestar_peer_health_failures_total", .kind = "counter", .labels = &.{"probe"} },
+    .{ .name = "lodestar_peer_rejections_total", .kind = "counter", .labels = &.{"kind"} },
+    .{ .name = "lodestar_peer_dial_selections_total", .kind = "counter", .labels = &.{"source"} },
+    .{ .name = "lodestar_peer_dial_outcomes_total", .kind = "counter", .labels = &.{"outcome"} },
+    .{ .name = "lodestar_peer_dial_time_seconds", .kind = "histogram", .labels = &.{"outcome"} },
+    .{ .name = "lodestar_peer_dial_retries_total", .kind = "counter", .labels = &.{"previous"} },
+    .{ .name = "lodestar_peer_dial_recent_failures_refused_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "lodestar_peer_dial_funnel_total", .kind = "counter", .labels = &.{ "origin", "stage" } },
+    .{ .name = "lodestar_peer_remembered_count", .kind = "gauge" },
+    .{ .name = "lodestar_peer_remembered_seeds_total", .kind = "counter", .labels = &.{"outcome"} },
+    .{ .name = "lodestar_peer_remembered_replays_total", .kind = "counter", .labels = &.{"outcome"} },
+    .{ .name = "lodestar_peer_outbound_deficit_count", .kind = "gauge" },
     .{ .name = "lodestar_discovery_subnet_peers_to_connect", .kind = "gauge", .labels = &.{"type"} },
     .{ .name = "lodestar_discovery_custody_group_peers_to_connect", .kind = "gauge" },
     .{ .name = "lodestar_peer_count_per_sampling_group", .kind = "gauge", .labels = &.{"groupIndex"} },
     // Discovery
     .{ .name = "lodestar_discv5_kad_table_size", .kind = "gauge" },
     .{ .name = "lodestar_discv5_active_session_count", .kind = "gauge" },
-    .{ .name = "lodestar_native_discovery_lookups_started_total", .kind = "counter" },
-    .{ .name = "lodestar_native_discovery_lookup_finishes_total", .kind = "counter", .labels = &.{"reason"} },
-    .{ .name = "lodestar_native_discovery_candidates_published_total", .kind = "counter" },
-    .{ .name = "lodestar_native_discovery_candidate_rejections_total", .kind = "counter", .labels = &.{"reason"} },
-    .{ .name = "lodestar_native_discovery_datagram_rejections_total", .kind = "counter", .labels = &.{ "stage", "reason" } },
+    .{ .name = "lodestar_discovery_find_node_query_requests_total", .kind = "counter", .labels = &.{"action"} },
+    .{ .name = "lodestar_discovery_lookup_finishes_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "lodestar_discovery_candidates_published_total", .kind = "counter" },
+    .{ .name = "lodestar_discovery_candidate_rejections_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "lodestar_discovery_datagram_rejections_total", .kind = "counter", .labels = &.{ "stage", "reason" } },
     // Gossip
     .{ .name = "gossipsub_mesh_peer_count", .kind = "gauge", .labels = &.{"topicStr"} },
     .{ .name = "gossipsub_topic_peer_count", .kind = "gauge", .labels = &.{"topicStr"} },
@@ -113,32 +113,43 @@ const contract = [_]Series{
     .{ .name = "lodestar_gossip_topic_peers_by_beacon_attestation_subnet_count", .kind = "gauge", .labels = &.{ "subnet", "boundary" } },
     .{ .name = "lodestar_gossip_topic_peers_by_sync_committee_subnet_count", .kind = "gauge", .labels = &.{ "subnet", "boundary" } },
     .{ .name = "lodestar_gossip_topic_peers_by_data_column_subnet_count", .kind = "gauge", .labels = &.{ "subnet", "boundary" } },
-    .{ .name = "lodestar_native_gossip_subscriptions_by_type_count", .kind = "gauge", .labels = &.{ "type", "boundary" } },
-    .{ .name = "lodestar_native_gossip_subscriptions_by_beacon_attestation_subnet_count", .kind = "gauge", .labels = &.{ "subnet", "boundary" } },
-    .{ .name = "lodestar_native_gossip_subscriptions_by_sync_committee_subnet_count", .kind = "gauge", .labels = &.{ "subnet", "boundary" } },
-    .{ .name = "lodestar_native_gossip_subscriptions_by_data_column_subnet_count", .kind = "gauge", .labels = &.{ "subnet", "boundary" } },
+    .{ .name = "gossipsub_topic_subscription_status", .kind = "gauge", .labels = &.{"topicStr"} },
     .{ .name = "gossipsub_accepted_messages_total", .kind = "counter", .labels = &.{"topic"} },
     .{ .name = "gossipsub_rejected_messages_total", .kind = "counter", .labels = &.{"topic"} },
     .{ .name = "gossipsub_ignored_messages_total", .kind = "counter", .labels = &.{"topic"} },
     .{ .name = "gossipsub_msg_forward_count_total", .kind = "counter", .labels = &.{"topic"} },
-    .{ .name = "lodestar_native_gossip_data_recipients_total", .kind = "counter", .labels = &.{ "origin", "outcome" } },
-    .{ .name = "lodestar_native_gossip_queue_drops_total", .kind = "counter", .labels = &.{"reason"} },
-    .{ .name = "lodestar_native_gossip_retention_refusals_total", .kind = "counter", .labels = &.{"kind"} },
-    .{ .name = "lodestar_native_gossip_iwant_ids_total", .kind = "counter", .labels = &.{"outcome"} },
+    .{ .name = "gossipsub_data_recipients_total", .kind = "counter", .labels = &.{ "origin", "outcome" } },
+    .{ .name = "gossipsub_queue_drops_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "gossipsub_retention_refusals_total", .kind = "counter", .labels = &.{"topic"} },
+    .{ .name = "gossipsub_iwant_rcv_dont_have_msgids_total", .kind = "counter" },
+    .{ .name = "gossipsub_iwant_known_msgids_total", .kind = "counter", .labels = &.{"outcome"} },
     .{ .name = "gossipsub_iwant_promise_broken", .kind = "counter" },
-    .{ .name = "lodestar_native_gossip_iwant_promises_started_total", .kind = "counter" },
-    .{ .name = "lodestar_native_gossip_messages_received_total", .kind = "counter", .labels = &.{"topic"} },
-    .{ .name = "lodestar_native_gossip_messages_duplicate_total", .kind = "counter", .labels = &.{"topic"} },
-    .{ .name = "lodestar_native_gossip_messages_published_total", .kind = "counter", .labels = &.{"topic"} },
-    .{ .name = "lodestar_native_gossip_mesh_changes_total", .kind = "counter", .labels = &.{ "topic", "event", "reason" } },
-    .{ .name = "lodestar_native_gossip_behaviour_penalties_total", .kind = "counter", .labels = &.{"reason"} },
-    .{ .name = "lodestar_native_gossip_score_peers", .kind = "gauge", .labels = &.{ "scope", "threshold" } },
-    .{ .name = "lodestar_native_gossip_score", .kind = "gauge", .labels = &.{ "scope", "stat" } },
+    .{ .name = "gossipsub_iwant_promise_sent_total", .kind = "counter" },
+    .{ .name = "gossipsub_msg_received_prevalidation_total", .kind = "counter", .labels = &.{"topic"} },
+    .{ .name = "gossipsub_pre_validation_duplicate_total", .kind = "counter", .labels = &.{"topic"} },
+    .{ .name = "gossipsub_msg_publish_count_total", .kind = "counter", .labels = &.{"topic"} },
+    .{ .name = "gossipsub_mesh_changes_total", .kind = "counter", .labels = &.{ "topic", "event", "reason" } },
+    .{ .name = "gossipsub_behaviour_penalties_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "lodestar_gossip_peer_score_by_threshold_count", .kind = "gauge", .labels = &.{"threshold"} },
+    .{ .name = "lodestar_gossip_score_avg_min_max_sum", .kind = "gauge" },
+    .{ .name = "lodestar_gossip_score_avg_min_max_avg", .kind = "gauge" },
+    .{ .name = "lodestar_gossip_score_avg_min_max_min", .kind = "gauge" },
+    .{ .name = "lodestar_gossip_score_avg_min_max_max", .kind = "gauge" },
+    .{ .name = "lodestar_gossip_mesh_peer_score_by_threshold_count", .kind = "gauge", .labels = &.{"threshold"} },
+    .{ .name = "lodestar_gossip_mesh_score_avg_min_max_sum", .kind = "gauge" },
+    .{ .name = "lodestar_gossip_mesh_score_avg_min_max_avg", .kind = "gauge" },
+    .{ .name = "lodestar_gossip_mesh_score_avg_min_max_min", .kind = "gauge" },
+    .{ .name = "lodestar_gossip_mesh_score_avg_min_max_max", .kind = "gauge" },
     // Gossip processor
-    .{ .name = "lodestar_native_gossip_processor_items", .kind = "gauge", .labels = &.{ "kind", "state" } },
-    .{ .name = "lodestar_native_gossip_processor_execution_credit_limit", .kind = "gauge", .labels = &.{ "kind", "credit" } },
-    .{ .name = "lodestar_native_gossip_processor_refusals_total", .kind = "counter", .labels = &.{ "kind", "reason" } },
-    .{ .name = "lodestar_native_gossip_expired_executing", .kind = "gauge" },
+    .{ .name = "lodestar_awaiting_block_gossip_messages_per_slot_total", .kind = "gauge" },
+    .{ .name = "lodestar_gossip_validation_queue_length", .kind = "gauge", .labels = &.{"topic"} },
+    .{ .name = "lodestar_gossip_validation_waiting_block_count", .kind = "gauge", .labels = &.{"topic"} },
+    .{ .name = "lodestar_gossip_validation_dependency_checks_count", .kind = "gauge", .labels = &.{"topic"} },
+    .{ .name = "lodestar_gossip_validation_queue_concurrency", .kind = "gauge", .labels = &.{"topic"} },
+    .{ .name = "lodestar_gossip_validation_concurrency_limit", .kind = "gauge", .labels = &.{"topic"} },
+    .{ .name = "lodestar_gossip_validation_execution_limit_bytes", .kind = "gauge", .labels = &.{"topic"} },
+    .{ .name = "lodestar_gossip_validation_refusals_total", .kind = "counter", .labels = &.{ "topic", "reason" } },
+    .{ .name = "lodestar_gossip_validation_expired_executing_count", .kind = "gauge" },
     .{ .name = "gossipsub_async_validation_delay_from_first_seen", .kind = "histogram" },
     // ReqResp
     .{ .name = "beacon_reqresp_incoming_requests_total", .kind = "counter", .labels = &.{"method"} },
@@ -148,40 +159,41 @@ const contract = [_]Series{
     .{ .name = "beacon_reqresp_outgoing_requests_error_total", .kind = "counter", .labels = &.{"method"} },
     .{ .name = "beacon_reqresp_outgoing_requests_error_reason_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "beacon_reqresp_outgoing_request_roundtrip_time_seconds", .kind = "histogram", .labels = &.{"method"} },
-    .{ .name = "lodestar_native_reqresp_resources_serving_occupied", .kind = "gauge" },
-    .{ .name = "lodestar_native_reqresp_resources_serving_capacity", .kind = "gauge" },
-    .{ .name = "lodestar_native_reqresp_resources_retiring", .kind = "gauge" },
-    .{ .name = "lodestar_native_reqresp_inbound_occupied", .kind = "gauge", .labels = &.{"phase"} },
-    .{ .name = "lodestar_native_reqresp_admission_refusals_total", .kind = "counter", .labels = &.{ "method", "reason" } },
+    .{ .name = "beacon_reqresp_serving_count", .kind = "gauge" },
+    .{ .name = "beacon_reqresp_serving_capacity_count", .kind = "gauge" },
+    .{ .name = "beacon_reqresp_retiring_count", .kind = "gauge" },
+    .{ .name = "beacon_reqresp_incoming_count", .kind = "gauge", .labels = &.{"phase"} },
+    .{ .name = "beacon_reqresp_rate_limiter_errors_total", .kind = "counter", .labels = &.{"method"} },
+    .{ .name = "beacon_reqresp_admission_refusals_total", .kind = "counter", .labels = &.{ "method", "reason" } },
     // Transport and UDP
-    .{ .name = "lodestar_native_quic_connections_established_total", .kind = "counter", .labels = &.{"direction"} },
-    .{ .name = "lodestar_native_quic_connections_closed_total", .kind = "counter", .labels = &.{ "direction", "reason" } },
-    .{ .name = "lodestar_native_quic_connections_active", .kind = "gauge" },
-    .{ .name = "lodestar_native_quic_connections_handshaking", .kind = "gauge" },
-    .{ .name = "lodestar_native_quic_udp_received_bytes_total", .kind = "counter" },
-    .{ .name = "lodestar_native_quic_udp_sent_bytes_total", .kind = "counter" },
-    .{ .name = "lodestar_native_quic_udp_received_datagrams_total", .kind = "counter" },
-    .{ .name = "lodestar_native_quic_udp_sent_datagrams_total", .kind = "counter" },
-    .{ .name = "lodestar_native_udp_send_dropped_datagrams_total", .kind = "counter", .labels = &.{ "role", "reason" } },
-    .{ .name = "lodestar_native_udp_send_dropped_bytes_total", .kind = "counter", .labels = &.{ "role", "reason" } },
-    .{ .name = "lodestar_native_udp_socket_drops_total", .kind = "counter", .labels = &.{ "role", "family" } },
-    .{ .name = "lodestar_native_udp_socket_buffer_bytes", .kind = "gauge", .labels = &.{ "role", "family", "direction" } },
+    .{ .name = "lodestar_quic_connections_established_total", .kind = "counter", .labels = &.{"direction"} },
+    .{ .name = "lodestar_quic_connections_closed_total", .kind = "counter", .labels = &.{ "direction", "reason" } },
+    .{ .name = "lodestar_quic_connection_slots_count", .kind = "gauge" },
+    .{ .name = "lodestar_quic_connections_handshaking_count", .kind = "gauge" },
+    .{ .name = "lodestar_quic_udp_received_bytes_total", .kind = "counter" },
+    .{ .name = "lodestar_quic_udp_sent_bytes_total", .kind = "counter" },
+    .{ .name = "lodestar_quic_udp_received_datagrams_total", .kind = "counter" },
+    .{ .name = "lodestar_quic_udp_sent_datagrams_total", .kind = "counter" },
+    .{ .name = "lodestar_udp_send_dropped_datagrams_total", .kind = "counter", .labels = &.{ "role", "reason" } },
+    .{ .name = "lodestar_udp_send_dropped_bytes_total", .kind = "counter", .labels = &.{ "role", "reason" } },
+    .{ .name = "lodestar_udp_socket_drops_total", .kind = "counter", .labels = &.{ "role", "family" } },
+    .{ .name = "lodestar_udp_socket_buffer_bytes", .kind = "gauge", .labels = &.{ "role", "family", "direction" } },
     // Owner and resources
-    .{ .name = "lodestar_native_network_step_seconds", .kind = "histogram" },
-    .{ .name = "lodestar_native_network_running", .kind = "gauge" },
-    .{ .name = "lodestar_native_network_metrics_updated_timestamp_seconds", .kind = "gauge" },
-    .{ .name = "lodestar_native_network_transport_failures_total", .kind = "counter" },
-    .{ .name = "lodestar_native_network_readiness_failures_total", .kind = "counter" },
-    .{ .name = "lodestar_native_logs_dropped_total", .kind = "counter", .labels = &.{ "level", "scope" } },
-    .{ .name = "lodestar_native_gossipsub_storage_refusals_total", .kind = "counter", .labels = &.{"reason"} },
-    .{ .name = "lodestar_native_gossipsub_pending_validations", .kind = "gauge" },
-    .{ .name = "lodestar_native_gossipsub_validation_capacity", .kind = "gauge" },
-    .{ .name = "lodestar_native_gossipsub_queued_bytes", .kind = "gauge" },
-    .{ .name = "lodestar_native_gossipsub_delivery_descriptors_available", .kind = "gauge" },
-    .{ .name = "lodestar_native_gossipsub_delivery_descriptors_capacity", .kind = "gauge" },
-    .{ .name = "lodestar_native_gossipsub_receive_pages", .kind = "gauge" },
-    .{ .name = "lodestar_native_gossipsub_receive_page_capacity", .kind = "gauge" },
-    .{ .name = "lodestar_native_gossipsub_store_pages", .kind = "gauge" },
+    .{ .name = "lodestar_network_step_seconds", .kind = "histogram" },
+    .{ .name = "lodestar_network_running_bool", .kind = "gauge" },
+    .{ .name = "lodestar_network_metrics_updated_timestamp_seconds", .kind = "gauge" },
+    .{ .name = "lodestar_network_transport_failures_total", .kind = "counter" },
+    .{ .name = "lodestar_network_readiness_failures_total", .kind = "counter" },
+    .{ .name = "lodestar_network_logs_dropped_total", .kind = "counter", .labels = &.{ "level", "scope" } },
+    .{ .name = "gossipsub_storage_refusals_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "gossipsub_mcache_not_validated_count", .kind = "gauge" },
+    .{ .name = "gossipsub_validation_capacity_count", .kind = "gauge" },
+    .{ .name = "gossipsub_queued_bytes", .kind = "gauge" },
+    .{ .name = "gossipsub_delivery_descriptors_available_count", .kind = "gauge" },
+    .{ .name = "gossipsub_delivery_descriptors_capacity_count", .kind = "gauge" },
+    .{ .name = "gossipsub_receive_pages_count", .kind = "gauge" },
+    .{ .name = "gossipsub_receive_pages_capacity_count", .kind = "gauge" },
+    .{ .name = "gossipsub_store_pages_count", .kind = "gauge" },
 };
 
 fn hasSeries(output: []const u8, series: Series) bool {
@@ -232,33 +244,38 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     node.peer_manager.control.counters.closed[0] = 17;
     node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing = 4;
     node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing = 5;
+    node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].admission_refusals[@intFromEnum(AdmissionRefusal.peer_quota)] = 2;
+    node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].admission_refusals[@intFromEnum(AdmissionRefusal.global_quota)] = 3;
+    node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].admission_refusals[@intFromEnum(AdmissionRefusal.connection_capacity)] = 7;
     node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing_time.observe(100);
     node.protocols.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing_time.observe(200);
     node.protocols.gossipsub.messages.storage_refusals[0] = 11;
     node.peer_manager.selection.deficits.outbound = 7;
     const original = node.peer_manager.counters;
     const output = try f.render(true);
-    try contains(output, "lodestar_native_network_transport_failures_total 18446744073709551615\n");
+    try contains(output, "lodestar_network_transport_failures_total 18446744073709551615\n");
     const closed = @tagName(@as(types.DisconnectReason, @enumFromInt(0)));
     var line: [128]u8 = undefined;
-    const closes = try std.fmt.bufPrint(&line, "lodestar_native_peer_closes_total{{reason=\"{s}\"}} 17\n", .{closed});
+    const closes = try std.fmt.bufPrint(&line, "lodestar_peer_closes_total{{reason=\"{s}\"}} 17\n", .{closed});
     try contains(output, closes);
-    try contains(output, "lodestar_native_peer_outbound_deficit 7\n");
+    try contains(output, "lodestar_peer_outbound_deficit_count 7\n");
     try contains(output, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n");
+    try contains(output, "beacon_reqresp_rate_limiter_errors_total{method=\"status\"} 5\n");
+    try contains(output, "beacon_reqresp_admission_refusals_total{method=\"status\",reason=\"connection_capacity\"} 7\n");
     try contains(output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method=\"status\"} 2\n");
-    try contains(output, "lodestar_native_gossip_expired_executing 3\n");
-    try contains(output, "lodestar_native_network_metrics_updated_timestamp_seconds 123456\n");
+    try contains(output, "lodestar_gossip_validation_expired_executing_count 3\n");
+    try contains(output, "lodestar_network_metrics_updated_timestamp_seconds 123456\n");
     try std.testing.expect(std.mem.find(u8, output, "lodestar_peer_manager_starved_bool") == null);
     try std.testing.expect(std.mem.find(u8, output, "lodestar_discovery_total_dial_attempts") == null);
     try std.testing.expect(std.mem.find(u8, output, "_total_total") == null);
     _ = try f.render(true);
     try std.testing.expectEqualDeep(original, node.peer_manager.counters);
     const stopped = try f.render(false);
-    try contains(stopped, "lodestar_native_network_running 0\n");
-    try contains(stopped, "lodestar_native_peer_outbound_deficit 0\n");
+    try contains(stopped, "lodestar_network_running_bool 0\n");
+    try contains(stopped, "lodestar_peer_outbound_deficit_count 0\n");
     try contains(stopped, closes);
     try contains(stopped, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n");
-    try contains(stopped, "lodestar_native_gossip_expired_executing 0\n");
+    try contains(stopped, "lodestar_gossip_validation_expired_executing_count 0\n");
 }
 
 test "metrics include remote subscriptions on inactive topics and follow local fork boundary visibility" {
@@ -275,14 +292,14 @@ test "metrics include remote subscriptions on inactive topics and follow local f
     var output = try f.render(true);
     try contains(output, "lodestar_gossip_topic_peers_by_data_column_subnet_count{subnet=\"9\",boundary=\"fulu_100\"} 1\n");
     try contains(output, "lodestar_gossip_mesh_peers_by_data_column_subnet_count{subnet=\"9\",boundary=\"fulu_100\"} 0\n");
-    try contains(output, "lodestar_native_gossip_subscriptions_by_data_column_subnet_count{subnet=\"9\",boundary=\"fulu_100\"} 0\n");
+    try contains(output, "gossipsub_topic_subscription_status{topicStr=\"/eth2/00000000/data_column_sidecar_9/ssz_snappy\"} 0\n");
     try contains(output, "lodestar_gossip_topic_peers_by_beacon_attestation_subnet_count{subnet=\"00\",boundary=\"fulu_100\"} 0\n");
     try std.testing.expect(std.mem.find(u8, output, "fulu_200") == null);
     const future = "/eth2/01010101/beacon_block/ssz_snappy";
     try gossip_test.subscribe(g, future);
     output = try f.render(true);
     try contains(output, "lodestar_gossip_mesh_peers_by_type_count{type=\"beacon_block\",boundary=\"fulu_200\"} 0\n");
-    try contains(output, "lodestar_native_gossip_subscriptions_by_type_count{type=\"beacon_block\",boundary=\"fulu_200\"} 1\n");
+    try contains(output, "gossipsub_topic_subscription_status{topicStr=\"/eth2/01010101/beacon_block/ssz_snappy\"} 1\n");
     try gossip_test.unsubscribe(g, future);
     output = try f.render(true);
     try std.testing.expect(std.mem.find(u8, output, "fulu_200") == null);
@@ -317,17 +334,17 @@ test "metrics preserve outgoing queue refusals across session retirement and reu
     const g = f.node.protocols.gossipsub;
     const first = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     g.sessions.rows[first.index].io.tx.drops[0] = 3;
-    try contains(try f.render(true), "lodestar_native_gossip_queue_drops_total{reason=\"data_descriptors\"} 3\n");
+    try contains(try f.render(true), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 3\n");
     const conn = g.sessions.rows[first.index].conn;
     g.connectionClosed(conn);
     g.connectionClosed(conn);
-    try contains(try f.render(true), "lodestar_native_gossip_queue_drops_total{reason=\"data_descriptors\"} 3\n");
+    try contains(try f.render(true), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 3\n");
     const next = gossip_test.addPeer(g, .{ .index = 0, .generation = 2 }, .v1_2).?;
     try std.testing.expectEqual(first.index, next.index);
     g.sessions.rows[next.index].io.tx.drops[0] = 2;
-    try contains(try f.render(true), "lodestar_native_gossip_queue_drops_total{reason=\"data_descriptors\"} 5\n");
+    try contains(try f.render(true), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 5\n");
     g.connectionClosed(g.sessions.rows[next.index].conn);
-    try contains(try f.render(false), "lodestar_native_gossip_queue_drops_total{reason=\"data_descriptors\"} 5\n");
+    try contains(try f.render(false), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 5\n");
 }
 
 test "metrics render retained usable coverage and suppress deficits when stopped" {
@@ -412,10 +429,10 @@ test "metrics report the kernel's buffer sizes and drops for every UDP socket" {
     for (roles) |role| {
         const reported = role[1].buffers[0].?;
         try std.testing.expect(reported.receive.? > 0 and reported.send.? > 0);
-        try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_buffer_bytes{{role=\"{s}\",family=\"ip4\",direction=\"receive\"}} {d}\n", .{ role[0], reported.receive.? }));
-        try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_buffer_bytes{{role=\"{s}\",family=\"ip4\",direction=\"send\"}} {d}\n", .{ role[0], reported.send.? }));
+        try contains(output, try std.fmt.bufPrint(&line, "lodestar_udp_socket_buffer_bytes{{role=\"{s}\",family=\"ip4\",direction=\"receive\"}} {d}\n", .{ role[0], reported.receive.? }));
+        try contains(output, try std.fmt.bufPrint(&line, "lodestar_udp_socket_buffer_bytes{{role=\"{s}\",family=\"ip4\",direction=\"send\"}} {d}\n", .{ role[0], reported.send.? }));
         // Linux kernels without SO_MEMINFO report no drop count.
-        if (role[1].drops()[0] != null) try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_drops_total{{role=\"{s}\",family=\"ip4\"}} 0\n", .{role[0]}));
+        if (role[1].drops()[0] != null) try contains(output, try std.fmt.bufPrint(&line, "lodestar_udp_socket_drops_total{{role=\"{s}\",family=\"ip4\"}} 0\n", .{role[0]}));
     }
     try std.testing.expect(std.mem.find(u8, output, "family=\"ip6\"") == null);
     f.node.discovery.?.transport.sockets.buffers[0].?.receive = null;
@@ -428,7 +445,7 @@ test "metrics label redials after a health close in the dial retries contract se
     var f = try Fixture.init(&.{});
     defer f.deinit();
     f.node.peer_manager.dialing.retries[@intFromEnum(types.DialFailure.health)] = 2;
-    try contains(try f.render(true), "lodestar_native_peer_dial_retries_total{previous=\"health\"} 2\n");
+    try contains(try f.render(true), "lodestar_peer_dial_retries_total{previous=\"health\"} 2\n");
 }
 
 test "metrics export dial time by outcome in seconds through shutdown" {
@@ -440,13 +457,13 @@ test "metrics export dial time by outcome in seconds through shutdown" {
     dialing.outcomes[connected] = 1;
     for ([_]bool{ true, false }) |running| {
         const output = try f.render(running);
-        try contains(output, "# TYPE lodestar_native_peer_dial_time_seconds histogram\n");
-        try contains(output, "lodestar_native_peer_dial_time_seconds_bucket{outcome=\"connected\",le=\"0.1\"} 0\n");
-        try contains(output, "lodestar_native_peer_dial_time_seconds_bucket{outcome=\"connected\",le=\"0.25\"} 1\n");
-        try contains(output, "lodestar_native_peer_dial_time_seconds_bucket{outcome=\"connected\",le=\"+Inf\"} 1\n");
-        try contains(output, "lodestar_native_peer_dial_time_seconds_sum{outcome=\"connected\"} 0.18\n");
-        try contains(output, "lodestar_native_peer_dial_time_seconds_count{outcome=\"connected\"} 1\n");
-        try contains(output, "lodestar_native_peer_dial_time_seconds_count{outcome=\"expired\"} 0\n");
+        try contains(output, "# TYPE lodestar_peer_dial_time_seconds histogram\n");
+        try contains(output, "lodestar_peer_dial_time_seconds_bucket{outcome=\"connected\",le=\"0.1\"} 0\n");
+        try contains(output, "lodestar_peer_dial_time_seconds_bucket{outcome=\"connected\",le=\"0.25\"} 1\n");
+        try contains(output, "lodestar_peer_dial_time_seconds_bucket{outcome=\"connected\",le=\"+Inf\"} 1\n");
+        try contains(output, "lodestar_peer_dial_time_seconds_sum{outcome=\"connected\"} 0.18\n");
+        try contains(output, "lodestar_peer_dial_time_seconds_count{outcome=\"connected\"} 1\n");
+        try contains(output, "lodestar_peer_dial_time_seconds_count{outcome=\"expired\"} 0\n");
     }
 }
 
@@ -460,12 +477,12 @@ test "metrics export cumulative discovery lookups and datagram rejections" {
     _ = coordinator.consume(&.{ .datagram = .{ .rejected = .record_admission_limited } }, &.{}, &.{});
     _ = coordinator.consume(&.{ .datagram = .{ .rejected = .admission_limited } }, &.{}, &.{});
     const output = try f.render(true);
-    try contains(output, "lodestar_native_discovery_lookups_started_total 5\n");
-    try contains(output, "lodestar_native_discovery_datagram_rejections_total{stage=\"handshake\",reason=\"invalid_handshake\"} 3\n");
-    try contains(output, "lodestar_native_discovery_datagram_rejections_total{stage=\"record\",reason=\"record_admission_limited\"} 1\n");
-    try contains(output, "lodestar_native_discovery_datagram_rejections_total{stage=\"admission\",reason=\"admission_limited\"} 1\n");
-    try contains(output, "lodestar_native_discovery_datagram_rejections_total{stage=\"record\",reason=\"invalid_record\"} 0\n");
-    try contains(try f.render(false), "lodestar_native_discovery_lookups_started_total 5\n");
+    try contains(output, "lodestar_discovery_find_node_query_requests_total{action=\"start\"} 5\n");
+    try contains(output, "lodestar_discovery_datagram_rejections_total{stage=\"handshake\",reason=\"invalid_handshake\"} 3\n");
+    try contains(output, "lodestar_discovery_datagram_rejections_total{stage=\"record\",reason=\"record_admission_limited\"} 1\n");
+    try contains(output, "lodestar_discovery_datagram_rejections_total{stage=\"admission\",reason=\"admission_limited\"} 1\n");
+    try contains(output, "lodestar_discovery_datagram_rejections_total{stage=\"record\",reason=\"invalid_record\"} 0\n");
+    try contains(try f.render(false), "lodestar_discovery_find_node_query_requests_total{action=\"start\"} 5\n");
 }
 
 test "metrics export stock per-topic gossipsub peer gauges under full topic strings" {
@@ -489,22 +506,22 @@ test "metrics export stock per-topic gossipsub peer gauges under full topic stri
     try contains(output, "gossipsub_mesh_peer_count{topicStr=\"" ++ future ++ "\"} 0\n");
 }
 
-test "metrics export gossip score populations only while running and omit empty statistics" {
+test "metrics export gossip score populations and zero empty statistics" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
     const g = f.node.protocols.gossipsub;
     _ = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     gossip_test.penalize(g, g.sessions.rows[0].conn, 7);
     const running = try f.render(true);
-    try contains(running, "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"all\"} 1\n");
-    try contains(running, "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"nonnegative\"} 0\n");
-    try contains(running, "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"all\"} 0\n");
-    try contains(running, "lodestar_native_gossip_score{scope=\"connected\",stat=\"max\"} -10\n");
-    try std.testing.expect(std.mem.find(u8, running, "lodestar_native_gossip_score{scope=\"mesh\"") == null);
+    try contains(running, "lodestar_gossip_peer_score_by_threshold_count{threshold=\"all\"} 1\n");
+    try contains(running, "lodestar_gossip_peer_score_by_threshold_count{threshold=\"mesh\"} 0\n");
+    try contains(running, "lodestar_gossip_mesh_peer_score_by_threshold_count{threshold=\"all\"} 0\n");
+    try contains(running, "lodestar_gossip_score_avg_min_max_max -10\n");
+    try contains(running, "lodestar_gossip_mesh_score_avg_min_max_avg 0\n");
     const stopped = try f.render(false);
-    try contains(stopped, "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"all\"} 0\n");
-    try contains(stopped, "# TYPE lodestar_native_gossip_score gauge\n");
-    try std.testing.expect(std.mem.find(u8, stopped, "lodestar_native_gossip_score{") == null);
+    try contains(stopped, "lodestar_gossip_peer_score_by_threshold_count{threshold=\"all\"} 0\n");
+    try contains(stopped, "lodestar_gossip_score_avg_min_max_avg 0\n");
+    try contains(stopped, "lodestar_gossip_mesh_score_avg_min_max_avg 0\n");
 }
 
 test "metrics export gossip message, mesh change, penalty and promise counters through shutdown" {
@@ -523,23 +540,23 @@ test "metrics export gossip message, mesh change, penalty and promise counters t
     g.peers.scores.penalties[@intFromEnum(score.Penalty.graft_flood)] = 6;
     g.recovery.armed = 9;
     const expected = [_][]const u8{
-        "lodestar_native_gossip_messages_received_total{topic=\"beacon_block\"} 5\n",
-        "lodestar_native_gossip_messages_duplicate_total{topic=\"beacon_block\"} 2\n",
-        "lodestar_native_gossip_messages_published_total{topic=\"unknown\"} 18446744073709551615\n",
-        "lodestar_native_gossip_messages_received_total{topic=\"data_column_sidecar\"} 0\n",
-        "lodestar_native_gossip_mesh_changes_total{topic=\"beacon_block\",event=\"join\",reason=\"remote_graft\"} 1\n",
-        "lodestar_native_gossip_mesh_changes_total{topic=\"unknown\",event=\"leave\",reason=\"refused_graft\"} 0\n",
-        "lodestar_native_gossip_behaviour_penalties_total{reason=\"graft_flood\"} 6\n",
-        "lodestar_native_gossip_behaviour_penalties_total{reason=\"large_frame_timeout\"} 0\n",
-        "lodestar_native_gossip_iwant_promises_started_total 9\n",
+        "gossipsub_msg_received_prevalidation_total{topic=\"beacon_block\"} 5\n",
+        "gossipsub_pre_validation_duplicate_total{topic=\"beacon_block\"} 2\n",
+        "gossipsub_msg_publish_count_total{topic=\"unknown\"} 18446744073709551615\n",
+        "gossipsub_msg_received_prevalidation_total{topic=\"data_column_sidecar\"} 0\n",
+        "gossipsub_mesh_changes_total{topic=\"beacon_block\",event=\"join\",reason=\"remote_graft\"} 1\n",
+        "gossipsub_mesh_changes_total{topic=\"unknown\",event=\"leave\",reason=\"refused_graft\"} 0\n",
+        "gossipsub_behaviour_penalties_total{reason=\"graft_flood\"} 6\n",
+        "gossipsub_behaviour_penalties_total{reason=\"large_frame_timeout\"} 0\n",
+        "gossipsub_iwant_promise_sent_total 9\n",
     };
     const running = try f.render(true);
     for (expected) |line| try contains(running, line);
-    try std.testing.expectEqual(@as(usize, (policy.kind_count + 1) * 12), std.mem.count(u8, running, "lodestar_native_gossip_mesh_changes_total{"));
+    try std.testing.expectEqual(@as(usize, (policy.kind_count + 1) * 12), std.mem.count(u8, running, "gossipsub_mesh_changes_total{"));
     g.connectionClosed(g.sessions.rows[peer.index].conn);
     const stopped = try f.render(false);
     for (expected) |line| try contains(stopped, line);
-    try contains(stopped, "lodestar_native_gossip_mesh_changes_total{topic=\"beacon_block\",event=\"leave\",reason=\"session_end\"} 1\n");
+    try contains(stopped, "gossipsub_mesh_changes_total{topic=\"beacon_block\",event=\"leave\",reason=\"session_end\"} 1\n");
 }
 
 test "stopped metrics report all delivery descriptors available with zero occupancy" {
@@ -551,11 +568,11 @@ test "stopped metrics report all delivery descriptors available with zero occupa
     defer pool.available = capacity;
     var line: [128]u8 = undefined;
     const running = try f.render(true);
-    try contains(running, try std.fmt.bufPrint(&line, "lodestar_native_gossipsub_delivery_descriptors_available {d}\n", .{capacity - 1}));
+    try contains(running, try std.fmt.bufPrint(&line, "gossipsub_delivery_descriptors_available_count {d}\n", .{capacity - 1}));
     const stopped = try f.render(false);
-    try contains(stopped, try std.fmt.bufPrint(&line, "lodestar_native_gossipsub_delivery_descriptors_capacity {d}\n", .{capacity}));
-    try contains(stopped, try std.fmt.bufPrint(&line, "lodestar_native_gossipsub_delivery_descriptors_available {d}\n", .{capacity}));
-    try contains(stopped, "lodestar_native_gossipsub_queued_bytes 0\n");
+    try contains(stopped, try std.fmt.bufPrint(&line, "gossipsub_delivery_descriptors_capacity_count {d}\n", .{capacity}));
+    try contains(stopped, try std.fmt.bufPrint(&line, "gossipsub_delivery_descriptors_available_count {d}\n", .{capacity}));
+    try contains(stopped, "gossipsub_queued_bytes 0\n");
     try std.testing.expectEqual(capacity - 1, pool.available);
 }
 
@@ -567,12 +584,12 @@ test "metrics expose local UDP send drops by role and pressure without clearing 
     f.node.discovery.?.transport.send_drops.add(.system_resources, 23);
     for ([_]bool{ true, false }) |running| {
         const output = try f.render(running);
-        try contains(output, "lodestar_native_udp_send_dropped_datagrams_total{role=\"quic\",reason=\"would_block\"} 2\n");
-        try contains(output, "lodestar_native_udp_send_dropped_bytes_total{role=\"quic\",reason=\"would_block\"} 36\n");
-        try contains(output, "lodestar_native_udp_send_dropped_datagrams_total{role=\"discovery\",reason=\"system_resources\"} 1\n");
-        try contains(output, "lodestar_native_udp_send_dropped_bytes_total{role=\"discovery\",reason=\"system_resources\"} 23\n");
-        try contains(output, "lodestar_native_udp_send_dropped_datagrams_total{role=\"quic\",reason=\"system_resources\"} 0\n");
-        try contains(output, "lodestar_native_udp_send_dropped_datagrams_total{role=\"discovery\",reason=\"would_block\"} 0\n");
+        try contains(output, "lodestar_udp_send_dropped_datagrams_total{role=\"quic\",reason=\"would_block\"} 2\n");
+        try contains(output, "lodestar_udp_send_dropped_bytes_total{role=\"quic\",reason=\"would_block\"} 36\n");
+        try contains(output, "lodestar_udp_send_dropped_datagrams_total{role=\"discovery\",reason=\"system_resources\"} 1\n");
+        try contains(output, "lodestar_udp_send_dropped_bytes_total{role=\"discovery\",reason=\"system_resources\"} 23\n");
+        try contains(output, "lodestar_udp_send_dropped_datagrams_total{role=\"quic\",reason=\"system_resources\"} 0\n");
+        try contains(output, "lodestar_udp_send_dropped_datagrams_total{role=\"discovery\",reason=\"would_block\"} 0\n");
     }
 }
 

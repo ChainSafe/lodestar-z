@@ -37,7 +37,7 @@ export const BUDGET_MS = 8;
 const SERVING_MAX = 32;
 /** Maximum serving starts handed to the host per turn. */
 const SERVING_STARTS = 8;
-export const BURST_NAME = "lodestar_native_drain_burst_seconds";
+export const BURST_NAME = "lodestar_network_drain_burst_seconds";
 export const BURST_BUCKETS = Object.freeze([0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2]);
 const VERDICTS = new Set(["accept", "reject", "ignore"]);
 const noop = () => undefined;

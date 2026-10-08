@@ -46,7 +46,7 @@ pub const Stats = struct {
 
     pub fn write(self: *const Stats, writer: *prom.Encoder) prom.Error!void {
         const records = try writer.family(.{
-            .name = "lodestar_native_logs_dropped_total",
+            .name = "lodestar_network_logs_dropped_total",
             .kind = .counter,
             .help = "Native log records dropped by scope and level",
             .labels = &.{ "scope", "level" },

@@ -77,7 +77,7 @@ pub const MeshChanges = struct {
 
     pub fn write(self: *const MeshChanges, w: *prom.Encoder) prom.Error!void {
         const changes = try w.family(.{
-            .name = "lodestar_native_gossip_mesh_changes_total",
+            .name = "gossipsub_mesh_changes_total",
             .kind = .counter,
             .help = "Committed mesh joins and leaves by topic kind and reason, not GRAFT or PRUNE controls",
             .labels = &.{ "topic", "event", "reason" },

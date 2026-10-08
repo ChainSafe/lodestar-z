@@ -22,7 +22,7 @@ pub fn write(manager: *const PeerManager, running: bool, w: *prom.Encoder) prom.
         .help = "Missing peer memberships across requested sampling groups",
     }, selection.deficits.groups);
     try w.scalar(.{
-        .name = "lodestar_native_peer_outbound_deficit",
+        .name = "lodestar_peer_outbound_deficit_count",
         .kind = .gauge,
         .help = "Missing relevant outbound peers after selection",
     }, selection.deficits.outbound);

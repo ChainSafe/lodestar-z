@@ -135,7 +135,7 @@ test("remembered peers return in the snapshot without expired or duplicate peers
       ["duplicate", 1],
       ["invalid", 0],
     ] as const) {
-      expect(metrics).toContain(`lodestar_native_remembered_peer_seeds_total{outcome="${outcome}"} ${count}\n`);
+      expect(metrics).toContain(`lodestar_peer_remembered_seeds_total{outcome="${outcome}"} ${count}\n`);
     }
   } finally {
     await runtime.close();
