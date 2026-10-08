@@ -688,34 +688,23 @@ test "variable vector streaming hashes need no scratch allocation" {
     }
 }
 
-test "memory_safety: VariableVector deserializeFromBytes leaves out deinit-safe on malformed offset" {
-    const allocator = std.testing.allocator;
+test "memory_safety: VariableVector deserializeFromBytes leaves out deinit-safe on malformed input" {
     const Vector = VariableVectorType(ByteListType(2), 3);
-    // Element 0 decodes into an allocation before offset 12 moves backward.
-    const serialized = [_]u8{ 12, 0, 0, 0, 13, 0, 0, 0, 12, 0, 0, 0, 1 };
-
-    var out = Vector.default_value;
-    defer Vector.deinit(allocator, &out);
-
-    try std.testing.expectError(
-        error.offsetNotIncreasing,
-        Vector.deserializeFromBytes(allocator, &serialized, &out),
-    );
-}
-
-test "memory_safety: VariableVector deserializeFromBytes leaves out deinit-safe on malformed element" {
-    const allocator = std.testing.allocator;
-    const Vector = VariableVectorType(ByteListType(2), 2);
-    // Element 0 decodes into an allocation; element 1 holds three bytes, over its limit of two.
-    const serialized = [_]u8{ 8, 0, 0, 0, 9, 0, 0, 0, 1, 2, 3, 4 };
-
-    var out = Vector.default_value;
-    defer Vector.deinit(allocator, &out);
-
-    try std.testing.expectError(
-        error.invalidLength,
-        Vector.deserializeFromBytes(allocator, &serialized, &out),
-    );
+    const cases = .{
+        // Element 0 decodes into an allocation before the third offset (12) falls below the
+        // second (13).
+        .{ &[_]u8{ 12, 0, 0, 0, 13, 0, 0, 0, 12, 0, 0, 0, 1 }, error.offsetNotIncreasing },
+        // Element 0 decodes into an allocation; element 1 holds three bytes, over its limit of two.
+        .{ &[_]u8{ 12, 0, 0, 0, 13, 0, 0, 0, 16, 0, 0, 0, 1, 2, 3, 4 }, error.invalidLength },
+    };
+    inline for (cases) |case| {
+        var out = Vector.default_value;
+        defer Vector.deinit(std.testing.allocator, &out);
+        try std.testing.expectError(
+            case[1],
+            Vector.deserializeFromBytes(std.testing.allocator, case[0], &out),
+        );
+    }
 }
 
 test "memory_safety: VariableVector deserializeFromBytes leaves out deinit-safe on OOM" {

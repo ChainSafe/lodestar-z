@@ -1503,34 +1503,22 @@ test "memory_safety: VariableList clone should keep destination deinit-safe on a
     try std.testing.expectEqual(@as(usize, 0), backing.live.count());
 }
 
-test "memory_safety: VariableList deserializeFromBytes leaves out deinit-safe on malformed offset" {
-    const allocator = std.testing.allocator;
+test "memory_safety: VariableList deserializeFromBytes leaves out deinit-safe on malformed input" {
     const List = VariableListType(ByteListType(2), 4);
-    // Offset 8 declares two elements, so `out` is resized before offset 4 moves backward.
-    const serialized = [_]u8{ 8, 0, 0, 0, 4, 0, 0, 0 };
-
-    var out = List.default_value;
-    defer List.deinit(allocator, &out);
-
-    try std.testing.expectError(
-        error.offsetNotIncreasing,
-        List.deserializeFromBytes(allocator, &serialized, &out),
-    );
-}
-
-test "memory_safety: VariableList deserializeFromBytes leaves out deinit-safe on malformed element" {
-    const allocator = std.testing.allocator;
-    const List = VariableListType(ByteListType(2), 4);
-    // Element 0 decodes into an allocation; element 1 holds three bytes, over its limit of two.
-    const serialized = [_]u8{ 8, 0, 0, 0, 9, 0, 0, 0, 1, 2, 3, 4 };
-
-    var out = List.default_value;
-    defer List.deinit(allocator, &out);
-
-    try std.testing.expectError(
-        error.invalidLength,
-        List.deserializeFromBytes(allocator, &serialized, &out),
-    );
+    const cases = .{
+        // Offset 8 declares two elements, so `out` is resized before offset 4 moves backward.
+        .{ &[_]u8{ 8, 0, 0, 0, 4, 0, 0, 0 }, error.offsetNotIncreasing },
+        // Element 0 decodes into an allocation; element 1 holds three bytes, over its limit of two.
+        .{ &[_]u8{ 8, 0, 0, 0, 9, 0, 0, 0, 1, 2, 3, 4 }, error.invalidLength },
+    };
+    inline for (cases) |case| {
+        var out = List.default_value;
+        defer List.deinit(std.testing.allocator, &out);
+        try std.testing.expectError(
+            case[1],
+            List.deserializeFromBytes(std.testing.allocator, case[0], &out),
+        );
+    }
 }
 
 test "memory_safety: VariableList deserializeFromBytes leaves out deinit-safe on OOM" {
