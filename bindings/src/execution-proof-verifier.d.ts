@@ -36,8 +36,11 @@ export declare function hasExecutionProofVerifier(proofType: number): boolean;
 
 /**
  * Verifies `proofData` off the JS thread with the verifier registered for `proofType`.
+ *
  * Resolves with the public values the proof commits to, or null when the proof is malformed or
- * does not verify. Rejects for an unregistered proof type, an oversized proof, or an internal
+ * does not verify.
+ *
+ * Rejects for an unregistered proof type, an oversized proof, or an internal
  * verifier failure.
  */
 export declare function verifyExecutionProof(proofType: number, proofData: Uint8Array): Promise<Uint8Array | null>;
