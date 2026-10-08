@@ -5,8 +5,8 @@ export const LOG_RECORDS = 256;
 const LOG_FINAL = 8;
 /** Record loss is reported at most this often, with every loss since the last report. */
 const LOG_LOSS_MS = 30000;
-export const LOG_ERRORS_NAME = "lodestar_native_log_delivery_errors_total";
-export const LOG_DRAIN_ERRORS_NAME = "lodestar_native_log_drain_errors_total";
+export const LOG_ERRORS_NAME = "lodestar_network_log_delivery_errors_total";
+export const LOG_DRAIN_ERRORS_NAME = "lodestar_network_log_drain_errors_total";
 
 /** Delivers bounded log batches until the pump stops it after native closes. */
 export class LogDelivery {

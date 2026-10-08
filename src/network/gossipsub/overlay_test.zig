@@ -39,7 +39,7 @@ fn meshChanges(overlay: *const Overlay, comptime topic: []const u8, comptime eve
     var writer = std.Io.Writer.fixed(&buffer);
     var encoder: registry.Encoder = .{ .writer = &writer };
     try overlay.mesh_changes.write(&encoder);
-    const prefix = "lodestar_native_gossip_mesh_changes_total{topic=\"" ++ topic ++ "\",event=\"" ++ event ++ "\",reason=\"" ++ reason ++ "\"} ";
+    const prefix = "gossipsub_mesh_changes_total{topic=\"" ++ topic ++ "\",event=\"" ++ event ++ "\",reason=\"" ++ reason ++ "\"} ";
     const start = (std.mem.find(u8, writer.buffered(), prefix) orelse return error.MissingSeries) + prefix.len;
     const end = std.mem.findScalarPos(u8, writer.buffered(), start, '\n').?;
     return std.fmt.parseInt(u64, writer.buffered()[start..end], 10);

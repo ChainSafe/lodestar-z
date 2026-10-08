@@ -183,7 +183,7 @@ test.each([
     await vi.waitFor(
       async () => {
         expect(await pair.left.getMetrics()).toContain(
-          'lodestar_native_gossip_data_recipients_total{origin="publication",outcome="queued"} 1\n'
+          'gossipsub_data_recipients_total{origin="publication",outcome="queued"} 1\n'
         );
         expect(await pair.left.getMetrics()).toContain(
           `lodestar_gossip_topic_peers_by_type_count{type="beacon_block",boundary="${requestForks[0].fork}_0"} 1\n`
@@ -239,7 +239,7 @@ test.each([
     expect((await pair.right.getGossipDiagnostics()).peers[0].identity).toEqual(pair.identity.peerId);
     await Promise.all([pair.left.close(), pair.right.close()]);
     expect(await pair.left.getMetrics()).toContain(
-      'lodestar_native_gossip_data_recipients_total{origin="publication",outcome="completed"} 1\n'
+      'gossipsub_data_recipients_total{origin="publication",outcome="completed"} 1\n'
     );
   } finally {
     await Promise.all([pair.left.stop(), pair.right.close()]);
@@ -475,11 +475,7 @@ for (const hoodi of [false, true]) {
           const active = runtime;
           await expect
             .poll(
-              () =>
-                metricValue(
-                  active.getMetrics(),
-                  'lodestar_native_gossip_processor_items{kind="beacon_block",state="queued"}'
-                ),
+              () => metricValue(active.getMetrics(), 'lodestar_gossip_validation_queue_length{topic="beacon_block"}'),
               {timeout: 5000}
             )
             .toBe(held);

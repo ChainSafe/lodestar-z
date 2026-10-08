@@ -44,11 +44,11 @@ fn writeRuntime(self: *const Context, w: *prom.Encoder) prom.Error!void {
         try w.scalar(.{ .name = "lodestar_discv5_active_session_count", .kind = .gauge, .help = "Stored discovery sessions" }, self.live(discovery.transport.engine.channel.sessions.sessionCount()));
         try w.scalar(.{ .name = "lodestar_discv5_kad_table_size", .kind = .gauge, .help = "Discovery routing table entries" }, self.live(discovery.transport.engine.peerCount()));
     }
-    try w.scalar(.{ .name = "lodestar_native_network_metrics_updated_timestamp_seconds", .kind = .gauge, .help = "Unix time at which the owner last collected this metrics export", .unit = .seconds }, self.now.unixSeconds());
-    try w.scalar(.{ .name = "lodestar_native_network_running", .kind = .gauge, .help = "Network owner is running" }, @intFromBool(self.running));
-    try w.scalar(.{ .name = "lodestar_native_network_transport_failures_total", .kind = .counter, .help = "Failed owner clock reads and transport receive steps" }, self.owner.counters.transport_failures);
-    try w.scalar(.{ .name = "lodestar_native_network_readiness_failures_total", .kind = .counter, .help = "Failed owner readiness polls" }, self.owner.counters.readiness_failures);
-    const steps = try w.histograms(.{ .name = "lodestar_native_network_step_seconds", .kind = .histogram, .help = "Network step duration after native readiness polling, covering transport, protocols and discovery", .unit = .seconds }, timing.Duration);
+    try w.scalar(.{ .name = "lodestar_network_metrics_updated_timestamp_seconds", .kind = .gauge, .help = "Unix time at which the owner last collected this metrics export", .unit = .seconds }, self.now.unixSeconds());
+    try w.scalar(.{ .name = "lodestar_network_running_bool", .kind = .gauge, .help = "Network owner is running" }, @intFromBool(self.running));
+    try w.scalar(.{ .name = "lodestar_network_transport_failures_total", .kind = .counter, .help = "Failed owner clock reads and transport receive steps" }, self.owner.counters.transport_failures);
+    try w.scalar(.{ .name = "lodestar_network_readiness_failures_total", .kind = .counter, .help = "Failed owner readiness polls" }, self.owner.counters.readiness_failures);
+    const steps = try w.histograms(.{ .name = "lodestar_network_step_seconds", .kind = .histogram, .help = "Network step duration after native readiness polling, covering transport, protocols and discovery", .unit = .seconds }, timing.Duration);
     try steps.histogram(.{}, &self.owner.step_duration);
 }
 
@@ -59,7 +59,7 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .{ "received_datagrams", "QUIC UDP datagrams received, including truncated datagrams" },
         .{ "sent_datagrams", "QUIC UDP datagrams sent" },
     }) |metric| try w.scalar(.{
-        .name = "lodestar_native_quic_udp_" ++ metric[0] ++ "_total",
+        .name = "lodestar_quic_udp_" ++ metric[0] ++ "_total",
         .kind = .counter,
         .help = metric[1],
     }, @field(self.owner.transport.counters, metric[0]));
@@ -67,7 +67,7 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const discovery_drops = if (self.owner.discovery) |d| d.transport.send_drops else udp.Sockets.SendDrops{};
     inline for (.{ "datagrams", "bytes" }) |measure| {
         const dropped = try w.family(.{
-            .name = "lodestar_native_udp_send_dropped_" ++ measure ++ "_total",
+            .name = "lodestar_udp_send_dropped_" ++ measure ++ "_total",
             .kind = .counter,
             .help = "UDP " ++ measure ++ " discarded before kernel acceptance due to local send pressure or unreachable destinations",
             .labels = &.{ "role", "reason" },
@@ -89,7 +89,7 @@ fn writeSockets(self: *const Context, w: *prom.Encoder) prom.Error!void {
     };
     const families = [_][]const u8{ "ip4", "ip6" };
     const buffers = try w.family(.{
-        .name = "lodestar_native_udp_socket_buffer_bytes",
+        .name = "lodestar_udp_socket_buffer_bytes",
         .kind = .gauge,
         .help = "UDP socket buffer size as the kernel reports it; Linux reports double the size it grants",
         .labels = &.{ "role", "family", "direction" },
@@ -100,7 +100,7 @@ fn writeSockets(self: *const Context, w: *prom.Encoder) prom.Error!void {
         if (sizes.send) |bytes| try buffers.sample(.{ role[0], family, "send" }, bytes);
     };
     const drops = try w.family(.{
-        .name = "lodestar_native_udp_socket_drops_total",
+        .name = "lodestar_udp_socket_drops_total",
         .kind = .counter,
         .help = "Datagrams the kernel dropped at the socket, mostly on a full receive buffer; Linux only",
         .labels = &.{ "role", "family" },
@@ -120,25 +120,25 @@ fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void 
         resources.store_pages = 0;
     }
     inline for (.{
-        .{ "receive_pages", "Receive pages holding partial inbound frames" },
-        .{ "receive_page_capacity", "Receive pages the pool holds" },
-        .{ "validation_capacity", "Messages the validation table holds" },
-        .{ "pending_validations", "Admitted messages awaiting a verdict" },
-        .{ "delivery_descriptors_capacity", "Outgoing data descriptors the shared pool holds" },
-        .{ "delivery_descriptors_available", "Outgoing data descriptors free in the shared pool" },
-        .{ "queued_bytes", "Compressed bytes queued to peers as data frames" },
-        .{ "store_pages", "Message store pages in use" },
+        .{ "receive_pages_count", "receive_pages", "Receive pages holding partial inbound frames" },
+        .{ "receive_pages_capacity_count", "receive_page_capacity", "Receive pages the pool holds" },
+        .{ "validation_capacity_count", "validation_capacity", "Messages the validation table holds" },
+        .{ "mcache_not_validated_count", "pending_validations", "Admitted messages awaiting a verdict" },
+        .{ "delivery_descriptors_capacity_count", "delivery_descriptors_capacity", "Outgoing data descriptors the shared pool holds" },
+        .{ "delivery_descriptors_available_count", "delivery_descriptors_available", "Outgoing data descriptors free in the shared pool" },
+        .{ "queued_bytes", "queued_bytes", "Compressed bytes queued to peers as data frames" },
+        .{ "store_pages_count", "store_pages", "Message store pages in use" },
     }) |field| try w.scalar(.{
-        .name = "lodestar_native_gossipsub_" ++ field[0],
+        .name = "gossipsub_" ++ field[0],
         .kind = .gauge,
-        .help = field[1],
-    }, @field(resources, field[0]));
+        .help = field[2],
+    }, @field(resources, field[1]));
 }
 fn writeRequestResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const requests = self.owner.protocols.reqresp.resourceSnapshot();
-    try w.scalar(.{ .name = "lodestar_native_reqresp_resources_serving_capacity", .kind = .gauge, .help = "Incoming requests the host may serve at once" }, requests.serving_capacity);
-    try w.scalar(.{ .name = "lodestar_native_reqresp_resources_serving_occupied", .kind = .gauge, .help = "Incoming requests the host is serving" }, self.live(requests.serving_occupied));
-    try w.scalar(.{ .name = "lodestar_native_reqresp_resources_retiring", .kind = .gauge, .help = "Serving resources awaiting host retirement" }, self.live(requests.retiring));
+    try w.scalar(.{ .name = "beacon_reqresp_serving_capacity_count", .kind = .gauge, .help = "Incoming requests the host may serve at once" }, requests.serving_capacity);
+    try w.scalar(.{ .name = "beacon_reqresp_serving_count", .kind = .gauge, .help = "Incoming requests the host is serving" }, self.live(requests.serving_occupied));
+    try w.scalar(.{ .name = "beacon_reqresp_retiring_count", .kind = .gauge, .help = "Serving resources awaiting host retirement" }, self.live(requests.retiring));
 }
 
 fn writePeerCloses(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -151,8 +151,8 @@ fn writeRememberedPeers(self: *const Context, w: *prom.Encoder) prom.Error!void 
 
 fn writeTransportConnections(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const transport = self.owner.transport.engine.resourceSnapshot();
-    try w.scalar(.{ .name = "lodestar_native_quic_connections_active", .kind = .gauge, .help = "Occupied QUIC slots, including closed connections awaiting retirement" }, self.live(transport.active));
-    try w.scalar(.{ .name = "lodestar_native_quic_connections_handshaking", .kind = .gauge, .help = "Inbound QUIC connections still handshaking" }, self.live(transport.handshaking));
+    try w.scalar(.{ .name = "lodestar_quic_connection_slots_count", .kind = .gauge, .help = "Occupied QUIC slots, including closed connections awaiting retirement" }, self.live(transport.active));
+    try w.scalar(.{ .name = "lodestar_quic_connections_handshaking_count", .kind = .gauge, .help = "Inbound QUIC connections still handshaking" }, self.live(transport.handshaking));
 }
 
 fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -186,23 +186,32 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
         }
     }
     const refusals = try w.family(.{
-        .name = "lodestar_native_reqresp_admission_refusals_total",
+        .name = "beacon_reqresp_admission_refusals_total",
         .kind = .counter,
         .help = "Incoming request admission refusals counted once at the decision",
         .labels = &.{ "method", "reason" },
     });
+    const rate_limits = try w.family(.{
+        .name = "beacon_reqresp_rate_limiter_errors_total",
+        .kind = .counter,
+        .help = "Incoming requests refused by peer or global rate limits",
+        .labels = &.{"method"},
+    });
     for (rr.protocol.methods, 0..) |method, index| {
         if (!firstMethod(index)) continue;
+        var rate_limited: u64 = 0;
         inline for (std.meta.fields(rr.ReqResp.metrics.AdmissionRefusal)) |reason| {
             var count: u64 = 0;
             for (rr.protocol.methods, &self.owner.protocols.reqresp.protocol_counters) |candidate, *values| {
                 if (std.mem.eql(u8, candidate, method)) count +|= values.admission_refusals[reason.value];
             }
             try refusals.sample(.{ method, reason.name }, count);
+            if (comptime reason.value == @intFromEnum(rr.ReqResp.metrics.AdmissionRefusal.peer_quota) or reason.value == @intFromEnum(rr.ReqResp.metrics.AdmissionRefusal.global_quota)) rate_limited +|= count;
         }
+        try rate_limits.sample(.{method}, rate_limited);
     }
     try w.enums(.{
-        .name = "lodestar_native_reqresp_inbound_occupied",
+        .name = "beacon_reqresp_incoming_count",
         .kind = .gauge,
         .help = "Occupied incoming request slots by current phase, including terminal owners awaiting recycling",
         .labels = &.{"phase"},
@@ -244,7 +253,7 @@ fn writeBridge(self: *const Context, w: *prom.Encoder) prom.Error!void {
 
 fn writeGossipExecution(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.scalar(.{
-        .name = "lodestar_native_gossip_expired_executing",
+        .name = "lodestar_gossip_validation_expired_executing_count",
         .kind = .gauge,
         .help = "Delivered gossip validations still awaiting host completion after their verdict deadlines",
     }, self.expired_executing);
@@ -264,13 +273,13 @@ fn writeGossipTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {
 fn writeConnections(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const counters = &self.owner.transport.engine.connection_metrics;
     try w.enums(.{
-        .name = "lodestar_native_quic_connections_established_total",
+        .name = "lodestar_quic_connections_established_total",
         .kind = .counter,
         .help = "QUIC connections with authenticated expected identities by direction",
         .labels = &.{"direction"},
     }, types.Direction, &counters.established);
     const closed = try w.family(.{
-        .name = "lodestar_native_quic_connections_closed_total",
+        .name = "lodestar_quic_connections_closed_total",
         .kind = .counter,
         .help = "QUIC closes including pre-admission failures; wire error codes share bounded reason labels",
         .labels = &.{ "direction", "reason" },

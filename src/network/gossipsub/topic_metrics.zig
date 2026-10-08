@@ -25,12 +25,12 @@ pub fn write(g: *const Gossipsub, running: bool, digest: [4]u8, w: *prom.Encoder
             }
         }
     }
-    inline for (.{ "mesh", "topic", "subscriptions" }) |group| {
+    inline for (.{ "mesh", "topic" }) |group| {
         inline for (.{ "type", "beacon_attestation_subnet", "sync_committee_subnet", "data_column_subnet" }) |suffix| {
             const metric = try w.family(.{
-                .name = (if (std.mem.eql(u8, group, "subscriptions")) "lodestar_native_gossip_subscriptions_by_" else "lodestar_gossip_" ++ group ++ "_peers_by_") ++ suffix ++ "_count",
+                .name = "lodestar_gossip_" ++ group ++ "_peers_by_" ++ suffix ++ "_count",
                 .kind = .gauge,
-                .help = if (std.mem.eql(u8, group, "subscriptions")) "Local subscriptions in the current and locally subscribed fork boundaries" else if (std.mem.eql(u8, group, "mesh")) "Peer/topic mesh memberships in the current and locally subscribed fork boundaries" else "Accepted remote subscription memberships, including locally inactive topics, in the current and locally subscribed fork boundaries",
+                .help = if (std.mem.eql(u8, group, "mesh")) "Peer/topic mesh memberships in the current and locally subscribed fork boundaries" else "Accepted remote subscription memberships, including locally inactive topics, in the current and locally subscribed fork boundaries",
                 .labels = &.{ if (std.mem.eql(u8, suffix, "type")) "type" else "subnet", "boundary" },
             });
             for (ns.boundaries, ns.offsets, 0..) |*boundary, starts, index| {
@@ -50,7 +50,7 @@ pub fn write(g: *const Gossipsub, running: bool, digest: [4]u8, w: *prom.Encoder
                     var total: usize = 0;
                     for (0..count) |subnet| {
                         const ordinal = starts[kind.value] + subnet;
-                        const value: usize = if (comptime std.mem.eql(u8, group, "mesh")) mesh[ordinal] else if (comptime std.mem.eql(u8, group, "topic")) overlay.subscribers(@intCast(ordinal)).count() else @intFromBool(subscribed.isSet(ordinal));
+                        const value: usize = if (comptime std.mem.eql(u8, group, "mesh")) mesh[ordinal] else overlay.subscribers(@intCast(ordinal)).count();
                         if (comptime std.mem.eql(u8, suffix, "type")) {
                             total += value;
                         } else {
@@ -66,11 +66,11 @@ pub fn write(g: *const Gossipsub, running: bool, digest: [4]u8, w: *prom.Encoder
             }
         }
     }
-    inline for (.{ "mesh", "topic" }) |group| {
+    inline for (.{ "mesh", "topic", "subscriptions" }) |group| {
         const metric = try w.family(.{
-            .name = "gossipsub_" ++ group ++ "_peer_count",
+            .name = if (comptime std.mem.eql(u8, group, "subscriptions")) "gossipsub_topic_subscription_status" else "gossipsub_" ++ group ++ "_peer_count",
             .kind = .gauge,
-            .help = if (comptime std.mem.eql(u8, group, "mesh")) "Mesh peers per topic in the current and locally subscribed fork boundaries" else "Subscribed peers per topic in the current and locally subscribed fork boundaries",
+            .help = if (comptime std.mem.eql(u8, group, "subscriptions")) "Local subscription status per topic" else if (comptime std.mem.eql(u8, group, "mesh")) "Mesh peers per topic in the current and locally subscribed fork boundaries" else "Subscribed peers per topic in the current and locally subscribed fork boundaries",
             .labels = &.{"topicStr"},
         });
         for (ns.boundaries, ns.offsets, 0..) |*boundary, starts, index| {
@@ -80,7 +80,7 @@ pub fn write(g: *const Gossipsub, running: bool, digest: [4]u8, w: *prom.Encoder
                     const ordinal = starts[kind.value] + subnet;
                     var name: [gossip.topic.topic_max_len]u8 = undefined;
                     const topic = gossip.topic.buildCanonical(.{ .digest = boundary.digest, .name = .{ .kind = @enumFromInt(kind.value), .subnet = @intCast(subnet) } }, &name);
-                    try metric.sample(.{topic}, if (comptime std.mem.eql(u8, group, "mesh")) mesh[ordinal] else overlay.subscribers(@intCast(ordinal)).count());
+                    try metric.sample(.{topic}, if (comptime std.mem.eql(u8, group, "mesh")) mesh[ordinal] else if (comptime std.mem.eql(u8, group, "topic")) overlay.subscribers(@intCast(ordinal)).count() else @intFromBool(subscribed.isSet(ordinal)));
                 }
             }
         }

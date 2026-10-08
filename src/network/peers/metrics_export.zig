@@ -16,12 +16,12 @@ pub fn writePeers(manager: *const PeerManager, population: *const Population, ru
         .help = "Authenticated connected peers",
     }, population.count);
     try w.scalar(.{
-        .name = "lodestar_native_network_relevant_peers",
+        .name = "lodestar_peers_relevant_count",
         .kind = .gauge,
         .help = "Peers with compatible Status",
     }, population.relevant);
     try w.scalar(.{
-        .name = "lodestar_native_peer_below_target",
+        .name = "lodestar_peers_below_target_bool",
         .kind = .gauge,
         .help = "Connected peers below target while running",
     }, @intFromBool(running and population.count < manager.catalog.options.target_peers));
@@ -43,19 +43,19 @@ pub fn writePeers(manager: *const PeerManager, population: *const Population, ru
 
 pub fn writePeerCloses(manager: *const PeerManager, w: *prom.Encoder) prom.Error!void {
     try w.enums(.{
-        .name = "lodestar_native_peer_closes_total",
+        .name = "lodestar_peer_closes_total",
         .kind = .counter,
         .help = "Peer closes initiated by native peer control",
         .labels = &.{"reason"},
     }, peer_types.DisconnectReason, &manager.control.counters.closed);
     try w.enums(.{
-        .name = "lodestar_native_peer_rejections_total",
+        .name = "lodestar_peer_rejections_total",
         .kind = .counter,
         .help = "Remote rejections recorded against peer identities by kind: a received Goodbye, or a remote close of our dial or its refusal of our Status before the Status and Metadata exchange completed",
         .labels = &.{"kind"},
     }, peer_types.Rejection, &manager.catalog.rejections);
     try w.enums(.{
-        .name = "lodestar_native_peer_health_failures_total",
+        .name = "lodestar_peer_health_failures_total",
         .kind = .counter,
         .help = "Failed Status, Metadata and Ping probes; a streak of failures disconnects at its limit and a refused probe at once",
         .labels = &.{"probe"},
@@ -66,24 +66,24 @@ pub fn writeRememberedPeers(manager: *const PeerManager, w: *prom.Encoder) prom.
     const remembered = @import("remembered.zig");
     const memory = &manager.catalog.remembered;
     try w.scalar(.{
-        .name = "lodestar_native_remembered_peers",
+        .name = "lodestar_peer_remembered_count",
         .kind = .gauge,
         .help = "Remembered peers held for the host to persist",
     }, memory.count);
     try w.enums(.{
-        .name = "lodestar_native_remembered_peer_seeds_total",
+        .name = "lodestar_peer_remembered_seeds_total",
         .kind = .counter,
         .help = "Remembered peers passed at startup: loaded, or dropped as expired, duplicate or invalid",
         .labels = &.{"outcome"},
     }, remembered.Seed, &memory.counters.seeds);
     try w.enums(.{
-        .name = "lodestar_native_remembered_peer_replays_total",
+        .name = "lodestar_peer_remembered_replays_total",
         .kind = .counter,
         .help = "Loaded remembered peers visited by replay: queued as a candidate, already connected or a candidate, refused by the identity's rejection memory or the endpoint's failure history, or without candidate room",
         .labels = &.{"outcome"},
     }, remembered.Replay, &memory.counters.replays);
     const funnel = try w.family(.{
-        .name = "lodestar_native_peer_dial_funnel_total",
+        .name = "lodestar_peer_dial_funnel_total",
         .kind = .counter,
         .help = "Automatic dials by candidate origin, remembered or fresh from discovery, and stage: started, connected, and kept five minutes with a completed Status and Metadata exchange",
         .labels = &.{ "origin", "stage" },
@@ -96,20 +96,20 @@ pub fn writeRememberedPeers(manager: *const PeerManager, w: *prom.Encoder) prom.
 }
 
 pub fn writeDiscoveryProgress(manager: *const PeerManager, discovery_owner: ?*const Discovery, w: *prom.Encoder) prom.Error!void {
-    try w.enums(.{ .name = "lodestar_native_peer_dial_selections_total", .kind = .counter, .help = "Selected peer connection attempts by initiating demand, including immediate errors and local start deferrals", .labels = &.{"source"} }, Dialing.Source, &manager.dialing.selected_attempts);
-    try w.enums(.{ .name = "lodestar_native_peer_dial_outcomes_total", .kind = .counter, .help = "Finished connection attempts by outcome; closes before admission map the transport close reason", .labels = &.{"outcome"} }, peer_types.DialOutcome, &manager.dialing.outcomes);
+    try w.enums(.{ .name = "lodestar_peer_dial_selections_total", .kind = .counter, .help = "Selected peer connection attempts by initiating demand, including immediate errors and local start deferrals", .labels = &.{"source"} }, Dialing.Source, &manager.dialing.selected_attempts);
+    try w.enums(.{ .name = "lodestar_peer_dial_outcomes_total", .kind = .counter, .help = "Finished connection attempts by outcome; closes before admission map the transport close reason", .labels = &.{"outcome"} }, peer_types.DialOutcome, &manager.dialing.outcomes);
     const times = try w.histograms(.{
-        .name = "lodestar_native_peer_dial_time_seconds",
+        .name = "lodestar_peer_dial_time_seconds",
         .kind = .histogram,
         .help = "Selected connection attempts from selection to outcome, including local start deferrals; a connected attempt ends at connection admission, before Status and Metadata",
         .labels = &.{"outcome"},
         .unit = .seconds,
     }, Dialing.DialTime);
     inline for (std.meta.fields(peer_types.DialOutcome)) |field| try times.histogram(.{field.name}, &manager.dialing.durations[field.value]);
-    try w.enums(.{ .name = "lodestar_native_peer_dial_retries_total", .kind = .counter, .help = "Redials of an endpoint by its previous failure", .labels = &.{"previous"} }, peer_types.DialFailure, &manager.dialing.retries);
+    try w.enums(.{ .name = "lodestar_peer_dial_retries_total", .kind = .counter, .help = "Redials of an endpoint by its previous failure", .labels = &.{"previous"} }, peer_types.DialFailure, &manager.dialing.retries);
     const discovery = discovery_owner orelse return;
     const lookup_finishes = try w.family(.{
-        .name = "lodestar_native_discovery_lookup_finishes_total",
+        .name = "lodestar_discovery_lookup_finishes_total",
         .kind = .counter,
         .help = "Completed foreground discovery walks by finish reason; cancellations excluded",
         .labels = &.{"reason"},
@@ -126,7 +126,7 @@ pub fn writePeerEvents(manager: *const PeerManager, w: *prom.Encoder) prom.Error
 
 pub fn writeDiscoveryCounters(manager: *const PeerManager, discovery_owner: ?*const Discovery, w: *prom.Encoder) prom.Error!void {
     const refused = try w.family(.{
-        .name = "lodestar_native_dial_recent_failures_refused_total",
+        .name = "lodestar_peer_dial_recent_failures_refused_total",
         .kind = .counter,
         .help = "Discovered candidates refused because every endpoint recently failed, or because the identity recently rejected us, by that rejection",
         .labels = &.{"reason"},
@@ -137,16 +137,17 @@ pub fn writeDiscoveryCounters(manager: *const PeerManager, discovery_owner: ?*co
     const discovery_counts = if (discovery_owner) |d| d.counters else Discovery.Counters{};
     const rejections = if (discovery_owner) |d| d.rejections else @as([Discovery.rejection_count]u64, @splat(0));
     const datagram_rejections = if (discovery_owner) |d| d.datagram_rejections else @as([Discovery.datagram_rejection_count]u64, @splat(0));
-    try w.scalar(.{ .name = "lodestar_native_discovery_lookups_started_total", .kind = .counter, .help = "Foreground discovery lookups started" }, discovery_counts.lookups_started);
-    try w.scalar(.{ .name = "lodestar_native_discovery_candidates_published_total", .kind = .counter, .help = "Authenticated discovery candidates handed to peer selection" }, discovery_counts.candidates_published);
+    const queries = try w.family(.{ .name = "lodestar_discovery_find_node_query_requests_total", .kind = .counter, .help = "Foreground discovery queries started", .labels = &.{"action"} });
+    try queries.sample(.{"start"}, discovery_counts.lookups_started);
+    try w.scalar(.{ .name = "lodestar_discovery_candidates_published_total", .kind = .counter, .help = "Authenticated discovery candidates handed to peer selection" }, discovery_counts.candidates_published);
     try w.enums(.{
-        .name = "lodestar_native_discovery_candidate_rejections_total",
+        .name = "lodestar_discovery_candidate_rejections_total",
         .kind = .counter,
         .help = "Authenticated discovery candidates rejected by reason",
         .labels = &.{"reason"},
     }, Discovery.Rejection, &rejections);
     const rejected = try w.family(.{
-        .name = "lodestar_native_discovery_datagram_rejections_total",
+        .name = "lodestar_discovery_datagram_rejections_total",
         .kind = .counter,
         .help = "Received discovery datagrams rejected by processing stage and reason",
         .labels = &.{ "stage", "reason" },

@@ -623,8 +623,8 @@ export interface NativeHost {
   /**
    * Native log records at or above the configured level, up to 256 every 100 ms and up to 2,048 after close, with the
    * records native lost since the last report when that grew, at most every 30 s while running. A throw counts the
-   * delivery's records in lodestar_native_log_delivery_errors_total and never fails the network. Failed native drains count
-   * separately in lodestar_native_log_drain_errors_total.
+   * delivery's records in lodestar_network_log_delivery_errors_total and never fails the network. Failed native drains count
+   * separately in lodestar_network_log_drain_errors_total.
    */
   logs(records: readonly NativeLogRecord[], lost: NativeLogLoss | null): void;
   /** A failure the binding recovered from: one of the above that threw, rejected or broke its contract. */

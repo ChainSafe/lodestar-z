@@ -245,7 +245,7 @@ test("serving capacity stays charged after the stream closes until serve settles
     const pending = stream.next().catch(() => undefined);
     await vi.waitFor(() => expect(started).toBeDefined(), {timeout: 5000});
     await pending;
-    const retiring = () => metricValue(network.metrics(), "lodestar_native_reqresp_resources_retiring");
+    const retiring = () => metricValue(network.metrics(), "beacon_reqresp_retiring_count");
     await expect.poll(retiring, {timeout: 5000}).toBe(1);
     retire();
     await expect.poll(retiring, {timeout: 5000}).toBe(0);
@@ -425,9 +425,9 @@ test("the facade validates its host, starts without host callbacks and hides the
     expect(native.length).toBeGreaterThan(0);
     expect(rendered).toEqual([
       ...native,
-      "lodestar_native_drain_burst_seconds",
-      "lodestar_native_log_delivery_errors_total",
-      "lodestar_native_log_drain_errors_total",
+      "lodestar_network_drain_burst_seconds",
+      "lodestar_network_log_delivery_errors_total",
+      "lodestar_network_log_drain_errors_total",
     ]);
     expect(new Set(rendered).size).toBe(rendered.length);
   } finally {

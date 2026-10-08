@@ -29,7 +29,7 @@ pub const Delivery = struct {
     }
 
     pub fn write(self: *const Delivery, w: *prom.Encoder) prom.Error!void {
-        const recipients = try w.family(.{ .name = "lodestar_native_gossip_data_recipients_total", .kind = .counter, .help = "Data frame recipients by delivery origin: selected, then queued, pressured or unavailable; queued frames later complete when QUIC accepts their last byte, which is not delivery, or are cancelled by cache eviction or a stream reset", .labels = &.{ "origin", "outcome" } });
+        const recipients = try w.family(.{ .name = "gossipsub_data_recipients_total", .kind = .counter, .help = "Data frame recipients by delivery origin: selected, then queued, pressured or unavailable; queued frames later complete when QUIC accepts their last byte, which is not delivery, or are cancelled by cache eviction or a stream reset", .labels = &.{ "origin", "outcome" } });
         inline for (@typeInfo(delivery.Origin).@"enum".fields) |origin| {
             inline for (@typeInfo(Outcome).@"enum".fields) |outcome| try recipients.sample(.{ origin.name, outcome.name }, self.recipients[origin.value][outcome.value]);
         }
@@ -100,28 +100,30 @@ pub const ScorePopulations = struct {
     }
 
     pub fn write(self: *const ScorePopulations, w: *prom.Encoder) prom.Error!void {
-        const counts = try w.family(.{
-            .name = "lodestar_native_gossip_score_peers",
-            .kind = .gauge,
-            .help = "Connected gossip peers, and distinct peers in any mesh, whose score meets each configured gate; gates are cumulative, and all counts the whole population",
-            .labels = &.{ "scope", "threshold" },
-        });
         inline for (std.meta.fields(Scope)) |scope| {
-            inline for (std.meta.fields(Threshold)) |threshold| try counts.sample(.{ scope.name, threshold.name }, self.populations[scope.value].peers[threshold.value]);
-        }
-        const scores = try w.family(.{
-            .name = "lodestar_native_gossip_score",
-            .kind = .gauge,
-            .help = "Minimum, mean and maximum gossip score of connected peers and of distinct mesh peers; an empty population has no samples",
-            .labels = &.{ "scope", "stat" },
-        });
-        inline for (std.meta.fields(Scope)) |scope| {
+            const prefix = if (comptime std.mem.eql(u8, scope.name, "connected")) "lodestar_gossip" else "lodestar_gossip_mesh";
             const population = &self.populations[scope.value];
+            const counts = try w.family(.{
+                .name = prefix ++ "_peer_score_by_threshold_count",
+                .kind = .gauge,
+                .help = "Distinct gossip peers whose score meets each configured gate; thresholds are cumulative",
+                .labels = &.{"threshold"},
+            });
+            inline for (std.meta.fields(Threshold)) |threshold| {
+                const label = if (comptime std.mem.eql(u8, threshold.name, "nonnegative")) "mesh" else threshold.name;
+                try counts.sample(.{label}, population.peers[threshold.value]);
+            }
             const count = population.peers[@intFromEnum(Threshold.all)];
-            if (count > 0) {
-                try scores.sample(.{ scope.name, "min" }, population.min);
-                try scores.sample(.{ scope.name, "mean" }, population.sum / @as(f64, @floatFromInt(count)));
-                try scores.sample(.{ scope.name, "max" }, population.max);
+            inline for (.{ "sum", "avg", "min", "max" }) |stat| {
+                const value = if (comptime std.mem.eql(u8, stat, "avg"))
+                    if (count == 0) 0 else population.sum / @as(f64, @floatFromInt(count))
+                else
+                    @field(population, stat);
+                try w.scalar(.{
+                    .name = prefix ++ "_score_avg_min_max_" ++ stat,
+                    .kind = .gauge,
+                    .help = "Gossip peer score " ++ stat ++ "; zero for an empty population",
+                }, value);
             }
         }
     }
