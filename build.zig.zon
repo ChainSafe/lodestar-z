@@ -67,8 +67,8 @@
             .hash = "zio-0.14.0-xHbVVPxFHgBCop4CvfF4u360kzWlHD4FS8Ud-RIkPcZ7",
         },
         .quiche_zig = .{
-            .url = "git+https://github.com/chainsafe/quiche-zig#2e0b489b3c9900f658ca97b766b802003525cdb0",
-            .hash = "quiche-0.1.0-rnTCo4cQAACPgyY1ZYEYw7Yw0JNl2jGqlVLz6pOmA06t",
+            .url = "git+https://github.com/chainsafe/quiche-zig#50f5cbe9d2979cf0a075568646900ef9a098609d",
+            .hash = "quiche-0.1.0-rnTCo54dAABcgU3DDFNmiwQXA3Py7L1syFWGWsyhrkt2",
         },
     },
     .options_modules = .{

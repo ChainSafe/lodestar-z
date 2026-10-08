@@ -94,7 +94,7 @@ jobs:
           fi
       - name: Build and publish to npm
         run: |
-          scripts/zig-cross.sh pnpm zapi build-artifacts --optimize ReleaseSafe
+          pnpm zapi build-artifacts --optimize ReleaseSafe
           pnpm zapi prepublish
           rm -rf zig-out/lib
           pnpm zapi publish --access public -- --ignore-scripts --provenance ${{ steps.detect_dist_tag.outputs.tag_flag }}

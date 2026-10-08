@@ -443,6 +443,7 @@ test "transport fails only the connection whose destination the host refuses and
     var hub: Transport = .{};
     try hub.init(std.testing.allocator, std.testing.io, .{ .host = &hub_key, .bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } }, .limits = limits });
     defer hub.deinit(std.testing.io);
+    try support.singlePacketInitial(&hub);
     var peers: [2]Node = .{ .{}, .{} };
     try peers[0].init(112);
     defer peers[0].deinit();
@@ -884,6 +885,7 @@ test "transport pressure drops later families with exact cumulative accounting" 
     var node: Transport = .{};
     try node.init(std.testing.allocator, std.testing.io, .{ .host = &key, .bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } } });
     defer node.deinit(std.testing.io);
+    try support.singlePacketInitial(&node);
     const now = try Now.read(std.testing.io);
     const local = node.sockets.localAddresses();
     var owners: [3]Engine.Handle = undefined;

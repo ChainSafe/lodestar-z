@@ -129,7 +129,8 @@ pub const Pair = struct {
         var remaining = from.dirtyCount();
         while (remaining > 0) : (remaining -= 1) {
             const index = from.nextDirty() orelse break;
-            var retry: ?struct { bytes: [constants.datagram_size_max]u8, len: usize, from: types.Address } = null;
+            var replies: [send_burst_max]struct { bytes: [constants.datagram_size_max]u8, len: usize, from: types.Address } = undefined;
+            var reply_count: usize = 0;
             var budget: u32 = 0;
             var drained = false;
             while (budget < send_burst_max) {
@@ -155,9 +156,10 @@ pub const Pair = struct {
                     }
                     if (to == &self.client and outcome == .accepted) self.client_accepted += 1;
                     if (outcome == .retry) {
-                        std.debug.assert(retry == null);
-                        retry = .{ .bytes = undefined, .len = outcome.retry.len, .from = sent.to };
-                        @memcpy(retry.?.bytes[0..outcome.retry.len], outcome.retry);
+                        const reply = &replies[reply_count];
+                        reply.* = .{ .bytes = undefined, .len = outcome.retry.len, .from = sent.to };
+                        @memcpy(reply.bytes[0..outcome.retry.len], outcome.retry);
+                        reply_count += 1;
                     }
                 }
                 if (count < constants.send_batch_max) {
@@ -166,8 +168,8 @@ pub const Pair = struct {
                 }
             }
             from.sent(index, self.now, drained);
-            // The reply re-dirties the sender after its burst ended, as a later turn would.
-            if (retry) |*reply| {
+            // Replies re-dirty the sender after its burst ended, as a later turn would.
+            for (replies[0..reply_count]) |*reply| {
                 var out: [constants.datagram_size_max]u8 = undefined;
                 _ = from.receive(reply.bytes[0..reply.len], &reply.from, self.now, &out);
             }
