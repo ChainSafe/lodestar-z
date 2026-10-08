@@ -35,7 +35,7 @@ function logRecord(sequence: number): NativeLogRecord {
 }
 
 describe("native log delivery", () => {
-  it("delivers up to 32 native records every 250 ms, one batch each time", () => {
+  it("delivers up to 256 native records every 100 ms, one batch each time", () => {
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
     const node = fixture();
     const records = [logRecord(1), logRecord(2)];
@@ -73,15 +73,15 @@ describe("native log delivery", () => {
     expect(node.logs.metrics()).toContain(`${LOG_DRAIN_ERRORS_NAME} 1\n`);
   });
 
-  it("drains at most four final batches, then stops", () => {
+  it("drains at most eight final batches, then stops", () => {
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
     const node = fixture();
     node.runtime.drainLogs.mockReturnValue({...noLogs, more: true, records: [logRecord(1)]});
     node.logs.stop();
-    expect(node.host.logs).toHaveBeenCalledTimes(4);
+    expect(node.host.logs).toHaveBeenCalledTimes(8);
     expect(vi.getTimerCount()).toBe(0);
     vi.advanceTimersByTime(10 * LOG_MS);
-    expect(node.host.logs).toHaveBeenCalledTimes(4);
+    expect(node.host.logs).toHaveBeenCalledTimes(8);
   });
 
   it("reports all native log loss at most every 30 s despite wall clock corrections, then flushes on close", () => {
