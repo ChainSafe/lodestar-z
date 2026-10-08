@@ -757,6 +757,7 @@ pub fn complete(owner: *ReqResp, engine: *Engine, router: *Router, record: *Requ
     assert(now.millis() >= record.started_ms);
     const duration_ms = now.millis() - record.started_ms;
     if (event == .served and info.result_code != constants.result_success) {
+        counts.incoming_errors +|= 1;
         std.log.scoped(.network_reqresp_errors).debug("request_error_response request={d}:{d} connection={d}:{d} method={s} code={d} detail={s} chunks={d} elapsed_ms={d}", .{ index, record.generation, record.conn.index, record.conn.generation, @tagName(record.protocol), info.result_code, if (info.rejection) |err| @errorName(err) else "", record.chunks, duration_ms });
     } else if (event != .failed) std.log.scoped(.network_reqresp).debug("request_completed direction={s} request={d}:{d} connection={d}:{d} method={s} chunks={d} elapsed_ms={d}", .{ @tagName(record.direction), index, record.generation, record.conn.index, record.conn.generation, @tagName(record.protocol), record.chunks, duration_ms });
     if (record.direction == .outbound) counts.outgoing_time.observe(duration_ms) else counts.incoming_time.observe(duration_ms);

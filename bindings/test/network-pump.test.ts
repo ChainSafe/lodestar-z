@@ -485,6 +485,26 @@ describe("binding pump scheduling", () => {
     expect(node.calls()[1][1]).toEqual(control);
   });
 
+  it("exposes dropped peer reports and preserves the counter after draining", async () => {
+    const node = fixture();
+    const metric = "lodestar_peers_report_peer_dropped_total";
+    expect(node.pump.metrics()).toContain(`${metric} 0\n`);
+    for (let i = 0; i < 513; i++) node.pump.reportPeer(`peer-${i}`, "low_tolerance");
+    expect(node.pump.metrics()).toContain(`# TYPE ${metric} counter\n`);
+    expect(node.pump.metrics()).toContain(`${metric} 1\n`);
+    for (let i = 0; i < 4; i++) await macrotask();
+    expect(
+      node
+        .calls()
+        .flatMap(([actions]) => actions)
+        .filter((action) => action.type === "reportPeer")
+    ).toHaveLength(512);
+    expect(node.pump.metrics()).toContain(`${metric} 1\n`);
+    node.pump.reportPeer("next-peer", "low_tolerance");
+    await macrotask();
+    expect(node.pump.metrics()).toContain(`${metric} 1\n`);
+  });
+
   it("measures each turn's burst through its continuations up to the next macrotask checkpoint", async () => {
     const node = fixture();
     node.host.peers.mockImplementation(() => {

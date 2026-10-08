@@ -135,7 +135,8 @@ pub const Admission = struct {
     pub fn commit(self: *Admission) void {
         assert(!self.committed);
         const owner = self.messages;
-        assert(self.feasible(&.{}));
+        const feasible_now = self.feasible(&.{});
+        assert(feasible_now);
         var reservation = owner.validation.reserve(self.event.id).?;
         const payload = owner.history.admitPayload(&owner.store, self.event.id, self.event.topic, self.compressed).?;
         self.event.handle = reservation.commit(&owner.store, self.context.peers, payload, self.source.peer, self.topic_index, self.event.admitted_ms);

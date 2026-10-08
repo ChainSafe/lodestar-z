@@ -135,6 +135,7 @@ pub fn sendManyNative(io: std.Io, handle: net.Socket.Handle, messages: []const S
 pub fn sendError(errno: std.posix.E) SendError {
     return switch (errno) {
         .SUCCESS => unreachable,
+        // UDP destinations with port zero produce EINVAL on Linux.
         .PERM, .INVAL => error.DestinationRefused,
         .ACCES => error.AccessDenied,
         .ALREADY => error.FastOpenAlreadyInProgress,

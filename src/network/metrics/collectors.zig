@@ -168,7 +168,7 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .{ "beacon_reqresp_outgoing_requests_total", "outgoing", "Started outgoing native requests, including control methods" },
         .{ "beacon_reqresp_incoming_requests_total", "incoming", "Accepted incoming native request streams, including control methods" },
         .{ "beacon_reqresp_outgoing_requests_error_total", "outgoing_errors", "Outgoing requests with a terminal native failure, excluding local cancellation" },
-        .{ "beacon_reqresp_incoming_requests_error_total", "incoming_errors", "Incoming requests with a terminal native failure" },
+        .{ "beacon_reqresp_incoming_requests_error_total", "incoming_errors", "Incoming requests ending with an error response or native failure, excluding local cancellation" },
     }) |metric| {
         const requests = try w.family(.{
             .name = metric[0],

@@ -553,7 +553,7 @@ pub const Dialing = struct {
         self.refresh(catalog, now_ms);
         const due = self.takeDue(catalog, &catalog.dial.expiries, now_ms);
         if (due.len == 0) return 0;
-        std.sort.pdq(u32, due, {}, std.sort.asc(u32));
+        if (due.len > 1) std.sort.pdq(u32, due, {}, std.sort.asc(u32));
         for (due) |index| {
             const row = catalog.edit(catalog.reference(index)).?;
             if (!catalog.intents.isSet(index)) continue;

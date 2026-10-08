@@ -124,7 +124,7 @@ test "reqresp rejected wire requests retain diagnostics and count terminal outco
         }
         try std.testing.expectEqual(expected, slot.rejection.?);
         try std.testing.expectEqual(@as(u32, 0), slot.request.terminalEvent().?.served.chunks);
-        try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.ping_v1)].incoming_errors);
+        try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.ping_v1)].incoming_errors);
         for (0..3) |_| try setup.pumpOnce();
         setup.server_event_capacity = 16;
         try setup.pumpOnce();
@@ -134,6 +134,51 @@ test "reqresp rejected wire requests retain diagnostics and count terminal outco
         try std.testing.expect(fault.identity.eql(&slot.identity));
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
+        try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.ping_v1)].incoming_errors);
+    }
+}
+
+test "reqresp incoming error responses and failed writes count once through terminal retention" {
+    const Outcome = enum { success, error_response, failed_write };
+    for (std.enums.values(Outcome)) |outcome| {
+        var setup: Pair = .{};
+        try setup.init(.{}, .{});
+        defer setup.deinit();
+        const bytes = [_]u8{0} ** 8;
+        var sink: [8]u8 = undefined;
+        _ = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
+        try waitForRequest(&setup);
+        const handle = setup.serverEvents()[0].request.request;
+        const slot = &setup.shared.server.reqresp.inbound[handle.index];
+        const counts = &setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.ping_v1)];
+        setup.server_event_capacity = 0;
+        if (outcome == .success) {
+            try std.testing.expect(setup.shared.server.reqresp.finish(handle, setup.shared.pair.now));
+        } else {
+            try setup.shared.server.reqresp.respondError(handle, 2, "local serving failure", setup.shared.pair.now);
+        }
+        try std.testing.expectEqual(@as(u64, 0), counts.incoming_errors);
+        if (outcome == .failed_write) {
+            setup.shared.server.reqresp.connectionClosed(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.handles.server, setup.shared.pair.now);
+        }
+        for (0..20) |_| {
+            try setup.pumpOnce();
+            if (slot.request.terminalEvent() != null) break;
+        }
+        const terminal = slot.request.terminalEvent() orelse return error.TestUnexpectedResult;
+        if (outcome == .failed_write) {
+            try std.testing.expectEqual(rr.Failure.connection_closed, terminal.failed.reason);
+        } else try std.testing.expect(terminal == .served);
+        const expected: u64 = if (outcome == .success) 0 else 1;
+        try std.testing.expectEqual(expected, counts.incoming_errors);
+        for (0..3) |_| try setup.pumpOnce();
+        setup.shared.server.reqresp.connectionClosed(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.handles.server, setup.shared.pair.now);
+        setup.server_event_capacity = 16;
+        try setup.pumpOnce();
+        try std.testing.expectEqual(@as(usize, 1), setup.serverEvents().len);
+        try setup.pumpOnce();
+        try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
+        try std.testing.expectEqual(expected, counts.incoming_errors);
     }
 }
 
@@ -225,6 +270,7 @@ test "reqresp cancellation releases read held chunk and response write states on
         var events: [1]Event = undefined;
         try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
         try std.testing.expect(events[0].failed.reason == .cancelled);
+        try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.ping_v1)].incoming_errors);
         try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control);
         try std.testing.expect(events[0].failed.reason == .cancelled);
     }
@@ -272,5 +318,6 @@ test "reqresp canonical cancel supersedes accepted unfinished finish and error" 
         try std.testing.expectEqual(.cancelled, events[0].failed.reason);
         _ = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .application = &events }).application;
         try std.testing.expect(setup.shared.server.reqresp.responseReadiness(handle) == .stale);
+        try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.blocks_by_range_v2)].incoming_errors);
     }
 }

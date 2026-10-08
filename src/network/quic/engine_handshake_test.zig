@@ -1,5 +1,6 @@
 const std = @import("std");
 const Engine = @import("Engine.zig");
+const c = @import("binding.zig").c;
 const keys = @import("../wire/keys.zig");
 const limits = @import("limits.zig");
 const support = @import("test_support.zig");
@@ -39,6 +40,25 @@ test "engine handshake connects both sides with verified peer ids" {
     try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
     try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, &pair.client.connection_metrics.established);
     try std.testing.expectEqualSlices(u64, &.{ 1, 0 }, &pair.server.connection_metrics.established);
+}
+
+test "engine cannot connect without ALPN negotiation" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    c.SSL_CTX_set_alpn_select_cb(pair.server_ctx.ssl_ctx, null, null);
+
+    const dialed = try pair.dial();
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expect(events[0] == .closed);
+    try std.testing.expectEqual(dialed, events[0].closed.conn);
+    try std.testing.expectEqual(Engine.CloseReason{ .peer_closed = .{ .app = false, .code = 0x100 + c.SSL_AD_NO_APPLICATION_PROTOCOL } }, events[0].closed.reason);
+    try std.testing.expectEqual(@as(u64, 0), pair.client.connection_metrics.established[1]);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.dialing);
 }
 
 test "engine counts only inbound handshakes against the permit bound" {

@@ -197,7 +197,8 @@ export interface NativeNetworkApplicationRuntime {
    * One host turn: applies up to 256 `actions`, delivers up to 32 publication, command, request and
    * incoming completions per family in `completions`, then the close result once nothing else awaits delivery, and
    * delivers the payload `demand` asks for. It throws only for invalid input or a nested call, before applying anything. Actions after
-   * a stop are ignored; unknown penalized identities count in peerReportsIgnored.
+   * a stop are ignored; unknown penalized identities count in peerReportsIgnored. A bridge result or completion-contract
+   * failure terminates the process rather than throwing after partial delivery.
    */
   exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): NativeExchange;
   /** Terminates the process at a fatal site. `reason` is at most 64 printable ASCII characters. */
