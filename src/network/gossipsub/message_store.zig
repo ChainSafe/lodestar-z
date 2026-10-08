@@ -137,7 +137,7 @@ pub const Store = struct {
         return if (len <= inline_bytes) 0 else (len + page_bytes - 1) / page_bytes;
     }
 
-    fn kindRoom(self: *const Store, kind: topic.Kind, len: usize) bool {
+    pub fn pendingRoom(self: *const Store, kind: topic.Kind, len: usize) bool {
         const limits = self.limits orelse return true;
         const k = @intFromEnum(kind);
         const pages = pagesFor(len);
@@ -150,24 +150,42 @@ pub const Store = struct {
         return lacking.pages == 0 and lacking.entries == 0;
     }
 
+    const Shortfall = struct { pages: usize, entries: usize };
+
     /// The pages and entries of its kind's retention allowance that retained messages must
     /// release before `handle` fits.
-    pub fn retentionShortfall(self: *const Store, handle: Handle) struct { pages: usize, entries: usize } {
-        const limits = self.limits orelse return .{ .pages = 0, .entries = 0 };
+    pub fn retentionShortfall(self: *const Store, handle: Handle) Shortfall {
         const entry = self.get(handle).?;
         if (entry.history) return .{ .pages = 0, .entries = 0 };
-        const k = @intFromEnum(entry.kind);
+        return self.retentionNeeded(entry.kind, entry.len);
+    }
+
+    pub fn retentionNeeded(self: *const Store, kind: topic.Kind, len: usize) Shortfall {
+        const limits = self.limits orelse return .{ .pages = 0, .entries = 0 };
+        const k = @intFromEnum(kind);
         return .{
-            .pages = (self.retained_by_kind[k] + pagesFor(entry.len)) -| limits[k].bytes / page_bytes,
+            .pages = (self.retained_by_kind[k] + pagesFor(len)) -| limits[k].bytes / page_bytes,
             .entries = (self.retained_entries_by_kind[k] + 1) -| limits[k].items,
         };
     }
     pub fn put(self: *Store, id: topic.MessageId, name: []const u8, data: []const u8) ?Handle {
-        assert(name.len <= topic.topic_max_len);
         const kind = if (topic.parseCanonical(name)) |canonical| canonical.name.kind else .beacon_block;
-        if (!self.canReserve(data.len) or !self.kindRoom(kind, data.len)) return null;
+        if (!self.canReserve(data.len) or !self.pendingRoom(kind, data.len)) return null;
+        return self.allocate(id, name, data, kind);
+    }
+
+    /// Insert into history in this owner call, before another admission observes the provisional entry.
+    pub fn putPublication(self: *Store, id: topic.MessageId, name: []const u8, data: []const u8) Handle {
+        const kind = if (topic.parseCanonical(name)) |canonical| canonical.name.kind else .beacon_block;
+        const needed = self.retentionNeeded(kind, data.len);
+        assert(needed.pages == 0 and needed.entries == 0 and self.canReserve(data.len));
+        return self.allocate(id, name, data, kind);
+    }
+
+    fn allocate(self: *Store, id: topic.MessageId, name: []const u8, data: []const u8, kind: topic.Kind) Handle {
+        assert(name.len <= topic.topic_max_len and self.canReserve(data.len));
         const index = self.free_entry;
-        if (index == none) return null;
+        assert(index != none);
         const entry = &self.entries[index];
         assert(!entry.active and entry.generation < std.math.maxInt(u64));
         self.free_entry = entry.free_next;

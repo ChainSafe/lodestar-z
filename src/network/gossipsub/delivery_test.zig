@@ -7,6 +7,54 @@ const Origin = @import("delivery.zig").Origin;
 const per_peer_reserve = @import("delivery.zig").per_peer_reserve;
 const std = @import("std");
 const storage = @import("message_store.zig");
+const Options = @import("options.zig").Options;
+const constants = @import("constants.zig");
+
+test "gossip global descriptor pressure preserves every peer local reservation" {
+    const a = std.testing.allocator;
+    var pool = try Pool.init(a, 2, Pool.capacity(2, 1));
+    defer pool.deinit(a);
+    pool.local_descriptors = 8;
+    var store = try storage.Store.init(a, 1, storage.page_bytes);
+    defer store.deinit(a);
+    const message = store.put(@splat(1), "topic", "payload").?;
+    store.retainHistory(message);
+    store.seal(message);
+    var queues: [2]Queue = @splat(.{ .pool = &pool });
+    defer for (&queues) |*queue| queue.reset();
+    const limits: Limits = .{ .bytes = 8192 };
+    for (0..per_peer_limit - 8) |_| try queues[0].append(&store, message, .forward, limits, 0);
+    for (0..per_peer_reserve - 8) |_| try queues[1].append(&store, message, .iwant, limits, 0);
+    try std.testing.expectEqual(@as(usize, 16), pool.available);
+    try std.testing.expectEqual(pool.available, pool.protected);
+    try std.testing.expectError(error.PoolFull, queues[1].append(&store, message, .forward, limits, 0));
+    for (&queues) |*queue| for (0..8) |_| try queue.append(&store, message, .publication, limits, 1);
+    try std.testing.expectEqual(@as(usize, 0), pool.available);
+}
+
+test "gossip default byte reserve admits a maximal local frame after ordinary saturation" {
+    const a = std.testing.allocator;
+    const maximum = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
+    const options: Options = .{};
+    const limits: Limits = .{ .bytes = options.tx_peer_bytes, .local_bytes = options.tx_local_bytes };
+    var pool = try Pool.init(a, 1, Pool.capacity(1, 1));
+    defer pool.deinit(a);
+    var store = try storage.Store.init(a, 1, std.mem.alignForward(usize, maximum, storage.page_bytes));
+    defer store.deinit(a);
+    const payload = try a.alloc(u8, maximum);
+    defer a.free(payload);
+    @memset(payload, 1);
+    const message = store.put(@splat(1), "topic", payload).?;
+    store.retainHistory(message);
+    store.seal(message);
+    var queue: Queue = .{ .pool = &pool };
+    defer queue.reset();
+    try queue.append(&store, message, .forward, limits, 0);
+    try std.testing.expectError(error.Bytes, queue.append(&store, message, .iwant, limits, 0));
+    try queue.append(&store, message, .publication, limits, 1);
+    try std.testing.expectEqual(limits.bytes, queue.bytes);
+    try std.testing.expectEqual(Origin.publication, (try queue.next(&store)).?.origin);
+}
 
 test "gossip shared deliveries preserve every peer reserve under global pressure" {
     const a = std.testing.allocator;
@@ -243,8 +291,8 @@ test "memory_safety: gossip queued handles survive payload and page reuse withou
     try std.testing.expectEqual(@as(usize, 1), queue.count);
     try std.testing.expectEqual(@as(usize, 700), queue.bytes);
     try std.testing.expectEqual(@as(usize, 0), queue.local_bytes);
-    try std.testing.expectEqual(@as(usize, 1), queue.kind_entries[@intFromEnum(store.get(fresh).?.kind)]);
-    try std.testing.expectEqual(@as(usize, 700), queue.kind_bytes[@intFromEnum(store.get(fresh).?.kind)]);
+    try std.testing.expectEqual(@as(usize, 1), queue.ordinary_kind_entries[@intFromEnum(store.get(fresh).?.kind)]);
+    try std.testing.expectEqual(@as(usize, 700), queue.ordinary_kind_bytes[@intFromEnum(store.get(fresh).?.kind)]);
     for (0..3) |_| {
         const segment = (try queue.next(&store)).?.segment(&store);
         if (queue.advance(&store, segment.len)) |receipt| {

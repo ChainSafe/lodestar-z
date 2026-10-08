@@ -200,7 +200,7 @@ test "resident topics above the live limit preserve pins scores diagnostics and 
     try std.testing.expectEqual(high, page.peers[0].topics[0].index);
     try std.testing.expectEqual(@as(f64, 1), page.peers[0].topics[0].counters.invalid);
     try std.testing.expect(page.peers[0].topics[0].weights.p4 < 0);
-    g.messages.validation.finish(&g.messages.store, handle, .ignore, 2);
+    g.messages.validation.finish(&g.messages.store, &g.peers, handle, .ignore, 2);
     g.messages.validation.expire(&g.messages.store, &g.peers, 2 + g.options.validation_tombstone_ms);
     try std.testing.expect(!g.messages.validation.retainsTopic(high));
     const masks = tx.subscription_dirty.masks;
@@ -308,7 +308,7 @@ test "topic expiry preserves attribution announcements and backoff independently
     try std.testing.expect(g.peers.score(peer, 11) < 0);
     g.overlay.expireTopic(&g.overlayContext(11), index, g.messages.validation.retainsTopic(index));
     try std.testing.expect(g.peers.scores.retainsTopic(index));
-    g.messages.validation.finish(&g.messages.store, handle, .ignore, 11);
+    g.messages.validation.finish(&g.messages.store, &g.peers, handle, .ignore, 11);
     g.overlay.expireTopic(&g.overlayContext(11), index, g.messages.validation.retainsTopic(index));
     try std.testing.expect(g.peers.scores.retainsTopic(index));
     const expired = 11 + g.options.validation_tombstone_ms;

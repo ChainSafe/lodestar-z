@@ -41,12 +41,12 @@ pub const Options = struct {
     tx_timeout_ms: u64 = 30_000,
     control_bytes: usize = 28 * 1024,
     critical_bytes: usize = outbox.critical_bytes,
-    tx_peer_bytes: usize = 16 * 1024 * 1024,
+    tx_peer_bytes: usize = 2 * constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE),
     /// Per-peer data descriptors and bytes that only local publications may use: forwards and
     /// IWANT responses leave them free, so our own messages still queue behind a forward burst.
     /// The delivery pool holds the descriptor count.
     tx_local_descriptors: usize = 32,
-    tx_local_bytes: usize = 1024 * 1024,
+    tx_local_bytes: usize = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE),
     peers_per_pump: usize = 32,
     topics_per_pump: usize = 4,
     items_per_peer: usize = 32,
@@ -118,7 +118,7 @@ pub const Options = struct {
         try range(o.control_bytes, 1, 65536);
         try range(o.critical_bytes, 32 + topic_mod.topic_max_len, outbox.critical_bytes);
         try range(o.tx_peer_bytes, compressed, 1024 * 1024 * 1024);
-        try range(o.tx_local_descriptors, 0, delivery.per_peer_limit - 1);
+        try range(o.tx_local_descriptors, 0, delivery.per_peer_reserve);
         try range(o.tx_local_bytes, 0, o.tx_peer_bytes - compressed);
         try range(o.topics_per_pump, 1, constants.topics_cap);
         try range(o.peers_per_pump, 1, constants.peers_cap);

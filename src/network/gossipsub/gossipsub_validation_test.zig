@@ -16,6 +16,41 @@ const constants = @import("constants.zig");
 const StorageRefusal = @import("messages.zig").StorageRefusal;
 const frame = @import("frame.zig");
 
+test "gossip resolved attribution releases peer rows and scores late duplicates once after reuse" {
+    for ([_]Gossipsub.Verdict{ .accept, .reject, .ignore }) |verdict| {
+        var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 1, .retained_capacity = 2, .retained_outbound_reserve = 1 });
+        defer g.deinit();
+        var inbox: support.Inbox = .{};
+        defer inbox.deinit();
+        inbox.attach(&g);
+        try support.subscribe(&g, test_topic);
+        const conn: Handle = .{ .index = 0, .generation = 1 };
+        const source = support.addPeer(&g, conn, .v1_2).?;
+        const old = g.logical(source.index);
+        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, source.index, "message", 1));
+        const handle = inbox.last().handle;
+        try std.testing.expectEqual(@as(u32, 1), g.peers.rows[old.index].pins);
+        _ = g.report(handle, verdict, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
+        try std.testing.expectEqual(@as(u32, 0), g.peers.rows[old.index].pins);
+        const topic = g.overlay.findTopic(test_topic).?;
+        try std.testing.expect(g.messages.validation.retainsTopic(topic));
+        g.connectionClosed(conn);
+        const next = support.addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
+        const current = g.logical(next.index);
+        try std.testing.expectEqual(old.index, current.index);
+        try std.testing.expect(!g.peers.matches(old));
+        g.overlay.rows[topic].mesh.set(next.index);
+        for (0..2) |_| try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, next.index, "message", 3));
+        const counters = g.peers.scores.topics[@as(usize, current.index) * g.peers.scores.topic_params.len + topic];
+        try std.testing.expectEqual(@as(f64, if (verdict == .reject) 1 else 0), counters.invalid);
+        try std.testing.expectEqual(@as(f64, if (verdict == .accept) 1 else 0), counters.mesh_deliveries);
+        try std.testing.expectEqual(@as(u32, 0), g.peers.rows[current.index].pins);
+        g.messages.expire(&g.peers, 30_002);
+        try std.testing.expect(!g.messages.validation.retainsTopic(topic));
+        try std.testing.expect(g.peers.matches(current));
+    }
+}
+
 fn buildTopic(name: []const u8, out: []u8) []const u8 {
     return topic_mod.build(digest, name, out);
 }

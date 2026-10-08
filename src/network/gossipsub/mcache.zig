@@ -270,19 +270,35 @@ pub const History = struct {
     }
 
     pub fn admitPayload(self: *History, store: *storage.Store, id: MessageId, name: []const u8, bytes: []const u8) ?storage.Handle {
-        if (!store.canReserve(bytes.len)) {
-            if (!self.canAdmitPayload(store, bytes.len, store.free_pages, store.entries.len - store.used_entries - store.retired_entries)) return null;
-            var slot = self.head;
-            const count = self.count;
-            for (0..count) |_| {
-                if (store.canReserve(bytes.len)) break;
-                const candidate = slot;
-                slot = self.entries[slot].next;
-                if (reclaimable(store.get(self.entries[candidate].message).?)) self.remove(store, candidate);
-            }
-            assert(store.canReserve(bytes.len));
+        const kind = if (topic_mod.parseCanonical(name)) |canonical| canonical.name.kind else .beacon_block;
+        if (!store.pendingRoom(kind, bytes.len) or
+            !self.canAdmitPayload(store, bytes.len, store.free_pages, store.entries.len - store.used_entries - store.retired_entries)) return null;
+        self.reclaimPayload(store, bytes.len);
+        return store.put(id, name, bytes).?;
+    }
+
+    pub fn admitPublication(self: *History, store: *storage.Store, id: MessageId, name: []const u8, bytes: []const u8, topic: u16, epoch: u64) error{ Capacity, Retention }!storage.Handle {
+        const kind = if (topic_mod.parseCanonical(name)) |canonical| canonical.name.kind else .beacon_block;
+        var victims: [reclaim_scan]u32 = undefined;
+        const count = self.retentionVictims(store, kind, bytes.len, &victims) orelse return error.Retention;
+        if (!self.canAdmitPayload(store, bytes.len, store.free_pages, store.entries.len - store.used_entries - store.retired_entries)) return error.Capacity;
+        for (victims[0..count]) |victim| self.remove(store, victim);
+        self.reclaimPayload(store, bytes.len);
+        const handle = store.putPublication(id, name, bytes);
+        self.put(store, handle, topic, epoch);
+        return handle;
+    }
+
+    fn reclaimPayload(self: *History, store: *storage.Store, len: usize) void {
+        var slot = self.head;
+        const count = self.count;
+        for (0..count) |_| {
+            if (store.canReserve(len)) break;
+            const candidate = slot;
+            slot = self.entries[slot].next;
+            if (reclaimable(store.get(self.entries[candidate].message).?)) self.remove(store, candidate);
         }
-        return store.put(id, name, bytes);
+        assert(store.canReserve(len));
     }
     fn reclaimable(e: *const storage.Entry) bool {
         return e.history and !e.provisional and !e.validation;
@@ -354,12 +370,20 @@ pub const History = struct {
     /// from those whose eviction frees retention the message lacks, and are evicted only when
     /// together they free enough; otherwise the history is unchanged.
     pub fn makeRoom(self: *History, store: *storage.Store, handle: storage.Handle) bool {
-        const lacking = store.retentionShortfall(handle);
-        if (lacking.pages == 0 and lacking.entries == 0) return true;
+        const entry = store.get(handle).?;
+        if (entry.history) return true;
         var victims: [reclaim_scan]u32 = undefined;
+        const count = self.retentionVictims(store, entry.kind, entry.len, &victims) orelse return false;
+        for (victims[0..count]) |victim| self.remove(store, victim);
+        assert(store.canRetain(handle));
+        return true;
+    }
+
+    fn retentionVictims(self: *const History, store: *const storage.Store, kind: topic_mod.Kind, len: usize, victims: *[reclaim_scan]u32) ?usize {
+        const lacking = store.retentionNeeded(kind, len);
         var chosen: usize = 0;
         var pages: usize = 0;
-        var slot = self.kinds[@intFromEnum(store.get(handle).?.kind)].head;
+        var slot = self.kinds[@intFromEnum(kind)].head;
         for (0..reclaim_scan) |_| {
             if (slot == empty_slot or (pages >= lacking.pages and chosen >= lacking.entries)) break;
             const entry = store.get(self.entries[slot].message).?;
@@ -371,10 +395,7 @@ pub const History = struct {
             }
             slot = self.entries[slot].kind_next;
         }
-        if (pages < lacking.pages or chosen < lacking.entries) return false;
-        for (victims[0..chosen]) |victim| self.remove(store, victim);
-        assert(store.canRetain(handle));
-        return true;
+        return if (pages >= lacking.pages and chosen >= lacking.entries) chosen else null;
     }
 
     fn remove(self: *History, store: *storage.Store, slot: u32) void {

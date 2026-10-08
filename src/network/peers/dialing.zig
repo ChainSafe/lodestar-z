@@ -16,6 +16,7 @@ const histogram = @import("../metrics/histogram.zig");
 
 const replacement_grace_ms = Catalog.replacement_grace_ms;
 const hint_freshness_ms = Catalog.hint_freshness_ms;
+const candidates_max = 4096;
 
 const Attempt = struct {
     generation: u64 = 0,
@@ -75,7 +76,7 @@ pub const Dialing = struct {
     const Demand = struct { revision: u64, intent_revision: u64, version: u64, pending: u16, host: u16 };
 
     pub fn validateOptions(options: Options) error{InvalidOptions}!void {
-        if (options.capacity == 0 or options.capacity > 4096 or options.concurrent_max == 0 or
+        if (options.capacity == 0 or options.capacity > candidates_max or options.concurrent_max == 0 or
             options.concurrent_max > attempts_max or options.concurrent_max > options.capacity or
             options.outbound_reserved > options.concurrent_max) return error.InvalidOptions;
     }
@@ -222,7 +223,8 @@ pub const Dialing = struct {
         const admitted = admittedAddresses(catalog, &record.peer, &.{record.address}, 0, now_ms);
         if (admitted.rejection != null) return .rejected;
         if (admitted.count == 0) return .failed;
-        const incoming: Row = .{ .identity = record.peer, .dial = .{ .automatic = true, .replay = .untried } };
+        var incoming: Row = .{ .identity = record.peer, .dial = .{ .automatic = true, .replay = .untried } };
+        applyAddresses(&incoming.dial, &admitted);
         const ref = retainCandidate(catalog, &incoming, context, wanted, now_ms) catch return .capacity;
         const row = catalog.rowForMut(ref).?;
         row.dial.automatic = true;
@@ -244,9 +246,24 @@ pub const Dialing = struct {
         return catalog.retainIntent(&incoming.identity);
     }
     fn replacement(catalog: *const Catalog, incoming: *const Row, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) ?usize {
+        assert(catalog.intent_count <= candidates_max);
         const incoming_utility = matchesDemand(incoming, context, wanted, now_ms);
+        var prefixes: [2 * candidates_max]u64 = undefined;
+        var prefix_count: usize = 0;
+        var population = catalog.intents.iterator(.{});
+        while (population.next()) |index| {
+            const dial = &catalog.rows[index].dial;
+            for (dial.addresses[0..dial.address_count]) |address| {
+                prefixes[prefix_count] = candidatePrefix(address);
+                prefix_count += 1;
+            }
+        }
+        const sorted = prefixes[0..prefix_count];
+        std.sort.heap(u64, sorted, {}, std.sort.asc(u64));
+        const incoming_population = prefixPopulation(sorted, &incoming.dial);
         var victim: ?usize = null;
         var victim_utility: u2 = 2;
+        var victim_population: usize = 0;
         var it = catalog.intents.iterator(.{});
         while (it.next()) |index| {
             const row = &catalog.rows[index];
@@ -255,10 +272,19 @@ pub const Dialing = struct {
                 row.generation == std.math.maxInt(u64)) continue;
             std.debug.assert(row.connection == null and row.pending_close == null and !row.pending_update);
             const usefulness: u2 = if (row.dial.failures != 0) 0 else matchesDemand(row, context, wanted, now_ms);
-            if (incoming_utility < usefulness or (row.dial.failures == 0 and incoming_utility == usefulness and now_ms < row.dial.replacement_after_ms)) continue;
-            if (victim == null or usefulness < victim_utility or (usefulness == victim_utility and row.dial.replacement_after_ms < catalog.rows[victim.?].dial.replacement_after_ms)) {
+            if (incoming_utility < usefulness) continue;
+            const peers_in_prefix = prefixPopulation(sorted, &row.dial);
+            if (row.dial.failures == 0 and incoming_utility == usefulness) {
+                if (incoming_population > peers_in_prefix) continue;
+                const improves_diversity = incoming.dial.address_count > 0 and peers_in_prefix > incoming_population + 1;
+                if (now_ms < row.dial.replacement_after_ms and !improves_diversity) continue;
+            }
+            if (victim == null or usefulness < victim_utility or (usefulness == victim_utility and
+                (peers_in_prefix > victim_population or (peers_in_prefix == victim_population and row.dial.replacement_after_ms < catalog.rows[victim.?].dial.replacement_after_ms))))
+            {
                 victim = index;
                 victim_utility = usefulness;
+                victim_population = peers_in_prefix;
             }
         }
         return victim;
@@ -806,6 +832,29 @@ fn origin(row: *const Row) remembered.Origin {
 }
 fn dialedKey(catalog: *const Catalog, row: *const Row, attempt: *const Attempt) u64 {
     return catalog.history.endpointKey(&row.identity, attempt.address);
+}
+
+// IPv4 /24 and IPv6 /48 guide replacement, not admission entitlements: an ENR proves no endpoint ownership.
+fn candidatePrefix(address: t.Address) u64 {
+    const canonical = t.Address.fromNetwork(address.toNetwork());
+    return switch (canonical) {
+        .ip4 => |ip| @as(u64, 4) << 56 | (std.mem.readInt(u32, &ip.octets, .big) >> 8),
+        .ip6 => |ip| @as(u64, 6) << 56 | std.mem.readInt(u48, ip.octets[0..6], .big),
+    };
+}
+
+fn comparePrefix(prefix: u64, other: u64) std.math.Order {
+    return std.math.order(prefix, other);
+}
+
+fn prefixPopulation(sorted: []const u64, dial: *const Catalog.DialState) usize {
+    var population: usize = 0;
+    for (dial.addresses[0..dial.address_count]) |address| {
+        const prefix = candidatePrefix(address);
+        const count = std.sort.upperBound(u64, sorted, prefix, comparePrefix) - std.sort.lowerBound(u64, sorted, prefix, comparePrefix);
+        population = @max(population, count);
+    }
+    return population;
 }
 
 const Admitted = struct { addresses: [2]t.Address = undefined, count: u8 = 0, strikes: u8 = 0, rejection: ?t.Rejection = null };

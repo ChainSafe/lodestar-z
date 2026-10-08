@@ -38,11 +38,11 @@ pub const Attribution = struct {
     until: u64 = 0,
     verdict: Verdict = .ignore,
     id: topic_mod.MessageId = undefined,
+    /// Pending validation owns these peers; resolved attribution only compares their generations.
     source: PeerRef = undefined,
     topic: u16 = undefined,
     admitted_ms: u64 = 0,
     source_eligible: bool = false,
-    pinned: bool = false,
     duplicates: [duplicates_max]Duplicate = undefined,
     duplicate_len: u8 = 0,
 };
@@ -172,7 +172,7 @@ pub const Validation = struct {
             owner.pending_per_peer[source.index] += 1;
             owner.pending_per_peer_kind[source.index][@intFromEnum(store.get(message).?.kind)] += 1;
             owner.bytes_per_peer_kind[source.index][@intFromEnum(store.get(message).?.kind)] += chargedBytes(store.get(message).?.len);
-            record.* = .{ .handle = handle, .state = .pending, .id = id, .source = source, .topic = topic, .admitted_ms = now, .pinned = true };
+            record.* = .{ .handle = handle, .state = .pending, .id = id, .source = source, .topic = topic, .admitted_ms = now };
             assert(topic < owner.topic_counts.len and owner.topic_counts[topic] < owner.recent.len);
             owner.topic_counts[topic] += 1;
             owner.index.insert(id, self.record);
@@ -250,10 +250,11 @@ pub const Validation = struct {
     }
 
     pub fn duplicate(e: *Attribution, peers: *Peers, peer: PeerRef, eligible: bool) bool {
-        if (!e.pinned or std.meta.eql(e.source, peer)) return false;
+        assert(e.state != .free);
+        if (std.meta.eql(e.source, peer)) return false;
         for (e.duplicates[0..e.duplicate_len]) |d| if (std.meta.eql(d.peer, peer)) return false;
         if (e.duplicate_len == duplicates_max) return false;
-        peers.retain(peer);
+        if (e.state == .pending) peers.retain(peer);
         e.duplicates[e.duplicate_len] = .{ .peer = peer, .eligible = eligible };
         e.duplicate_len += 1;
         return true;
@@ -272,12 +273,13 @@ pub const Validation = struct {
         };
     }
 
-    pub fn finish(self: *Validation, store: *storage.Store, h: Handle, verdict: Verdict, now: u64) void {
+    pub fn finish(self: *Validation, store: *storage.Store, peers: *Peers, h: Handle, verdict: Verdict, now: u64) void {
         const e = &self.entries[h.index];
         assert(e.state == .pending and e.generation == h.generation and now < e.state.pending.deadline);
         const pending = e.state.pending;
         const record = &self.recent[pending.delivery];
         self.releasePending(store, h.index);
+        releasePeers(record, peers);
         record.state = .resolved;
         record.verdict = verdict;
         record.until = now +| self.tombstone_ms;
@@ -321,12 +323,16 @@ pub const Validation = struct {
         return if (resolved) |deadline| @min(pending.?, deadline) else pending;
     }
     fn releaseAttribution(self: *Validation, e: *Attribution, peers: *Peers) void {
-        if (!e.pinned) return;
+        if (e.state == .free) return;
         assert(self.topic_counts[e.topic] > 0);
         self.topic_counts[e.topic] -= 1;
+        if (e.state == .pending) releasePeers(e, peers);
+    }
+
+    fn releasePeers(e: *const Attribution, peers: *Peers) void {
+        assert(e.state == .pending);
         peers.release(e.source);
         for (e.duplicates[0..e.duplicate_len]) |d| peers.release(d.peer);
-        e.pinned = false;
     }
 };
 

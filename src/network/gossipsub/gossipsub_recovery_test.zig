@@ -14,8 +14,63 @@ const Now = @import("../types.zig").Now;
 const peer_id = @import("../wire/peer_id.zig");
 const outbox = @import("outbox.zig");
 const delivery = @import("delivery.zig");
+const Recovery = @import("recovery.zig");
 const IwantOutcome = @import("metrics.zig").IwantOutcome;
 const resource_options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 3, .retained_capacity = 4, .retained_outbound_reserve = 1, .validation_capacity = 1, .mcache_capacity = 2, .seen_capacity = 4 };
+
+test "gossipsub IHAVE saturation preserves recovery for new and reconnected identities" {
+    const decay = @exp(@log(@as(f64, 0.01)) / 320);
+    const target = 0.3125 / (1 - decay) - 6;
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 8, .retained_capacity = 420, .retained_outbound_reserve = 1, .iwant_followup_ms = 12000, .score_params = .{ .behaviour_weight = -4000 / (target * target), .behaviour_decay = decay } });
+    defer g.deinit();
+    try support.subscribe(&g, test_topic);
+    for (0..8) |index| _ = support.addPeer(&g, .{ .index = @intCast(index), .generation = 1 }, .v1_2).?;
+    var bytes: [4096]u8 = undefined;
+    var writer = protobuf.Writer.init(&bytes);
+    for (0..7) |peer| {
+        const io = &g.sessions.rows[peer].io;
+        for (0..constants.max_ihave_per_heartbeat) |batch| {
+            writer.len = 0;
+            for (0..constants.gossip_ids_max) |item| {
+                var id: MessageId = @splat(0);
+                std.mem.writeInt(u32, id[0..4], @intCast((peer * constants.max_ihave_per_heartbeat + batch) * constants.gossip_ids_max + item), .little);
+                writer.bytesField(2, &id);
+            }
+            support.control(&g, @intCast(peer), .{ .ihave = .{ .topic = test_topic, .body = writer.written() } }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
+            for (0..4) |_| {
+                const segment = try io.tx.segment(&g.messages.store);
+                if (segment.len == 0) break;
+                if (io.tx.advance(&g.messages.store, segment.len)) |completion| g.writeCompleted(g.sessions.ref(@intCast(peer)), completion, 1);
+            }
+        }
+    }
+    const reserve = Recovery.promises_reserved_per_peer;
+    try std.testing.expectEqual(constants.promises_cap - (420 - 7) * reserve, g.recovery.len);
+    const occupied = g.recovery.len;
+    const old = g.logical(0);
+    const conn = g.sessions.rows[0].conn;
+    g.connectionClosed(conn);
+    try std.testing.expectEqual(occupied, g.recovery.len);
+    try std.testing.expect(g.peers.rows[old.index].pins > 0);
+    const reconnect = g.addPeer(.{ .index = 0, .generation = 2 }, &.{ .identity = g.peers.rows[old.index].identity, .address = .unspecified, .direction = .inbound }, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })).admitted;
+    var fresh: [1]MessageId = .{@splat(255)};
+    try std.testing.expectEqual(old, g.logical(reconnect.index));
+    try std.testing.expectError(error.PeerCapacity, g.recovery.filterPending(&g.peers, old, &fresh));
+    writer.len = 0;
+    for (0..constants.gossip_ids_max) |item| {
+        var id: MessageId = @splat(255);
+        id[0] = @intCast(item);
+        writer.bytesField(2, &id);
+    }
+    support.control(&g, 7, .{ .ihave = .{ .topic = test_topic, .body = writer.written() } }, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
+    try std.testing.expectEqual(@as(u16, reserve), g.sessions.rows[7].io.iwant_ids_sent);
+    try std.testing.expectEqual(occupied + reserve, g.recovery.len);
+    try std.testing.expectError(error.PeerCapacity, g.recovery.filterPending(&g.peers, g.logical(7), &fresh));
+    _ = g.recovery.cancel(&g.peers, conn, true);
+    try std.testing.expect((try g.recovery.filterPending(&g.peers, g.logical(7), &fresh)).capacity > reserve);
+    g.recovery.clear(&g.peers);
+    try std.testing.expectEqual(@as(usize, constants.promises_cap), g.recovery.available());
+}
 
 fn expectControlFloodBounded(control_tag: u8) !void {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .items_per_peer = 4096, .items_per_pump = 8192 });
@@ -342,7 +397,7 @@ test "gossip recovery refusal restores promise slots and identity pins before re
     try std.testing.expect(row.io.tx.inject(bytes, 0));
     const available = g.recovery.available();
     var ids: [2]Gossipsub.MessageId = .{ @splat(1), @splat(2) };
-    _ = try g.recovery.filterPending(row.logical, &ids);
+    _ = try g.recovery.filterPending(&g.peers, row.logical, &ids);
     try std.testing.expectError(error.OutboxFull, g.recovery.requestBatch(&g.peers, &row.io.tx, &g.sessions.control_scratch, &ids, row.logical, row.conn, g.overlay.rng.random(), g.options.iwant_followup_ms, 1));
     try std.testing.expectEqual(available, g.recovery.available());
     try std.testing.expectEqual(@as(usize, 0), g.recovery.batch_len);
@@ -350,7 +405,7 @@ test "gossip recovery refusal restores promise slots and identity pins before re
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[row.logical.index].pins);
     try std.testing.expect(row.io.tx.submit(&.{ .graft = test_topic }, &g.sessions.control_scratch, 1) != null);
     row.io.tx.cancelStream();
-    _ = try g.recovery.filterPending(row.logical, &ids);
+    _ = try g.recovery.filterPending(&g.peers, row.logical, &ids);
     try g.recovery.requestBatch(&g.peers, &row.io.tx, &g.sessions.control_scratch, &ids, row.logical, row.conn, g.overlay.rng.random(), g.options.iwant_followup_ms, 2);
     try std.testing.expectEqual(@as(usize, 2), g.recovery.len);
     try std.testing.expectEqual(g.recovery.buckets.len - 2, std.mem.count(u16, g.recovery.buckets, &.{std.math.maxInt(u16)}));

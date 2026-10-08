@@ -155,7 +155,7 @@ fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
         candidates[count] = id_bytes[0..constants.message_id_length].*;
         count += 1;
     }
-    const selected = self.recovery.filterPending(self.logical(index), candidates[0..count]) catch return;
+    const selected = self.recovery.filterPending(&self.peers, self.logical(index), candidates[0..count]) catch return;
     const limit = @min(constants.gossip_ids_max, id_budget, selected.capacity);
     count = 0;
     for (candidates[0..selected.count]) |id| {
