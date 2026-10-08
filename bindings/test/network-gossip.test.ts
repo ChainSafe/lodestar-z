@@ -182,6 +182,14 @@ test.each([
     const message = await nextGossip(pair.right);
     await vi.waitFor(
       async () => {
+        const sent = await pair.left.getMetrics();
+        const received = pair.right.getMetrics();
+        expect(metricValue(sent, "gossipsub_rpc_sent_message_total")).toBe(1);
+        expect(metricValue(received, "gossipsub_rpc_recv_message_total")).toBe(1);
+        const publishedBytes = metricValue(sent, 'gossipsub_msg_publish_bytes_total{topic="beacon_block"}');
+        expect(publishedBytes).toBeGreaterThan(0);
+        expect(metricValue(sent, "gossipsub_rpc_sent_bytes_total")).toBeGreaterThan(publishedBytes ?? 0);
+        expect(metricValue(received, "gossipsub_rpc_recv_bytes_total")).toBeGreaterThan(publishedBytes ?? 0);
         expect(await pair.left.getMetrics()).toContain(
           'gossipsub_data_recipients_total{origin="publication",outcome="queued"} 1\n'
         );

@@ -103,6 +103,9 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     turn.budget.work = 0;
     for (0..2) |_| {
         try std.testing.expectEqual(Progress.credits, try session_io.processRpc(&g, session.index, &turn, &peer));
+        try std.testing.expectEqual(@as(u64, 1), g.rpc_received.count);
+        try std.testing.expectEqual(@as(u64, 1), g.rpc_received.ihave);
+        try std.testing.expectEqual(writer.len, g.rpc_received.bytes);
         try std.testing.expectEqual(@as(u16, 0), io.ihave_recv);
         try std.testing.expect(io.rpc.?.item != null);
         try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
@@ -179,6 +182,8 @@ test "gossipsub IWANT work preflight defers all replies and resumes exactly once
     try std.testing.expectEqual(Progress.done, try session_io.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expectEqual(@as(usize, 2), io.tx.data.count);
     try std.testing.expectEqual(@as(u64, 2), g.iwant_outcomes[@intFromEnum(IwantOutcome.queued)]);
+    try std.testing.expectEqual(@as(u64, 1), g.rpc_received.count);
+    try std.testing.expectEqual(@as(u64, 2), io.tx.rpc_sent.message);
 }
 
 test "gossipsub maximum IWANT shares oversized allowance with data and makes progress" {

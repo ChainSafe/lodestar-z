@@ -9,6 +9,8 @@ const delivery = @import("delivery.zig");
 const frame = @import("frame.zig");
 const test_support = @import("test_support.zig");
 const wire = @import("../wire/protobuf.zig");
+const RpcCounts = @import("protobuf_schema.zig").RpcCounts;
+const RpcCounters = @import("metrics.zig").RpcCounters;
 pub const data_capacity = delivery.per_peer_limit;
 pub const control_frames = 128;
 pub const critical_frames = 2 * constants.topics_cap;
@@ -135,6 +137,8 @@ pub const Outbox = struct {
     gossip: []u8 = &.{},
     gossip_len: usize = 0,
     gossip_ids: usize = 0,
+    gossip_entries: u32 = 0,
+    rpc_sent: RpcCounters = .{},
     critical: FrameQueue(critical_frames),
     data: delivery.Queue,
     active: enum { none, critical, control, data } = .none,
@@ -204,7 +208,18 @@ pub const Outbox = struct {
             .subscription, .graft, .prune => true,
             else => false,
         };
-        return self.appendControl(control.encode(scratch), critical, now_ms);
+        const bytes = control.encode(scratch);
+        const token = self.appendControl(bytes, critical, now_ms) orelse return null;
+        const counts: RpcCounts = switch (control.*) {
+            .subscription => .{ .subscription = 1 },
+            .graft => .{ .control = 1, .graft = 1 },
+            .prune => .{ .control = 1, .prune = 1 },
+            .ihave => .{ .control = 1, .ihave = 1 },
+            .iwant => .{ .control = 1, .iwant = 1 },
+            .idontwant => .{ .control = 1, .idontwant = 1 },
+        };
+        self.countRpc(bytes, &counts);
+        return token;
     }
 
     /// Accumulates the heartbeat's topic advertisements into one control RPC per peer.
@@ -225,6 +240,7 @@ pub const Outbox = struct {
         for (ids) |id| protobuf.writeIhaveId(&writer, &id);
         self.gossip_len += writer.len;
         self.gossip_ids += ids.len;
+        self.gossip_entries += 1;
         return true;
     }
 
@@ -232,15 +248,18 @@ pub const Outbox = struct {
         if (self.gossip_len == 0) return false;
         var prefix: [10]u8 = undefined;
         var writer = protobuf.Writer.init(&prefix);
-        writer.varint(wire.bytesFieldSize(3, self.gossip_len));
+        const rpc_len = wire.bytesFieldSize(3, self.gossip_len);
+        writer.varint(rpc_len);
         writer.tag(3, protobuf.wire_len);
         writer.varint(self.gossip_len);
         const begin = 10 - writer.len;
         @memcpy(self.gossip[begin..10], writer.written());
         assert(writer.len + self.gossip_len <= self.control.bytes.len);
         const result = self.appendControl(self.gossip[begin .. 10 + self.gossip_len], false, now_ms);
+        if (result != null) self.rpc_sent.record(rpc_len, &.{ .control = 1, .ihave = self.gossip_entries });
         self.gossip_len = 0;
         self.gossip_ids = 0;
+        self.gossip_entries = 0;
         return result != null;
     }
 
@@ -282,7 +301,12 @@ pub const Outbox = struct {
             });
             return .full;
         };
+        self.countRpc(&store.get(h).?.frame, &.{ .message = 1 });
         return .queued;
+    }
+    fn countRpc(self: *Outbox, bytes: []const u8, counts: *const RpcCounts) void {
+        var reader = protobuf.Reader.init(bytes);
+        self.rpc_sent.record(@intCast(reader.varint() catch unreachable), counts);
     }
     fn dropped(self: *Outbox, reason: DropReason) void {
         self.drops[@intFromEnum(reason)] +|= 1;
@@ -361,6 +385,7 @@ pub const Outbox = struct {
             .sequence = self.sequence,
             .subscription_dirty = self.subscription_dirty,
             .drops = self.drops,
+            .rpc_sent = self.rpc_sent,
             .pressure_log_due_ms = self.pressure_log_due_ms,
             .last_drop = self.last_drop,
             .ready = false,
@@ -370,6 +395,7 @@ pub const Outbox = struct {
         self.critical.reset();
         self.gossip_len = 0;
         self.gossip_ids = 0;
+        self.gossip_entries = 0;
     }
 
     pub fn cancelStream(self: *Outbox) void {
@@ -384,6 +410,7 @@ pub const Outbox = struct {
         self.critical.reset();
         self.gossip_len = 0;
         self.gossip_ids = 0;
+        self.gossip_entries = 0;
         self.progress_ms = null;
         self.ready = false;
         self.blocked_since = null;

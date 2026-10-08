@@ -436,7 +436,9 @@ pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) pro
         if (rpc.item == null) {
             const available = @min(turn.budget.fields, peer.fields);
             var fields = available;
+            const validating = rpc.reader.validator.depth != 0;
             const step = try rpc.reader.step(&fields);
+            if (validating and rpc.reader.validator.depth == 0) self.rpc_received.record(rpc.reader.view.len, &rpc.reader.validator.rpc_counts);
             turn.budget.fields -= available - fields;
             peer.fields -= available - fields;
             switch (step) {

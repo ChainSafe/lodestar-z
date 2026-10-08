@@ -110,6 +110,26 @@ const contract = [_]Series{
     .{ .name = "lodestar_discovery_candidate_rejections_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "lodestar_discovery_datagram_rejections_total", .kind = "counter", .labels = &.{ "stage", "reason" } },
     // Gossip
+    .{ .name = "gossipsub_rpc_recv_bytes_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_recv_count_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_recv_subscription_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_recv_message_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_recv_control_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_recv_ihave_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_recv_iwant_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_recv_graft_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_recv_prune_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_recv_idontwant_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_sent_bytes_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_sent_count_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_sent_subscription_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_sent_message_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_sent_control_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_sent_ihave_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_sent_iwant_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_sent_graft_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_sent_prune_total", .kind = "counter" },
+    .{ .name = "gossipsub_rpc_sent_idontwant_total", .kind = "counter" },
     .{ .name = "gossipsub_mesh_peer_count", .kind = "gauge", .labels = &.{"topicStr"} },
     .{ .name = "gossipsub_topic_peer_count", .kind = "gauge", .labels = &.{"topicStr"} },
     .{ .name = "lodestar_gossip_mesh_peers_by_type_count", .kind = "gauge", .labels = &.{ "type", "boundary" } },
@@ -136,6 +156,7 @@ const contract = [_]Series{
     .{ .name = "gossipsub_msg_received_prevalidation_total", .kind = "counter", .labels = &.{"topic"} },
     .{ .name = "gossipsub_pre_validation_duplicate_total", .kind = "counter", .labels = &.{"topic"} },
     .{ .name = "gossipsub_msg_publish_count_total", .kind = "counter", .labels = &.{"topic"} },
+    .{ .name = "gossipsub_msg_publish_bytes_total", .kind = "counter", .labels = &.{"topic"} },
     .{ .name = "gossipsub_mesh_changes_total", .kind = "counter", .labels = &.{ "topic", "event", "reason" } },
     .{ .name = "gossipsub_behaviour_penalties_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "lodestar_gossip_peer_score_by_threshold_count", .kind = "gauge", .labels = &.{"threshold"} },
@@ -372,6 +393,36 @@ test "metrics preserve outgoing queue refusals across session retirement and reu
     g.connectionClosed(g.sessions.rows[next.index].conn);
     try contains(try f.render(false), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 5\n");
     try contains(try f.render(false), "gossipsub_ihave_budget_skipped_total 7\n");
+}
+
+test "metrics preserve gossip RPC admissions through cancellation retirement and slot reuse" {
+    var f = try Fixture.init(&.{});
+    defer f.deinit();
+    const g = f.node.protocols.gossipsub;
+    g.rpc_received.record(123, &.{ .subscription = 2, .message = 3, .control = 1, .ihave = 4, .iwant = 5, .graft = 6, .prune = 7, .idontwant = 8 });
+    const peer = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    try std.testing.expect(g.sessions.rows[peer.index].io.tx.submit(&.{ .graft = "t" }, &g.sessions.control_scratch, 1) != null);
+    for (0..3) |stage| {
+        const output = try f.render(stage < 2);
+        try contains(output, "gossipsub_rpc_recv_bytes_total 123\n");
+        try contains(output, "gossipsub_rpc_recv_count_total 1\n");
+        inline for (.{ "subscription", "message", "ihave", "iwant", "graft", "prune", "idontwant" }, 2..) |field, count| {
+            try contains(output, "gossipsub_rpc_recv_" ++ field ++ "_total " ++ std.fmt.comptimePrint("{d}\n", .{count}));
+        }
+        try contains(output, "gossipsub_rpc_recv_control_total 1\n");
+        try contains(output, "gossipsub_rpc_sent_count_total 1\n");
+        try contains(output, "gossipsub_rpc_sent_bytes_total 7\n");
+        try contains(output, "gossipsub_rpc_sent_graft_total 1\n");
+        try contains(output, "gossipsub_rpc_sent_control_total 1\n");
+        if (stage == 0) g.cancelWrites(peer);
+        if (stage == 1) g.connectionClosed(g.sessions.rows[peer.index].conn);
+    }
+    const reused = gossip_test.addPeer(g, .{ .index = 0, .generation = 2 }, .v1_2).?;
+    try std.testing.expectEqual(peer.index, reused.index);
+    try std.testing.expect(g.sessions.rows[reused.index].io.tx.submit(&.{ .graft = "t" }, &g.sessions.control_scratch, 2) != null);
+    try contains(try f.render(true), "gossipsub_rpc_sent_count_total 2\n");
+    try contains(try f.render(true), "gossipsub_rpc_sent_bytes_total 14\n");
+    try contains(try f.render(true), "gossipsub_rpc_sent_graft_total 2\n");
 }
 
 test "metrics render retained usable coverage and suppress deficits when stopped" {
