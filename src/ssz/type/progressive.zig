@@ -194,6 +194,75 @@ pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
     }
 }
 
+/// Builds progressive subtrees with bounded scratch. Append fresh, unretained roots or zero nodes.
+/// `append` consumes its node, even on error.
+/// Call `deinit` after success or failure; a successful `finish` transfers the root to the caller.
+/// Abandon the builder if a pool operation fails.
+pub const TreeBuilder = struct {
+    const max_subtrees = @min((@import("hashing").max_depth - 1) / 3, (@bitSizeOf(usize) - 1) / 2) + 1;
+    const max_chunks = blk: {
+        var total: usize = 0;
+        for (0..max_subtrees) |i| total += @as(usize, 1) << @intCast(2 * i);
+        break :blk total;
+    };
+
+    pool: *Node.Pool,
+    roots: [max_subtrees]?Node.Id = @splat(null),
+    subtree: Node.FillWithContentsIterator,
+    subtree_count: usize = 0,
+    subtree_len: usize = 0,
+    remaining: usize,
+    finished: bool = false,
+
+    pub fn init(pool: *Node.Pool, chunk_count: usize) !TreeBuilder {
+        if (chunk_count > max_chunks) return error.InputTooLong;
+        return .{ .pool = pool, .subtree = Node.FillWithContentsIterator.init(pool, 0), .remaining = chunk_count };
+    }
+
+    pub fn deinit(self: *TreeBuilder) void {
+        self.subtree.deinit();
+        for (self.roots) |root| if (root) |id| self.pool.unref(id);
+    }
+
+    pub fn append(self: *TreeBuilder, node: Node.Id) !void {
+        if (self.finished or self.remaining == 0) {
+            self.pool.unref(node);
+            return error.InvalidLength;
+        }
+        std.debug.assert(self.subtree_count < max_subtrees);
+        try self.subtree.append(node);
+        self.remaining -= 1;
+        self.subtree_len += 1;
+        if (self.subtree_len == @as(usize, 1) << @intCast(2 * self.subtree_count)) {
+            try self.finishSubtree();
+        }
+    }
+
+    fn finishSubtree(self: *TreeBuilder) !void {
+        std.debug.assert(self.subtree_len > 0);
+        self.roots[self.subtree_count] = try self.subtree.finish();
+        self.subtree_count += 1;
+        self.subtree_len = 0;
+        self.subtree = Node.FillWithContentsIterator.init(self.pool, @intCast(2 * self.subtree_count));
+    }
+
+    pub fn finish(self: *TreeBuilder) !Node.Id {
+        if (self.finished) return error.InvalidState;
+        if (self.remaining != 0) return error.InvalidLength;
+        if (self.subtree_len != 0) try self.finishSubtree();
+        var root: Node.Id = @enumFromInt(0);
+        errdefer self.pool.unref(root);
+        while (self.subtree_count > 0) {
+            const i = self.subtree_count - 1;
+            root = try self.pool.createBranch(self.roots[i].?, root);
+            self.roots[i] = null;
+            self.subtree_count -= 1;
+        }
+        self.finished = true;
+        return root;
+    }
+};
+
 pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, nodes: *[node_count]Node.Id) !Node.Id {
     const subtree_count = comptime subtreeIndex(node_count);
     var n: Node.Id = @enumFromInt(0);

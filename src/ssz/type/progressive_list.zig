@@ -260,68 +260,56 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             }
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
-                const allocator = pool.allocator;
-                var value = Self.default_value;
-                defer Self.deinit(allocator, &value);
-
-                try Self.deserializeFromBytes(allocator, data, &value);
-                return fromValue(pool, &value);
+                const len = try serialized.length(data);
+                if (comptime Element.kind == .bool) try serialized.validate(data);
+                var builder = try progressive.TreeBuilder.init(pool, chunkCountForLength(len));
+                defer builder.deinit();
+                if (comptime isBasicType(Element)) {
+                    var offset: usize = 0;
+                    while (offset < data.len) {
+                        var chunk: [32]u8 = @splat(0);
+                        const count = @min(32, data.len - offset);
+                        @memcpy(chunk[0..count], data[offset..][0..count]);
+                        try builder.append(try pool.createLeaf(&chunk));
+                        offset += count;
+                    }
+                } else {
+                    for (0..len) |i| {
+                        try builder.append(try Element.tree.deserializeFromBytes(pool, data[i * Element.fixed_size ..][0..Element.fixed_size]));
+                    }
+                }
+                const contents = try builder.finish();
+                errdefer pool.unref(contents);
+                const length_leaf = try pool.createLeafFromUint(len);
+                errdefer pool.unref(length_leaf);
+                return try pool.createBranch(contents, length_leaf);
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                const allocator = pool.allocator;
-                const len = value.items.len;
-                const chunk_count = chunkCount(value);
-
-                if (chunk_count == 0) {
-                    const length_leaf = try pool.createLeafFromUint(0);
-                    errdefer pool.unref(length_leaf);
-
-                    return try pool.createBranch(@enumFromInt(0), length_leaf);
-                }
-
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-                @memset(nodes, @as(Node.Id, @enumFromInt(0)));
-                var content_owns_nodes = false;
-                errdefer if (!content_owns_nodes) pool.free(nodes);
+                var builder = try progressive.TreeBuilder.init(pool, chunkCount(value));
+                defer builder.deinit();
                 if (comptime isBasicType(Element)) {
                     const items_per_chunk = 32 / Element.fixed_size;
-                    var next: usize = 0;
-
-                    for (0..chunk_count) |i| {
-                        var leaf_buf = [_]u8{0} ** 32;
-
-                        const remaining = len - next;
-                        const to_write = @min(remaining, items_per_chunk);
-
-                        for (0..to_write) |j| {
-                            const dst_off = j * Element.fixed_size;
-                            const dst_slice = leaf_buf[dst_off .. dst_off + Element.fixed_size];
-                            _ = Element.serializeIntoBytes(&value.items[next + j], dst_slice);
+                    var index: usize = 0;
+                    while (index < value.items.len) {
+                        var chunk: [32]u8 = @splat(0);
+                        const count = @min(items_per_chunk, value.items.len - index);
+                        for (value.items[index..][0..count], 0..) |*element, i| {
+                            _ = Element.serializeIntoBytes(element, chunk[i * Element.fixed_size ..][0..Element.fixed_size]);
                         }
-                        next += to_write;
-
-                        nodes[i] = try pool.createLeaf(&leaf_buf);
+                        try builder.append(try pool.createLeaf(&chunk));
+                        index += count;
                     }
                 } else {
-                    for (0..chunk_count) |i| {
-                        nodes[i] = try Element.tree.fromValue(pool, &value.items[i]);
+                    for (value.items) |*element| {
+                        try builder.append(try Element.tree.fromValue(pool, element));
                     }
                 }
-
-                const contents_tree = try progressive.fillWithContents(allocator, pool, nodes);
-                content_owns_nodes = true;
-                errdefer pool.unref(contents_tree);
-
-                const length_leaf = try pool.createLeafFromUint(len);
+                const contents = try builder.finish();
+                errdefer pool.unref(contents);
+                const length_leaf = try pool.createLeafFromUint(value.items.len);
                 errdefer pool.unref(length_leaf);
-
-                const result = try pool.createBranch(
-                    contents_tree,
-                    length_leaf,
-                );
-                return result;
+                return try pool.createBranch(contents, length_leaf);
             }
         };
     };
@@ -500,42 +488,30 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
             }
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
-                const allocator = pool.allocator;
-                var value = Self.default_value;
-                defer Self.deinit(allocator, &value);
-
-                try Self.deserializeFromBytes(allocator, data, &value);
-                return fromValue(pool, &value);
+                var elements = try VariableElementIterator(Self).init(data);
+                var builder = try progressive.TreeBuilder.init(pool, elements.len);
+                defer builder.deinit();
+                while (try elements.next()) |element_bytes| {
+                    try builder.append(try Element.tree.deserializeFromBytes(pool, element_bytes));
+                }
+                const contents = try builder.finish();
+                errdefer pool.unref(contents);
+                const length_leaf = try pool.createLeafFromUint(elements.len);
+                errdefer pool.unref(length_leaf);
+                return try pool.createBranch(contents, length_leaf);
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                const allocator = pool.allocator;
-                const len = value.items.len;
-                const chunk_count = len;
-                if (chunk_count == 0) {
-                    const length_leaf = try pool.createLeafFromUint(0);
-                    errdefer pool.unref(length_leaf);
-
-                    return try pool.createBranch(@enumFromInt(0), length_leaf);
+                var builder = try progressive.TreeBuilder.init(pool, value.items.len);
+                defer builder.deinit();
+                for (value.items) |*element| {
+                    try builder.append(try Element.tree.fromValue(pool, element));
                 }
-
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-                @memset(nodes, @as(Node.Id, @enumFromInt(0)));
-                var content_owns_nodes = false;
-                errdefer if (!content_owns_nodes) pool.free(nodes);
-                for (0..chunk_count) |i| {
-                    nodes[i] = try Element.tree.fromValue(pool, &value.items[i]);
-                }
-
-                const contents_tree = try progressive.fillWithContents(allocator, pool, nodes);
-                content_owns_nodes = true;
-                errdefer pool.unref(contents_tree);
-
-                const length_leaf = try pool.createLeafFromUint(len);
+                const contents = try builder.finish();
+                errdefer pool.unref(contents);
+                const length_leaf = try pool.createLeafFromUint(value.items.len);
                 errdefer pool.unref(length_leaf);
-
-                return try pool.createBranch(contents_tree, length_leaf);
+                return try pool.createBranch(contents, length_leaf);
             }
         };
 
