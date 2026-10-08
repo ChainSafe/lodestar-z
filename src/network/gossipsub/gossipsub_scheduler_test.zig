@@ -28,13 +28,20 @@ test "gossip maintenance yields between bounded topics and resumes without repea
     g.clock = .{ .userdata = &clock, .vtable = &vtable };
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     support.heartbeat(&g, now);
-    for ([_][]const u8{ "beacon_block", "beacon_aggregate_and_proof", "voluntary_exit" }) |name| {
+    var ordinals: [3]u16 = undefined;
+    for ([_][]const u8{ "beacon_block", "beacon_aggregate_and_proof", "voluntary_exit" }, &ordinals) |name, *ordinal| {
         var wire: [topic.topic_max_len]u8 = undefined;
-        const index = g.overlay.namespace.lookup(topic.build(.{ 1, 2, 3, 4 }, name, &wire)).?.ordinal;
-        g.maintainTopics(now);
-        try std.testing.expect(g.cycle.isActive());
-        try std.testing.expectEqual(@as(usize, index) + 1, g.cycle.cursor);
+        ordinal.* = g.overlay.namespace.lookup(topic.build(.{ 1, 2, 3, 4 }, name, &wire)).?.ordinal;
     }
+    var visited = std.StaticBitSet(3).empty;
+    for (0..ordinals.len) |_| {
+        g.maintainTopics(now);
+        const last = g.cycle.order[g.cycle.cursor - 1];
+        const index = std.mem.findScalar(u16, &ordinals, @intCast(last)).?;
+        try std.testing.expect(!visited.isSet(index));
+        visited.set(index);
+    }
+    try std.testing.expectEqual(@as(usize, 3), visited.count());
     g.maintainTopics(now);
     try std.testing.expect(!g.cycle.isActive());
     try std.testing.expectEqual(@as(u64, 1), g.cycle.epoch);

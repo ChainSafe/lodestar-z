@@ -329,6 +329,8 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     _ = try g.publish(first_name, "first", start);
     _ = try g.publish(second_name, "second", start);
     support.heartbeat(&g, start);
+    // Place the score change between the two topics regardless of the shuffled traversal.
+    for (g.cycle.order, 0..) |*topic, index| topic.* = @intCast(index);
     Gossipsub.finishPump(&g, start);
     try std.testing.expectEqual(@as(usize, 1), g.cycle.cursor);
     try std.testing.expect(g.cycle.isActive());
@@ -492,7 +494,7 @@ test "gossip advertisements sample the whole burst independently for each recipi
     for (g.sessions.rows) |*peer| peer.io.tx.cancelStream();
     g.overlay.rows[t].fanout = .empty;
     const context = g.overlayContext(1);
-    g.cycle.begin(context.sessions, context.peers, context.now, false);
+    g.cycle.begin(context.sessions, context.peers, context.now, false, g.overlay.rng.random());
     Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = context.now, .unix_s = 0 }));
     const first = try g.sessions.rows[0].io.tx.segment(&g.messages.store);
     const second = try g.sessions.rows[1].io.tx.segment(&g.messages.store);

@@ -212,11 +212,14 @@ test "resident topics above the live limit preserve pins scores diagnostics and 
     try std.testing.expectEqual(@as(usize, 1), reused.subscription_dirty.count());
     g.overlay.synchronize(reused, 3);
     try std.testing.expectEqual(@as(?u16, high), reused.nextSubscription());
-    g.cycle.begin(g.sessions, &g.peers, 3, false);
+    g.cycle.begin(g.sessions, &g.peers, 3, false, g.overlay.rng.random());
+    var seen: std.DynamicBitSetUnmanaged = try .initEmpty(std.testing.allocator, g.overlay.rows.len);
+    defer seen.deinit(std.testing.allocator);
     var visited: usize = 0;
     for (0..g.overlay.rows.len) |_| {
         const index = g.cycle.next() orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqual(visited, index);
+        try std.testing.expect(!seen.isSet(index));
+        seen.set(index);
         visited += 1;
     }
     try std.testing.expect(g.cycle.next() == null);

@@ -40,7 +40,7 @@ peers: peers_mod.PeerBook,
 messages: messages_mod.Messages,
 /// The sink and its context must outlive every pump that uses them.
 message_sink: ?*const MessageSink = null,
-cycle: heartbeat_cycle.Cycle = .{},
+cycle: heartbeat_cycle.Cycle,
 /// The clock that bounds each maintenance slice.
 clock: std.Io = std.Io.Threaded.global_single_threaded.io(),
 retired_queue_drops: [outbox_mod.drop_reason_count]u64 = @splat(0),
@@ -156,10 +156,10 @@ pub fn coverageSubscriptions(self: *Gossipsub, conn: Handle, digest: [4]u8, loca
     return result;
 }
 
-/// Protocol events other code reads: broken promises for their export, pressure resets for
-/// the health log, malformed RPCs for the interop harness and negotiations for the retry tests.
+/// Cumulative protocol events, independent of session lifetimes.
 pub const Counters = struct {
     broken_promises: u64 = 0,
+    ihave_budget_skipped: u64 = 0,
     local_pressure_resets: u64 = 0,
     malformed_rpcs: u64 = 0,
     negotiation_started: u64 = 0,
@@ -183,6 +183,9 @@ pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
     var peers = try peers_mod.PeerBook.init(allocator, &options, layout.topics);
     errdefer peers.deinit(allocator);
 
+    const topic_order = try allocator.alloc(u16, layout.topics);
+    errdefer allocator.free(topic_order);
+
     var messages = try messages_mod.Messages.init(allocator, &options, &layout);
     errdefer messages.deinit(allocator, &peers);
     const msg_scratch = try allocator.alloc(u8, constants.GOSSIP_MAX_SIZE);
@@ -197,6 +200,7 @@ pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
         .memory = memory,
         .sessions = sessions,
         .peers = peers,
+        .cycle = .{ .order = topic_order },
         .messages = messages,
         .msg_scratch = msg_scratch,
         .recovery = recovery,
@@ -212,6 +216,7 @@ pub fn deinit(self: *Gossipsub) void {
     self.recovery.deinit(self.allocator, &self.peers);
     self.allocator.free(self.msg_scratch);
     self.messages.deinit(self.allocator, &self.peers);
+    self.allocator.free(self.cycle.order);
     self.peers.deinit(self.allocator);
     self.overlay.deinit(self.allocator);
     self.allocator.destroy(self.overlay);
@@ -453,7 +458,7 @@ fn heartbeat(self: *Gossipsub, now: Now) void {
     if (self.cycle.isActive()) return;
     const opportunistic = self.opportunistic_at != 0 and now.millis() >= self.opportunistic_at;
     if (self.opportunistic_at == 0 or opportunistic) self.opportunistic_at = now.millis() +| self.options.opportunistic_graft_interval_ms;
-    self.cycle.begin(self.sessions, &self.peers, now.millis(), opportunistic);
+    self.cycle.begin(self.sessions, &self.peers, now.millis(), opportunistic, self.overlay.rng.random());
 }
 
 pub fn maintainTopics(self: *Gossipsub, now: Now) void {
@@ -496,7 +501,7 @@ fn emitGossip(self: *Gossipsub, topic: u16, context: *const overlay_mod.Context)
             const j = self.overlay.rng.random().uintLessThan(usize, count - i) + i;
             std.mem.swap(MessageId, &ids[i], &ids[j]);
         }
-        self.sessions.rows[peer].io.tx.gossipTopic(topic_str, ids[0..n]);
+        if (!self.sessions.rows[peer].io.tx.gossipTopic(topic_str, ids[0..n])) self.counters.ihave_budget_skipped +|= 1;
     }
 }
 

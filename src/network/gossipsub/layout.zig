@@ -81,7 +81,7 @@ pub const Layout = struct {
             @sizeOf(sessions_mod.Sessions) + @sizeOf(overlay.Overlay) +
             sessions_mod.Sessions.metadataBytes(self) +
             peers.PeerBook.backingBytesForTopics(self.retained, self.topics) +
-            @as(usize, self.topics) * @sizeOf(overlay.Row) +
+            @as(usize, self.topics) * (@sizeOf(overlay.Row) + @sizeOf(u16)) +
             messages.Messages.metadataBytes(self) +
             recovery.Recovery.backingBytes() + self.namespace_bytes;
         const frames = self.receive_arena_bytes + constants.GOSSIP_MAX_SIZE;
