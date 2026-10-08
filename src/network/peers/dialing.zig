@@ -112,7 +112,7 @@ pub const Dialing = struct {
             count += 1;
         }
         const ref = try catalog.retainIntent(peer);
-        const row = catalog.rowForMut(ref).?;
+        const row = catalog.edit(ref).?;
         row.dial.addresses = prepared;
         row.dial.address_count = count;
         row.dial.address_index = address_index;
@@ -122,7 +122,6 @@ pub const Dialing = struct {
         if (!direct) row.dial.manual_until_ms = @max(row.dial.manual_until_ms, deadline_ms);
         self.selection_dirty = true;
         self.version +|= 1;
-        catalog.markDial(ref.index);
         if (row.connection) |conn| self.accepted(catalog, ref, conn, now_ms);
     }
 
@@ -135,7 +134,7 @@ pub const Dialing = struct {
         for (candidate.addresses[0..candidate.address_count]) |address| if (address.port() == 0) return error.InvalidCandidate;
         var incoming: Row = .{ .identity = candidate.peer, .node_id = candidate.node_id, .dial = .{ .automatic = true, .eligible_at_ms = now_ms, .replacement_after_ms = now_ms +| replacement_grace_ms, .hints = hints, .hints_at_ms = now_ms } };
         if (catalog.find(&candidate.peer)) |ref| {
-            const row = catalog.rowForMut(ref).?;
+            const row = catalog.edit(ref).?;
             if (row.node_id) |id| if (!std.mem.eql(u8, &id, &candidate.node_id)) return error.InvalidCandidate;
             if (row.dial.hints) |previous| {
                 if (candidate.hints.sequence < previous.sequence) return error.StaleRecord;
@@ -145,7 +144,6 @@ pub const Dialing = struct {
                     if (catalog.intents.isSet(ref.index) or (row.connection != null and row.dial.automatic)) {
                         row.dial.hints_at_ms = now_ms;
                         self.selection_dirty = true;
-                        catalog.markDial(ref.index);
                         return;
                     }
                 }
@@ -165,7 +163,6 @@ pub const Dialing = struct {
             if (row.dial.automatic) applyAddresses(&row.dial, &admitted);
             Catalog.prepareCandidateCustody(row, context);
             self.selection_dirty = true;
-            catalog.markDial(ref.index);
             return;
         }
         const admitted = admittedAddresses(catalog, &candidate.peer, candidate.addresses[0..candidate.address_count], candidate.hints.sequence, now_ms);
@@ -173,13 +170,12 @@ pub const Dialing = struct {
         applyAddresses(&incoming.dial, &admitted);
         Catalog.prepareCandidateCustody(&incoming, context);
         const ref = try retainCandidate(catalog, &incoming, context, wanted, now_ms);
-        const row = catalog.rowForMut(ref).?;
+        const row = catalog.edit(ref).?;
         row.node_id = incoming.node_id;
         row.dial = incoming.dial;
         row.custody_work = incoming.custody_work;
         row.custody_context = incoming.custody_context;
         self.selection_dirty = true;
-        catalog.markDial(ref.index);
     }
     fn refuse(self: *Dialing, admitted: *const Admitted) error{ RecentlyFailed, RecentlyRejected } {
         const kind = admitted.rejection orelse {
@@ -226,21 +222,20 @@ pub const Dialing = struct {
         var incoming: Row = .{ .identity = record.peer, .dial = .{ .automatic = true, .replay = .untried } };
         applyAddresses(&incoming.dial, &admitted);
         const ref = retainCandidate(catalog, &incoming, context, wanted, now_ms) catch return .capacity;
-        const row = catalog.rowForMut(ref).?;
+        const row = catalog.edit(ref).?;
         row.dial.automatic = true;
         row.dial.replay = .untried;
         row.dial.deferUntil(now_ms);
         row.dial.replacement_after_ms = @max(row.dial.replacement_after_ms, now_ms +| replacement_grace_ms);
         applyAddresses(&row.dial, &admitted);
         self.selection_dirty = true;
-        catalog.markDial(ref.index);
         return .queued;
     }
     fn retainCandidate(catalog: *Catalog, incoming: *const Row, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) error{Capacity}!t.PeerRef {
         if (catalog.intent_count == catalog.intent_capacity) {
             const index = replacement(catalog, incoming, context, wanted, now_ms) orelse return error.Capacity;
             // Candidate replacement may retire discovery intent, never established reputation.
-            catalog.rows[index].dial.automatic = false;
+            catalog.edit(catalog.reference(index)).?.dial.automatic = false;
             catalog.releaseIntent(catalog.reference(index));
         }
         return catalog.retainIntent(&incoming.identity);
@@ -320,7 +315,7 @@ pub const Dialing = struct {
         self.selection_deadline = null;
         var it = catalog.intents.iterator(.{});
         while (it.next()) |index| {
-            const row = &catalog.rows[index];
+            const row = catalog.edit(catalog.reference(index)).?;
             const deadline = row.dial.hints_at_ms +| hint_freshness_ms;
             if (row.dial.hints != null and now_ms < deadline) self.selection_deadline = @min(self.selection_deadline orelse deadline, deadline);
             row.dial.priority = matchesDemand(row, context, wanted, now_ms);
@@ -328,7 +323,6 @@ pub const Dialing = struct {
                 hints.validFor(context) and (general or row.dial.priority > 0)
             else
                 general and row.dial.replay != .none;
-            catalog.markDial(index);
         }
         self.selection_dirty = false;
         self.selection_revision = catalog.intent_revision;
@@ -393,19 +387,17 @@ pub const Dialing = struct {
         for (self.active, 0..) |attempt, index| {
             const peer = attempt.peer orelse continue;
             if (!std.meta.eql(attempt.connection, conn)) continue;
-            const row = catalog.rowForMut(peer).?;
+            const row = catalog.edit(peer).?;
             self.retire(catalog, @intCast(index), .admission_refused, now_ms);
             row.dial.deferUntil(now_ms +| 1_000);
-            catalog.markDial(peer.index);
             releaseUnused(catalog, peer);
             return true;
         }
         return false;
     }
     pub fn accepted(self: *Dialing, catalog: *Catalog, peer: t.PeerRef, conn: t.Handle, now_ms: u64) void {
-        const row = catalog.rowForMut(peer).?;
+        const row = catalog.edit(peer).?;
         std.debug.assert(std.meta.eql(row.connection, conn));
-        catalog.markDial(peer.index);
         // Any connection to a remembered candidate ends its turn for a paced first attempt.
         if (row.dial.replay == .untried) row.dial.replay = .tried;
         if (row.dial.manual_until_ms != 0) {
@@ -429,11 +421,10 @@ pub const Dialing = struct {
     }
     pub fn cancelConnect(self: *Dialing, catalog: *Catalog, peer: *const t.PeerId, now_ms: u64) ?t.Handle {
         const ref = catalog.find(peer) orelse return null;
-        const row = catalog.rowForMut(ref).?;
+        const row = catalog.edit(ref).?;
         var close: ?t.Handle = null;
         row.dial.manual_until_ms = 0;
         self.version +|= 1;
-        catalog.markDial(ref.index);
         if (row.attempt) |index| {
             close = self.active[index].connection;
             self.retire(catalog, index, .cancelled, now_ms);
@@ -473,7 +464,7 @@ pub const Dialing = struct {
         const attempt = self.attemptFor(token) orelse return false;
         if (attempt.connection != null) return false;
         const peer = attempt.peer.?;
-        const row = catalog.rowForMut(peer).?;
+        const row = catalog.edit(peer).?;
         self.retire(catalog, @intCast(token.index), .deferred, now_ms);
         row.dial.deferUntil(now_ms +| 1_000);
         releaseUnused(catalog, peer);
@@ -482,13 +473,12 @@ pub const Dialing = struct {
     fn retire(self: *Dialing, catalog: *Catalog, index: u8, outcome: t.DialOutcome, now_ms: u64) void {
         const attempt = &self.active[index];
         const peer = attempt.peer.?;
-        const row = catalog.rowForMut(peer).?;
+        const row = catalog.edit(peer).?;
         std.debug.assert(row.attempt == index);
         row.attempt = null;
         self.held.total -= 1;
         if (attempt.connection == null) self.held.unstarted -= 1;
         self.version +|= 1;
-        catalog.markDial(peer.index);
         self.durations[@intFromEnum(outcome)].observe(now_ms -| attempt.selected_ms);
         attempt.* = .{ .generation = attempt.generation };
         self.outcomes[@intFromEnum(outcome)] +|= 1;
@@ -496,7 +486,7 @@ pub const Dialing = struct {
     fn failed(self: *Dialing, catalog: *Catalog, index: u8, now_ms: u64, failure: t.DialFailure, evidence: bool) void {
         const attempt = self.active[index];
         const peer = attempt.peer.?;
-        const row = catalog.rowForMut(peer).?;
+        const row = catalog.edit(peer).?;
         // Another connection to the peer already won, so this attempt is redundant, not failed.
         const redundant = row.connection != null;
         self.retire(catalog, index, if (redundant) .cancelled else failureOutcome(failure), now_ms);
@@ -565,7 +555,7 @@ pub const Dialing = struct {
         if (due.len == 0) return 0;
         std.sort.pdq(u32, due, {}, std.sort.asc(u32));
         for (due) |index| {
-            const row = &catalog.rows[index];
+            const row = catalog.edit(catalog.reference(index)).?;
             if (!catalog.intents.isSet(index)) continue;
             if (row.dial.manual_until_ms == 0 or now_ms < row.dial.manual_until_ms) continue;
             const peer = catalog.reference(index);
@@ -680,7 +670,7 @@ pub const Dialing = struct {
             }
             const index = (if (self.preferred_starts >= self.options.concurrent_max) automatic orelse best else best) orelse break;
             self.cursor = (index + 1) % catalog.rows.len;
-            const row = &catalog.rows[index];
+            const row = catalog.edit(catalog.reference(index)).?;
             const attempt = &self.active[slot];
             attempt.* = .{ .generation = attempt.generation + 1, .selected_ms = now_ms, .peer = catalog.reference(index), .lease_until_ms = if (row.direct or row.dial.automatic) now_ms +| 10_000 else @min(row.dial.manual_until_ms, now_ms +| 10_000), .address = row.dial.addresses[row.dial.address_index] };
             row.attempt = slot;

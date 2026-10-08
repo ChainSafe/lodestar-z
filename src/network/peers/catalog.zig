@@ -401,15 +401,17 @@ pub const Catalog = struct {
         return if (row.occupied and row.generation == ref.generation) row else null;
     }
 
-    pub fn rowForMut(self: *Catalog, ref: t.PeerRef) ?*Row {
+    /// Borrows mutable row state and invalidates its dial deadlines. End the mutation before refreshing Dialing.
+    pub fn edit(self: *Catalog, ref: t.PeerRef) ?*Row {
         if (self.rowFor(ref) == null) return null;
+        self.markDial(ref.index);
         return &self.rows[ref.index];
     }
 
     fn connectedRow(self: *Catalog, ref: t.PeerRef, conn: t.Handle) ?*Row {
-        const row = self.rowForMut(ref) orelse return null;
+        const row = self.rowFor(ref) orelse return null;
         const current = row.connection orelse return null;
-        return if (std.meta.eql(current, conn)) row else null;
+        return if (std.meta.eql(current, conn)) self.edit(ref) else null;
     }
 
     pub fn get(self: *const Catalog, ref: t.PeerRef) ?t.Snapshot {
@@ -465,7 +467,7 @@ pub const Catalog = struct {
         std.debug.assert(conn.index < self.by_connection.len);
         if (identity.eql(local)) return .duplicate;
         if (self.find(identity)) |ref| {
-            const row = self.rowForMut(ref).?;
+            const row = self.edit(ref).?;
             var current_reputation = row.reputation;
             current_reputation.decay(options.now_ms);
             if (current_reputation.banned(options.now_ms)) return .banned;
@@ -492,7 +494,6 @@ pub const Catalog = struct {
             self.by_connection[conn.index] = ref.index;
             self.revision +|= 1;
             self.syncEvent(ref.index);
-            self.markDial(ref.index);
             self.noteReputation(row, options.now_ms);
             return .{ .admitted = .{ .peer = ref, .displaced = displaced, .fresh = fresh } };
         }
@@ -501,14 +502,13 @@ pub const Catalog = struct {
         if (self.established[slot]) |victim| self.forget(self.reference(victim));
         const ref = self.allocate(identity) orelse return .capacity;
         self.established[slot] = ref.index;
-        const row = self.rowForMut(ref).?;
+        const row = self.edit(ref).?;
         row.established_slot = @intCast(slot);
         connect(row, conn, options);
         self.connected_count += 1;
         self.by_connection[conn.index] = ref.index;
         self.revision +|= 1;
         self.syncEvent(ref.index);
-        self.markDial(ref.index);
         return .{ .admitted = .{ .peer = ref, .fresh = true } };
     }
 
@@ -549,14 +549,13 @@ pub const Catalog = struct {
 
     /// Releases dial capacity without discarding an established peer's addresses or ENR hints.
     pub fn releaseIntent(self: *Catalog, peer: t.PeerRef) void {
-        const row = self.rowForMut(peer) orelse return;
+        const row = self.edit(peer) orelse return;
         std.debug.assert(!row.direct and row.attempt == null);
         if (self.intents.isSet(peer.index)) {
             self.intents.unset(peer.index);
             self.intent_count -= 1;
             self.intent_revision +|= 1;
         }
-        self.markDial(peer.index);
         if (row.established_slot == null) {
             self.forget(peer);
         } else if (row.connection == null) {
@@ -566,7 +565,7 @@ pub const Catalog = struct {
     }
 
     fn forget(self: *Catalog, peer: t.PeerRef) void {
-        const row = self.rowForMut(peer).?;
+        const row = self.edit(peer).?;
         std.debug.assert(row.connection == null and row.attempt == null and !row.direct and row.pending_close == null and !row.pending_update);
         self.by_identity.remove(self.rows, &row.identity);
         if (row.established_slot) |slot| {
@@ -578,7 +577,6 @@ pub const Catalog = struct {
             self.intent_revision +|= 1;
         }
         assert(!self.events.isSet(peer.index));
-        self.markDial(peer.index);
         row.* = .{ .generation = row.generation };
         self.free.prepend(self.rows, "free_link", peer.index);
     }
@@ -723,7 +721,6 @@ pub const Catalog = struct {
         row.reputation.decay(now_ms);
         self.connectionClosed(ref.index, reason, now_ms);
         self.syncEvent(ref.index);
-        self.markDial(ref.index);
         self.noteReputation(row, now_ms);
         return true;
     }
@@ -788,7 +785,6 @@ pub const Catalog = struct {
         std.log.scoped(.network_peers).debug("peer_rejection_recorded peer={f} connection={d}:{d} kind={s} block_ms={d}", .{ logging.peer(&row.identity), conn.index, conn.generation, @tagName(kind), block_ms });
         if (!row.dial.automatic) return;
         row.dial.automatic = false;
-        self.markDial(ref.index);
         if (!row.direct and row.dial.manual_until_ms == 0 and row.attempt == null) self.releaseIntent(ref);
     }
 
@@ -919,13 +915,12 @@ pub const Catalog = struct {
     }
 
     pub fn setDirect(self: *Catalog, ref: t.PeerRef, direct: bool) bool {
-        const row = self.rowForMut(ref) orelse return false;
+        const row = self.edit(ref) orelse return false;
         if (row.direct != direct) {
             self.revision +|= 1;
             if (direct) self.direct_count += 1 else self.direct_count -= 1;
         }
         row.direct = direct;
-        self.markDial(ref.index);
         return true;
     }
 
@@ -935,13 +930,10 @@ pub const Catalog = struct {
         action: t.PeerAction,
         now_ms: u64,
     ) ?t.ReputationDecision {
-        const row = self.rowForMut(ref) orelse return null;
+        const row = self.edit(ref) orelse return null;
         if (row.established_slot == null) return null;
         self.revision +|= 1;
-        defer {
-            self.noteReputation(row, now_ms);
-            self.markDial(ref.index);
-        }
+        defer self.noteReputation(row, now_ms);
         const decision = row.reputation.apply(action, now_ms);
         // A local ban forgets the peer whether or not a connection is left to close.
         if (decision == .ban) self.remembered.forget(&row.identity);
@@ -949,13 +941,12 @@ pub const Catalog = struct {
     }
 
     pub fn nonCompletion(self: *Catalog, ref: t.PeerRef, now_ms: u64) bool {
-        const row = self.rowForMut(ref) orelse return false;
+        const row = self.edit(ref) orelse return false;
         if (row.established_slot == null) return false;
         const before = row.reputation.score;
         row.reputation.nonCompletion(now_ms);
         if (before != row.reputation.score) self.revision +|= 1;
         self.noteReputation(row, now_ms);
-        self.markDial(ref.index);
         return true;
     }
 
@@ -970,7 +961,6 @@ pub const Catalog = struct {
         self.revision +|= 1;
         row.reputation.cooldown(now_ms, duration_ms);
         self.noteReputation(row, now_ms);
-        self.markDial(ref.index);
         return true;
     }
 
@@ -1018,7 +1008,6 @@ pub const Catalog = struct {
         self.revision +|= 1;
         row.reputation.deferRedial(now_ms, duration_ms);
         self.noteReputation(row, now_ms);
-        self.markDial(ref.index);
         return true;
     }
 

@@ -29,7 +29,6 @@ const options: Gossipsub.Options = .{
 
 const Consumer = struct {
     table: *processor.GossipProcessor,
-    owner: *Gossipsub,
     slot: u64 = 1,
 
     fn sink(self: *Consumer) Gossipsub.MessageSink {
@@ -43,7 +42,7 @@ const Consumer = struct {
 
     fn admit(context: *anyopaque, candidate: *Gossipsub.MessageAdmission) bool {
         const self: *Consumer = @ptrCast(@alignCast(context));
-        return self.table.admit(self.owner, candidate, candidate.event.admitted_ms, 1, self.slot);
+        return self.table.admit(candidate, candidate.event.admitted_ms, 1, self.slot);
     }
 };
 
@@ -65,7 +64,7 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
     var table = try processor.GossipProcessor.init(t.allocator, .{ .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .table = &table, .owner = g };
+    var consumer: Consumer = .{ .table = &table };
     const sink = consumer.sink();
     g.message_sink = &sink;
     defer g.message_sink = null;
@@ -123,7 +122,7 @@ test "gossip full processor preserves duplicate attribution without runtime allo
     var table = try processor.GossipProcessor.init(ledger.allocator(), .{ .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .table = &table, .owner = &g };
+    var consumer: Consumer = .{ .table = &table };
     const sink = consumer.sink();
     g.message_sink = &sink;
     try support.subscribe(&g, block);
@@ -152,7 +151,7 @@ test "gossip saturated attestation intake preserves block priority and storage" 
     var table = try processor.GossipProcessor.init(t.allocator, .{ .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .table = &table, .owner = &g };
+    var consumer: Consumer = .{ .table = &table };
     const sink = consumer.sink();
     g.message_sink = &sink;
     _ = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
@@ -188,7 +187,7 @@ test "gossip admission rejects ineligible candidates without replacing work and 
     var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .table = &table, .owner = &g };
+    var consumer: Consumer = .{ .table = &table };
     const sink = consumer.sink();
     g.message_sink = &sink;
     try support.subscribe(&g, attestation);
@@ -217,6 +216,7 @@ test "gossip admission rejects ineligible candidates without replacing work and 
     try receive(&g, 2, attestation, &bytes);
     try t.expect(table.get(victim) == null);
     try t.expectEqual(@as(u64, 1), table.diag.reportsAppliedIgnore);
+    try t.expectEqual(@as(u64, 1), g.topic_metrics.get(attestation).ignored);
     try t.expectEqual(@as(usize, 4), table.diag.occupied);
     try t.expectEqual(@as(usize, 4), g.resourceSnapshot().pending_validations);
     try t.expectEqual(Gossipsub.ReportOutcome.already_resolved, g.report(handle, .reject, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
@@ -236,7 +236,7 @@ test "gossip admission leaves queued work intact when a host copy pins the requi
     var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .table = &table, .owner = &g };
+    var consumer: Consumer = .{ .table = &table };
     const sink = consumer.sink();
     g.message_sink = &sink;
     try support.subscribe(&g, attestation);
@@ -280,7 +280,7 @@ test "gossip admission after a refused victim selection retires only its own vic
     var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .table = &table, .owner = &g };
+    var consumer: Consumer = .{ .table = &table };
     const sink = consumer.sink();
     g.message_sink = &sink;
     try support.subscribe(&g, attestation);
@@ -338,7 +338,7 @@ const IwantFixture = struct {
         self.table = try processor.GossipProcessor.init(t.allocator, .{ .limits = limits, .source_maximum = @splat(6000), .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
         errdefer self.table.deinit();
         self.table.maintain(0, 96);
-        self.consumer = .{ .table = &self.table, .owner = &self.g, .slot = 96 };
+        self.consumer = .{ .table = &self.table, .slot = 96 };
         self.sink = self.consumer.sink();
         self.g.message_sink = &self.sink;
         try support.subscribe(&self.g, attestation);
@@ -588,7 +588,7 @@ test "gossip ineligible QUIC publication preserves sent IWANT promises for other
     var table = try processor.GossipProcessor.init(t.allocator, .{ .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .table = &table, .owner = g, .slot = 96 };
+    var consumer: Consumer = .{ .table = &table, .slot = 96 };
     const sink = consumer.sink();
     g.message_sink = &sink;
     defer g.message_sink = null;
@@ -805,7 +805,7 @@ test "gossip replacement preflights compressed and decoded pages across multiple
     var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .table = &table, .owner = &g };
+    var consumer: Consumer = .{ .table = &table };
     const sink = consumer.sink();
     g.message_sink = &sink;
     try support.subscribe(&g, attestation);
@@ -853,7 +853,7 @@ test "gossip processor pending validation quota preserves room for another peer 
         var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, g.options.topic_policy, &.{.{ .digest = boundary.digest, .fork = .fulu }}, 1));
         defer table.deinit();
         defer table.close();
-        var consumer: Consumer = .{ .table = &table, .owner = &g };
+        var consumer: Consumer = .{ .table = &table };
         const sink = consumer.sink();
         g.message_sink = &sink;
         try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, first.index, "first", 1));
@@ -889,7 +889,7 @@ test "gossip protocol expiry frees compressed storage while host work retains pr
     var table = try processor.GossipProcessor.init(t.allocator, try processor.GossipProcessor.Options.resolve(limits, null, opts.topic_policy, &.{.{ .digest = boundary.digest, .fork = .fulu }}, 1));
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .table = &table, .owner = &g };
+    var consumer: Consumer = .{ .table = &table };
     const sink = consumer.sink();
     g.message_sink = &sink;
     try support.subscribe(&g, block);

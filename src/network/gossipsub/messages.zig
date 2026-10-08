@@ -26,6 +26,8 @@ const gossip_limits = @import("../gossip_limits.zig");
 const layout_mod = @import("layout.zig");
 const outbox_mod = @import("outbox.zig");
 const delivery = @import("delivery.zig");
+const metrics = @import("metrics.zig");
+const logging = @import("../logging.zig");
 
 /// Topic and payload slices are borrowed for the synchronous admission callback only.
 pub const MessageEvent = struct {
@@ -90,6 +92,8 @@ pub const Context = struct {
     peers: *Peers,
     options: *const Options,
     epoch: u64,
+    topic_metrics: *metrics.Topics,
+    validation_time: *metrics.ValidationTime,
 };
 
 pub const Source = struct {
@@ -300,12 +304,15 @@ pub const Messages = struct {
     }
 
     pub fn report(self: *Messages, context: *const Context, handle: Handle, verdict: Verdict, now: u64) Report {
-        if (self.validation.inspect(&self.store, context.peers, handle, now)) |outcome| return switch (outcome) {
-            .already_resolved => .already_resolved,
-            .expired => .expired,
-            .stale_handle => .stale_handle,
-            .applied => unreachable,
-        };
+        if (self.validation.inspect(&self.store, context.peers, handle, now)) |outcome| {
+            std.log.scoped(.network_gossip).debug("validation_report_refused validation={d}:{d} verdict={s} reason={s}", .{ handle.index, handle.generation, @tagName(verdict), @tagName(outcome) });
+            return switch (outcome) {
+                .already_resolved => .already_resolved,
+                .expired => .expired,
+                .stale_handle => .stale_handle,
+                .applied => unreachable,
+            };
+        }
         const entry = self.validation.attribution(handle);
         assert(context.overlay.rows[entry.topic].active);
         const message = self.validation.entries[handle.index].state.pending.message;
@@ -325,6 +332,14 @@ pub const Messages = struct {
             }
         }
         self.validation.finish(&self.store, context.peers, handle, verdict, now);
+        const counts = context.topic_metrics.get(result.topicString());
+        switch (verdict) {
+            .accept => counts.accepted +|= 1,
+            .reject => counts.rejected +|= 1,
+            .ignore => counts.ignored +|= 1,
+        }
+        context.validation_time.observe(now -| result.admitted_ms);
+        if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, result.id, @tagName(verdict), result.topicString(), logging.peer(&result.source), now -| result.admitted_ms });
         return .{ .applied = result };
     }
 

@@ -43,7 +43,7 @@ test "message admission retains canonical topic bounds" {
         const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
         const index = support.activate(&g, name).?;
         g.overlay.rows[index].subscribed = true;
-        const context: messages.Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options, .epoch = g.cycle.epoch };
+        const context = g.messageContext();
         const source: messages.Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = peer, .connection = g.sessions.rows[peer.index].conn };
         var sink: Sink = .{};
         const callback: messages.MessageSink = .{ .context = &sink, .has_capacity = Sink.hasCapacity, .admit = Sink.admit };

@@ -275,7 +275,7 @@ test "remembered candidates replace failed intents for known and new identities"
         }
         const retained = try candidate(74, 0);
         try d.enqueueDiscovered(&c, &retained, &.{}, &.{}, 2);
-        c.rowForMut(c.find(&retained.peer).?).?.dial.failures = 1;
+        c.edit(c.find(&retained.peer).?).?.dial.failures = 1;
         const seeds = [_]remembered.Record{.{ .peer = incoming.peer, .address = address, .qualified_at_s = unix_s }};
         c.remembered.load(&seeds, &local, unix_s, c.random.random());
         try std.testing.expectEqual(@as(usize, 1), d.replayRemembered(&c, &.{}, &.{}, at(10_000)));

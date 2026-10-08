@@ -36,7 +36,7 @@ const ConnectionState = struct {
     /// endpoint's connection failures; `proven` once a probe started after that succeeded, which
     /// clears the endpoint's health strikes.
     evidence: enum { pending, ready, proven } = .pending,
-    closing: ?struct { reason: t.DisconnectReason, deadline_ms: u64, sent: bool = false } = null,
+    closing: ?Control.Closing = null,
     /// How the remote refused us on this connection, recorded against its identity at close: its
     /// Goodbye, or for our dial a close or a refused Status before the Status and Metadata exchange
     /// completed. None counts once a local close began.
@@ -46,6 +46,8 @@ const ConnectionState = struct {
 /// rejection attribution and disconnect decisions. Started request tokens and their terminal
 /// outcomes keep connection states current; the owner executes the requests and closes it chooses.
 pub const Control = struct {
+    pub const Closing = struct { reason: t.DisconnectReason, deadline_ms: u64, sent: bool = false };
+
     pub const Options = struct {
         starts_per_turn_max: u16 = 8,
         inbound_status_grace_ms: u64 = 15_000,
@@ -191,6 +193,7 @@ pub const Control = struct {
             self.deadlines.clear(peer.index);
         }
     }
+    /// The returned closing state is borrowed until this peer's control state next changes.
     pub fn disconnect(
         self: *Control,
         catalog: *Catalog,
@@ -198,9 +201,9 @@ pub const Control = struct {
         conn: t.Handle,
         reason: t.DisconnectReason,
         now: Now,
-    ) bool {
-        const row = self.connectionState(peer, conn) orelse return false;
-        if (!catalog.markUnavailable(peer, conn, reason)) return false;
+    ) ?*Closing {
+        const row = self.connectionState(peer, conn) orelse return null;
+        if (!catalog.markUnavailable(peer, conn, reason)) return null;
         if (row.closing == null) {
             if (reason == .capacity or reason == .count_pruning) {
                 _ = catalog.deferRedial(peer, conn, now.millis(), goodbye.cooldownMs(129));
@@ -213,7 +216,7 @@ pub const Control = struct {
             row.closing = .{ .reason = reason, .deadline_ms = now.millis() +| 2_000 };
         }
         self.rekey(catalog, peer.index);
-        return true;
+        return &row.closing.?;
     }
     pub fn reStatusPeer(self: *Control, catalog: *const Catalog, peer: t.PeerRef, conn: t.Handle, now: Now) bool {
         const row = self.connectionState(peer, conn) orelse return false;
@@ -536,8 +539,7 @@ pub const Control = struct {
                 std.debug.assert(event.bytes.len == 8);
                 const code = wire.decodeScalar(event.bytes) catch unreachable;
                 self.receivedGoodbye(catalog, peer, event.conn, code, false);
-                _ = self.disconnect(catalog, peer, event.conn, .remote_goodbye, now);
-                self.connections[peer.index].closing.?.sent = true;
+                if (self.disconnect(catalog, peer, event.conn, .remote_goodbye, now)) |closing| closing.sent = true;
             },
             else => unreachable,
         }

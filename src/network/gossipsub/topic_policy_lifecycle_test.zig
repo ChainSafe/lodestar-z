@@ -111,7 +111,7 @@ test "topic policy incoming lengths precede decode work arena store and validati
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     try support.subscribe(&g, name);
-    const context: messages.Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options, .epoch = g.cycle.epoch };
+    const context = g.messageContext();
     const source: messages.Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = g.sessions.ref(peer.index), .connection = g.sessions.rows[peer.index].conn };
     var peer_work: usize = g.options.decompress_per_peer_bytes;
     var work: usize = 10000;

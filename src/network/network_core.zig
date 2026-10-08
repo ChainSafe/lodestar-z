@@ -300,8 +300,10 @@ pub const NetworkCore = struct {
         if (self.peer_manager.phase != .running) return error.Stopped;
         try self.peer_manager.updateStatus(self.protocols.router.capabilities().receive, status);
     }
+    pub const RequestError = rr.ReqResp.RequestError || error{ StalePeer, Disconnected, Stopped, ControlProtocol };
+
     /// Borrows request bytes and the exclusive response sink until terminal delivery or deinit.
-    pub fn sendReqRespRequest(self: *NetworkCore, identity: *const t.PeerId, protocol: rr.Protocol, request: []const u8, sink: []u8, options: rr.ReqResp.RequestOptions, now: Now) !rr.ReqResp.RequestHandle {
+    pub fn sendReqRespRequest(self: *NetworkCore, identity: *const t.PeerId, protocol: rr.Protocol, request: []const u8, sink: []u8, options: rr.ReqResp.RequestOptions, now: Now) RequestError!rr.ReqResp.RequestHandle {
         const peer = self.peer_manager.catalog.find(identity) orelse return error.StalePeer;
         const snapshot = self.peer_manager.catalog.get(peer) orelse return error.StalePeer;
         const conn = snapshot.connection orelse return error.Disconnected;
@@ -314,11 +316,11 @@ pub const NetworkCore = struct {
         return self.protocols.reqresp.consume(&self.transport.engine, &self.protocols.router, request, now);
     }
     /// Borrows bytes until chunk_sent or terminal delivery. Readiness is not a reservation.
-    pub fn respond(self: *NetworkCore, request: rr.ReqResp.RequestHandle, bytes: []const u8, context: ?ForkEntry, now: Now) !void {
+    pub fn respond(self: *NetworkCore, request: rr.ReqResp.RequestHandle, bytes: []const u8, context: ?ForkEntry, now: Now) rr.ReqResp.RespondError!void {
         try self.protocols.reqresp.respond(request, bytes, context, now);
     }
     /// Copies the message; terminal delivery still ends any outstanding payload borrows.
-    pub fn respondError(self: *NetworkCore, request: rr.ReqResp.RequestHandle, code: u8, message: []const u8, now: Now) !void {
+    pub fn respondError(self: *NetworkCore, request: rr.ReqResp.RequestHandle, code: u8, message: []const u8, now: Now) rr.ReqResp.RespondError!void {
         try self.protocols.reqresp.respondError(request, code, message, now);
     }
     /// Finishes the inbound response after any pending chunk acknowledgement.

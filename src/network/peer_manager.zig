@@ -587,7 +587,7 @@ pub const PeerManager = struct {
             snapshot.connection orelse return false,
             reason,
             now,
-        );
+        ) != null;
     }
     /// Run `expireDials` before admitting transport events and selecting dials at this time.
     pub fn selectDials(
