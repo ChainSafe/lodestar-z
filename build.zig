@@ -16,11 +16,33 @@ pub fn build(b: *std.Build) !void {
     configureEreVerifier(b, result);
 }
 
-/// ere.zig links `libere_verifier_c` into the `ere_verifier` module.
-/// Two things stay on the consumer side: Zig's self-hosted x86_64 ELF linker
-/// cannot read the archive, so x86_64 Linux Debug binaries use LLVM and LLD,
-/// and on native macOS the verifier is a dylib that must sit beside
-/// `bindings.node`.
+/// HACK: 
+/// Manually make ere.zig link `libere_verifier_c` into the `ere_verifier` module. Two Zig
+/// linker bugs make us have to workaround this way:
+///
+/// - ELF: ere ships one `ld -r` merged object with ~98k sections, so the file
+///   uses extended section numbering (`e_shnum = 0`, real count in section
+///   header 0, `SHN_XINDEX` + `.symtab_shndx`). Zig's own ELF linker treats
+///   `e_shnum == 0` as "no sections" and silently drops the object, leaving
+///   `ere_verifier_new` undefined. Zig's own linker is only the default for
+///   x86_64 Linux Debug builds.
+///   Workaround: force `use_llvm` and `use_lld` to link
+///   through LLVM and LLD instead.
+///
+///   Source: https://codeberg.org/ziglang/zig/src/commit/7647adab80dd088f4de3610fd245915a912eb6ad/src/link/Elf/Object.zig#L150
+///
+/// - Mach-O: Zig's stab parser assumes every function stab group is exactly
+///   BNSYM, FUN, FUN, ENSYM and aborts on the `N_SOL` entries in ere's merged
+///   object. With stabs stripped it links, but it detects TLV initialisers by
+///   the `$tlv$init` symbol name, and dyld rejects the output as a malformed
+///   thread-local.
+///   Workaround: We convert the archive into `libere_verifier_c.dylib`
+///   with Apple's `ld` and install it next to `bindings.node`,
+///   where its `@loader_path` rpath finds it at runtime.
+///
+///   Sources:
+///   https://codeberg.org/ziglang/zig/src/commit/7647adab80dd088f4de3610fd245915a912eb6ad/src/link/MachO/Object.zig#L1001-L1019
+///   https://codeberg.org/ziglang/zig/src/commit/7647adab80dd088f4de3610fd245915a912eb6ad/src/link/MachO/Symbol.zig#L46
 fn configureEreVerifier(b: *std.Build, result: zbuild.BuildResult) void {
     const target = result.module("ere_verifier").?.resolved_target.?.result;
     if (target.os.tag == .linux and target.cpu.arch == .x86_64) {
