@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) !void {
     configureEreVerifier(b, result);
 }
 
-/// HACK: 
+/// HACK:
 /// Manually make ere.zig link `libere_verifier_c` into the `ere_verifier` module. Two Zig
 /// linker bugs make us have to workaround this way:
 ///
