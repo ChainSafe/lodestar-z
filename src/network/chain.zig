@@ -74,7 +74,7 @@ pub const Config = struct {
                 if (std.mem.eql(u8, &prior.digest, &digest)) return error.InvalidNetworkChain;
             }
             result.forks[result.boundary_count] = .{ .fork = fork.fork_seq, .digest = digest };
-            result.topics[result.boundary_count] = try topicBoundary(chain, fork.fork_seq, digest);
+            result.topics[result.boundary_count] = try topicBoundary(cfg, fork.fork_seq, digest, epoch);
             result.topics[result.boundary_count].fork = fork.fork_seq;
             result.topics[result.boundary_count].epoch = epoch;
             result.boundary_count += 1;
@@ -159,8 +159,9 @@ fn rule(comptime T: type, count: u64, payload_max: u64) !topics.Rule {
     return .{ .count = @intCast(count), .ssz_min = minimum, .ssz_max = @intCast(maximum) };
 }
 
-fn topicBoundary(chain: *const config.ChainConfig, fork: config.ForkSeq, digest: [4]u8) !topics.Boundary {
+fn topicBoundary(cfg: *const config.BeaconConfig, fork: config.ForkSeq, digest: [4]u8, epoch: u64) !topics.Boundary {
     var result: topics.Boundary = .{ .digest = digest };
+    const chain = &cfg.chain;
     const max = chain.MAX_PAYLOAD_SIZE;
     const r = &result.rules;
     r[@intFromEnum(topics.Kind.proposer_slashing)] = try rule(ct.phase0.ProposerSlashing, 1, max);
@@ -181,7 +182,9 @@ fn topicBoundary(chain: *const config.ChainConfig, fork: config.ForkSeq, digest:
             }
             if (comptime selected.gte(.capella)) r[@intFromEnum(topics.Kind.bls_to_execution_change)] = try rule(ct.capella.SignedBLSToExecutionChange, 1, max);
             if (comptime selected.gte(.fulu)) {
-                r[@intFromEnum(topics.Kind.data_column_sidecar)] = try rule(types.DataColumnSidecar, chain.DATA_COLUMN_SIDECAR_SUBNET_COUNT, max);
+                const per_blob = ct.fulu.Cell.fixed_size + ct.primitive.KZGCommitment.fixed_size + ct.primitive.KZGProof.fixed_size;
+                const column_max = types.DataColumnSidecar.min_size +| cfg.getMaxBlobsPerBlock(epoch) *| per_blob;
+                r[@intFromEnum(topics.Kind.data_column_sidecar)] = try rule(types.DataColumnSidecar, chain.DATA_COLUMN_SIDECAR_SUBNET_COUNT, @min(max, column_max));
             } else if (comptime selected.gte(.deneb)) {
                 r[@intFromEnum(topics.Kind.blob_sidecar)] = try rule(ct.deneb.BlobSidecar, if (selected.gte(.electra)) chain.BLOB_SIDECAR_SUBNET_COUNT_ELECTRA else chain.BLOB_SIDECAR_SUBNET_COUNT, max);
             }

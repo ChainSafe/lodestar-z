@@ -11,6 +11,7 @@ const peer_book = @import("peer_book.zig");
 pub const Outbound = union(enum) {
     /// No scheduled opening. New inbound stream evidence may return this to pending.
     none,
+    send_timeout,
     pending,
     retry_at: u64,
     negotiating: StreamHandle,

@@ -117,7 +117,6 @@ test("native processor retains dependencies, protects blocks, batches ready work
         items: 8,
       }));
       config.gossipPolicy.execution = undefined;
-      config.resources.nativeBudgetBytes = 256 * 1024 * 1024;
     }
   });
   try {
@@ -242,7 +241,6 @@ test("expired validation execution remains visible until late host completion", 
       }));
       config.gossipPolicy.execution = undefined;
       config.gossipPolicy.validationTimeoutMs = 2000n;
-      config.resources.nativeBudgetBytes = 256 * 1024 * 1024;
     }
   });
   try {

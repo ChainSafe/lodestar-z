@@ -299,3 +299,19 @@ test "network chain namespace capacity preserves retired scores and backoffs acr
         }
     }
 }
+
+test "network column size bounds follow each configured blob boundary" {
+    const cfg = config.BeaconConfig.init(fixture(), @splat(0));
+    const derived = try chain.Config.init(&cfg, true);
+    const column = @intFromEnum(topics.Kind.data_column_sidecar);
+    const per_blob = consensus_types.fulu.Cell.fixed_size + consensus_types.primitive.KZGCommitment.fixed_size + consensus_types.primitive.KZGProof.fixed_size;
+    for ([_]struct { index: usize, blobs: usize }{ .{ .index = 2, .blobs = 33 }, .{ .index = 3, .blobs = 40 } }) |case| {
+        try std.testing.expectEqual(consensus_types.fulu.DataColumnSidecar.min_size + case.blobs * per_blob, derived.topics[case.index].rules[column].ssz_max);
+    }
+    var large = fixture();
+    large.BLOB_SCHEDULE = &.{};
+    large.MAX_BLOBS_PER_BLOCK_ELECTRA = preset.preset.MAX_BLOB_COMMITMENTS_PER_BLOCK;
+    const large_config = config.BeaconConfig.init(large, @splat(0));
+    const capped = try chain.Config.init(&large_config, true);
+    try std.testing.expectEqual(@min(consensus_types.fulu.DataColumnSidecar.max_size, large.MAX_PAYLOAD_SIZE), capped.topics[2].rules[column].ssz_max);
+}

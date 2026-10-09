@@ -11,6 +11,13 @@ pub fn full(digest: [4]u8) topic_policy.Boundary {
     return boundary;
 }
 
+pub fn blocks(digest: [4]u8) topic_policy.Boundary {
+    var boundary = full(digest);
+    boundary.rules[0].ssz_min = 0;
+    boundary.rules[0].ssz_max = constants.MAX_PAYLOAD_SIZE;
+    return boundary;
+}
+
 pub fn bytes(digest: [4]u8) topic_policy.Boundary {
     var boundary = full(digest);
     for (&boundary.rules) |*rule| {

@@ -184,7 +184,7 @@ fn streamClosed(self: *Gossipsub, engine: *Engine, stream: StreamHandle) void {
             resetOutbound(self, engine, index);
         },
         .negotiating => |pending| if (std.meta.eql(pending, stream)) resetOutbound(self, engine, index),
-        .none, .pending, .retry_at, .closing => {},
+        .none, .send_timeout, .pending, .retry_at, .closing => {},
     }
     // Read-side FIN can be reported with buffered payload. The framing owner
     // drains it before resetting; a reset is observed by its next read.
@@ -348,27 +348,14 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
     const now = turn.now;
     const stream = self.sessions.rows[index].outStream() orelse return;
     for (0..self.options.calls_per_peer) |_| {
-        const segment = self.writeSegment(self.sessions.ref(index)) catch {
-            // Resetting can discard IWANTs already buffered by QUIC, before the peer sees them.
-            const work = self.cancelPromises(index, true);
-            turn.budget.work -|= work;
-            peer.work -|= work;
-            const retry_direct = self.peers.rows[self.sessions.rows[index].logical.index].direct;
-            resetOutbound(self, engine, index);
-            if (retry_direct) self.sessions.setOutbound(index, .{ .retry_at = now.millis() +| direct_retry_delay_ms });
-            return;
-        };
-        if (segment.len == 0) {
-            io.tx.progress_ms = null;
-            return;
-        }
         if (peer.output == 0 or turn.budget.output == 0 or peer.calls == 0 or turn.budget.calls == 0) return;
+        const segment = self.writeSegment(self.sessions.ref(index));
+        if (segment.len == 0) return;
         const take = @min(peer.output, turn.budget.output, segment.len);
         peer.calls -= 1;
         io.write_first = false;
         turn.budget.calls -= 1;
         self.sessions.writes +|= 1;
-        if (io.tx.progress_ms == null) io.tx.progress_ms = now.millis();
         const written = engine.write(stream, segment[0..take], false) catch |err| {
             if (err == error.WouldBlock) {
                 self.sessions.blocked_writes +|= 1;
@@ -386,7 +373,6 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
         }
         peer.output -= written;
         turn.budget.output -= written;
-        io.tx.progress_ms = now.millis();
         self.advanceWrite(self.sessions.ref(index), written, now.millis());
         if (written < take) {
             self.sessions.blocked_writes +|= 1;
@@ -410,7 +396,7 @@ pub fn serviceSession(self: *Gossipsub, router: *Router, engine: *Engine, index:
             openOutbound(self, router, engine, index, now);
             openings.* += 1;
         },
-        .none, .retry_at, .negotiating, .live => {},
+        .none, .send_timeout, .retry_at, .negotiating, .live => {},
     }
     if (session.in_stream != null and !self.acceptsRpc(index, now)) resetInbound(self, engine, index);
     const io = &session.io;
@@ -511,7 +497,13 @@ pub fn expireSession(self: *Gossipsub, router: *Router, engine: *Engine, index: 
                 }
                 resetInbound(self, engine, index);
             },
-            .send_queue, .send_progress => {
+            .active_send => {
+                turn.budget.work -|= self.cancelPromises(index, true);
+                resetOutbound(self, engine, index);
+                self.sessions.setOutbound(index, .send_timeout);
+                break;
+            },
+            .send_queue => {
                 const retry_direct = peer.outbound == .live and g.peers.rows[peer.logical.index].direct;
                 resetOutbound(self, engine, index);
                 if (retry_direct) g.sessions.setOutbound(index, .{ .retry_at = now_ms +| direct_retry_delay_ms });
@@ -530,5 +522,5 @@ fn logSendPressure(row: *Session, identity: *const PeerId, options: *const Optio
 
 fn logIoTimeout(row: *const Session, identity: *const PeerId, reason: []const u8, now_ms: u64) void {
     const io = &row.io;
-    std.log.scoped(.network_gossip_errors).debug("gossip_io_timeout peer={f} connection={d}:{d} reason={s} inbound={any} outbound={any} subscriptions={d} data_queued={d} data_bytes={d} control_bytes={d} critical_bytes={d} oldest_ms={d}", .{ logging.peer(identity), row.conn.index, row.conn.generation, reason, row.in_stream != null, row.outStream() != null, io.tx.subscription_dirty.count(), io.tx.data.count, io.tx.data.bytes, io.tx.control.used, io.tx.critical.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0 });
+    std.log.scoped(.network_gossip_errors).debug("gossip_io_timeout peer={f} connection={d}:{d} reason={s} inbound={any} outbound={any} subscriptions={d} data_queued={d} data_bytes={d} control_bytes={d} critical_bytes={d} oldest_ms={d} active_sent={d}", .{ logging.peer(identity), row.conn.index, row.conn.generation, reason, row.in_stream != null, row.outStream() != null, io.tx.subscription_dirty.count(), io.tx.data.count, io.tx.data.bytes, io.tx.control.used, io.tx.critical.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0, if (io.tx.active == .data) io.tx.active.data.sent() else 0 });
 }

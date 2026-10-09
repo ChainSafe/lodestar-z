@@ -422,7 +422,7 @@ test "publication subscribed fanout expires through owner maintenance" {
     try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
     try std.testing.expect(g.overlay.fanoutMembers(t).isSet(next.index));
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[p.index].io.tx.data.count);
-    const queued = (try g.sessions.rows[next.index].io.tx.data.next(&g.messages.store)).?.message;
+    const queued = (g.sessions.rows[next.index].io.tx.data.next(&g.messages.store, g.last_now_ms, g.options.tx_timeout_ms)).?.message;
     try std.testing.expectEqual(topic_mod.validMessageId(name, "fresh fanout", .{}), g.messages.store.get(queued).?.id);
 }
 
@@ -455,17 +455,17 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     support.control(&g, peer.index, .{ .iwant = (try reader.next()).?.iwant }, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }));
     const io = &g.sessions.rows[peer.index].io;
     try std.testing.expectEqual(@as(usize, 1), io.tx.data.count);
-    try std.testing.expectEqual(message, (try io.tx.data.next(&g.messages.store)).?.message);
+    try std.testing.expectEqual(message, (io.tx.data.next(&g.messages.store, g.last_now_ms, g.options.tx_timeout_ms)).?.message);
     try std.testing.expectEqual(@as(u8, 1), g.messages.history.countsRow(g.messages.history.get(&g.messages.store, id).?)[g.sessions.rows[peer.index].logical.index]);
     var wire: [512]u8 = undefined;
     var used: usize = 0;
     for (0..8) |_| {
-        const segment = try io.tx.segment(&g.messages.store);
+        const segment = io.tx.segment(&g.messages.store, 0);
         if (segment.len == 0) break;
         try std.testing.expect(used + segment.len <= wire.len);
         @memcpy(wire[used..][0..segment.len], segment);
         used += segment.len;
-        _ = io.tx.advance(&g.messages.store, segment.len);
+        _ = io.tx.advance(segment.len);
     }
     try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
     try std.testing.expect(std.mem.find(u8, wire[0..used], name) != null);
@@ -496,8 +496,8 @@ test "gossip advertisements sample the whole burst independently for each recipi
     const context = g.overlayContext(1);
     g.cycle.begin(context.sessions, context.peers, context.now, false, g.overlay.rng.random());
     Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = context.now, .unix_s = 0 }));
-    const first = try g.sessions.rows[0].io.tx.segment(&g.messages.store);
-    const second = try g.sessions.rows[1].io.tx.segment(&g.messages.store);
+    const first = g.sessions.rows[0].io.tx.segment(&g.messages.store, 0);
+    const second = g.sessions.rows[1].io.tx.segment(&g.messages.store, 0);
     try std.testing.expect(first.len > 0 and second.len > 0);
     try std.testing.expect(!std.mem.eql(u8, first, second));
     var beyond_prefix: usize = 0;

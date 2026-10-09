@@ -113,6 +113,10 @@ export interface NativeGossipStartupPolicy {
   validationTombstoneMs: bigint;
   pressureTimeoutMs: bigint;
   txTimeoutMs: bigint;
+  /** Absolute active-frame lifetime. Large payloads share their first recipient's deadline; progress never extends it. */
+  activeSendTimeoutMs: bigint;
+  /** Distinct large payloads per kind, shared across recipients. */
+  activeSendItems: Readonly<Record<NativeTopicKind, number>>;
   largeFrameTimeoutMs: bigint;
   seenTtlMs: bigint;
   retainedScoreMs: bigint;
@@ -323,6 +327,7 @@ export type NativeDisconnectReason =
   | "banned"
   | "count_pruning"
   | "gossip_unavailable"
+  | "gossip_send_timeout"
   | "health_error";
 export interface NativeConnection {
   index: number;

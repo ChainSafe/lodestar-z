@@ -38,9 +38,9 @@ test "gossipsub IHAVE saturation preserves recovery for new and reconnected iden
             }
             support.control(&g, @intCast(peer), .{ .ihave = .{ .topic = test_topic, .body = writer.written() } }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
             for (0..4) |_| {
-                const segment = try io.tx.segment(&g.messages.store);
+                const segment = io.tx.segment(&g.messages.store, 0);
                 if (segment.len == 0) break;
-                if (io.tx.advance(&g.messages.store, segment.len)) |completion| g.writeCompleted(g.sessions.ref(@intCast(peer)), completion, 1);
+                if (io.tx.advance(segment.len)) |completion| g.writeCompleted(g.sessions.ref(@intCast(peer)), completion, 1);
             }
         }
     }
@@ -167,10 +167,10 @@ test "gossipsub IWANT promises commit on queue and start at completed control tr
     support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 1_000, .unix_s = 0 }));
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
     const io = &g.sessions.rows[peer.index].io;
-    const first = try io.tx.segment(&g.messages.store);
-    _ = io.tx.advance(&g.messages.store, 1);
+    const first = io.tx.segment(&g.messages.store, 0);
+    _ = io.tx.advance(1);
     try std.testing.expectEqual(@as(u64, 3_002), g.recovery.batches[0].expiry);
-    const token = io.tx.advance(&g.messages.store, first.len - 1).?.control.token;
+    const token = io.tx.advance(first.len - 1).?.control.token;
     g.recovery.controlSent(g.sessions.rows[peer.index].conn, token, g.options.iwant_followup_ms, 1_000);
     try std.testing.expectEqual(@as(u64, 4_000), g.recovery.batches[0].expiry);
 }
@@ -261,9 +261,9 @@ test "gossipsub IHAVE security bounds one identity and deduplicates queued reque
             }
             support.control(&g, peer.index, .{ .ihave = .{ .topic = name, .body = writer.written() } }, Now.fromMilliseconds(.{ .mono_ms = heartbeat * 1000, .unix_s = 1 }));
             for (0..4) |_| {
-                const segment = try io.tx.segment(&g.messages.store);
+                const segment = io.tx.segment(&g.messages.store, 0);
                 if (segment.len == 0) break;
-                if (io.tx.advance(&g.messages.store, segment.len)) |completion| g.writeCompleted(g.sessions.ref(peer.index), completion, heartbeat * 1000);
+                if (io.tx.advance(segment.len)) |completion| g.writeCompleted(g.sessions.ref(peer.index), completion, heartbeat * 1000);
             }
         }
     }
@@ -356,10 +356,10 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
     g.recovery.controlSent(.{ .index = 0, .generation = 2 }, token, 12_000, 5);
     g.recovery.controlSent(g.sessions.rows[p.index].conn, token + 1, g.options.iwant_followup_ms, 5);
     try std.testing.expectEqual(@as(u64, 30_000), g.recovery.batches[0].expiry);
-    _ = try io.tx.segment(&g.messages.store);
-    try std.testing.expect(io.tx.advance(&g.messages.store, 1) == null);
+    _ = io.tx.segment(&g.messages.store, 0);
+    try std.testing.expect(io.tx.advance(1) == null);
     try std.testing.expectEqual(@as(u64, 30_000), g.recovery.batches[0].expiry);
-    g.writeCompleted(g.sessions.ref(p.index), io.tx.advance(&g.messages.store, 6).?, 100);
+    g.writeCompleted(g.sessions.ref(p.index), io.tx.advance(6).?, 100);
     g.recovery.controlSent(g.sessions.rows[p.index].conn, token, g.options.iwant_followup_ms, 200);
     try std.testing.expectEqual(@as(u64, 12_100), g.recovery.batches[0].expiry);
     support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 12_099, .unix_s = 0 }));

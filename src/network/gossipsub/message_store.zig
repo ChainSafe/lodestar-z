@@ -33,6 +33,8 @@ pub const Entry = struct {
     provisional: bool = false,
     validation: bool = false,
     history: bool = false,
+    senders: u16 = 0,
+    send_deadline_ms: ?u64 = null,
     first: u32 = none,
     len: u32 = 0,
     id: topic.MessageId = undefined,
@@ -88,10 +90,16 @@ pub const Store = struct {
     retired_entries: usize = 0,
     free_entry: u32 = 0,
     limits: ?gossip_limits.Limits = null,
-    used_by_kind: [gossip_limits.kind_count]usize = @splat(0),
-    entries_by_kind: [gossip_limits.kind_count]usize = @splat(0),
     retained_entries_by_kind: [gossip_limits.kind_count]usize = @splat(0),
     retained_by_kind: [gossip_limits.kind_count]usize = @splat(0),
+    pending_entries_by_kind: [gossip_limits.kind_count]usize = @splat(0),
+    pending_by_kind: [gossip_limits.kind_count]usize = @splat(0),
+    send_limits: gossip_limits.Limits = @splat(.{ .items = 0, .bytes = 0 }),
+    /// Validation and history cannot consume the extra backing reserved for active sends.
+    base_pages: usize = std.math.maxInt(usize),
+    base_entries: usize = std.math.maxInt(usize),
+    sending_entries_by_kind: [gossip_limits.kind_count]usize = @splat(0),
+    sending_by_kind: [gossip_limits.kind_count]usize = @splat(0),
 
     pub fn metadataBytes(capacity: usize, byte_capacity: usize) usize {
         return capacity * @sizeOf(Entry) + byte_capacity / page_bytes * @sizeOf(u32);
@@ -128,8 +136,41 @@ pub const Store = struct {
         return entry;
     }
 
+    pub const Room = struct {
+        pages: usize,
+        entries: usize,
+        base_pages: usize,
+        base_entries: usize,
+
+        pub fn fits(self: *const Room, len: usize) bool {
+            const pages = pagesFor(len);
+            return self.entries > 0 and self.base_entries > 0 and pages <= self.pages and pages <= self.base_pages;
+        }
+
+        /// Preflights releasing the last validation/history owner, preserving active sends.
+        pub fn releaseBase(self: *Room, entry: *const Entry) void {
+            const pages = pagesFor(entry.len);
+            self.base_pages +|= pages;
+            self.base_entries +|= 1;
+            if (entry.senders == 0) {
+                self.pages += pages;
+                self.entries += @intFromBool(entry.generation != std.math.maxInt(u64));
+            }
+        }
+    };
+
+    pub fn room(self: *const Store) Room {
+        var pages: usize = 0;
+        var entries: usize = 0;
+        for (self.pending_by_kind, self.retained_by_kind, self.pending_entries_by_kind, self.retained_entries_by_kind) |pending, retained, pending_entries, retained_entries| {
+            pages += pending + retained;
+            entries += pending_entries + retained_entries;
+        }
+        return .{ .pages = self.free_pages, .entries = self.entries.len - self.used_entries - self.retired_entries, .base_pages = self.base_pages -| pages, .base_entries = self.base_entries -| entries };
+    }
+
     pub fn canReserve(self: *const Store, len: usize) bool {
-        return self.used_entries + self.retired_entries < self.entries.len and pagesFor(len) <= self.free_pages;
+        return self.room().fits(len);
     }
 
     pub fn pagesFor(len: usize) usize {
@@ -142,8 +183,8 @@ pub const Store = struct {
         const k = @intFromEnum(kind);
         const pages = pagesFor(len);
         const capacity = limits[k].bytes / page_bytes;
-        const pending = self.used_by_kind[k] - self.retained_by_kind[k];
-        return pending <= capacity and pages <= capacity - pending and self.entries_by_kind[k] - self.retained_entries_by_kind[k] < limits[k].items;
+        const pending = self.pending_by_kind[k];
+        return pending <= capacity and pages <= capacity - pending and self.pending_entries_by_kind[k] < limits[k].items;
     }
     pub fn canRetain(self: *const Store, handle: Handle) bool {
         const lacking = self.retentionShortfall(handle);
@@ -220,8 +261,8 @@ pub const Store = struct {
         }
         link.* = none;
         self.used_entries += 1;
-        self.used_by_kind[@intFromEnum(kind)] += pagesFor(data.len);
-        self.entries_by_kind[@intFromEnum(kind)] += 1;
+        self.pending_by_kind[@intFromEnum(kind)] += pagesFor(data.len);
+        self.pending_entries_by_kind[@intFromEnum(kind)] += 1;
         return .{ .index = @intCast(index), .generation = entry.generation };
     }
 
@@ -287,34 +328,90 @@ pub const Store = struct {
     pub fn seal(self: *Store, h: Handle) void {
         const e = self.mutable(h);
         assert(e.provisional);
+        const pending = isPending(e);
         e.provisional = false;
+        self.updatePending(e, pending);
         self.collect(h);
     }
     pub fn retainValidation(self: *Store, h: Handle) void {
         const e = self.mutable(h);
         assert(!e.validation);
+        const pending = isPending(e);
         e.validation = true;
+        self.updatePending(e, pending);
     }
     pub fn releaseValidation(self: *Store, h: Handle) void {
         const e = self.mutable(h);
         assert(e.validation);
+        const pending = isPending(e);
         e.validation = false;
+        self.updatePending(e, pending);
         self.collect(h);
     }
     pub fn retainHistory(self: *Store, h: Handle) void {
         const e = self.mutable(h);
         assert(!e.history and self.canRetain(h));
+        const pending = isPending(e);
         self.retained_by_kind[@intFromEnum(e.kind)] += pagesFor(e.len);
         self.retained_entries_by_kind[@intFromEnum(e.kind)] += 1;
         e.history = true;
+        self.updatePending(e, pending);
     }
     pub fn releaseHistory(self: *Store, h: Handle) void {
         const e = self.mutable(h);
         assert(e.history);
+        const pending = isPending(e);
         e.history = false;
+        self.updatePending(e, pending);
         self.retained_by_kind[@intFromEnum(e.kind)] -= pagesFor(e.len);
         self.retained_entries_by_kind[@intFromEnum(e.kind)] -= 1;
         self.collect(h);
+    }
+    /// Charges the distinct payload even while history owns it. Its first deadline never renews.
+    pub fn retainSend(self: *Store, h: Handle, now_ms: u64, timeout_ms: u64) ?u64 {
+        const e = self.mutable(h);
+        if (!e.history or now_ms >= (e.send_deadline_ms orelse std.math.maxInt(u64))) return null;
+        const k = @intFromEnum(e.kind);
+        if (e.senders == 0) {
+            const limit = self.send_limits[k];
+            const pages = pagesFor(e.len);
+            if (self.sending_entries_by_kind[k] >= limit.items or pages > limit.bytes / page_bytes -| self.sending_by_kind[k]) return null;
+            self.sending_entries_by_kind[k] += 1;
+            self.sending_by_kind[k] += pages;
+        }
+        assert(e.senders < constants.peers_cap);
+        e.senders += 1;
+        e.send_deadline_ms = e.send_deadline_ms orelse now_ms +| timeout_ms;
+        return e.send_deadline_ms;
+    }
+
+    pub fn releaseSend(self: *Store, h: Handle) void {
+        const e = self.mutable(h);
+        assert(e.senders > 0);
+        e.senders -= 1;
+        if (e.senders == 0) {
+            const k = @intFromEnum(e.kind);
+            self.sending_entries_by_kind[k] -= 1;
+            self.sending_by_kind[k] -= pagesFor(e.len);
+        }
+        self.collect(h);
+    }
+
+    fn isPending(e: *const Entry) bool {
+        return !e.history and (e.provisional or e.validation);
+    }
+
+    fn updatePending(self: *Store, e: *const Entry, before: bool) void {
+        const after = isPending(e);
+        if (before == after) return;
+        const k = @intFromEnum(e.kind);
+        if (after) {
+            self.pending_entries_by_kind[k] += 1;
+            self.pending_by_kind[k] += pagesFor(e.len);
+        } else {
+            self.pending_entries_by_kind[k] -= 1;
+            self.pending_by_kind[k] -= pagesFor(e.len);
+        }
     }
     fn mutable(self: *Store, h: Handle) *Entry {
         assert(self.get(h) != null);
@@ -322,7 +419,7 @@ pub const Store = struct {
     }
     fn collect(self: *Store, h: Handle) void {
         const e = self.mutable(h);
-        if (e.provisional or e.validation or e.history) return;
+        if (e.provisional or e.validation or e.history or e.senders > 0) return;
         var page = e.first;
         for (0..pagesFor(e.len)) |_| {
             assert(page != none);
@@ -333,8 +430,6 @@ pub const Store = struct {
             page = next;
         }
         assert(page == none);
-        self.used_by_kind[@intFromEnum(e.kind)] -= pagesFor(e.len);
-        self.entries_by_kind[@intFromEnum(e.kind)] -= 1;
         e.active = false;
         self.used_entries -= 1;
         if (e.generation == std.math.maxInt(u64)) self.retired_entries += 1 else {

@@ -202,7 +202,7 @@ test "gossip partial peer turn queues subscription before outgoing GRAFT" {
     try std.testing.expect(f.g.overlay.inMesh(f.topic, 1));
     try std.testing.expectEqual(@as(usize, 2), target.critical.count);
     for (0..2) |i| {
-        const bytes = try f.g.writeSegment(f.g.sessions.ref(1));
+        const bytes = f.g.writeSegment(f.g.sessions.ref(1));
         var prefix = protobuf.Reader.init(bytes);
         const len = try prefix.varint();
         var rpc = protobuf.RpcReader.init(bytes[bytes.len - len ..]);
@@ -240,7 +240,7 @@ test "gossip GRAFT admission preserves subscription and mesh state at both queue
     try std.testing.expectEqual(@as(usize, 2), tx.critical.count);
     try std.testing.expectEqual(@as(u64, 0), meshChangeTotal(f.g.overlay));
     for (0..3) |_| {
-        const segment = try tx.segment(&f.g.messages.store);
+        const segment = tx.segment(&f.g.messages.store, 0);
         if (segment.len == 0) break;
         f.g.advanceWrite(f.g.sessions.ref(0), segment.len, 2);
     }

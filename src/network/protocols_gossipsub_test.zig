@@ -75,64 +75,36 @@ test "gossipsub protocol stack does not retry a closed outbound stream" {
     try std.testing.expectEqual(started, setup.shared.client.gossipsub.counters.negotiation_started);
 }
 
-test "gossipsub direct send timeout retries once after a bounded delay" {
-    const driver = @import("gossipsub/session_io.zig");
-    const Recovery = enum { resume_stream, negotiation_timeout, remove_direct };
-    for ([_]Recovery{ .resume_stream, .negotiation_timeout, .remove_direct }) |recovery| {
-        var setup: Pair = .{};
-        try setup.initOpts(.{ .random_seed = 1, .tx_timeout_ms = 5 }, .{ .random_seed = 1 });
-        defer setup.deinit();
-        const topic = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
-        const g = setup.shared.client.gossipsub;
-        try gossip_test.subscribe(g, topic);
-        try gossip_test.subscribe(setup.shared.server.gossipsub, topic);
-        for (0..32) |_| try setup.pumpOnce();
-        g.markDirect(setup.shared.handles.client);
-        for (0..4) |_| try setup.pumpOnce();
-        const index = g.sessions.find(setup.shared.handles.client).?;
-        const previous = g.sessions.rows[index].outStream().?;
-        const started = g.counters.negotiation_started;
-        try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, "stalled", setup.shared.pair.now)).queued);
-        setup.shared.pair.advance(g.options.tx_timeout_ms);
-        for (0..4) |_| try setup.pumpOnce();
-        try std.testing.expectEqual(setup.shared.pair.now.millis() + driver.direct_retry_delay_ms, g.sessions.rows[index].outbound.retry_at);
-        try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[index].io.tx.data.count);
-        try std.testing.expectEqual(.pending, setup.shared.client.gossipsub.deliveryStatus(setup.shared.handles.client));
-        setup.shared.pair.advance(driver.direct_retry_delay_ms - 1);
-        for (0..4) |_| try setup.pumpOnce();
-        try std.testing.expectEqual(started, g.counters.negotiation_started);
-        if (recovery == .remove_direct) g.unmarkDirect(&setup.shared.pair.server_ctx.local_peer_id);
-        setup.shared.pair.advance(1);
-        _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
-        if (recovery == .resume_stream) {
-            for (0..32) |_| try setup.pumpOnce();
-            try std.testing.expectEqual(started + 1, g.counters.negotiation_started);
-            try std.testing.expect(g.sessions.rows[index].outStream().?.id != previous.id);
-            try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, "resumed", setup.shared.pair.now)).queued);
-            var received = false;
-            for (0..32) |_| {
-                try setup.pumpOnce();
-                for (setup.serverMessages()) |message| {
-                    try std.testing.expectEqualStrings("resumed", message.bytes);
-                    _ = setup.shared.server.gossipsub.report(message.handle, .accept, setup.shared.pair.now);
-                    received = true;
-                }
-                if (received) break;
-            }
-            try std.testing.expect(received);
-        } else {
-            if (recovery == .negotiation_timeout) {
-                try std.testing.expectEqual(started + 1, g.counters.negotiation_started);
-                setup.shared.pair.advance(negotiate.Negotiator.negotiate_timeout_ms + 1);
-                _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
-            }
-            try std.testing.expect(g.sessions.rows[index].outbound == .none);
-            const final_started = g.counters.negotiation_started;
-            setup.shared.pair.advance(driver.direct_retry_delay_ms * 2);
-            _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
-            try std.testing.expectEqual(final_started, g.counters.negotiation_started);
-        }
-    }
+test "gossipsub active send deadline is absolute and direct peers do not retry streams" {
+    var setup: Pair = .{};
+    try setup.initOpts(.{ .random_seed = 1, .active_send_timeout_ms = 100 }, .{ .random_seed = 1 });
+    defer setup.deinit();
+    try setup.connectMesh();
+    const g = setup.shared.client.gossipsub;
+    const index = g.sessions.find(setup.shared.handles.client).?;
+    const row = &g.sessions.rows[index];
+    g.markDirect(row.conn);
+    for (0..4) |_| try setup.pumpOnce();
+    const started = g.counters.negotiation_started;
+    const before = g.peers.scores.penalties;
+    g.options.output_per_peer = 1;
+    _ = try g.publish("/eth2/01020304/beacon_block/ssz_snappy", "a partially written payload", setup.shared.pair.now);
+    try setup.pumpOnce();
+    const deadline = row.io.tx.active_deadline_ms.?;
+    const sent = row.io.tx.active.data.sent();
+    setup.shared.pair.advance(99);
+    try setup.pumpOnce();
+    try std.testing.expect(row.io.tx.active.data.sent() > sent);
+    try std.testing.expectEqual(deadline, row.io.tx.active_deadline_ms.?);
+    setup.shared.pair.advance(1);
+    try setup.pumpOnce();
+    try std.testing.expectEqual(.send_timeout, g.deliveryStatus(row.conn));
+    try std.testing.expectEqual(@as(usize, 0), row.io.tx.data.count);
+    try std.testing.expect(row.io.tx.active_deadline_ms == null);
+    try std.testing.expectEqualDeep(before, g.peers.scores.penalties);
+    setup.shared.pair.advance(60_000);
+    for (0..4) |_| try setup.pumpOnce();
+    try std.testing.expectEqual(started, g.counters.negotiation_started);
 }
 
 fn propose(pair: *support.Pair, conn: Engine.Handle, version: []const u8, payload: []const u8) !Engine.StreamHandle {

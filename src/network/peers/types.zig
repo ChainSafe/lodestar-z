@@ -30,6 +30,7 @@ pub const DisconnectReason = enum {
     banned,
     count_pruning,
     gossip_unavailable,
+    gossip_send_timeout,
     health_error,
 };
 /// `health` is a peer-charged health close of a connection to the endpoint; no dial attempt ends with it.

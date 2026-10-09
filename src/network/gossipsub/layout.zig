@@ -1,3 +1,4 @@
+const gossip_limits = @import("../gossip_limits.zig");
 const constants = @import("constants.zig");
 const storage = @import("message_store.zig");
 const delivery = @import("delivery.zig");
@@ -44,6 +45,8 @@ pub const Layout = struct {
     namespace_bytes: usize,
 
     pub fn init(options: *const Options) Layout {
+        const active_limits = options.activeSendLimits();
+        const active = activeBacking(&active_limits, options.connected_capacity);
         return .{
             .sessions = options.connected_capacity,
             .connection_slots = options.connection_slots,
@@ -53,13 +56,21 @@ pub const Layout = struct {
             .seen = options.seen_capacity,
             .validations = options.validation_capacity,
             .fingerprints = 4 * options.validation_capacity,
-            .payload_entries = historyCapacity(options) + options.validation_capacity,
-            .payload_bytes = options.mcache_arena_bytes / storage.page_bytes * storage.page_bytes,
+            .payload_entries = historyCapacity(options) + options.validation_capacity + active.items,
+            .payload_bytes = options.mcache_arena_bytes / storage.page_bytes * storage.page_bytes + active.bytes,
             .deliveries = delivery.Pool.capacity(options.connected_capacity, options.validation_capacity),
             .receive_arena_bytes = options.receive_arena_bytes,
             .session_buffer_bytes = PeerIo.bufferBytes(options),
             .namespace_bytes = policy.Namespace.backingBytes(options.topic_policy),
         };
+    }
+
+    // Each session owns at most one frame. Noncanonical Snappy can exceed the usual
+    // compressed size for its topic, so reserve against aggregate byte allowances.
+    fn activeBacking(limits: *const gossip_limits.Limits, sessions: u16) struct { items: usize, bytes: usize } {
+        const items = @min(sessions, gossip_limits.items(limits));
+        const maximum = storage.Store.pagesFor(constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE)) * storage.page_bytes;
+        return .{ .items = items, .bytes = @min(gossip_limits.bytes(limits), items * maximum) };
     }
 
     pub fn residentTopics(options: *const Options) u16 {

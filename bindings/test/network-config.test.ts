@@ -179,6 +179,27 @@ const cases: readonly [string, (config: NativeApplicationConfig) => void, string
     "InvalidNetworkConfig",
   ],
   [
+    "zero active send deadline",
+    (c) => {
+      c.gossipPolicy.activeSendTimeoutMs = 0n;
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "oversized active send deadline",
+    (c) => {
+      c.gossipPolicy.activeSendTimeoutMs = 86400001n;
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "zero active send capacity",
+    (c) => {
+      Reflect.set(c.gossipPolicy.activeSendItems, "beacon_block", 0);
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
     "custody count over local limit",
     (c) => {
       c.local.metadata.custodyGroupCount = 129n;

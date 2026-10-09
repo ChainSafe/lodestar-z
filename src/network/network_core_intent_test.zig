@@ -303,7 +303,7 @@ test "core BPO same-fork digest transition updates status and advertisement" {
     const first: ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
     const second: ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
-    const resolved = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .profile = .small, .seed = 1, .forks = &.{ first, second }, .admission_policy = policy_fixture.config() });
+    const resolved = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.blocks(.{ 1, 2, 3, 4 })} }, .profile = .small, .seed = 1, .forks = &.{ first, second }, .admission_policy = policy_fixture.config() });
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &resolved, .{
         .host = &key,

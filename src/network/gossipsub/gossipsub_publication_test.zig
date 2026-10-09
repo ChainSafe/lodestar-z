@@ -150,7 +150,7 @@ test "publication recipient policy tops up without graft and accounts unique sha
         if (index == 0 or (index >= 2 and index <= 8)) {
             try std.testing.expectEqual(@as(usize, 1), io.tx.data.count);
             try std.testing.expectEqual(@as(u64, 1), io.tx.rpc_sent.message);
-            try std.testing.expectEqual(h, (try io.tx.data.next(&g.messages.store)).?.message);
+            try std.testing.expectEqual(h, (io.tx.data.next(&g.messages.store, g.last_now_ms, g.options.tx_timeout_ms)).?.message);
         } else try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
         io.tx.cancelStream();
     }
@@ -321,7 +321,7 @@ test "delivery recipients count refused frames and completions by origin" {
     try std.testing.expectEqual(@as(u64, 2), io.tx.drops[@intFromEnum(outbox.DropReason.data_descriptors)]);
     // The first queued frame was the publication.
     for (0..16) |_| {
-        const segment = try io.tx.segment(&g.messages.store);
+        const segment = io.tx.segment(&g.messages.store, 0);
         g.advanceWrite(g.sessions.ref(peer.index), segment.len, 40);
         if (recipients[@intFromEnum(Origin.publication)][@intFromEnum(Outcome.completed)] == 1) break;
     }
@@ -351,7 +351,7 @@ test "publication priority belongs to each attempt: an IWANT for our publication
     try std.testing.expectEqual(@as(usize, 1), io.tx.data.origins[@intFromEnum(Origin.iwant)]);
     // Both frames complete, the local one first; a later publication is cancelled by a reset.
     for (0..16) |_| {
-        const segment = try io.tx.segment(&g.messages.store);
+        const segment = io.tx.segment(&g.messages.store, 0);
         if (segment.len == 0) break;
         g.advanceWrite(g.sessions.ref(peer.index), segment.len, 3);
     }

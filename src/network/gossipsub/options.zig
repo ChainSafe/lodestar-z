@@ -11,6 +11,7 @@ const outbox = @import("outbox.zig");
 const preset = @import("preset");
 const mcache = @import("mcache.zig");
 const delivery = @import("delivery.zig");
+const active_send = @import("active_send.zig");
 
 pub const mcache_arena_bytes_min = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + storage.page_bytes;
 
@@ -37,8 +38,12 @@ pub const Options = struct {
     validation_tombstone_ms: u64 = 30_000,
     /// Absolute receive-frame residence and local-pressure wait limit.
     pressure_timeout_ms: u64 = 30_000,
-    /// Absolute per-frame residence from queue admission through transmission.
+    /// Pending data expiry and queued control residence.
     tx_timeout_ms: u64 = 30_000,
+    /// Absolute active-frame lifetime; large payloads share the first recipient's deadline.
+    active_send_timeout_ms: u64 = 6_000,
+    /// Distinct large payloads per kind, shared across recipients.
+    active_send_items: [gossip_limits.kind_count]u16 = @splat(8),
     control_bytes: usize = 28 * 1024,
     critical_bytes: usize = outbox.critical_bytes,
     tx_peer_bytes: usize = 2 * constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE),
@@ -62,7 +67,7 @@ pub const Options = struct {
     calls_per_pump: usize = 256,
     /// Ordinary per-peer compressed-copy/decode/hash byte credits; one legal oversized item may use the shared allowance.
     decompress_per_peer_bytes: usize = 4 * 1024 * 1024,
-    /// Absolute large-frame transfer timeout and receive/transmit progress timeout.
+    /// Absolute large receive-frame lifetime and receive progress timeout.
     large_frame_timeout_ms: u64 = 10_000,
     body_buffer_bytes: usize = constants.body_buffer_len,
     receive_arena_bytes: usize = 32 * 1024 * 1024,
@@ -83,6 +88,20 @@ pub const Options = struct {
         o.validation_capacity = gossip_limits.items(limits);
         // Pending validation and retained history each receive the configured byte allowance.
         o.mcache_arena_bytes = @max(2 * gossip_limits.bytes(limits), mcache_arena_bytes_min);
+    }
+
+    pub fn activeSendLimits(o: *const Options) gossip_limits.Limits {
+        var limits: gossip_limits.Limits = @splat(.{ .items = 0, .bytes = 0 });
+        for (o.topic_policy) |*boundary| {
+            for (boundary.rules, &limits, 0..) |rule, *limit, k| {
+                if (rule.count == 0) continue;
+                const compressed = constants.maxCompressedLen(rule.ssz_max);
+                if (compressed + 32 + topic_mod.topic_max_len <= active_send.small_frame_bytes) continue;
+                limit.items = o.active_send_items[k];
+                limit.bytes = @max(limit.bytes, @as(u32, @intCast(storage.Store.pagesFor(compressed) * storage.page_bytes * o.active_send_items[k])));
+            }
+        }
+        return limits;
     }
 
     pub fn validate(o: *const Options) (error{InvalidLimits} || topic_policy_mod.Error)!void {
@@ -132,7 +151,8 @@ pub const Options = struct {
         const byte_credits = [_]usize{ o.input_per_peer, o.input_per_pump, o.output_per_peer, o.output_per_pump, o.work_per_pump, o.decompress_per_peer_bytes };
         for (byte_credits) |bytes| try range(bytes, 1, 128 * 1024 * 1024);
         try range(o.idontwant_min_data_size, 0, constants.GOSSIP_MAX_SIZE);
-        const timers = [_]u64{ o.iwant_followup_ms, o.heartbeat_interval_ms, o.validation_timeout_ms, o.validation_tombstone_ms, o.pressure_timeout_ms, o.tx_timeout_ms, o.large_frame_timeout_ms, o.seen_ttl_ms, o.opportunistic_graft_interval_ms };
+        for (o.active_send_items) |items| try range(items, 1, constants.peers_cap);
+        const timers = [_]u64{ o.active_send_timeout_ms, o.iwant_followup_ms, o.heartbeat_interval_ms, o.validation_timeout_ms, o.validation_tombstone_ms, o.pressure_timeout_ms, o.tx_timeout_ms, o.large_frame_timeout_ms, o.seen_ttl_ms, o.opportunistic_graft_interval_ms };
         for (timers) |timer| if (timer == 0 or timer > 86_400_000) return error.InvalidLimits;
     }
 };

@@ -98,7 +98,7 @@ pub const ResourceSnapshot = struct {
 const Gossipsub = @This();
 
 pub const ConnectionAdmission = enum { admitted, duplicate, capacity, unauthenticated };
-pub const Delivery = enum { unavailable, pending, available };
+pub const Delivery = enum { unavailable, pending, available, send_timeout };
 pub const peerConnected = session_io.peerConnected;
 pub const transportEvents = session_io.transportEvents;
 pub const retireConnection = session_io.retireConnection;
@@ -506,7 +506,7 @@ pub fn cancelPromises(self: *Gossipsub, peer: u16, local_pressure: bool) usize {
 
 /// Borrows a segment for one transport write. Complete or abandon the borrow before any
 /// operation that can change message storage; advanceWrite must follow a successful write.
-pub fn writeSegment(self: *Gossipsub, session: sessions_mod.SessionRef) error{PartialFrameEvicted}![]const u8 {
+pub fn writeSegment(self: *Gossipsub, session: sessions_mod.SessionRef) []const u8 {
     assert(self.sessions.matches(session));
     const outbox = &self.sessions.rows[session.index].io.tx;
     self.overlay.flushSubscriptions(outbox, &self.sessions.control_scratch, self.last_now_ms);
@@ -516,12 +516,12 @@ pub fn writeSegment(self: *Gossipsub, session: sessions_mod.SessionRef) error{Pa
         for (&cancelled, before, outbox.data.origins) |*count, previous, remaining| count.* = previous - remaining;
         self.delivery_metrics.cancelled(&cancelled);
     }
-    return outbox.segment(&self.messages.store);
+    return outbox.segment(&self.messages.store, self.last_now_ms);
 }
 
 pub fn advanceWrite(self: *Gossipsub, session: sessions_mod.SessionRef, written: usize, now_ms: u64) void {
     assert(self.sessions.matches(session));
-    if (self.sessions.rows[session.index].io.tx.advance(&self.messages.store, written)) |completion| self.writeCompleted(session, completion, now_ms);
+    if (self.sessions.rows[session.index].io.tx.advance(written)) |completion| self.writeCompleted(session, completion, now_ms);
 }
 
 pub fn writeCompleted(self: *Gossipsub, session: sessions_mod.SessionRef, completion: outbox_mod.Completion, now_ms: u64) void {
@@ -586,6 +586,7 @@ pub fn deliveryStatus(self: *Gossipsub, conn: Handle) Delivery {
     const index = self.sessions.find(conn) orelse return .unavailable;
     return switch (self.sessions.rows[index].outbound) {
         .none, .closing => .unavailable,
+        .send_timeout => .send_timeout,
         .pending, .retry_at, .negotiating => .pending,
         .live => .available,
     };

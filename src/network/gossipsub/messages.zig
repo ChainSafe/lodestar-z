@@ -123,6 +123,9 @@ pub const Messages = struct {
         var store = try storage.Store.init(a, layout.payload_entries, layout.payload_bytes);
         errdefer store.deinit(a);
         store.limits = options.payload_limits;
+        store.send_limits = options.activeSendLimits();
+        store.base_pages = options.mcache_arena_bytes / storage.page_bytes;
+        store.base_entries = layout.history + layout.validations;
         var history = try mcache.History.init(a, layout.history, layout.retained, layout.topics);
         errdefer history.deinit(a);
         var seen = try mcache.SeenCache.init(a, layout.seen, options.seen_ttl_ms);

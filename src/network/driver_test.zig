@@ -349,7 +349,7 @@ test "discovery readiness with other work due runs a full turn" {
 
 fn initOwner(node: *NetworkCore) !void {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{94}));
-    const resolved = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = policy_fixture.config() });
+    const resolved = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.blocks(.{ 1, 2, 3, 4 })} }, .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = policy_fixture.config() });
     try node.init(std.testing.allocator, std.testing.io, &resolved, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },

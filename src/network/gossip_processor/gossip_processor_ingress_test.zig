@@ -377,7 +377,7 @@ const IwantFixture = struct {
     fn flush(self: *IwantFixture, source: u16) !void {
         const session = self.g.sessions.ref(source);
         for (0..64) |_| {
-            const bytes = try self.g.writeSegment(session);
+            const bytes = self.g.writeSegment(session);
             if (bytes.len == 0) return;
             self.g.advanceWrite(session, bytes.len, self.now);
         }
@@ -560,7 +560,7 @@ test "gossip refused receipt before IWANT write completion cannot rearm its ID o
     try f.request(0, @splat(0xee));
     try f.request(1, x);
     const p = f.g.sessions.ref(0);
-    const segment = try f.g.writeSegment(p);
+    const segment = f.g.writeSegment(p);
     try t.expect(segment.len > 1);
     f.g.advanceWrite(p, 1, 250);
     f.now = 250;
@@ -825,7 +825,7 @@ test "gossip replacement preflights compressed and decoded pages across multiple
     }
     const k = @intFromEnum(processor.limits.Kind.beacon_attestation);
     try t.expectEqual(@as(usize, 8192), table.used_bytes[k]);
-    try t.expectEqual(@as(usize, 2), g.messages.store.used_by_kind[k]);
+    try t.expectEqual(@as(usize, 2), g.messages.store.pending_by_kind[k]);
     random.random().bytes(&data);
     std.mem.writeInt(u64, data[16..24], 1, .little);
     try receive(&g, 2, attestation, &data);
@@ -833,7 +833,7 @@ test "gossip replacement preflights compressed and decoded pages across multiple
     try t.expectEqual(@as(usize, 3), table.diag.occupied);
     try t.expectEqual(@as(usize, 3), g.resourceSnapshot().pending_validations);
     try t.expectEqual(@as(usize, 8192), table.used_bytes[k]);
-    try t.expectEqual(@as(usize, 2), g.messages.store.used_by_kind[k]);
+    try t.expectEqual(@as(usize, 2), g.messages.store.pending_by_kind[k]);
     for (tokens, ids, 0..) |token, id, i| {
         try t.expectEqual(i >= 2, table.get(token) != null);
         try t.expect(!g.messages.wants(id, 1));
@@ -907,7 +907,7 @@ test "gossip protocol expiry frees compressed storage while host work retains pr
     const validation = table.get(token).?.handle;
     table.finish(&batch, true);
     try t.expectEqual(@as(usize, 0), table.used_bytes[kind]);
-    try t.expectEqual(@as(usize, 2), g.messages.store.used_by_kind[kind]);
+    try t.expectEqual(@as(usize, 2), g.messages.store.pending_by_kind[kind]);
 
     random.random().bytes(&payload);
     std.mem.writeInt(u64, payload[100..108], 1, .little);
@@ -923,7 +923,7 @@ test "gossip protocol expiry frees compressed storage while host work retains pr
     g.messages.expire(&g.peers, 101);
     table.expire(101);
     try t.expectEqual(@as(usize, 0), g.resourceSnapshot().pending_validations);
-    try t.expectEqual(@as(usize, 0), g.messages.store.used_by_kind[kind]);
+    try t.expectEqual(@as(usize, 0), g.messages.store.pending_by_kind[kind]);
     try t.expectEqual(@as(usize, 1), table.used_items[kind]);
     try t.expectEqual(@as(usize, payload.len), table.executing_bytes[kind]);
     try t.expectEqual(@as(?usize, 0), support.receiveMessage(&g, 0, message, Now.fromMilliseconds(.{ .mono_ms = 102, .unix_s = 0 })));

@@ -252,19 +252,16 @@ pub const History = struct {
         a.free(self.entries);
         self.* = undefined;
     }
-    pub fn canAdmitPayload(self: *const History, store: *const storage.Store, len: usize, free_pages: usize, free_entries: usize) bool {
-        const required = storage.Store.pagesFor(len);
-        var pages = free_pages;
-        var entries = free_entries;
-        if (pages >= required and entries > 0) return true;
+    pub fn canAdmitPayload(self: *const History, store: *const storage.Store, len: usize, available: storage.Store.Room) bool {
+        var room = available;
+        if (room.fits(len)) return true;
         var slot = self.head;
         for (0..self.count) |_| {
             const entry = store.get(self.entries[slot].message).?;
             slot = self.entries[slot].next;
             if (!reclaimable(entry)) continue;
-            pages += storage.Store.pagesFor(entry.len);
-            entries += @intFromBool(entry.generation != std.math.maxInt(u64));
-            if (pages >= required and entries > 0) return true;
+            room.releaseBase(entry);
+            if (room.fits(len)) return true;
         }
         return false;
     }
@@ -272,7 +269,7 @@ pub const History = struct {
     pub fn admitPayload(self: *History, store: *storage.Store, id: MessageId, name: []const u8, bytes: []const u8) ?storage.Handle {
         const kind = if (topic_mod.parseCanonical(name)) |canonical| canonical.name.kind else .beacon_block;
         if (!store.pendingRoom(kind, bytes.len) or
-            !self.canAdmitPayload(store, bytes.len, store.free_pages, store.entries.len - store.used_entries - store.retired_entries)) return null;
+            !self.canAdmitPayload(store, bytes.len, store.room())) return null;
         self.reclaimPayload(store, bytes.len);
         return store.put(id, name, bytes).?;
     }
@@ -281,7 +278,7 @@ pub const History = struct {
         const kind = if (topic_mod.parseCanonical(name)) |canonical| canonical.name.kind else .beacon_block;
         var victims: [reclaim_scan]u32 = undefined;
         const count = self.retentionVictims(store, kind, bytes.len, &victims) orelse return error.Retention;
-        if (!self.canAdmitPayload(store, bytes.len, store.free_pages, store.entries.len - store.used_entries - store.retired_entries)) return error.Capacity;
+        if (!self.canAdmitPayload(store, bytes.len, store.room())) return error.Capacity;
         for (victims[0..count]) |victim| self.remove(store, victim);
         self.reclaimPayload(store, bytes.len);
         const handle = store.putPublication(id, name, bytes);

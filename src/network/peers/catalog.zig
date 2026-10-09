@@ -1076,7 +1076,7 @@ pub const Catalog = struct {
 fn servedUntil(reason: t.DisconnectReason) bool {
     return switch (reason) {
         .host, .shutdown, .transport_closed, .capacity, .remote_goodbye, .count_pruning => true,
-        .incompatible_fork, .future_head, .finalized_mismatch, .missing_availability, .invalid_status, .invalid_metadata, .health_timeout, .reputation, .banned, .gossip_unavailable, .health_error => false,
+        .incompatible_fork, .future_head, .finalized_mismatch, .missing_availability, .invalid_status, .invalid_metadata, .health_timeout, .reputation, .banned, .gossip_unavailable, .gossip_send_timeout, .health_error => false,
     };
 }
 

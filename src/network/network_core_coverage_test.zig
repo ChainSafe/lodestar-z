@@ -736,3 +736,42 @@ test "core replaces failed gossip below target without a reputation penalty or a
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(started, driver.counters.negotiation_started);
 }
+
+test "core closes regular and direct connections on the active gossip send deadline" {
+    for ([_]bool{ false, true }) |direct| {
+        var setup: Setup = .{};
+        try setup.init(&.{});
+        defer setup.deinit();
+        for (0..80) |_| try setup.step(0);
+        var snapshots: [4]t.Snapshot = undefined;
+        _ = setup.client.peer_manager.snapshots(&snapshots);
+        const snapshot = snapshots[0];
+        const conn = snapshot.connection.?;
+        const g = setup.client.protocols.gossipsub;
+        const index = g.sessions.find(conn).?;
+        const tx = &g.sessions.rows[index].io.tx;
+        if (direct) {
+            try expect(setup.client.peer_manager.catalog.setDirect(snapshot.peer, true));
+            g.markDirect(conn);
+        }
+        g.options.output_per_peer = 1;
+        tx.active_send_timeout_ms = 100;
+        _ = tx.injectFrame("\x80\x02" ++ ([_]u8{0} ** 256), false, setup.pair.now.millis()).?;
+        g.settle(index);
+        _ = try setup.turn(&setup.client, .{});
+        const deadline = tx.active_deadline_ms.?;
+        setup.pair.advance(99);
+        _ = try setup.turn(&setup.client, .{});
+        try equal(deadline, tx.active_deadline_ms.?);
+        setup.pair.advance(1);
+        _ = try setup.turn(&setup.client, .{});
+        const after = setup.client.peer_manager.catalog.get(snapshot.peer).?;
+        try equal(t.DisconnectReason.gossip_send_timeout, after.disconnect_reason.?);
+        try equal(snapshot.score, after.score);
+        try equal(@as(u64, 0), after.ban_until_ms);
+        try expect(!tx.pending() and tx.active_deadline_ms == null);
+        setup.pair.advance(2000);
+        _ = try setup.turn(&setup.client, .{});
+        try expect(!g.admitted(conn));
+    }
+}
