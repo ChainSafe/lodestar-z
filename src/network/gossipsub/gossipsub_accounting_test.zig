@@ -193,10 +193,10 @@ test "gossip RPC send metrics count admitted controls and batches without counti
     var body: [1024]u8 = undefined;
     var frames: usize = 0;
     for (0..4096) |_| {
-        const segment = try tx.segment(&g.messages.store);
+        const segment = tx.segment(&g.messages.store, 0);
         if (segment.len == 0) break;
         const decoded = try reader.feed(segment[0..1], &body);
-        _ = tx.advance(&g.messages.store, 1);
+        _ = tx.advance(1);
         if (decoded.frame) |rpc| {
             frames += 1;
             expected.bytes += rpc.len;

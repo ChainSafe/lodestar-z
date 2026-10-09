@@ -39,14 +39,14 @@ test "gossip admission enforces source and kind items independently of retained 
     try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .accept }, g.report(accepted, .accept, Now.fromMilliseconds(.{ .mono_ms = 6, .unix_s = 0 })));
     try t.expectEqual(@as(?usize, 1), try support.message(&g, 2, "five", 7));
     try t.expectEqual(@as(usize, 1), g.messages.history.count);
-    try t.expectEqual(@as(usize, 5), g.messages.store.entries_by_kind[kind]);
+    try t.expectEqual(@as(usize, 5), g.messages.store.used_entries);
     try t.expectEqual(@as(usize, 4), g.resourceSnapshot().pending_validations);
     try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(ignored, .ignore, Now.fromMilliseconds(.{ .mono_ms = 8, .unix_s = 0 })));
     try t.expectEqual(@as(?usize, 1), try support.message(&g, 0, "six", 9));
 
     g.messages.expire(&g.peers, 20);
     try t.expectEqual(@as(usize, 0), g.resourceSnapshot().pending_validations);
-    try t.expectEqual(@as(usize, 1), g.messages.store.entries_by_kind[kind]);
+    try t.expectEqual(@as(usize, 1), g.messages.store.used_entries);
     try t.expectEqual(@as(?usize, 1), try support.message(&g, 0, "seven", 21));
 }
 
@@ -77,13 +77,13 @@ test "gossip admission enforces compressed pages independently of retained histo
     const incoming = topic.validMessageId(name, &payload, .{});
     try t.expectEqual(@as(?usize, 0), support.receiveMessage(&g, 1, .{ .topic = name, .data = compressed[0..len] }, now));
     try t.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.kind_payload)]);
-    try t.expectEqual(@as(usize, 1), g.messages.store.used_by_kind[kind]);
+    try t.expectEqual(@as(usize, 1), g.messages.store.pending_by_kind[kind]);
     try t.expectEqual(@as(usize, 1), g.resourceSnapshot().pending_validations);
     try t.expect(!g.messages.wasSeen(incoming, 1));
 
     try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .accept }, g.report(accepted, .accept, now));
     try t.expectEqual(@as(?usize, 1), support.receiveMessage(&g, 1, .{ .topic = name, .data = compressed[0..len] }, now));
-    try t.expectEqual(@as(usize, 2), g.messages.store.used_by_kind[kind]);
+    try t.expectEqual(@as(usize, 1), g.messages.store.pending_by_kind[kind]);
     try t.expectEqual(@as(usize, 1), g.messages.store.retained_by_kind[kind]);
     try t.expectEqual(@as(usize, 1), g.resourceSnapshot().pending_validations);
 }

@@ -8,7 +8,7 @@ const Outbox = @import("outbox.zig").Outbox;
 const options_mod = @import("options.zig");
 const delivery = @import("delivery.zig");
 
-pub const TimeoutReason = enum { subscriptions, receive_frame, send_queue, send_progress };
+pub const TimeoutReason = enum { active_send, subscriptions, receive_frame, send_queue };
 
 pub const ActiveRpc = struct {
     reader: protobuf.RpcReader,
@@ -49,7 +49,7 @@ pub const PeerIo = struct {
         const gossip = critical + options.critical_bytes;
         const body = gossip + options.control_bytes + 10;
         const unread = body + options.body_buffer_bytes;
-        return .{ .tx = .{ .data = .{ .pool = deliveries }, .control = .{ .bytes = bytes[0..critical] }, .critical = .{ .bytes = bytes[critical..gossip] }, .gossip = bytes[gossip..body] }, .body = bytes[body..unread], .unread = bytes[unread..] };
+        return .{ .tx = .{ .active_send_timeout_ms = options.active_send_timeout_ms, .queue_timeout_ms = options.tx_timeout_ms, .data = .{ .pool = deliveries }, .control = .{ .bytes = bytes[0..critical] }, .critical = .{ .bytes = bytes[critical..gossip] }, .gossip = bytes[gossip..body] }, .body = bytes[body..unread], .unread = bytes[unread..] };
     }
 
     write_first: bool = false,
@@ -141,10 +141,10 @@ pub const PeerIo = struct {
             else
                 since +| options.pressure_timeout_ms;
         }
-        if (self.tx.oldest()) |since| {
+        if (self.tx.controlOldest()) |since| {
             result.values[@intFromEnum(TimeoutReason.send_queue)] = since +| options.tx_timeout_ms;
-            if (self.tx.progress_ms) |progress| result.values[@intFromEnum(TimeoutReason.send_progress)] = progress +| options.large_frame_timeout_ms;
         }
+        result.values[@intFromEnum(TimeoutReason.active_send)] = self.tx.active_deadline_ms;
         return result;
     }
 };

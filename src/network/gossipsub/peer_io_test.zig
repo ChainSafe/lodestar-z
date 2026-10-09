@@ -17,10 +17,10 @@ test "gossip deadlines track pressure and progress through partial frame reset" 
     try std.testing.expect(!pool.resetRx(0));
     try std.testing.expect(io.deadlines(&options).next() == null);
     _ = io.tx.injectFrame("abc", false, 0).?;
-    io.tx.progress_ms = 20;
-    try std.testing.expectEqual(TimeoutReason.send_progress, io.deadlines(&options).expired(70).?);
-    io.tx.progress_ms = 50;
-    try std.testing.expectEqual(@as(?u64, 100), io.deadlines(&options).next());
+    io.tx.active_deadline_ms = 70;
+    try std.testing.expectEqual(TimeoutReason.active_send, io.deadlines(&options).expired(70).?);
+    try std.testing.expectEqual(@as(?u64, 70), io.deadlines(&options).next());
+    io.tx.active_deadline_ms = null;
     try std.testing.expectEqual(TimeoutReason.send_queue, io.deadlines(&options).expired(100).?);
 }
 

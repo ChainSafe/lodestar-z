@@ -1,5 +1,6 @@
 const std = @import("std");
 const storage = @import("message_store.zig");
+const active_send = @import("active_send.zig");
 const protobuf = @import("protobuf.zig");
 const constants = @import("constants.zig");
 const topic = @import("topic.zig");
@@ -16,7 +17,7 @@ pub const control_frames = 128;
 pub const critical_frames = 2 * constants.topics_cap;
 pub const critical_bytes = critical_frames * (32 + topic.topic_max_len);
 pub const QueueResult = enum { queued, full };
-pub const DropReason = enum { data_descriptors, data_pool, data_bytes, control_frames, control_bytes, critical_frames, critical_bytes, token_exhausted };
+pub const DropReason = enum { data_descriptors, data_pool, data_bytes, control_frames, control_bytes, critical_frames, critical_bytes, token_exhausted, active_capacity };
 pub const drop_reason_count = @typeInfo(DropReason).@"enum".fields.len;
 /// Storage for encoding one control frame, which the gossip owner shares across its outboxes.
 pub const ControlScratch = [32 + topic.topic_max_len + constants.gossip_ids_max * (constants.message_id_length + 2)]u8;
@@ -141,10 +142,13 @@ pub const Outbox = struct {
     rpc_sent: RpcCounters = .{},
     critical: FrameQueue(critical_frames),
     data: delivery.Queue,
-    active: enum { none, critical, control, data } = .none,
+    active: union(enum) { none, critical, control, data: active_send.Frame } = .none,
+    small_frame: [active_send.small_frame_bytes]u8 = undefined,
+    active_deadline_ms: ?u64 = null,
+    active_send_timeout_ms: u64 = 6_000,
+    queue_timeout_ms: u64 = 30_000,
     control_burst: u8 = 0,
     sequence: u64 = 0,
-    progress_ms: ?u64 = null,
     /// The out stream takes writes: a new stream or a writable event sets it, and a write that
     /// blocks clears it. Queueing never sets it, so a blocked stream waits for its writable event.
     ready: bool = true,
@@ -316,60 +320,67 @@ pub const Outbox = struct {
     pub fn pending(self: *const Outbox) bool {
         return self.data.count != 0 or self.control.count != 0 or self.critical.count != 0;
     }
-    /// Borrows bytes until the next store mutation. An evicted partial frame requires a reset.
-    pub fn segment(self: *Outbox, store: *const storage.Store) error{PartialFrameEvicted}![]const u8 {
-        for (0..2) |_| {
+    pub fn segment(self: *Outbox, store: *storage.Store, now_ms: u64) []const u8 {
+        for (0..data_capacity + 2) |_| {
             if (self.active == .none) {
-                if (self.data.count > 0 and self.control_burst >= 4) {
-                    self.active = .data;
-                } else if (self.critical.count > 0) {
+                const data_first = self.data.count > 0 and self.control_burst >= 4;
+                if (!data_first and self.critical.count > 0) {
                     self.active = .critical;
-                } else if (self.control.count > 0) {
+                } else if (!data_first and self.control.count > 0) {
                     self.active = .control;
-                } else if (self.data.count > 0) {
-                    self.active = .data;
-                }
+                } else if (self.data.next(store, now_ms, self.queue_timeout_ms)) |tx| {
+                    const acquired = active_send.Frame.acquire(store, tx.message, &self.small_frame, now_ms, self.active_send_timeout_ms) orelse {
+                        _ = self.data.complete();
+                        self.dropped(.active_capacity);
+                        self.control_burst = 0;
+                        continue;
+                    };
+                    self.active = .{ .data = acquired.frame };
+                    self.active_deadline_ms = acquired.deadline_ms;
+                } else if (self.critical.count > 0 or self.control.count > 0) {
+                    self.control_burst = 0;
+                    continue;
+                } else return &.{};
+                self.active_deadline_ms = self.active_deadline_ms orelse now_ms +| self.active_send_timeout_ms;
             }
-            switch (self.active) {
-                .none => return &.{},
-                .critical => return self.critical.segment(),
-                .control => return self.control.segment(),
-                .data => if (try self.data.next(store)) |tx| {
-                    return tx.segment(store);
-                } else {
-                    self.active = .none;
-                    self.progress_ms = null;
-                },
-            }
+            return switch (self.active) {
+                .none => unreachable,
+                .critical => self.critical.segment(),
+                .control => self.control.segment(),
+                .data => |*data| data.segment(&self.small_frame),
+            };
         }
         unreachable;
     }
-    pub fn advance(self: *Outbox, store: *const storage.Store, len: usize) ?Completion {
-        switch (self.active) {
+    pub fn advance(self: *Outbox, len: usize) ?Completion {
+        const completion: Completion = switch (self.active) {
             .none => unreachable,
-            .critical, .control => {
-                const completion = if (self.active == .critical) self.critical.advance(len) else self.control.advance(len);
-                if (completion) |receipt| {
-                    self.active = .none;
-                    self.progress_ms = null;
-                    self.control_burst +|= 1;
-                    return .{ .control = receipt };
-                }
+            .critical, .control => blk: {
+                const receipt = (if (self.active == .critical) self.critical.advance(len) else self.control.advance(len)) orelse return null;
+                self.control_burst +|= 1;
+                break :blk .{ .control = receipt };
             },
-            .data => {
-                if (self.data.advance(store, len)) |receipt| {
-                    self.active = .none;
-                    self.progress_ms = null;
-                    self.control_burst = 0;
-                    return .{ .data = receipt };
-                }
+            .data => |*data| blk: {
+                if (!data.advance(len)) return null;
+                data.deinit();
+                self.control_burst = 0;
+                break :blk .{ .data = self.data.complete() };
             },
-        }
-        return null;
+        };
+        self.active = .none;
+        self.active_deadline_ms = null;
+        return completion;
     }
     pub fn oldest(self: *const Outbox) ?u64 {
         var first = self.data.oldest();
         if (self.control.count > 0) first = @min(first orelse std.math.maxInt(u64), self.control.frames[self.control.head].enqueued_ms);
+        if (self.critical.count > 0) first = @min(first orelse std.math.maxInt(u64), self.critical.frames[self.critical.head].enqueued_ms);
+        return first;
+    }
+
+    pub fn controlOldest(self: *const Outbox) ?u64 {
+        var first: ?u64 = null;
+        if (self.control.count > 0) first = self.control.frames[self.control.head].enqueued_ms;
         if (self.critical.count > 0) first = @min(first orelse std.math.maxInt(u64), self.critical.frames[self.critical.head].enqueued_ms);
         return first;
     }
@@ -383,6 +394,8 @@ pub const Outbox = struct {
             .critical = self.critical,
             .data = self.data,
             .sequence = self.sequence,
+            .active_send_timeout_ms = self.active_send_timeout_ms,
+            .queue_timeout_ms = self.queue_timeout_ms,
             .subscription_dirty = self.subscription_dirty,
             .drops = self.drops,
             .rpc_sent = self.rpc_sent,
@@ -399,6 +412,8 @@ pub const Outbox = struct {
     }
 
     pub fn cancelStream(self: *Outbox) void {
+        if (self.active == .data) self.active.data.deinit();
+        self.active_deadline_ms = null;
         self.subscription_dirty.setRangeValue(.{ .start = 0, .end = self.subscription_dirty.bit_length }, false);
         self.subscription_since = null;
         self.subscription_cursor = 0;
@@ -411,7 +426,6 @@ pub const Outbox = struct {
         self.gossip_len = 0;
         self.gossip_ids = 0;
         self.gossip_entries = 0;
-        self.progress_ms = null;
         self.ready = false;
         self.blocked_since = null;
     }
@@ -450,16 +464,16 @@ test "gossip transmit never interleaves control into partial data" {
     try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, .forward, .{ .bytes = 8192 }, 0));
     var out: [128]u8 = undefined;
     var n: usize = 0;
-    out[n] = (try io.segment(&store))[0];
+    out[n] = (io.segment(&store, 0))[0];
     n += 1;
-    _ = io.advance(&store, 1);
+    _ = io.advance(1);
     const token = io.appendControl("\x01x", true, 0).?;
     for (0..127) |_| {
-        const segment = try io.segment(&store);
+        const segment = io.segment(&store, 0);
         if (segment.len == 0) break;
         out[n] = segment[0];
         n += 1;
-        if (io.advance(&store, 1)) |done| switch (done) {
+        if (io.advance(1)) |done| switch (done) {
             .control => |receipt| try std.testing.expectEqual(token, receipt.token),
             .data => try std.testing.expectEqual(@as(usize, 1), store.used_entries),
         };
@@ -525,11 +539,11 @@ test "gossip queues a full validation burst in order and preserves byte bounds" 
     var actual: [4096]u8 = undefined;
     var used: usize = 0;
     for (0..burst * 3) |_| {
-        const segment = try io.segment(&store);
+        const segment = io.segment(&store, 0);
         if (segment.len == 0) break;
         @memcpy(actual[used..][0..segment.len], segment);
         used += segment.len;
-        _ = io.advance(&store, segment.len);
+        _ = io.advance(segment.len);
     }
     try std.testing.expect(!io.pending());
     try std.testing.expectEqualSlices(u8, writer.written(), actual[0..used]);
@@ -551,14 +565,14 @@ test "gossip control receipts survive partial writes ring reuse and refused fram
         const token = io.appendControl("abc", false, 1).?;
         try std.testing.expect(io.appendControl("ab", false, 1) == null);
         for (0..3) |byte| {
-            _ = try io.segment(&store);
-            const receipt = io.advance(&store, 1);
+            _ = io.segment(&store, 0);
+            const receipt = io.advance(1);
             if (byte < 2) try std.testing.expect(receipt == null) else try std.testing.expectEqual(token, receipt.?.control.token);
         }
     }
     _ = io.appendControl("abc", false, 1).?;
-    _ = try io.segment(&store);
-    try std.testing.expect(io.advance(&store, 1) == null);
+    _ = io.segment(&store, 0);
+    try std.testing.expect(io.advance(1) == null);
     io.cancelStream();
     try std.testing.expect(!io.pending());
 }
@@ -588,11 +602,11 @@ test "gossip typed controls preserve maximum ID lists and completion kinds" {
         var received: ?[]const u8 = null;
         var completion: ?Completion = null;
         for (0..2) |_| {
-            const segment = try outbox.segment(&store);
+            const segment = outbox.segment(&store, 0);
             if (segment.len == 0) break;
             const parsed = try reader.feed(segment, &body);
             received = parsed.frame;
-            completion = outbox.advance(&store, segment.len);
+            completion = outbox.advance(segment.len);
             if (completion != null) break;
         }
         var rpc = protobuf.RpcReader.init(received.?);
@@ -673,13 +687,39 @@ test "gossip full stale delivery queue yields to waiting control and returns eve
     const token = outbox.appendControl("control", false, 2).?;
     outbox.control_burst = 4;
     store.releaseHistory(message);
-    try std.testing.expectEqualStrings("control", try outbox.segment(&store));
+    try std.testing.expectEqualStrings("control", outbox.segment(&store, 0));
     try std.testing.expectEqual(@as(usize, 0), outbox.data.count);
     try std.testing.expectEqual(@as(usize, 0), outbox.data.bytes);
     try std.testing.expectEqual(@as(usize, 0), outbox.data.local_bytes);
     for (outbox.data.origins) |count| try std.testing.expectEqual(@as(usize, 0), count);
     try std.testing.expectEqual(pool.slots.len, pool.available);
     try std.testing.expectEqual(@as(usize, delivery.per_peer_reserve), pool.protected);
-    try std.testing.expectEqual(token, outbox.advance(&store, 7).?.control.token);
+    try std.testing.expectEqual(token, outbox.advance(7).?.control.token);
     try std.testing.expect(!outbox.pending());
+}
+
+test "gossip active capacity refusal drops pending data and immediately serves controls" {
+    const a = std.testing.allocator;
+    var pool = try delivery.Pool.init(a, 1, delivery.Pool.capacity(1, 1));
+    defer pool.deinit(a);
+    var store = try storage.Store.init(a, 1, 20 * storage.page_bytes);
+    defer store.deinit(a);
+    var normal: [32]u8 = undefined;
+    var critical: [32]u8 = undefined;
+    var tx: Outbox = .{ .data = .{ .pool = &pool }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
+    defer tx.cancelStream();
+    const message = store.put(@splat(1), "topic", &([_]u8{9} ** 70_000)).?;
+    store.retainHistory(message);
+    store.seal(message);
+    try tx.data.append(&store, message, .publication, .{ .bytes = 100_000 }, 1);
+    _ = tx.appendControl("control", true, 1).?;
+    tx.control_burst = 4;
+    try std.testing.expectEqualStrings("control", tx.segment(&store, 2));
+    try std.testing.expectEqual(@as(usize, 0), tx.data.count);
+    try std.testing.expectEqual(@as(u64, 1), tx.drops[@intFromEnum(DropReason.active_capacity)]);
+    try std.testing.expectEqual(@as(u16, 0), store.get(message).?.senders);
+    try std.testing.expectEqual(@as(?u64, 6002), tx.active_deadline_ms);
+    _ = tx.advance(7).?;
+    try std.testing.expect(tx.active_deadline_ms == null);
+    store.releaseHistory(message);
 }

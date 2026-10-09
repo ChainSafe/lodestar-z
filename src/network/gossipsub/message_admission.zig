@@ -26,8 +26,7 @@ pub const Admission = struct {
     const Usage = struct {
         available: usize,
         records: usize,
-        pages: usize,
-        entries: usize,
+        payload: storage.Store.Room,
         kind_pages: usize,
         kind_entries: usize,
     };
@@ -73,12 +72,9 @@ pub const Admission = struct {
         const k = @intFromEnum(incoming_kind);
         var available = pending.available_entries.len;
         var records = pending.free_records.len + pending.resolved_records.len;
-        var pages = store.free_pages;
-        var entries = store.entries.len - store.used_entries - store.retired_entries;
-        var kind_pages = store.used_by_kind[k] - store.retained_by_kind[k];
-        // At admission boundaries, every unretained entry belongs to a pending validation.
-        // Acceptance moves the entry to history and finishes validation in one owner call.
-        var kind_entries = store.entries_by_kind[k] - store.retained_entries_by_kind[k];
+        var room = store.room();
+        var kind_pages = store.pending_by_kind[k];
+        var kind_entries = store.pending_entries_by_kind[k];
         for (victims, 0..) |handle, i| {
             for (victims[0..i]) |previous| assert(!std.meta.eql(handle, previous));
             if (handle.index >= pending.entries.len) continue;
@@ -89,14 +85,13 @@ pub const Admission = struct {
             const payload = store.get(entry.state.pending.message).?;
             if (payload.provisional or payload.history) continue;
             const released = storage.Store.pagesFor(payload.len);
-            pages += released;
-            entries += @intFromBool(payload.generation != std.math.maxInt(u64));
+            room.releaseBase(payload);
             if (payload.kind == incoming_kind) {
                 kind_pages -= released;
                 kind_entries -= 1;
             }
         }
-        return .{ .available = available, .records = records, .pages = pages, .entries = entries, .kind_pages = kind_pages, .kind_entries = kind_entries };
+        return .{ .available = available, .records = records, .payload = room, .kind_pages = kind_pages, .kind_entries = kind_entries };
     }
 
     /// Checks compressed storage and validation capacity after retiring `victims`.
@@ -117,7 +112,7 @@ pub const Admission = struct {
         if (pending.index.find(self.event.id)) |index| {
             if (pending.recent[index].reserved or pending.recent[index].state == .pending) return self.refuse(.validation_capacity);
         }
-        if (!owner.history.canAdmitPayload(store, self.compressed.len, resources.pages, resources.entries)) return self.refuse(.payload_capacity);
+        if (!owner.history.canAdmitPayload(store, self.compressed.len, resources.payload)) return self.refuse(.payload_capacity);
         return true;
     }
 

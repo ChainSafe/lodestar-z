@@ -43,6 +43,8 @@ pub const GossipOverrides = struct {
     validation_tombstone_ms: ?u64 = null,
     pressure_timeout_ms: ?u64 = null,
     tx_timeout_ms: ?u64 = null,
+    active_send_timeout_ms: ?u64 = null,
+    active_send_items: ?@FieldType(gossip.Options, "active_send_items") = null,
     control_bytes: ?usize = null,
     critical_bytes: ?usize = null,
     tx_peer_bytes: ?usize = null,
@@ -213,7 +215,7 @@ pub fn resolve(options: Options) !Resolved {
         .limits = limits,
         .work_limits = options.work_limits,
         .socket_buffers = options.socket_buffers,
-        .byte_limit = options.byte_limit orelse if (small) 96 * 1024 * 1024 else 384 * 1024 * 1024,
+        .byte_limit = options.byte_limit orelse if (small) 256 * 1024 * 1024 else 512 * 1024 * 1024,
         .core = .{
             .peers = peer_options,
             .dial = dial_options,

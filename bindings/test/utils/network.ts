@@ -100,6 +100,13 @@ export function networkConfig(): NativeRuntimeConfig {
     bind: {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0},
     discovery: null,
     gossipPolicy: {
+      activeSendItems: Object.fromEntries(
+        Object.keys(processor).map((kind) => [
+          kind,
+          kind === "data_column_sidecar" ? 256 : kind === "blob_sidecar" ? 32 : 8,
+        ])
+      ) as Record<NativeTopicKind, number>,
+      activeSendTimeoutMs: 6000n,
       execution: gossipExecution(processor),
       gossipFactor: 0.25,
       heartbeatIntervalMs: 1000n,

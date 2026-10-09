@@ -72,7 +72,7 @@ test "gossip idle mesh of 200 sessions costs no session visits" {
 
 test "gossip retries a flow-blocked session only when send capacity grows" {
     var setup: Pair = .{};
-    try setup.initWindow(.{ .random_seed = 1, .large_frame_timeout_ms = 400 }, .{ .random_seed = 1 }, 4096);
+    try setup.initWindow(.{ .random_seed = 1, .active_send_timeout_ms = 400 }, .{ .random_seed = 1 }, 4096);
     defer setup.deinit();
     try connectMesh(&setup);
     const g = setup.shared.client.gossipsub;
@@ -129,14 +129,14 @@ test "gossip retries a flow-blocked session only when send capacity grows" {
     try std.testing.expect(woken > 1);
     try std.testing.expect(g.sessions.rows[index].outStream() != null);
 
-    // A blocked stream that never gains credit is reset at its progress deadline, popped from
+    // A blocked stream that never gains credit fails at its active-send deadline, popped from
     // the heap on the first turn at or after it.
     try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, payload[0 .. 32 * 1024], setup.shared.pair.now)).queued);
     _ = processClient(&setup);
     try std.testing.expect(!io.tx.ready and io.tx.pending());
     const deadline = io.deadlines(&g.options).next().?;
     try std.testing.expectEqual(deadline, g.sessions.deadlines.get(index).?);
-    try std.testing.expectEqual(io.tx.progress_ms.? + g.options.large_frame_timeout_ms, deadline);
+    try std.testing.expectEqual(io.tx.active_deadline_ms.?, deadline);
     setup.shared.pair.advance(deadline - 1 - setup.shared.pair.now.millis());
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(g.schedule(), setup.shared.pair.now.millis()).? > setup.shared.pair.now.millis());
     _ = processClient(&setup);
@@ -247,7 +247,7 @@ test "gossip resumes a small frame cut by a short write once the stream is writa
     try std.testing.expectEqual(blocked + 1, g.sessions.blocked_writes);
     try std.testing.expect(!io.tx.ready and io.tx.pending() and io.tx.blocked_since != null);
     try std.testing.expectEqual(payloads.len - whole, io.tx.data.count);
-    try std.testing.expectEqual(offset, (try io.tx.data.next(&g.messages.store)).?.cursor.sent);
+    try std.testing.expectEqual(offset, io.tx.active.data.sent());
 
     // The server reads, the writable event resumes the cut frame, and every frame arrives intact.
     for (0..256) |_| {

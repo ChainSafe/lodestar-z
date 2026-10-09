@@ -128,7 +128,7 @@ fn parseGossipLimits(value: Value, items_max: u32, bytes_max: u32) !n.gossip_pro
 fn parseGossip(value: Value, out: *Config) !void {
     out.gossip = .{};
     const policy = try decode.get(value, "gossipPolicy");
-    try decode.object(policy, &.{ "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score", "processor", "execution" });
+    try decode.object(policy, &.{ "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "activeSendTimeoutMs", "activeSendItems", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score", "processor", "execution" });
     const processor = try decode.get(policy, "processor");
     {
         const limits_mod = n.gossip_processor.limits;
@@ -148,6 +148,14 @@ fn parseGossip(value: Value, out: *Config) !void {
     out.gossip.validation_tombstone_ms = try decode.bigint(try decode.get(policy, "validationTombstoneMs"));
     out.gossip.pressure_timeout_ms = try decode.bigint(try decode.get(policy, "pressureTimeoutMs"));
     out.gossip.tx_timeout_ms = try decode.bigint(try decode.get(policy, "txTimeoutMs"));
+    out.gossip.active_send_timeout_ms = try decode.bigint(try decode.get(policy, "activeSendTimeoutMs"));
+    const active_items = try decode.get(policy, "activeSendItems");
+    var item_limits: @FieldType(n.gossipsub.Gossipsub.Options, "active_send_items") = undefined;
+    try decode.completeObject(active_items, &topic_kind_names);
+    inline for (std.meta.fields(n.gossipsub.topic.Kind), 0..) |field, index| {
+        item_limits[index] = @intCast(try decode.integer(try decode.get(active_items, field.name), n.gossipsub.constants.peers_cap));
+    }
+    out.gossip.active_send_items = item_limits;
     out.gossip.large_frame_timeout_ms = try decode.bigint(try decode.get(policy, "largeFrameTimeoutMs"));
     out.gossip.seen_ttl_ms = try decode.bigint(try decode.get(policy, "seenTtlMs"));
     out.gossip.retained_score_ms = try decode.bigint(try decode.get(policy, "retainedScoreMs"));

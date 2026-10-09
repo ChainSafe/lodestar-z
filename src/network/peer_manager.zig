@@ -430,6 +430,7 @@ pub const PeerManager = struct {
                 input.reject = .missing_availability;
         }
         const delivery = gossipsub.deliveryStatus(conn);
+        if (delivery == .send_timeout and input.reject == null) input.reject = .gossip_send_timeout;
         if (delivery == .unavailable) {
             if (!input.revalidating) input.outbound = false;
             if (snapshot.relevant and !snapshot.direct and input.reject == null)

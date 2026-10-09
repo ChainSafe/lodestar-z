@@ -18,14 +18,9 @@ pub const Transmission = struct {
     message: storage.Handle,
     enqueued_ms: u64,
     origin: Origin,
-    cursor: storage.FrameCursor,
     kind: gossip_limits.Kind,
     len: u32,
     frame_len: u32,
-
-    pub fn segment(self: *const Transmission, store: *const storage.Store) []const u8 {
-        return store.frameSegment(self.message, self.cursor);
-    }
 };
 
 /// A frame that QUIC accepted in full.
@@ -155,7 +150,6 @@ pub const Queue = struct {
             .message = message,
             .enqueued_ms = now,
             .origin = origin,
-            .cursor = store.frameCursor(message),
             .kind = entry.kind,
             .len = entry.len,
             .frame_len = @intCast(entry.frameLen()),
@@ -178,24 +172,28 @@ pub const Queue = struct {
         return self.count + (self.pool.local_descriptors -| self.classCount(.local)) >= per_peer_limit;
     }
 
-    /// The frame to write next. A frame in progress continues. At a frame boundary a local frame
-    /// goes first, unless a full run of them already went while an ordinary frame waited.
-    /// Discards evicted, unstarted frames. A partial eviction requires resetting the stream.
-    /// The returned transmission may borrow payload bytes only until the next store mutation.
-    pub fn next(self: *Queue, store: *const storage.Store) error{PartialFrameEvicted}!?*const Transmission {
+    /// Drops expired or evicted pending frames. Active sends own their backing in the outbox.
+    pub fn next(self: *Queue, store: *const storage.Store, now_ms: u64, timeout_ms: u64) ?*const Transmission {
         for (0..self.count + 1) |_| {
             if (self.count == 0) return null;
             const class = self.current orelse self.choose();
             self.current = class;
             const tx = &self.pool.slots[self.fifos[@intFromEnum(class)].head].tx;
-            if (store.get(tx.message)) |entry| {
-                if (entry.history) return tx;
+            if (now_ms < tx.enqueued_ms +| timeout_ms) {
+                if (store.get(tx.message)) |entry| if (entry.history) return tx;
             }
-            if (tx.cursor.sent != 0) return error.PartialFrameEvicted;
             self.remove(class);
             self.current = null;
         }
         unreachable;
+    }
+
+    pub fn complete(self: *Queue) Receipt {
+        const class = self.current.?;
+        const receipt: Receipt = .{ .origin = self.pool.slots[self.fifos[@intFromEnum(class)].head].tx.origin };
+        self.remove(class);
+        self.current = null;
+        return receipt;
     }
 
     fn choose(self: *Queue) Class {
@@ -223,17 +221,6 @@ pub const Queue = struct {
             result = @min(result orelse since, since);
         };
         return result;
-    }
-
-    /// Moves the chosen frame past `len` sent bytes, and removes it once QUIC holds all of it.
-    pub fn advance(self: *Queue, store: *const storage.Store, len: usize) ?Receipt {
-        const class = self.current.?;
-        const tx = &self.pool.slots[self.fifos[@intFromEnum(class)].head].tx;
-        if (!store.advanceFrame(tx.message, &tx.cursor, len)) return null;
-        const receipt: Receipt = .{ .origin = tx.origin };
-        self.remove(class);
-        self.current = null;
-        return receipt;
     }
 
     fn remove(self: *Queue, class: Class) void {

@@ -181,7 +181,7 @@ test "gossip history expiry frees payloads and cancels unstarted sends without a
         }
     }
     try std.testing.expect(g.messages.store.get(handle) == null);
-    try std.testing.expectEqual(@as(usize, 0), (try g.writeSegment(peer)).len);
+    try std.testing.expectEqual(@as(usize, 0), (g.writeSegment(peer)).len);
     try std.testing.expect(!tx.pending());
     try std.testing.expect(g.sessions.rows[peer.index].outStream() != null);
     try std.testing.expectEqual(@as(usize, 0), g.messages.store.used_entries);
@@ -229,10 +229,10 @@ test "gossip retention forwards fresh messages while slow recipients queue the o
         try std.testing.expectEqual(@as(u64, 0), g.messages.retention_refusals[@intFromEnum(topic_mod.Kind.data_column_sidecar)]);
         const tx = &g.sessions.rows[destination.index].io.tx;
         try std.testing.expectEqual(@as(usize, 1), tx.data.count);
-        const fresh = (try tx.data.next(&g.messages.store)).?.message;
+        const fresh = (tx.data.next(&g.messages.store, g.last_now_ms, g.options.tx_timeout_ms)).?.message;
         try std.testing.expectEqual(topic_mod.validMessageId(name, "fresh", .{}), g.messages.store.get(fresh).?.id);
         for (0..4) |_| {
-            const segment = try g.writeSegment(destination);
+            const segment = g.writeSegment(destination);
             if (segment.len == 0) break;
             g.advanceWrite(destination, segment.len, now.millis());
         }
@@ -242,63 +242,74 @@ test "gossip retention forwards fresh messages while slow recipients queue the o
     }
 }
 
-test "gossipsub cache eviction skips unsent frames resets partial frames and preserves completed writes" {
+test "gossipsub cache eviction skips pending frames and preserves active frames" {
     const test_topic = "/eth2/01020304/beacon_block/ssz_snappy";
     const Stage = enum { unstarted, partial, complete };
-    for ([_]Stage{ .unstarted, .partial, .complete }) |stage| {
-        var setup: Pair = .{};
-        try setup.initOpts(.{ .random_seed = 1, .mcache_capacity = 1 }, .{ .random_seed = 1 });
-        defer setup.deinit();
-        try setup.connectMesh();
-        const g = setup.shared.client.gossipsub;
-        const index = g.sessions.find(setup.shared.handles.client).?;
-        const peer = &g.sessions.rows[index];
-        const stream = peer.outStream().?;
-        const before = g.peers.scores.penalties;
-        const first = try g.publish(test_topic, "old payload", setup.shared.pair.now);
-        try std.testing.expectEqual(@as(u16, 1), first.queued);
-        const handle = g.messages.history.message(g.messages.history.head);
-        var received_old = false;
-        if (stage != .unstarted) {
-            if (stage == .partial) g.options.output_per_peer = 1;
-            try setup.pumpOnce();
-            for (setup.serverMessages()) |event| if (std.mem.eql(u8, event.bytes, "old payload")) {
-                received_old = true;
-            };
-            if (stage == .partial) {
-                try std.testing.expect((try peer.io.tx.data.next(&g.messages.store)).?.cursor.sent > 0);
-                g.recovery.add(&g.peers, @splat(9), peer.logical, peer.conn, 1, setup.shared.pair.now.millis() + 30_000);
-                g.recovery.controlSent(peer.conn, 1, 12_000, setup.shared.pair.now.millis());
-            } else try std.testing.expectEqual(@as(usize, 0), peer.io.tx.data.count);
-        }
-        _ = try g.publish(test_topic, "new payload", setup.shared.pair.now);
-        try std.testing.expect(g.messages.store.get(handle) == null);
-        g.options.output_per_peer = 64 * 1024;
-        var received_new = false;
-        for (0..16) |_| {
-            try setup.pumpOnce();
-            for (setup.serverMessages()) |event| {
-                if (std.mem.eql(u8, event.bytes, "old payload")) received_old = true;
-                if (std.mem.eql(u8, event.bytes, "new payload")) received_new = true;
+    var random = std.Random.DefaultPrng.init(8712);
+    var large: [80_000]u8 = undefined;
+    random.random().bytes(&large);
+    for ([_][]const u8{ "old payload", &large }) |payload| {
+        for ([_]Stage{ .unstarted, .partial, .complete }) |stage| {
+            var setup: Pair = .{};
+            try setup.initOpts(.{ .random_seed = 1, .mcache_capacity = 1 }, .{ .random_seed = 1 });
+            defer setup.deinit();
+            try setup.connectMesh();
+            const g = setup.shared.client.gossipsub;
+            const index = g.sessions.find(setup.shared.handles.client).?;
+            const peer = &g.sessions.rows[index];
+            const stream = peer.outStream().?;
+            const before = g.peers.scores.penalties;
+            const first = try g.publish(test_topic, payload, setup.shared.pair.now);
+            try std.testing.expectEqual(@as(u16, 1), first.queued);
+            const handle = g.messages.history.message(g.messages.history.head);
+            var received_old = false;
+            if (stage != .unstarted) {
+                if (stage == .partial) g.options.output_per_peer = 1;
+                for (0..64) |_| {
+                    try setup.pumpOnce();
+                    for (setup.serverMessages()) |event| if (std.mem.eql(u8, event.bytes, payload)) {
+                        received_old = true;
+                    };
+                    if (stage == .partial or received_old) break;
+                }
+                if (stage == .partial) {
+                    try std.testing.expect(peer.io.tx.active.data.sent() > 0);
+                    g.recovery.add(&g.peers, @splat(9), peer.logical, peer.conn, 1, setup.shared.pair.now.millis() + 30_000);
+                    g.recovery.controlSent(peer.conn, 1, 12_000, setup.shared.pair.now.millis());
+                } else try std.testing.expectEqual(@as(usize, 0), peer.io.tx.data.count);
             }
+            _ = try g.publish(test_topic, "new payload", setup.shared.pair.now);
+            if (stage == .partial and payload.len > 64 * 1024) {
+                const retained = g.messages.store.get(handle).?;
+                try std.testing.expect(!retained.history);
+                try std.testing.expectEqual(@as(u16, 1), retained.senders);
+            } else try std.testing.expect(g.messages.store.get(handle) == null);
+            g.options.output_per_peer = 64 * 1024;
+            var received_new = false;
+            for (0..64) |_| {
+                try setup.pumpOnce();
+                for (setup.serverMessages()) |event| {
+                    if (std.mem.eql(u8, event.bytes, payload)) received_old = true;
+                    if (std.mem.eql(u8, event.bytes, "new payload")) received_new = true;
+                }
+            }
+            try std.testing.expect(g.messages.store.get(handle) == null);
+            try std.testing.expectEqual(stage != .unstarted, received_old);
+            try std.testing.expect(received_new);
+            try std.testing.expectEqual(stream, peer.outStream().?);
+            try std.testing.expectEqualDeep(before, g.peers.scores.penalties);
+            try std.testing.expectEqual(@as(usize, if (stage == .partial) 1 else 0), g.recovery.len);
+            const metrics = &g.delivery_metrics.recipients[@intFromEnum(delivery.Origin.publication)];
+            try std.testing.expectEqual(@as(u64, 2), metrics[@intFromEnum(Delivery.Outcome.queued)]);
+            const cancelled: u64 = switch (stage) {
+                .unstarted => 1,
+                .partial => 0,
+                .complete => 0,
+            };
+            try std.testing.expectEqual(cancelled, metrics[@intFromEnum(Delivery.Outcome.cancelled)]);
+            try std.testing.expectEqual(2 - cancelled, metrics[@intFromEnum(Delivery.Outcome.completed)]);
+            g.cancelWrites(g.sessions.ref(index));
+            try std.testing.expectEqual(@as(u64, 2), metrics[@intFromEnum(Delivery.Outcome.cancelled)] + metrics[@intFromEnum(Delivery.Outcome.completed)]);
         }
-        try std.testing.expectEqual(stage == .complete, received_old);
-        try std.testing.expectEqual(stage != .partial, received_new);
-        if (stage == .partial) {
-            try std.testing.expect(peer.outStream() == null or !std.meta.eql(stream, peer.outStream().?));
-        } else try std.testing.expectEqual(stream, peer.outStream().?);
-        try std.testing.expectEqualDeep(before, g.peers.scores.penalties);
-        try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
-        const metrics = &g.delivery_metrics.recipients[@intFromEnum(delivery.Origin.publication)];
-        try std.testing.expectEqual(@as(u64, 2), metrics[@intFromEnum(Delivery.Outcome.queued)]);
-        const cancelled: u64 = switch (stage) {
-            .unstarted => 1,
-            .partial => 2,
-            .complete => 0,
-        };
-        try std.testing.expectEqual(cancelled, metrics[@intFromEnum(Delivery.Outcome.cancelled)]);
-        try std.testing.expectEqual(2 - cancelled, metrics[@intFromEnum(Delivery.Outcome.completed)]);
-        g.cancelWrites(g.sessions.ref(index));
-        try std.testing.expectEqual(@as(u64, 2), metrics[@intFromEnum(Delivery.Outcome.cancelled)] + metrics[@intFromEnum(Delivery.Outcome.completed)]);
     }
 }
