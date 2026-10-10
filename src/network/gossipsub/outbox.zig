@@ -335,8 +335,9 @@ pub const Outbox = struct {
                     self.active = .control;
                 } else if (self.data.next(store, now_ms, self.queue_timeout_ms)) |tx| {
                     const acquired = active_send.Frame.acquire(store, tx.message, &self.small_frame, now_ms, self.active_send_timeout_ms) orelse {
-                        _ = self.data.complete();
+                        const receipt = self.data.complete();
                         self.dropped(.active_capacity);
+                        self.last_drop_kind = receipt.kind;
                         self.control_burst = 0;
                         continue;
                     };
@@ -723,6 +724,7 @@ test "gossip active capacity refusal drops pending data and immediately serves c
     try std.testing.expectEqualStrings("control", tx.segment(&store, 2));
     try std.testing.expectEqual(@as(usize, 0), tx.data.count);
     try std.testing.expectEqual(@as(u64, 1), tx.drops[@intFromEnum(DropReason.active_capacity)]);
+    try std.testing.expectEqual(@as(?topic.Kind, .beacon_block), tx.last_drop_kind);
     try std.testing.expectEqual(@as(u16, 0), store.get(message).?.senders);
     try std.testing.expectEqual(@as(?u64, 6002), tx.active_deadline_ms);
     _ = tx.advance(7).?;
