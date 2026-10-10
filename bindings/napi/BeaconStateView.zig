@@ -902,7 +902,7 @@ pub fn isExecutionStateType(self: *BeaconStateView) !js.Boolean {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const fork_seq = cached_state.state.forkSeq();
-    return js.Boolean.from(fork_seq.gte(.bellatrix) and fork_seq.lt(.gloas));
+    return js.Boolean.from(fork_seq.gte(.bellatrix));
 }
 
 /// Check whether execution is enabled for the given Lodestar-shaped block object.

@@ -40,7 +40,7 @@ describe("Gloas native state view", () => {
     try {
       expect(state.forkName).toBe("gloas");
       expect(state.isExecutionEnabled(ssz.gloas.BeaconBlock.defaultValue())).toBe(true);
-      expect(state.isExecutionStateType).toBe(false);
+      expect(state.isExecutionStateType).toBe(true);
       expect(state.isMergeTransitionComplete).toBe(true);
       expect(Buffer.compare(state.serialize(), ssz.gloas.BeaconState.serialize(value))).toBe(0);
       expect(state.hashTreeRoot()).toEqual(ssz.gloas.BeaconState.hashTreeRoot(value));
