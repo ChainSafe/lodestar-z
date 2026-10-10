@@ -75,7 +75,8 @@ pub const MessageAdmission = @import("message_admission.zig").Admission;
 pub const MessageEvent = @import("messages.zig").MessageEvent;
 pub const MessageSink = @import("messages.zig").MessageSink;
 
-const Turn = @import("turn.zig").Turn;
+const turn_mod = @import("turn.zig");
+const Turn = turn_mod.Turn;
 const Layout = @import("layout.zig").Layout;
 pub const MemoryPlan = @import("layout.zig").Plan;
 
@@ -166,6 +167,7 @@ pub const ReceiveDiscard = enum { capacity, timeout, unattributed_timeout };
 
 /// Cumulative protocol events, independent of session lifetimes.
 pub const Counters = struct {
+    pump_budget_exhausted: [turn_mod.budget_count]u64 = @splat(0),
     receive_discards: [std.meta.fields(ReceiveDiscard).len]u64 = @splat(0),
     broken_promises: u64 = 0,
     ihave_budget_skipped: u64 = 0,
@@ -541,7 +543,7 @@ pub fn writeCompleted(self: *Gossipsub, session: sessions_mod.SessionRef, comple
     const peer = session.index;
     switch (completion) {
         .control => |receipt| self.controlSent(peer, receipt.token, now_ms),
-        .data => |receipt| self.delivery_metrics.recipient(receipt.origin, .completed),
+        .data => |receipt| self.delivery_metrics.completed(receipt, now_ms),
     }
 }
 
@@ -648,6 +650,9 @@ pub fn runTurn(self: *Gossipsub, router: *Router, engine: *Engine, turn: *Turn) 
     }
     // Writers a spent call or output budget left waiting, for the send-pressure log.
     const exhausted = turn.exhausted();
+    inline for (std.meta.fields(turn_mod.Budget)) |budget| {
+        if (exhausted.contains(@enumFromInt(budget.value))) self.counters.pump_budget_exhausted[budget.value] +|= 1;
+    }
     if (exhausted.contains(.calls) or exhausted.contains(.output)) {
         var next = self.sessions.ready.head;
         for (0..self.sessions.ready.len) |_| {

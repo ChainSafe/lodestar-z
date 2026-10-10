@@ -24,7 +24,7 @@ pub const Transmission = struct {
 };
 
 /// A frame that QUIC accepted in full.
-pub const Receipt = struct { origin: Origin };
+pub const Receipt = struct { origin: Origin, kind: gossip_limits.Kind, enqueued_ms: u64 };
 
 const Slot = struct { tx: Transmission = undefined, next: u32 = none };
 
@@ -192,7 +192,8 @@ pub const Queue = struct {
 
     pub fn complete(self: *Queue) Receipt {
         const class = self.current.?;
-        const receipt: Receipt = .{ .origin = self.pool.slots[self.fifos[@intFromEnum(class)].head].tx.origin };
+        const tx = &self.pool.slots[self.fifos[@intFromEnum(class)].head].tx;
+        const receipt: Receipt = .{ .origin = tx.origin, .kind = tx.kind, .enqueued_ms = tx.enqueued_ms };
         self.remove(class);
         self.current = null;
         return receipt;

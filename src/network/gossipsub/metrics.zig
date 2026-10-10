@@ -62,7 +62,14 @@ pub const Delivery = struct {
     const delivery = @import("delivery.zig");
     pub const Outcome = enum { selected, queued, pressured, unavailable, completed, cancelled };
 
+    const Residence = histogram.Duration(&.{ 1, 10, 30, 100, 300, 1000, 3000, 6000, 30000 });
+    residence: [policy.kind_count]Residence = @splat(.{}),
     recipients: [delivery.origin_count][@typeInfo(Outcome).@"enum".fields.len]u64 = @splat(@splat(0)),
+
+    pub fn completed(self: *Delivery, receipt: delivery.Receipt, now_ms: u64) void {
+        self.recipient(receipt.origin, .completed);
+        self.residence[@intFromEnum(receipt.kind)].observe(now_ms -| receipt.enqueued_ms);
+    }
 
     pub fn recipient(self: *Delivery, origin: delivery.Origin, outcome: Outcome) void {
         if (outcome != .completed and outcome != .cancelled) self.recipients[@intFromEnum(origin)][@intFromEnum(Outcome.selected)] +|= 1;
@@ -74,6 +81,8 @@ pub const Delivery = struct {
     }
 
     pub fn write(self: *const Delivery, w: *prom.Encoder) prom.Error!void {
+        const residence = try w.histograms(.{ .name = "gossipsub_send_queue_seconds", .kind = .histogram, .help = "Time from enqueue until QUIC accepts the last byte of a completed data frame; excludes cancelled frames and does not measure remote delivery", .unit = .seconds, .labels = &.{"kind"} }, Residence);
+        inline for (std.meta.fields(policy.Kind)) |kind| try residence.histogram(.{kind.name}, &self.residence[kind.value]);
         const recipients = try w.family(.{ .name = "gossipsub_data_recipients_total", .kind = .counter, .help = "Data frame recipients by delivery origin: selected, then queued, pressured or unavailable; queued frames later complete when QUIC accepts their last byte, which is not delivery, or are cancelled by cache eviction or a stream reset", .labels = &.{ "origin", "outcome" } });
         inline for (@typeInfo(delivery.Origin).@"enum".fields) |origin| {
             inline for (@typeInfo(Outcome).@"enum".fields) |outcome| try recipients.sample(.{ origin.name, outcome.name }, self.recipients[origin.value][outcome.value]);

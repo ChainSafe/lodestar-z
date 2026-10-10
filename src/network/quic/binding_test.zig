@@ -7,6 +7,7 @@ test "quiche config initializes with the transport bounds" {
         limits.idle_timeout_ms,
         limits.connection_window_max,
         limits.connection_window_max / 2,
+        limits.initial_congestion_window_packets,
     );
     defer config.deinit();
     try std.testing.expect(binding.c.quiche_version_is_supported(1));

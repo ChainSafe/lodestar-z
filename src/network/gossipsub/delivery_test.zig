@@ -120,7 +120,7 @@ test "gossip delivery keeps the local reserve from ordinary frames and pressures
     try std.testing.expectError(error.Descriptors, queue.append(&store, message, .publication, descriptors, 3));
     try std.testing.expectEqual(@as(usize, 4), queue.classCount(.local));
     // Sending a local frame frees no ordinary room; sending an ordinary one does.
-    try std.testing.expectEqual(Origin.publication, complete(&queue, &store).origin);
+    try std.testing.expectEqual(Receipt{ .origin = .publication, .kind = .beacon_block, .enqueued_ms = 2 }, complete(&queue, &store));
     try std.testing.expect(queue.full());
     queue.current = .ordinary;
     try std.testing.expectEqual(Origin.forward, complete(&queue, &store).origin);

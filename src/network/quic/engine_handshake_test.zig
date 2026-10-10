@@ -202,3 +202,23 @@ test "engine releases inbound admission before advancing the receive batch" {
     try pair.pump();
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
 }
+
+test "quic transport metrics survive retirement and report live path windows" {
+    var pair: Pair = .{};
+    try pair.init(.{ .initial_congestion_window_packets = 32 }, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+    const before = pair.client.metricsSnapshot(true);
+    try std.testing.expect(before.counters.sent > 0);
+    try std.testing.expectEqual(@as(u16, 1), before.paths);
+    try std.testing.expectEqual(@as(u16, 0), before.unsampled);
+    try std.testing.expect(before.cwnd.sum >= 32 * 1200);
+    try std.testing.expect(before.rtt.sum > 0);
+    const stopped = pair.client.metricsSnapshot(false);
+    try std.testing.expectEqual(before.counters, stopped.counters);
+    try std.testing.expectEqual(@as(u16, 0), stopped.paths);
+    pair.client.registry.retire(handles.client.index);
+    const after = pair.client.metricsSnapshot(true);
+    try std.testing.expectEqual(before.counters, after.counters);
+    try std.testing.expectEqual(@as(u16, 0), after.paths);
+}

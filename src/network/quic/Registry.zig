@@ -5,6 +5,7 @@ const index_list = @import("../index_list.zig");
 const RouteTable = @import("RouteTable.zig");
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
+const metrics = @import("metrics.zig");
 
 const Registry = @This();
 
@@ -24,6 +25,7 @@ active_len: u16 = 0,
 handshaking: u16 = 0,
 dialing: u16 = 0,
 outbound: u16 = 0,
+retired_metrics: metrics.Counters = .{},
 
 pub fn init(allocator: std.mem.Allocator, slots_max: u16, seed: u64) !Registry {
     const slots = try allocator.alloc(Connection, slots_max);
@@ -117,6 +119,7 @@ pub fn retire(self: *Registry, index: u16) void {
     assert(slot.state != .free);
     self.removeRoute(index);
     self.unlink(index);
+    if (slot.conn) |conn| self.retired_metrics.retire(conn);
     slot.release();
     self.unclaim(index);
     assert(slot.state == .free);

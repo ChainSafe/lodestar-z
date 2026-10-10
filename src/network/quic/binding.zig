@@ -68,7 +68,7 @@ pub fn check(rc: anytype) Error!?usize {
 pub const Config = struct {
     ptr: *c.quiche_config,
 
-    pub fn init(idle_timeout_ms: u64, connection_window: u64, stream_window: u64) Error!Config {
+    pub fn init(idle_timeout_ms: u64, connection_window: u64, stream_window: u64, initial_congestion_window_packets: u16) Error!Config {
         const ptr = c.quiche_config_new(c.QUICHE_PROTOCOL_VERSION) orelse return error.Unknown;
         c.quiche_config_set_max_idle_timeout(ptr, idle_timeout_ms);
         c.quiche_config_set_max_recv_udp_payload_size(ptr, limits.recv_udp_payload_max);
@@ -88,7 +88,7 @@ pub const Config = struct {
         c.quiche_config_enable_pacing(ptr, native_pacing_supported);
         c.quiche_config_set_initial_congestion_window_packets(
             ptr,
-            limits.initial_congestion_window_packets,
+            initial_congestion_window_packets,
         );
         c.quiche_config_set_max_send_udp_payload_size(ptr, limits.send_udp_payload_max);
         c.quiche_config_discover_pmtu(ptr, false);

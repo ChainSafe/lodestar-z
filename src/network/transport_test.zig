@@ -150,7 +150,7 @@ test "transport validates socket work limits before startup allocation" {
         .{ .send_per_turn_max = 0 },
         .{ .send_per_turn_max = Transport.send_burst_max + 1 },
         .{ .receive_per_turn_max = 0 },
-        .{ .receive_per_turn_max = constants.receive_batch_max + 1 },
+        .{ .receive_per_turn_max = Transport.receive_per_turn_max + 1 },
         .{ .burst_per_connection = 0 },
         .{ .send_per_turn_max = 8, .burst_per_connection = 9 },
     };
@@ -163,7 +163,7 @@ test "transport validates socket work limits before startup allocation" {
         }));
     }
     try (Transport.WorkLimits{ .send_per_turn_max = 1, .receive_per_turn_max = 1, .burst_per_connection = 1 }).validate();
-    try (Transport.WorkLimits{ .burst_per_connection = Transport.send_burst_max }).validate();
+    try (Transport.WorkLimits{ .burst_per_connection = Transport.send_burst_max, .receive_per_turn_max = Transport.receive_per_turn_max }).validate();
 }
 
 test "transport requests configured socket buffers and records the kernel's sizes" {
