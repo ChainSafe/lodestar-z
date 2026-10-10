@@ -315,7 +315,6 @@ fn processorLimits(chain: *const Chain, options: *const Options) network.gossip_
 fn hubResolved(chain: *const Chain, options: *const Options) !network.configuration.Resolved {
     const limits = processorLimits(chain, options);
     return network.configuration.resolve(.{
-        .profile = .beacon_node,
         .seed = 7,
         .forks = chain.network_config.forks[0..chain.network_config.boundary_count],
         .admission_policy = chain.network_config.requestPolicy(),
@@ -385,24 +384,29 @@ fn decayOver(ms: f64, slot_ms: f64) f64 {
 
 const slow_tick_ms = 10;
 
-/// A small-profile spoke with a 100 ms heartbeat, so it grafts the hub quickly. A slow spoke reads
+/// A bounded spoke with a 100 ms heartbeat, so it grafts the hub quickly. A slow spoke reads
 /// its tick's share of `slow_rate` per pump and advertises the smallest stream window.
 fn spokeResolved(chain: *const Chain, options: *const Options, index: u16, slow: bool) !network.configuration.Resolved {
     const frame_bytes = chain.attestation_bytes + 64;
     const input: usize = @max(1, @as(usize, options.slow_rate) * frame_bytes * slow_tick_ms / 1000);
     const slow_limits: network.Limits = .{ .connections_max = 16, .handshaking_max = 8, .dialing_max = 4, .receive_budget_bytes = 16 * mib };
     return network.configuration.resolve(.{
-        .profile = .small,
         .seed = 1_000 + index,
         .forks = chain.network_config.forks[0..chain.network_config.boundary_count],
         .admission_policy = chain.network_config.requestPolicy(),
-        .limits = if (slow) slow_limits else null,
+        .limits = if (slow) slow_limits else .{ .connections_max = 16, .handshaking_max = 8, .dialing_max = 4, .receive_budget_bytes = 64 * mib },
+        .peers = .{ .capacity = 64, .outbound_reserve = 4, .target_peers = 8, .max_peers = 12, .min_outbound = 2 },
+        .reqresp = .{ .outbound_max = 18, .serving_max = 18 },
         .socket_buffers = .{ .quic = .{ .receive = 4 * mib, .send = 4 * mib } },
         .router = .{ .capabilities = chain.update.capabilities },
         .gossip = .{
             .topic_policy = chain.network_config.topics[0..chain.network_config.boundary_count],
             .message_id_policy = .{ .phase0_digest = chain.network_config.phase0_digest },
             .heartbeat_interval_ms = 100,
+            .receive_arena_bytes = 16 * mib,
+            .seen_capacity = 4096,
+            .validation_capacity = 64,
+            .mcache_arena_bytes = 16 * mib,
             .mcache_capacity = 4096,
             .input_per_peer = if (slow) input else null,
             .input_per_pump = if (slow) input else null,

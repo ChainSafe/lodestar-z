@@ -26,7 +26,6 @@ pub fn run(init: std.process.Init) !void {
     const network_config = try network.chain.Config.init(chain_config, false);
     const update = try network_config.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
     const resolved = try network.configuration.resolve(.{
-        .profile = .beacon_node,
         .seed = 7,
         .limits = .{ .connections_max = 256, .handshaking_max = 32, .dialing_max = 32, .receive_budget_bytes = 512 * 1024 * 1024 },
         .peers = .{ .target_peers = peers, .max_peers = peers + 20, .min_outbound = peers / 4 },

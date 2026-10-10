@@ -7,6 +7,12 @@ const StorageRefusal = @import("messages.zig").StorageRefusal;
 const IwantOutcome = @import("metrics.zig").IwantOutcome;
 
 pub fn writeCounters(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
+    try w.enums(.{
+        .name = "gossipsub_receive_discards_total",
+        .kind = .counter,
+        .help = "Gossip frames discarded for receive capacity, attributable timeout or unattributed expiry",
+        .labels = &.{"reason"},
+    }, Gossipsub.ReceiveDiscard, &g.counters.receive_discards);
     try g.rpc_received.write(.recv, w);
     var sent = g.retired_rpc_sent;
     for (g.sessions.rows) |*row| sent.add(&row.io.tx.rpc_sent);

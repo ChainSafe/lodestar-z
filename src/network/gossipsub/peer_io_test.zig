@@ -91,3 +91,23 @@ test "gossip local discard releases pages preserves the next frame and keeps the
     try std.testing.expectEqualStrings("next", (try io.rpc.?.reader.next()).?.subscription.topic);
     _ = sessions.finishFrame(io);
 }
+
+test "gossip receive length declarations reserve no overflow pages" {
+    var sessions = try test_support.sessions(std.testing.allocator, 1);
+    defer sessions.deinit(std.testing.allocator);
+    const io = &sessions.rows[0].io;
+    const pages = sessions.receive_pool.free_pages;
+    var writer = protobuf.Writer.init(io.unread);
+    writer.varint(io.body.len + 4096);
+    io.unread_end = writer.len;
+    try std.testing.expect(!(try io.feedUnread(&sessions.receive_pool, writer.len, 10)).complete);
+    try std.testing.expectEqual(pages, sessions.receive_pool.free_pages);
+    try std.testing.expectEqual(@as(usize, 0), io.reader.filled);
+    io.unread_start = 0;
+    io.unread_end = 1;
+    io.unread[0] = 0;
+    _ = try io.feedUnread(&sessions.receive_pool, 1, 11);
+    try std.testing.expectEqual(pages, sessions.receive_pool.free_pages);
+    try std.testing.expectEqual(@as(usize, 1), io.reader.filled);
+    _ = sessions.resetRx(0);
+}

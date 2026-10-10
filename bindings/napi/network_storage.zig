@@ -67,7 +67,7 @@ pub fn initialize(runtime: *Runtime, app: *const application_cfg.Config) !void {
     const gossip_backing = gossip.Table.backingBytes(&processor_options);
     const resident_topics = try n.gossipsub.topic_policy.validate(gossip_options.topic_policy);
     const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.boundary_count]);
-    const publication_capacity: usize = if (runtime.owner.?.config.profile == .small) 32 else publications.capacity_max;
+    const publication_capacity: usize = publications.capacity_max;
     const bridge = publication_capacity * @sizeOf(publications.Cell) + 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + Stores.bytesForTopics(runtime.peer_capacity, resident_topics) + @sizeOf(projection.Lane);
     if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
     runtime.metrics = try network_metrics.Export.init(metrics_capacity);

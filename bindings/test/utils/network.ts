@@ -113,10 +113,11 @@ export function networkConfig(): NativeRuntimeConfig {
       idontwantMinDataSize: 16829,
       ipAllowlist: [],
       iwantFollowupMs: 12000n,
-      largeFrameTimeoutMs: 30000n,
+      largeFrameTimeoutMs: 6000n,
       opportunisticGraftIntervalMs: 60000n,
       pressureTimeoutMs: 30000n,
       processor,
+      receiveBufferBytes: 16 * 1024 * 1024,
       retainedScoreMs: 38400000n,
       score: {
         behaviourDecay: 0.9,
@@ -169,7 +170,6 @@ export function networkConfig(): NativeRuntimeConfig {
         headSlot: 100n,
       },
     },
-    profile: "small",
   };
 }
 

@@ -112,13 +112,12 @@ pub fn main(init: std.process.Init) !void {
     gossip_topics[0].rules[@intFromEnum(network.gossipsub.topic.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 100 };
     var blob_schedule: [network.reqresp.request_policy.schedule_max]network.reqresp.request_policy.BlobLimit = undefined;
     const resolved = try network.configuration.resolve(.{
-        .profile = .small,
         .seed = 17,
         .forks = &.{.{ .digest = local.fork.digest, .fork = fork }},
         .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2 },
         .peers = .{ .capacity = 4, .outbound_reserve = 1, .target_peers = 1, .max_peers = 3, .min_outbound = 0 },
         .control = .{ .inbound_status_grace_ms = 20, .ping_inbound_ms = 1_000, .ping_outbound_ms = 1_000 },
-        .gossip = .{ .topic_policy = &gossip_topics },
+        .gossip = .{ .topic_policy = &gossip_topics, .receive_arena_bytes = 16 * 1024 * 1024 },
         .admission_policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&config.mainnet.config, &blob_schedule),
     });
     try peer.node.init(a, init.io, &resolved, .{

@@ -22,6 +22,7 @@ const KeyPair = @import("wire/keys.zig").KeyPair;
 const time = @import("time.zig");
 const topic_fixture = @import("gossipsub/topic_fixture.zig");
 const Source = @import("wake_sources.zig").Source;
+const Gossipsub = @import("gossipsub/Gossipsub.zig");
 
 fn init(setup: *core_test.Setup, local: *const t.LocalState) !void {
     var opts = core_test.resolvedOptions();
@@ -774,4 +775,33 @@ test "core closes regular and direct connections on the active gossip send deadl
         _ = try setup.turn(&setup.client, .{});
         try expect(!g.admitted(conn));
     }
+}
+
+test "core charges an incomplete large gossip frame once without a P7 penalty" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..80) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.peer_manager.snapshots(&snapshots);
+    const snapshot = snapshots[0];
+    const g = setup.client.protocols.gossipsub;
+    const index = g.sessions.find(snapshot.connection.?).?;
+    const io = &g.sessions.rows[index].io;
+    io.reader.declared = io.body.len + 4097;
+    io.reader.filled = io.body.len + 4096;
+    _ = g.sessions.receive_pool.writable(&io.overflow).?;
+    io.overflow.len = 4096;
+    io.frame_since = setup.pair.now.millis();
+    io.progress_ms = setup.pair.now.millis();
+    g.options.large_frame_timeout_ms = 100;
+    g.settle(index);
+    setup.pair.advance(100);
+    _ = try setup.turn(&setup.client, .{});
+    try equal(snapshot.score - 10, setup.client.peer_manager.catalog.get(snapshot.peer).?.score);
+    try equal(@as(u64, 1), g.counters.receive_discards[@intFromEnum(Gossipsub.ReceiveDiscard.timeout)]);
+    for (g.peers.scores.penalties) |count| try equal(@as(u64, 0), count);
+    try equal(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
+    _ = try setup.turn(&setup.client, .{});
+    try equal(snapshot.score - 10, setup.client.peer_manager.catalog.get(snapshot.peer).?.score);
 }

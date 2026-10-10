@@ -67,9 +67,8 @@ test("publication pressure preserves urgent, control and request admission", asy
   }
 });
 
-test("beacon profile admits 200 publications while control remains available", async () => {
+test("network admits 200 publications while control remains available", async () => {
   const config = applicationConfig();
-  config.profile = "beaconNode";
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
   config.resources.nativeBudgetBytes = 512 * 1024 * 1024;
   const runtime = startRuntime(config);

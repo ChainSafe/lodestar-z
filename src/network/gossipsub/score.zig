@@ -79,7 +79,7 @@ pub const TopicWeights = struct {
 
 pub const GlobalWeights = struct { p5: f64 = 0, p6: f64 = 0, p7: f64 = 0 };
 /// Protocol violations that each add one P7 behaviour penalty unit.
-pub const Penalty = enum { graft_backoff, graft_flood, broken_iwant, malformed_rpc, malformed_frame, large_frame_timeout };
+pub const Penalty = enum { graft_backoff, graft_flood, broken_iwant, malformed_rpc, malformed_frame };
 pub const Breakdown = struct {
     topics: []TopicWeights,
     global: GlobalWeights = .{},

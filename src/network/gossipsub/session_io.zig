@@ -297,6 +297,7 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
             const take = @min(io.unread_end - io.unread_start, peer.input, turn.budget.input);
             const result = io.feedUnread(&self.sessions.receive_pool, take, now.millis()) catch |err| {
                 if (err == error.ReceiveCapacity) {
+                    self.counters.receive_discards[@intFromEnum(Gossipsub.ReceiveDiscard.capacity)] += 1;
                     const victim = self.sessions.receiveVictim(index) orelse index;
                     const work = discardInboundFrame(self, victim) + self.sessions.rows.len;
                     if (victim != index) self.settle(victim);
@@ -484,16 +485,23 @@ pub fn expireSession(self: *Gossipsub, router: *Router, engine: *Engine, index: 
             },
             .receive_frame => {
                 if (io.rpc != null) {
+                    g.counters.receive_discards[@intFromEnum(Gossipsub.ReceiveDiscard.unattributed_timeout)] += 1;
                     turn.budget.work -|= discardInboundFrame(self, index);
                     continue;
                 }
-                if (io.discarding) {
-                    g.counters.local_pressure_resets += 1;
+                const unread = io.unread_start < io.unread_end or io.fin_seen or
+                    (if (peer.in_stream) |stream| engine.streamReadable(stream) catch true else true);
+                const attributable = !io.discarding and !unread and (io.reader.declaredLen() orelse 0) > io.body.len;
+                if (attributable) {
+                    std.debug.assert(g.receive_timeouts_len < g.receive_timeouts.len);
+                    g.receive_timeouts[g.receive_timeouts_len] = g.peers.rows[peer.logical.index].identity;
+                    g.receive_timeouts_len += 1;
+                    g.counters.receive_discards[@intFromEnum(Gossipsub.ReceiveDiscard.timeout)] += 1;
+                    g.peers.rows[peer.logical.index].large_frame_denied_until = now_ms +| g.options.pressure_timeout_ms;
                 } else {
-                    if ((io.reader.declaredLen() orelse 0) > io.body.len) {
-                        g.peers.penalize(peer.logical, .large_frame_timeout);
-                        g.peers.rows[peer.logical.index].large_frame_denied_until = now_ms +| g.options.pressure_timeout_ms;
-                    }
+                    if (!io.discarding) g.counters.receive_discards[@intFromEnum(Gossipsub.ReceiveDiscard.unattributed_timeout)] += 1;
+                    turn.budget.work -|= self.cancelPromises(index, true);
+                    if (io.discarding) g.counters.local_pressure_resets += 1;
                 }
                 resetInbound(self, engine, index);
             },

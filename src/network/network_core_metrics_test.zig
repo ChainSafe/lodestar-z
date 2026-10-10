@@ -158,6 +158,7 @@ const contract = [_]Series{
     .{ .name = "gossipsub_msg_publish_count_total", .kind = "counter", .labels = &.{"topic"} },
     .{ .name = "gossipsub_msg_publish_bytes_total", .kind = "counter", .labels = &.{"topic"} },
     .{ .name = "gossipsub_mesh_changes_total", .kind = "counter", .labels = &.{ "topic", "event", "reason" } },
+    .{ .name = "gossipsub_receive_discards_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "gossipsub_behaviour_penalties_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "lodestar_gossip_peer_score_by_threshold_count", .kind = "gauge", .labels = &.{"threshold"} },
     .{ .name = "lodestar_gossip_score_avg_min_max_sum", .kind = "gauge" },
@@ -660,7 +661,9 @@ test "metrics export gossip message, mesh change, penalty and promise counters t
         "gossipsub_mesh_changes_total{topic=\"beacon_block\",event=\"join\",reason=\"remote_graft\"} 1\n",
         "gossipsub_mesh_changes_total{topic=\"unknown\",event=\"leave\",reason=\"refused_graft\"} 0\n",
         "gossipsub_behaviour_penalties_total{reason=\"graft_flood\"} 6\n",
-        "gossipsub_behaviour_penalties_total{reason=\"large_frame_timeout\"} 0\n",
+        "gossipsub_receive_discards_total{reason=\"capacity\"} 0\n",
+        "gossipsub_receive_discards_total{reason=\"timeout\"} 0\n",
+        "gossipsub_receive_discards_total{reason=\"unattributed_timeout\"} 0\n",
         "gossipsub_iwant_promise_sent_total 9\n",
     };
     const running = try f.render(true);

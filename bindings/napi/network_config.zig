@@ -10,7 +10,6 @@ const bootstrap_max = n.peers.Discovery.bootstrap_max;
 const BeaconConfig = @import("config").BeaconConfig;
 
 pub const Config = struct {
-    profile: n.configuration.Profile,
     secret: [32]u8,
     bind: n.udp.Sockets.Bindings,
     local: t.LocalState,
@@ -53,7 +52,6 @@ pub fn bindings(value: Value) !n.udp.Sockets.Bindings {
 
 pub fn parse(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
     out.* = .{
-        .profile = .small,
         .secret = @splat(0),
         .bind = undefined,
         .local = .{},
@@ -71,11 +69,6 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
         .allowlist_count = 0,
     };
     errdefer out.wipe();
-    const profile = try decode.get(value, "profile");
-    if (try profile.typeof() != .string) return error.InvalidNetworkConfig;
-    var buf: [32]u8 = undefined;
-    const name = try profile.getValueStringUtf8(&buf);
-    out.profile = if (std.mem.eql(u8, name, "small")) .small else if (std.mem.eql(u8, name, "beaconNode")) .beacon_node else return error.InvalidNetworkConfig;
     out.secret = try decode.fixed(32, try decode.get(value, "identitySecretKey"));
     out.bind = try bindings(try decode.get(value, "bind"));
     out.slot = try decode.bigint(try decode.get(value, "initialSlot"));
@@ -128,7 +121,7 @@ fn parseGossipLimits(value: Value, items_max: u32, bytes_max: u32) !n.gossip_pro
 fn parseGossip(value: Value, out: *Config) !void {
     out.gossip = .{};
     const policy = try decode.get(value, "gossipPolicy");
-    try decode.object(policy, &.{ "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "activeSendTimeoutMs", "activeSendItems", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score", "processor", "execution" });
+    try decode.object(policy, &.{ "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "activeSendTimeoutMs", "activeSendItems", "largeFrameTimeoutMs", "receiveBufferBytes", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score", "processor", "execution" });
     const processor = try decode.get(policy, "processor");
     {
         const limits_mod = n.gossip_processor.limits;
@@ -156,6 +149,7 @@ fn parseGossip(value: Value, out: *Config) !void {
         item_limits[index] = @intCast(try decode.integer(try decode.get(active_items, field.name), n.gossipsub.constants.peers_cap));
     }
     out.gossip.active_send_items = item_limits;
+    out.gossip.receive_arena_bytes = @intCast(try decode.integer(try decode.get(policy, "receiveBufferBytes"), 1024 * 1024 * 1024));
     out.gossip.large_frame_timeout_ms = try decode.bigint(try decode.get(policy, "largeFrameTimeoutMs"));
     out.gossip.seen_ttl_ms = try decode.bigint(try decode.get(policy, "seenTtlMs"));
     out.gossip.retained_score_ms = try decode.bigint(try decode.get(policy, "retainedScoreMs"));

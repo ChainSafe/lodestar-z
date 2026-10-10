@@ -129,16 +129,16 @@ fn turn(node: *network.NetworkCore, io: std.Io, outputs: network.NetworkCore.Out
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len > 2 and std.mem.eql(u8, args[1], "gossip_burst")) return network_gossip_burst.run(init, args[2..]);
-    if (args.len > 2) return error.InvalidProfile;
-    const selected = if (args.len == 2) args[1] else return error.InvalidProfile;
+    if (args.len > 2) return error.InvalidBenchmark;
+    const selected = if (args.len == 2) args[1] else return error.InvalidBenchmark;
     if (std.mem.eql(u8, selected, "gossip_burst")) return network_gossip_burst.run(init, &.{});
     if (std.mem.eql(u8, selected, "idle_wait")) return idleWait(init);
     if (std.mem.eql(u8, selected, "recovery_resolve")) return network_recovery.run(init);
     if (std.mem.eql(u8, selected, "score_collection")) return network_scores.run(init);
     if (std.mem.eql(u8, selected, "idle_transport")) return idleTransport(init);
     if (std.mem.eql(u8, selected, "idle_connections")) return idleConnections(init);
-    const profile: network.configuration.Profile = if (std.mem.eql(u8, selected, "small")) .small else if (std.mem.eql(u8, selected, "beacon_node")) .beacon_node else return error.InvalidProfile;
-    std.debug.print("profile={s} preset={s} optimize={s} warmup_turns={} measured_turns={} payload=synthetic_transport_bytes host_consensus_validation=false\n", .{ selected, @tagName(preset.active_preset), @tagName(@import("builtin").mode), warmup_turns, turns });
+    if (!std.mem.eql(u8, selected, "owner")) return error.InvalidBenchmark;
+    std.debug.print("preset={s} optimize={s} warmup_turns={} measured_turns={} payload=synthetic_transport_bytes host_consensus_validation=false\n", .{ @tagName(preset.active_preset), @tagName(@import("builtin").mode), warmup_turns, turns });
     const network_config = try network.chain.Config.init(chain_config, false);
     const io = init.io;
     const allocator = init.gpa;
@@ -149,7 +149,7 @@ pub fn main(init: std.process.Init) !void {
     const a = try allocator.create(network.NetworkCore);
     defer allocator.destroy(a);
     var backing_a = std.testing.FailingAllocator.init(allocator, .{});
-    try initialize(a, backing_a.allocator(), io, &key_a, profile, &network_config);
+    try initialize(a, backing_a.allocator(), io, &key_a, &network_config);
     defer a.deinit(io);
     std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.reservations.bytes, @sizeOf(network.NetworkCore), a.protocols.gossipsub.memoryPlan().total_bytes, backing_a.allocations });
     std.debug.print("gossip_metadata_bytes={}\n", .{a.protocols.gossipsub.memoryPlan().metadata_bytes});
@@ -170,7 +170,7 @@ pub fn main(init: std.process.Init) !void {
     const b = try allocator.create(network.NetworkCore);
     defer allocator.destroy(b);
     var backing_b = std.testing.FailingAllocator.init(allocator, .{});
-    try initialize(b, backing_b.allocator(), io, &key_b, profile, &network_config);
+    try initialize(b, backing_b.allocator(), io, &key_b, &network_config);
     defer b.deinit(io);
     var topic_buffer: [network.gossipsub.topic.topic_max_len]u8 = undefined;
     const topic = network.gossipsub.topic.build(network_config.forks[0].digest, "beacon_block", &topic_buffer);
@@ -186,10 +186,9 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("turn_allocation_calls_a={} turn_allocation_calls_b={} process_rss=external_time_maximum_resident_set_kbytes\n", .{ backing_a.allocations - allocations_a, backing_b.allocations - allocations_b });
 }
 
-fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key: *const network.KeyPair, profile: network.configuration.Profile, network_config: *const network.chain.Config) !void {
+fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key: *const network.KeyPair, network_config: *const network.chain.Config) !void {
     const update = try network_config.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
     const resolved = try network.configuration.resolve(.{
-        .profile = profile,
         .seed = 7,
         .forks = network_config.forks[0..network_config.boundary_count],
         .admission_policy = network_config.requestPolicy(),
@@ -380,7 +379,7 @@ const IdleHost = struct {
     }
 };
 
-/// A fully idle small-profile node with a host attached through its wake pipe and a host
+/// A fully idle node with a host attached through its wake pipe and a host
 /// deadline at the end of a 1 s window. Every wait comes from a deadline.
 fn idleWait(init: std.process.Init) !void {
     const io = init.io;
@@ -389,7 +388,7 @@ fn idleWait(init: std.process.Init) !void {
     defer init.gpa.destroy(node);
     const network_config = try network.chain.Config.init(chain_config, false);
     var backing = std.testing.FailingAllocator.init(init.gpa, .{});
-    try initialize(node, backing.allocator(), io, &key, .small, &network_config);
+    try initialize(node, backing.allocator(), io, &key, &network_config);
     defer node.deinit(io);
     var host: IdleHost = .{ .pipe = undefined };
     if (std.c.pipe(&host.pipe) != 0) return error.PipeFailed;
@@ -418,7 +417,7 @@ fn idleWait(init: std.process.Init) !void {
     }
     const elapsed = timestamp(io) - start;
     if (elapsed < 1_000_000_000) return error.TurnLimit;
-    std.debug.print("case=idle_wait profile=small window_ms=1000 elapsed_ns={} turns={} host_applies={} immediate_deadlines={} turn_elapsed_ns={} turn_allocation_calls={} turns_max={}\n", .{ elapsed, count, host.applies, immediate, elapsed_turns, backing.allocations - calls, idle_wait_turns_max });
+    std.debug.print("case=idle_wait window_ms=1000 elapsed_ns={} turns={} host_applies={} immediate_deadlines={} turn_elapsed_ns={} turn_allocation_calls={} turns_max={}\n", .{ elapsed, count, host.applies, immediate, elapsed_turns, backing.allocations - calls, idle_wait_turns_max });
     std.debug.print("case=idle_wait due_now", .{});
     inline for (std.meta.fields(Source)) |field| std.debug.print(" {s}={}", .{ field.name, node.due_now_turns[field.value] });
     std.debug.print("\n", .{});
@@ -526,7 +525,7 @@ const idle_connections_spokes = 200;
 /// CI fails the case above this median turn.
 const idle_connections_p50_budget_ns = 40_000;
 
-/// A hub NetworkCore (beacon_node profile, 256 connections, 210 max peers, 200 target peers)
+/// A hub NetworkCore (256 connections, 210 max peers, 200 target peers)
 /// holding 200 admitted inbound connections from spoke Transports that speak only QUIC, so the
 /// hub's negotiations and its inbound Status grace wait on future deadlines. The measured turns
 /// start within 1 s of the last admission. An idle connection must cost no visit in the engine or
@@ -537,7 +536,6 @@ fn idleConnections(init: std.process.Init) !void {
     const network_config = try network.chain.Config.init(chain_config, false);
     const update = try network_config.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
     const resolved = try network.configuration.resolve(.{
-        .profile = .beacon_node,
         .seed = 7,
         .forks = network_config.forks[0..network_config.boundary_count],
         .admission_policy = network_config.requestPolicy(),

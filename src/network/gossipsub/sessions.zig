@@ -53,19 +53,22 @@ pub const Sessions = struct {
     /// a local so ReleaseSafe does not fill it for every control frame.
     control_scratch: ControlScratch = undefined,
 
-    /// Selects a larger incomplete frame to discard before refusing a smaller receiver.
+    /// Prefer frames below 25% completion, then reclaim the most pages within that band.
+    /// Completion buys a preference, never a reservation or immunity from eviction.
     pub fn receiveVictim(self: *const Sessions, incoming: u16) ?u16 {
-        const current = &self.rows[incoming].io;
-        var largest = current.overflow.pages;
-        var victim: ?u16 = null;
+        var victim = incoming;
         for (self.rows, 0..) |*session, index| {
             const io = &session.io;
-            if (index == incoming or !session.active or io.rpc != null or io.discarding) continue;
-            if (io.overflow.pages <= largest) continue;
-            largest = io.overflow.pages;
-            victim = @intCast(index);
+            if (!session.active or io.rpc != null or io.discarding or io.overflow.pages == 0) continue;
+            const current = &self.rows[victim].io;
+            const early = io.reader.filled * 4 < io.reader.declaredLen().?;
+            const current_early = current.reader.filled * 4 < (current.reader.declaredLen() orelse 0);
+            if (current.overflow.pages == 0 or
+                (early and !current_early) or
+                (early == current_early and io.overflow.pages > current.overflow.pages))
+                victim = @intCast(index);
         }
-        return victim;
+        return if (victim == incoming) null else victim;
     }
 
     /// An opening or a close is ready work. Callers settle any other change.

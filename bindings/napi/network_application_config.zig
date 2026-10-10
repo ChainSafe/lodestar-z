@@ -26,7 +26,6 @@ pub const Config = struct {
         gossip_options.ip_allowlist = common.allowlist[0..common.allowlist_count];
         gossip_options.topic_policy = common.chain.topics[0..common.chain.boundary_count];
         return .{
-            .profile = common.profile,
             .seed = seed,
             .forks = common.chain.forks[0..common.chain.boundary_count],
             .limits = .{ .connections_max = r.connectionCapacity, .handshaking_max = r.handshakingCapacity, .dialing_max = r.dialingCapacity, .receive_budget_bytes = r.receiveBudgetBytes },
@@ -68,7 +67,7 @@ const resource_maxima: Resources = .{
     .bridgeBudgetBytes = 1024 * 1024 * 1024,
 };
 
-const required = .{ "beaconConfig", "profile", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "gossipPolicy", "resources", "identify", "serveLightClients", "logLevel" };
+const required = .{ "beaconConfig", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "gossipPolicy", "resources", "identify", "serveLightClients", "logLevel" };
 
 pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out: *Config) !void {
     const remembered = try value.hasNamedProperty("rememberedPeers");

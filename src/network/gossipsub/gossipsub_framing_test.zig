@@ -85,7 +85,7 @@ test "gossipsub receives a message larger than the per-peer body buffer" {
 
 test "gossipsub receive page exhaustion discards only the requesting frame without blame" {
     var setup: Pair = .{};
-    try setup.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1, .body_buffer_bytes = 1024 });
+    try setup.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1, .body_buffer_bytes = 1024, .receive_arena_bytes = 16 * 1024 * 1024 });
     defer setup.deinit();
     try setup.connectMesh();
     const g = setup.shared.server.gossipsub;

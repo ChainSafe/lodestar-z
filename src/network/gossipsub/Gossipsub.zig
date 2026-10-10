@@ -57,6 +57,8 @@ retired_rpc_sent: metrics.RpcCounters = .{},
 iwant_outcomes: [metrics.iwant_outcome_count]u64 = @splat(0),
 delivery_metrics: metrics.Delivery = .{},
 validation_time: metrics.ValidationTime = .{},
+receive_timeouts: [constants.peers_cap]PeerId = undefined,
+receive_timeouts_len: u16 = 0,
 
 pub const Options = @import("options.zig").Options;
 
@@ -158,14 +160,22 @@ pub fn coverageSubscriptions(self: *Gossipsub, conn: Handle, digest: [4]u8, loca
     return result;
 }
 
+pub const ReceiveDiscard = enum { capacity, timeout, unattributed_timeout };
+
 /// Cumulative protocol events, independent of session lifetimes.
 pub const Counters = struct {
+    receive_discards: [std.meta.fields(ReceiveDiscard).len]u64 = @splat(0),
     broken_promises: u64 = 0,
     ihave_budget_skipped: u64 = 0,
     local_pressure_resets: u64 = 0,
     malformed_rpcs: u64 = 0,
     negotiation_started: u64 = 0,
 };
+
+/// Borrowed until the next pump. Consume once after the protocol pass.
+pub fn receiveTimeouts(self: *const Gossipsub) []const PeerId {
+    return self.receive_timeouts[0..self.receive_timeouts_len];
+}
 
 pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
     try options.validate();
@@ -664,6 +674,7 @@ fn expireSessions(self: *Gossipsub, router: *Router, engine: *Engine, turn: *Tur
 }
 
 pub fn beginPump(self: *Gossipsub, now: Now) Turn {
+    self.receive_timeouts_len = 0;
     self.last_now_ms = now.millis();
     self.messages.expire(&self.peers, now.millis());
     var turn = Turn.init(&self.options, now, self.msg_scratch);

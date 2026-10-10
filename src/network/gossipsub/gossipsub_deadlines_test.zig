@@ -1,7 +1,7 @@
 const support = @import("test_support.zig");
 const std = @import("std");
 const Pair = @import("test_pair.zig").Pair;
-const Penalty = @import("score.zig").Penalty;
+const Gossipsub = @import("Gossipsub.zig");
 const test_topic = "/eth2/01020304/beacon_block/ssz_snappy";
 const protobuf = @import("protobuf.zig");
 const TimeoutReason = @import("peer_io.zig").TimeoutReason;
@@ -15,7 +15,6 @@ test "gossipsub large frame deadline releases receive pages despite byte progres
     defer setup.deinit();
     for (0..16) |_| try setup.pumpOnce();
     const server_peer = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
-    const client_peer = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
     var prefix: [128]u8 = undefined;
     var w = protobuf.Writer.init(&prefix);
     w.varint(65536);
@@ -24,10 +23,6 @@ test "gossipsub large frame deadline releases receive pages despite byte progres
     for (0..4) |_| try setup.pumpOnce();
     try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[server_peer].io.reader.declaredLen() != null);
     try std.testing.expectEqual(@as(u32, 1), setup.shared.server.gossipsub.sessions.rows[server_peer].io.overflow.pages);
-    try support.subscribe(setup.shared.client.gossipsub, test_topic);
-    setup.shared.client.gossipsub.overlay.rows[setup.shared.client.gossipsub.overlay.findTopic(test_topic).?].mesh.set(client_peer);
-    _ = try setup.shared.client.gossipsub.publish(test_topic, "held transmit payload", setup.shared.pair.now);
-    for (0..4) |_| try setup.pumpOnce();
     const began = setup.shared.pair.now.millis();
     for (0..1) |_| {
         setup.shared.pair.advance(100);
@@ -41,10 +36,10 @@ test "gossipsub large frame deadline releases receive pages despite byte progres
     try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[server_peer].io.overflow.pages == 0);
     const logical = setup.shared.server.gossipsub.sessions.rows[server_peer].logical;
     try std.testing.expect(setup.shared.server.gossipsub.peers.rows[logical.index].large_frame_denied_until > setup.shared.pair.now.millis());
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.peers.scores.penalties[@intFromEnum(Penalty.large_frame_timeout)]);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.counters.receive_discards[@intFromEnum(Gossipsub.ReceiveDiscard.timeout)]);
     setup.shared.pair.advance(300);
     try setup.pumpOnce();
-    try std.testing.expectEqual(@as(usize, 0), setup.shared.client.gossipsub.sessions.rows[client_peer].io.tx.data.count);
+    try std.testing.expectEqual(@as(usize, 0), setup.shared.server.gossipsub.receiveTimeouts().len);
 }
 
 test "gossipsub completed frame expiry releases pages without blaming the peer" {
@@ -119,7 +114,7 @@ test "gossipsub healthy continuous frame turnover does not expire a nonempty que
 
 test "gossipsub discarding a locally refused frame preserves its deadline without blaming the peer" {
     var setup: Pair = .{};
-    try setup.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1, .body_buffer_bytes = 1024, .large_frame_timeout_ms = 200 });
+    try setup.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1, .body_buffer_bytes = 1024, .receive_arena_bytes = 16 * 1024 * 1024, .large_frame_timeout_ms = 200 });
     defer setup.deinit();
     try setup.connectMesh();
     const g = setup.shared.server.gossipsub;
@@ -153,4 +148,39 @@ test "gossipsub discarding a locally refused frame preserves its deadline withou
     try std.testing.expectEqual(before, g.peers.score(peer.logical, setup.shared.pair.now.millis()));
     try std.testing.expectEqual(@as(u64, 0), g.peers.rows[peer.logical.index].large_frame_denied_until);
     for (g.peers.scores.penalties) |count| try std.testing.expectEqual(@as(u64, 0), count);
+}
+
+test "gossipsub receive expiry with buffered or transport unread bytes has no peer consequence" {
+    for ([_]bool{ false, true }) |buffered| {
+        var setup: Pair = .{};
+        try setup.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1, .body_buffer_bytes = 64, .large_frame_timeout_ms = 100 });
+        defer setup.deinit();
+        try setup.connectMesh();
+        const g = setup.shared.server.gossipsub;
+        const index = g.sessions.find(setup.shared.handles.server).?;
+        const peer = &g.sessions.rows[index];
+        var prefix: [128]u8 = undefined;
+        var writer = protobuf.Writer.init(&prefix);
+        writer.varint(65536);
+        writer.bytes(&([_]u8{0} ** 65));
+        try std.testing.expectEqual(writer.len, try setup.shared.pair.client.write(setup.clientStream(), writer.written(), false));
+        for (0..4) |_| try setup.pumpOnce();
+        try std.testing.expectEqual(@as(u32, 1), peer.io.overflow.pages);
+        if (buffered) {
+            peer.io.unread_start = 0;
+            peer.io.unread_end = 1;
+            peer.io.unread[0] = 0;
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.client.write(setup.clientStream(), "x", false));
+            try setup.shared.pair.pump();
+            try std.testing.expect(try setup.shared.pair.server.streamReadable(peer.in_stream.?));
+        }
+        setup.shared.pair.advance(100);
+        try setup.pumpOnce();
+        try std.testing.expectEqual(@as(usize, 0), g.receiveTimeouts().len);
+        try std.testing.expectEqual(@as(u64, 1), g.counters.receive_discards[@intFromEnum(Gossipsub.ReceiveDiscard.unattributed_timeout)]);
+        try std.testing.expectEqual(@as(u64, 0), g.peers.rows[peer.logical.index].large_frame_denied_until);
+        for (g.peers.scores.penalties) |count| try std.testing.expectEqual(@as(u64, 0), count);
+        try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
+    }
 }

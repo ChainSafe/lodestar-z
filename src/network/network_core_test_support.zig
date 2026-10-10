@@ -40,11 +40,10 @@ pub const socket_buffers: configuration.SocketBuffers = .{
     .discovery = .{ .receive = 208 * 1024, .send = 208 * 1024 },
 };
 
-/// The small profile with the harness's peer, dial, request and gossip values.
+/// Explicit capacities for the two-core harness.
 pub fn options() configuration.Options {
     const gc = @import("gossipsub/constants.zig");
     return .{
-        .profile = .small,
         .seed = 1,
         .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }},
         .limits = .{
@@ -62,7 +61,8 @@ pub fn options() configuration.Options {
             .min_outbound = 1,
         },
         .dial = .{ .capacity = 4, .concurrent_max = 1, .outbound_reserved = 1, .seed = 7 },
-        .router = .{ .negotiations_max = 24 },
+        .router = .{ .negotiations_max = 24, .outbound_reserved = 11 },
+        .identify = .{ .inbound_max = 2, .outbound_max = 2 },
         .reqresp = .{
             .outbound_max = 16,
             .serving_max = 16,
