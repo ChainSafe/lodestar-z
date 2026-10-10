@@ -126,6 +126,86 @@ fn metricValue(output: []const u8, name: []const u8) ?u64 {
     return null;
 }
 
+fn metricFloatValue(output: []const u8, name: []const u8) ?f64 {
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, name) and line.len > name.len and line[name.len] == ' ') {
+            return std.fmt.parseFloat(f64, line[name.len + 1 ..]) catch null;
+        }
+    }
+    return null;
+}
+
+const IncreasingIntervalClock = struct {
+    next_ns: i96 = 1,
+
+    fn now(userdata: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        const self: *IncreasingIntervalClock = @ptrCast(@alignCast(userdata.?));
+        std.debug.assert(self.next_ns < (@as(i96, 1) << 90));
+        const timestamp = std.Io.Timestamp.fromNanoseconds(self.next_ns);
+        self.next_ns *= 2;
+        return timestamp;
+    }
+
+    const vtable: std.Io.VTable = blk: {
+        var vt = std.Io.failing.vtable.*;
+        vt.now = now;
+        break :blk vt;
+    };
+
+    fn io(self: *IncreasingIntervalClock) std.Io {
+        return .{ .userdata = self, .vtable = &vtable };
+    }
+};
+
+test "state transition - process block timer includes commit" {
+    const allocator = std.testing.allocator;
+    try metrics.init(allocator, std.testing.io, .{});
+    defer metrics.deinit();
+
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 180_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var block = types.electra.SignedBeaconBlock.default_value;
+    try generateElectraBlock(allocator, test_state.cached_state, &block);
+    defer types.electra.SignedBeaconBlock.deinit(allocator, &block);
+
+    // Keep the transition in this slot so the injected I/O only needs a clock.
+    block.message.slot = try test_state.cached_state.state.slot();
+    block.message.proposer_index = try test_state.cached_state.epoch_cache.getBeaconProposer(block.message.slot);
+    block.message.body.execution_payload.timestamp = (try test_state.cached_state.state.genesisTime()) +
+        block.message.slot * test_state.cached_state.config.chain.SECONDS_PER_SLOT;
+
+    // Every later clock interval exceeds all earlier elapsed time. A total timer
+    // stopped before commit therefore cannot contain the measured commit interval.
+    var clock: IncreasingIntervalClock = .{};
+    const post_state = try stateTransition(
+        allocator,
+        clock.io(),
+        test_state.cached_state,
+        .{ .full_electra = &block },
+        .{ .verify_signatures = false, .verify_proposer = false, .verify_state_root = false },
+        null,
+    );
+    defer {
+        post_state.deinit();
+        allocator.destroy(post_state);
+    }
+
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try metrics.write(&output.writer);
+    const total = metricFloatValue(output.written(), "lodestar_stfn_process_block_seconds_sum") orelse return error.MissingMetric;
+    const commit = metricFloatValue(output.written(), "lodestar_stfn_process_block_commit_seconds_sum") orelse return error.MissingMetric;
+    try testing.expectEqual(@as(?u64, 1), metricValue(output.written(), "lodestar_stfn_process_block_seconds_count"));
+    try testing.expectEqual(@as(?u64, 1), metricValue(output.written(), "lodestar_stfn_process_block_commit_seconds_count"));
+    try testing.expect(commit > 0);
+    try testing.expect(total >= commit);
+}
+
 test "state transition - records per-block and per-epoch metrics" {
     const allocator = std.testing.allocator;
     try metrics.init(allocator, std.testing.io, .{});
