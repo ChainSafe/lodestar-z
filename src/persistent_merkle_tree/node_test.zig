@@ -7,6 +7,40 @@ const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
 const ChunkedLeaf = @import("ChunkedLeaf.zig");
 
+test "memory_safety: pool backing preserves unused columns and frees the exact reservation" {
+    const capacity = 32;
+    const byte_count = comptime std.MultiArrayList(Node).capacityInBytes(capacity + max_depth);
+    var backing: [byte_count]u8 align(@alignOf(Node)) = @splat(0x3c);
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    var unused_payload: []const u8 = undefined;
+    var unused_roots: []const u8 = undefined;
+    {
+        var pool = try Node.Pool.init(.{
+            .page_allocator = fixed.allocator(),
+            .allocator = std.testing.allocator,
+            .pool_size = capacity,
+        });
+        defer pool.deinit();
+
+        const payload = std.mem.sliceAsBytes(pool.nodes.items(.payload)[max_depth..]);
+        const roots = std.mem.sliceAsBytes(pool.nodes.items(.root)[max_depth..]);
+        for (payload) |byte| try std.testing.expectEqual(@as(u8, 0x3c), byte);
+        for (roots) |byte| try std.testing.expectEqual(@as(u8, 0x3c), byte);
+
+        const leaf = try pool.createLeafFromUint(5);
+        const branch = try pool.createBranch(leaf, @enumFromInt(0));
+        const root = branch.getRoot(&pool).*;
+        try std.testing.expect(!std.mem.allEqual(u8, &root, 0x3c));
+        pool.unref(branch);
+        try std.testing.expectEqual(@as(usize, max_depth), pool.getNodesInUse());
+        unused_payload = std.mem.sliceAsBytes(pool.nodes.items(.payload)[max_depth + 2 ..]);
+        unused_roots = std.mem.sliceAsBytes(pool.nodes.items(.root)[max_depth + 2 ..]);
+    }
+    try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
+    for (unused_payload) |byte| try std.testing.expectEqual(@as(u8, 0x3c), byte);
+    for (unused_roots) |byte| try std.testing.expectEqual(@as(u8, 0x3c), byte);
+}
+
 // Allocate until the fixed pool is full. Returns the filler nodes to the caller for cleanup.
 fn fillPoolToCapacity(pool: *Node.Pool, out: *std.ArrayList(Node.Id)) !void {
     while (pool.createLeafFromUint(0)) |id| {
