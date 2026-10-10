@@ -7,6 +7,7 @@ pub const BYTES_PER_CHUNK = types.BYTES_PER_CHUNK;
 pub const TypeKind = types.TypeKind;
 pub const isBasicType = types.isBasicType;
 pub const isFixedType = types.isFixedType;
+pub const initValue = types.initValue;
 
 pub const BoolType = types.BoolType;
 pub const UintType = types.UintType;
@@ -19,6 +20,9 @@ pub const isBitVectorType = types.isBitVectorType;
 
 pub const ByteListType = types.ByteListType;
 pub const isByteListType = types.isByteListType;
+pub const ProgressiveByteListType = types.ProgressiveByteListType;
+pub const ProgressiveByteListTypeWithOptions = types.ProgressiveByteListTypeWithOptions;
+pub const isProgressiveByteListType = types.isProgressiveByteListType;
 
 pub const ByteVectorType = types.ByteVectorType;
 pub const isByteVectorType = types.isByteVectorType;
@@ -39,10 +43,13 @@ pub const VariableProgressiveContainerType = types.VariableProgressiveContainerT
 
 // Progressive list types
 pub const FixedProgressiveListType = types.FixedProgressiveListType;
+pub const FixedProgressiveListTypeWithOptions = types.FixedProgressiveListTypeWithOptions;
 pub const VariableProgressiveListType = types.VariableProgressiveListType;
+pub const VariableProgressiveListTypeWithOptions = types.VariableProgressiveListTypeWithOptions;
 
 // Progressive bit list
 pub const ProgressiveBitListType = types.ProgressiveBitListType;
+pub const ProgressiveBitListTypeWithOptions = types.ProgressiveBitListTypeWithOptions;
 pub const isProgressiveBitListType = types.isProgressiveBitListType;
 
 // Compatible union
@@ -59,7 +66,10 @@ pub const StructContainerTreeView = tree_view.StructContainerTreeView;
 pub const ArrayBasicTreeView = tree_view.ArrayBasicTreeView;
 pub const ArrayCompositeTreeView = tree_view.ArrayCompositeTreeView;
 pub const ListBasicTreeView = tree_view.ListBasicTreeView;
+pub const ProgressiveListBasicTreeView = tree_view.ProgressiveListBasicTreeView;
 pub const ListCompositeTreeView = tree_view.ListCompositeTreeView;
+pub const ProgressiveListCompositeTreeView = tree_view.ProgressiveListCompositeTreeView;
+pub const ProgressiveBitListTreeView = tree_view.ProgressiveBitListTreeView;
 pub const CloneOpts = @import("tree_view/utils/clone_opts.zig").CloneOpts;
 
 test {

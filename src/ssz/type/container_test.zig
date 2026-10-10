@@ -19,6 +19,35 @@ const FixedContainerType = container.FixedContainerType;
 const StructContainerType = container.StructContainerType;
 const VariableContainerType = container.VariableContainerType;
 
+test "variable container serialized hashing rejects every truncated fixed prefix" {
+    const ST = VariableContainerType(struct {
+        flag: BoolType(),
+        bytes: FixedListType(UintType(8), 32, .{}),
+    });
+    const encoded = [_]u8{ 1, 5, 0, 0, 0 };
+    var root: [32]u8 = undefined;
+    for (0..encoded.len) |length| {
+        try std.testing.expectError(error.InvalidSize, ST.readFieldRanges(encoded[0..length]));
+        try std.testing.expectError(error.InvalidSize, ST.serialized.hashTreeRoot(std.testing.allocator, encoded[0..length], &root));
+    }
+    try ST.serialized.hashTreeRoot(std.testing.allocator, &encoded, &root);
+}
+
+test "fixed container serialized hashing rejects invalid sizes through compatible unions" {
+    const ST = FixedContainerType(struct { flag: BoolType(), count: UintType(64) });
+    const Union = @import("compatible_union.zig").CompatibleUnionType(.{ .{ 1, ST }, .{ 7, ST } });
+    const encoded = [_]u8{ 7, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var root: [32]u8 = undefined;
+    for (0..ST.fixed_size) |length| {
+        try std.testing.expectError(error.InvalidSize, ST.serialized.hashTreeRoot(encoded[1..][0..length], &root));
+        try std.testing.expectError(error.InvalidSize, Union.serialized.hashTreeRoot(std.testing.allocator, encoded[0 .. length + 1], &root));
+    }
+    try std.testing.expectError(error.InvalidSize, ST.serialized.hashTreeRoot(encoded[1..], &root));
+    try std.testing.expectError(error.InvalidSize, Union.serialized.hashTreeRoot(std.testing.allocator, &encoded, &root));
+    try ST.serialized.hashTreeRoot(encoded[1..][0..ST.fixed_size], &root);
+    try Union.serialized.hashTreeRoot(std.testing.allocator, encoded[0 .. ST.fixed_size + 1], &root);
+}
+
 test "ContainerType - sanity" {
     // create a fixed container type and instance and round-trip serialize
     const Checkpoint = FixedContainerType(struct {

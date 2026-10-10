@@ -174,7 +174,25 @@ jobs:
             }
           ' build.zig.zon)
           test -n "$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          ssz_version=$(awk '
+            /\.ssz_spec_test_version = \./ {in_block=1}
+            in_block && /\.default = / {
+              match($0, /"[^"]+"/)
+              print substr($0, RSTART + 1, RLENGTH - 2)
+              exit
+            }
+          ' build.zig.zon)
+          ssz_digest=$(awk '
+            /\.ssz_spec_test_sha256 = \./ {in_block=1}
+            in_block && /\.default = / {
+              match($0, /"[^"]+"/)
+              print substr($0, RSTART + 1, RLENGTH - 2)
+              exit
+            }
+          ' build.zig.zon)
+          test -n "$ssz_version"
+          test -n "$ssz_digest"
+          echo "version=$version-ssz-$ssz_version-$ssz_digest" >> "$GITHUB_OUTPUT"
       - name: Restore spec tests cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:

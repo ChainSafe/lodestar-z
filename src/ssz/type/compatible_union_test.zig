@@ -7,6 +7,37 @@ const UintType = @import("uint.zig").UintType;
 const BoolType = @import("bool.zig").BoolType;
 const FixedProgressiveListType = @import("progressive_list.zig").FixedProgressiveListType;
 const CompatibleUnionType = @import("compatible_union.zig").CompatibleUnionType;
+const initValue = @import("value_init.zig").initValue;
+
+test "memory_safety: composed compatible unions decode with no SSZ default and survive OOM" {
+    const Items = FixedProgressiveListType(BoolType());
+    const Inner = CompatibleUnionType(.{ .{ 1, Items }, .{ 2, Items } });
+    const Nested = CompatibleUnionType(.{ .{ 3, Inner }, .{ 4, Inner } });
+    const Container = @import("progressive_container.zig").VariableProgressiveContainerType(struct { body: Nested }, &.{ 0, 1 });
+    const List = @import("progressive_list.zig").VariableProgressiveListType(Nested);
+    try std.testing.expect(!@hasDecl(Inner, "default_value"));
+    try std.testing.expect(!@hasDecl(Nested, "default_value"));
+    inline for (.{ Nested, Container, List }) |ST| {
+        const bytes: []const u8 = if (ST == Nested) &.{ 4, 2, 1, 0, 1 } else &.{ 4, 0, 0, 0, 4, 2, 1, 0, 1 };
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+            fn run(allocator: std.mem.Allocator, data: []const u8) !void {
+                var out = initValue(ST);
+                defer ST.deinit(allocator, &out);
+                try ST.deserializeFromBytes(allocator, data, &out);
+                var actual: [32]u8 = undefined;
+                const size = ST.serializeIntoBytes(&out, &actual);
+                try std.testing.expectEqualSlices(u8, data, actual[0..size]);
+            }
+        }.run, .{bytes});
+    }
+
+    var out = initValue(Nested);
+    defer Nested.deinit(std.testing.allocator, &out);
+    try std.testing.expectError(error.invalidBoolean, Nested.deserializeFromBytes(std.testing.allocator, &.{ 4, 2, 1, 2 }, &out));
+    try std.testing.expectEqual(3, Nested.getSelector(&out));
+    try std.testing.expectEqual(1, Inner.getSelector(&out.option_3));
+    try std.testing.expectEqual(0, out.option_3.option_1.items.len);
+}
 
 fn expectProgressiveFromValuePoolExhaustionReclaimsNodes(
     comptime ST: type,

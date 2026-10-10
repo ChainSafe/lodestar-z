@@ -1,6 +1,5 @@
 const std = @import("std");
 const BitList = @import("bit_array").BitList;
-const unlimited = @import("bit_array").unlimited;
 const expectEqualRootsAlloc = @import("test_utils.zig").expectEqualRootsAlloc;
 const expectEqualSerializedAlloc = @import("test_utils.zig").expectEqualSerializedAlloc;
 const TypeKind = @import("type_kind.zig").TypeKind;
@@ -17,16 +16,25 @@ pub fn isProgressiveBitListType(ST: type) bool {
     return ST.kind == .progressive_bit_list;
 }
 
+pub const TypeOpts = struct { limit: usize = std.math.maxInt(usize) };
+
 pub fn ProgressiveBitListType() type {
+    return ProgressiveBitListTypeWithOptions(.{});
+}
+
+pub fn ProgressiveBitListTypeWithOptions(comptime opts: TypeOpts) type {
     return struct {
         const Self = @This();
         pub const kind = TypeKind.progressive_bit_list;
         pub const Element: type = BoolType();
-        pub const Type: type = BitList(.{ .limit = unlimited });
+        pub const limit: usize = @intCast(@min(opts.limit, @as(u128, progressive.max_tree_chunks) * 256, std.math.maxInt(usize) - 255));
+        pub const Type: type = BitList(.{ .limit = if (opts.limit == std.math.maxInt(usize)) @import("bit_array").unlimited else opts.limit });
+        pub const TreeView = @import("../tree_view/progressive_bit_list.zig").ProgressiveBitListTreeView(Self);
         pub const min_size: usize = 1;
         pub const max_size: usize = std.math.maxInt(usize);
 
         pub const default_value: Type = Type.empty;
+        pub const default_root: [32]u8 = @import("hashing").getZeroHash(1).*;
 
         pub fn equals(a: *const Type, b: *const Type) bool {
             return a.equals(b);
@@ -41,6 +49,7 @@ pub fn ProgressiveBitListType() type {
         }
 
         pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
+            if (value.bit_len > limit) return error.LengthOverLimit;
             var accumulator = try progressive.MerkleAccumulator.init(chunkCount(value));
             var offset: usize = 0;
             while (offset < value.data.items.len) {
@@ -94,7 +103,8 @@ pub fn ProgressiveBitListType() type {
                 return error.noPaddingBit;
             }
             const last_1_index: u3 = @intCast(7 - last_byte_clz);
-            const bit_len = (data.len - 1) * 8 + last_1_index;
+            const bit_len = try std.math.add(usize, try std.math.mul(usize, data.len - 1, 8), last_1_index);
+            if (bit_len > limit) return error.LengthOverLimit;
 
             try out.resize(allocator, bit_len);
             if (bit_len == 0) {
@@ -127,8 +137,8 @@ pub fn ProgressiveBitListType() type {
                     return error.noPaddingBit;
                 }
                 const last_1_index: u3 = @intCast(7 - last_byte_clz);
-                const bit_len = (data.len - 1) * 8 + last_1_index;
-                _ = bit_len;
+                const bit_len = try std.math.add(usize, try std.math.mul(usize, data.len - 1, 8), last_1_index);
+                if (bit_len > limit) return error.LengthOverLimit;
             }
 
             pub fn length(data: []const u8) !usize {
@@ -144,7 +154,8 @@ pub fn ProgressiveBitListType() type {
                     return error.noPaddingBit;
                 }
                 const last_1_index: u3 = @intCast(7 - last_byte_clz);
-                const bit_len = (data.len - 1) * 8 + last_1_index;
+                const bit_len = try std.math.add(usize, try std.math.mul(usize, data.len - 1, 8), last_1_index);
+                if (bit_len > limit) return error.LengthOverLimit;
                 return bit_len;
             }
 
@@ -172,7 +183,11 @@ pub fn ProgressiveBitListType() type {
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
                 const right = try node.getRight(pool);
                 const hash = right.getRoot(pool);
-                return std.mem.readInt(usize, hash[0..8], .little);
+                const len = std.mem.readInt(u256, hash, .little);
+                if (len > limit) return error.LengthOverLimit;
+                const bit_len: usize = @intCast(len);
+                try progressive.validateContents(pool, try node.getLeft(pool), (bit_len + 255) / 256);
+                return bit_len;
             }
 
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
@@ -207,21 +222,28 @@ pub fn ProgressiveBitListType() type {
             }
 
             pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
-                const allocator = pool.allocator;
-                var value = Self.default_value;
-                defer Self.deinit(allocator, &value);
-
-                try toValue(allocator, node, pool, &value);
-                return Self.serializedSize(&value);
+                return (try length(node, pool)) / 8 + 1;
             }
 
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
-                const allocator = pool.allocator;
-                var value = Self.default_value;
-                defer Self.deinit(allocator, &value);
+                const bit_len = try length(node, pool);
+                const size = bit_len / 8 + 1;
+                if (out.len < size) return error.InvalidSize;
+                const byte_len = (bit_len + 7) / 8;
+                var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), (bit_len + 255) / 256);
+                var offset: usize = 0;
+                while (try it.next()) |chunk| {
+                    const count = @min(32, byte_len - offset);
+                    @memcpy(out[offset..][0..count], chunk.getRoot(pool)[0..count]);
+                    offset += count;
+                }
+                const padding: u8 = @as(u8, 1) << @intCast(bit_len % 8);
+                out[size - 1] = if (bit_len % 8 == 0) padding else (out[size - 1] & (padding - 1)) | padding;
+                return size;
+            }
 
-                try toValue(allocator, node, pool, &value);
-                return Self.serializeIntoBytes(&value, out);
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                return fromValue(pool, &Self.default_value);
             }
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
@@ -234,6 +256,7 @@ pub fn ProgressiveBitListType() type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
+                if (value.bit_len > limit) return error.LengthOverLimit;
                 const allocator = pool.allocator;
                 const chunk_count = chunkCount(value);
                 if (chunk_count == 0) {

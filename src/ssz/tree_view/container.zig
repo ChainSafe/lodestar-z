@@ -34,10 +34,10 @@ pub fn ContainerTreeView(comptime ST: type) type {
         /// a tuple of either Optional(Value) for basic type or Optional(ChildTreeView) for composite type
         child_data: TreeViewData,
         /// whether the corresponding child node/data has changed since the last update of the root
-        changed: std.StaticBitSet(ST.chunk_count),
-        original_nodes: [ST.chunk_count]?Node.Id,
+        changed: std.StaticBitSet(ST.fields.len),
+        original_nodes: [ST.fields.len]?Node.Id,
         /// View-owned backing for `getFieldRoot` snapshots of dirty basic fields.
-        field_root_cache: [ST.chunk_count][32]u8,
+        field_root_cache: [ST.fields.len][32]u8,
         pub const SszType = ST;
 
         const Self = @This();
@@ -49,10 +49,10 @@ pub fn ContainerTreeView(comptime ST: type) type {
             ptr.* = .{
                 .allocator = allocator,
                 .pool = pool,
-                .child_data = .{null} ** ST.chunk_count,
-                .original_nodes = .{null} ** ST.chunk_count,
+                .child_data = .{null} ** ST.fields.len,
+                .original_nodes = .{null} ** ST.fields.len,
                 .root = root,
-                .changed = std.StaticBitSet(ST.chunk_count).empty,
+                .changed = std.StaticBitSet(ST.fields.len).empty,
                 .field_root_cache = undefined,
             };
             try pool.ref(root);
@@ -84,9 +84,9 @@ pub fn ContainerTreeView(comptime ST: type) type {
             }
 
             // clear self's caches
-            self.child_data = .{null} ** ST.chunk_count;
-            self.original_nodes = .{null} ** ST.chunk_count;
-            self.changed = std.StaticBitSet(ST.chunk_count).empty;
+            self.child_data = .{null} ** ST.fields.len;
+            self.original_nodes = .{null} ** ST.fields.len;
+            self.changed = std.StaticBitSet(ST.fields.len).empty;
 
             return ptr;
         }
@@ -106,30 +106,33 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     self.child_data[i] = null;
                 }
             }
-            inline for (0..ST.chunk_count) |i| {
+            inline for (0..ST.fields.len) |i| {
                 // these nodes are unref by root
                 self.original_nodes[i] = null;
             }
-            self.changed = std.StaticBitSet(ST.chunk_count).empty;
+            self.changed = std.StaticBitSet(ST.fields.len).empty;
         }
 
         pub fn commit(self: *Self) !void {
+            comptime {
+                @setEvalBranchQuota(100000);
+            }
             if (self.changed.count() == 0) {
                 return;
             }
 
-            var nodes: [ST.chunk_count]Node.Id = undefined;
-            var indices: [ST.chunk_count]usize = undefined;
+            var nodes: [ST.fields.len]Node.Id = undefined;
+            var indices: [ST.fields.len]usize = undefined;
             // Only basic nodes created by this commit need direct cleanup. Composite roots are
             // borrowed from their child views and must not be released here.
-            var fresh_basic_nodes: [ST.chunk_count]Node.Id = undefined;
+            var fresh_basic_nodes: [ST.fields.len]Node.Id = undefined;
             var fresh_basic_count: usize = 0;
             errdefer self.pool.free(fresh_basic_nodes[0..fresh_basic_count]);
 
             var changed_idx: usize = 0;
             inline for (ST.fields, 0..) |field, i| {
                 if (self.changed.isSet(i)) {
-                    const ChildST = ST.getFieldType(field.name);
+                    const ChildST = field.type;
                     if (comptime isBasicType(ChildST)) {
                         const child_value = self.child_data[i] orelse return error.MissingChildValue;
                         const child_node = try ChildST.tree.fromValue(
@@ -158,10 +161,25 @@ pub fn ContainerTreeView(comptime ST: type) type {
             }
 
             if (changed_idx == 0) {
-                self.changed = std.StaticBitSet(ST.chunk_count).empty;
+                self.changed = std.StaticBitSet(ST.fields.len).empty;
                 return;
             }
-            const new_root = try self.root.setNodesAtDepth(
+            // Different-depth progressive updates can reclaim intermediate parents on failure.
+            // Retain inputs until the rebuilt root owns them; basic-node cleanup below remains
+            // armed on failure, while composite roots continue to belong to child views.
+            var retained: usize = 0;
+            defer for (nodes[0..retained]) |node| self.pool.unrefUnsafe(node);
+            const new_root = if (comptime ST.kind == .progressive_container) blk: {
+                var gindices: [ST.fields.len]Gindex = undefined;
+                var field_gindices: [ST.fields.len]Gindex = undefined;
+                inline for (ST.fields, 0..) |field, i| field_gindices[i] = comptime ST.getFieldGindex(field.name);
+                for (indices[0..changed_idx], nodes[0..changed_idx], 0..) |index, node, i| {
+                    gindices[i] = field_gindices[index];
+                    try self.pool.ref(node);
+                    retained += 1;
+                }
+                break :blk try self.root.setNodesGrouped(self.pool, gindices[0..changed_idx], nodes[0..changed_idx]);
+            } else try self.root.setNodesAtDepth(
                 self.pool,
                 ST.chunk_depth,
                 indices[0..changed_idx],
@@ -170,13 +188,13 @@ pub fn ContainerTreeView(comptime ST: type) type {
             // The rebuilt parent now owns the fresh basic nodes, so disarm their errdefer
             // cleanup. At depth zero there is no parent, so keep cleanup armed until the
             // view takes its own reference.
-            if (comptime ST.chunk_depth > 0) {
+            if (comptime ST.kind == .progressive_container or ST.chunk_depth > 0) {
                 fresh_basic_count = 0;
             }
             // This scope disarms the rollback once the view acquires its reference. The
             // remaining publication steps cannot fail.
             {
-                errdefer if (comptime ST.chunk_depth > 0) self.pool.unref(new_root);
+                errdefer if (comptime ST.kind == .progressive_container or ST.chunk_depth > 0) self.pool.unref(new_root);
                 try self.pool.ref(new_root);
             }
             fresh_basic_count = 0;
@@ -186,7 +204,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             for (indices[0..changed_idx], nodes[0..changed_idx]) |index, node| {
                 self.original_nodes[index] = node;
             }
-            self.changed = std.StaticBitSet(ST.chunk_count).empty;
+            self.changed = std.StaticBitSet(ST.fields.len).empty;
         }
 
         pub fn getRoot(self: *const Self) Node.Id {
@@ -204,7 +222,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             if (existing) |node| {
                 return node;
             } else {
-                const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
+                const node = try self.root.getNode(self.pool, comptime ST.getFieldGindex(field_name));
                 self.original_nodes[field_index] = node;
                 return node;
             }
@@ -218,6 +236,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             }
 
             const field_data = try ChildST.TreeView.init(self.allocator, self.pool, root);
+            errdefer field_data.deinit();
             try self.set(field_name, field_data);
         }
 
@@ -244,7 +263,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 if (existing) |child_value| {
                     return child_value;
                 } else {
-                    const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
+                    const node = try self.root.getNode(self.pool, comptime ST.getFieldGindex(field_name));
                     var child_value: ChildST.Type = undefined;
                     try ChildST.tree.toValue(node, self.pool, &child_value);
                     self.original_nodes[field_index] = node;
@@ -257,7 +276,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     self.changed.set(field_index);
                     return child_view_ptr;
                 } else {
-                    const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
+                    const node = try self.root.getNode(self.pool, comptime ST.getFieldGindex(field_name));
                     const child_view = try ChildST.TreeView.init(self.allocator, self.pool, node);
                     self.original_nodes[field_index] = node;
                     self.child_data[field_index] = child_view;
@@ -365,7 +384,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     try ChildST.hashTreeRoot(&child_value, &self.field_root_cache[field_index]);
                     return &self.field_root_cache[field_index];
                 }
-                const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
+                const node = try self.root.getNode(self.pool, comptime ST.getFieldGindex(field_name));
                 return node.getRoot(self.pool);
             } else {
                 // For composite types, if we have a cached view, commit it and return its root
@@ -373,7 +392,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     try child_view_ptr.commit();
                     return child_view_ptr.getRoot().getRoot(self.pool);
                 } else {
-                    const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
+                    const node = try self.root.getNode(self.pool, comptime ST.getFieldGindex(field_name));
                     return node.getRoot(self.pool);
                 }
             }
@@ -393,7 +412,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 if (existing) |child_value| {
                     return child_value;
                 } else {
-                    const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
+                    const node = try self.root.getNode(self.pool, comptime ST.getFieldGindex(field_name));
                     var child_value: ChildST.Type = undefined;
                     try ChildST.tree.toValue(node, self.pool, &child_value);
                     return child_value;
@@ -404,7 +423,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 if (existing_ptr) |child_view_ptr| {
                     return child_view_ptr;
                 } else {
-                    const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
+                    const node = try self.root.getNode(self.pool, comptime ST.getFieldGindex(field_name));
                     const child_view = try ChildST.TreeView.init(self.allocator, self.pool, node);
                     self.child_data[field_index] = child_view;
                     return child_view;
