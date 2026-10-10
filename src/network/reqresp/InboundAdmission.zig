@@ -84,6 +84,30 @@ pub fn schedulerBytes(self: *const InboundAdmission) usize {
     return self.connection_cursors.len * @sizeOf(ConnectionCursor);
 }
 
+pub fn connected(self: *InboundAdmission, conn: Handle, identity: *const PeerId, now_ms: u64) bool {
+    assert(conn.index < self.connection_cursors.len);
+    const cursor = &self.connection_cursors[conn.index];
+    if (cursor.identity) |held| {
+        if (held.generation == conn.generation) {
+            assert(self.limiter.rows[held.row].identity.eql(identity));
+            return true;
+        }
+        self.limiter.release(held.row);
+        cursor.identity = null;
+    }
+    const row = self.limiter.retain(identity, now_ms) orelse return false;
+    cursor.identity = .{ .row = row, .generation = conn.generation };
+    return true;
+}
+
+pub fn disconnected(self: *InboundAdmission, conn: Handle) void {
+    const cursor = &self.connection_cursors[conn.index];
+    const held = cursor.identity orelse return;
+    if (held.generation != conn.generation) return;
+    self.limiter.release(held.row);
+    cursor.identity = null;
+}
+
 pub fn due(self: *const InboundAdmission) bool {
     return self.pending and self.ready[0].len + self.ready[1].len > 0;
 }
@@ -113,7 +137,7 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
         return error.ProtocolConcurrency;
     }
     const limiter = &self.limiter;
-    if (!limiter.tracks(&identity, now.millis())) {
+    if (!self.connected(stream.conn, &identity, now.millis())) {
         owner.recordAdmissionRefusal(stream, which, .identity_capacity, 1);
         return error.TooManyRequests;
     }
@@ -341,9 +365,9 @@ pub fn checkSlot(self: *const InboundAdmission, slot: *const Server, index: u16)
     if (waiting and slot.admission.wait == .none) assert(self.pending);
 }
 
-/// Per connection index: where the next admission attempt starts, the `.ready` inbound slots and
-/// the admission list links, per class (application, control).
+/// Per-connection identity reservation and admission cursors, ready slots and list links.
 const ConnectionCursor = struct {
+    identity: ?struct { row: u16, generation: u32 } = null,
     admission: [2]u8 = @splat(0),
     ready_mask: [2]u64 = @splat(0),
     application_link: index_list.Link = .{},

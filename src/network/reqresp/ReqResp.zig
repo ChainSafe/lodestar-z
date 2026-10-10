@@ -25,6 +25,7 @@ const RequestState = @import("RequestState.zig");
 const RequestIO = @import("RequestIO.zig");
 const Router = @import("../router.zig").Router;
 const types = @import("../types.zig");
+const PeerId = @import("../wire/peer_id.zig").PeerId;
 const ReceiveLayout = @import("ReceiveLayout.zig");
 const ServingPool = @import("ServingPool.zig");
 const index_list = @import("../index_list.zig");
@@ -555,9 +556,17 @@ pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *Router, conn: Ha
     return null;
 }
 
-/// Fails the connection's slots: its outbound list and its inbound block of the receive layout.
+/// Reserves identity bookkeeping until connectionClosed; false means no row is available.
+/// Call at peer admission to protect idle peers. Otherwise, the first inbound request reserves it.
+pub fn connectionOpened(self: *ReqResp, conn: Handle, identity: *const PeerId, now: Now) bool {
+    assert(conn.index < self.options.connections);
+    return self.admission.connected(conn, identity, now.millis());
+}
+
+/// Fails the connection's slots and releases its identity reservation, retaining quota debt.
 pub fn connectionClosed(self: *ReqResp, engine: *Engine, router: *Router, conn: Handle, now: Now) void {
     if (conn.index >= self.options.connections) return;
+    defer self.admission.disconnected(conn);
     const list = &self.outbound_by_connection[conn.index];
     var cursor = list.head;
     for (0..self.outbound.len) |_| {

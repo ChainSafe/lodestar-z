@@ -10,6 +10,36 @@ const second: PeerId = .{ .bytes = @splat(2) };
 const third: PeerId = .{ .bytes = @splat(3) };
 const method: Protocol = .blocks_by_root_v2;
 
+test "reqresp connected identities keep limiter rows through idle periods and reconnect debt" {
+    var owner = try a.Limiter.init(std.testing.allocator, .{ .identities = 2, .peer = quotas(2, 1000), .global = quotas(100, 1000) });
+    defer owner.deinit(std.testing.allocator);
+    const held = owner.retain(&first, 0).?;
+    try std.testing.expectEqual(a.Decision.allowed, owner.take(&second, method, 2, .fulu, 1000));
+    try std.testing.expectEqual(a.Decision.identity_capacity, owner.start(&third, true, 1000));
+    try std.testing.expect(owner.retain(&third, 1000) == null);
+    try std.testing.expectEqual(a.Decision.allowed, owner.take(&first, method, 2, .fulu, 1000));
+    owner.release(held);
+    const reconnected = owner.retain(&first, 1001).?;
+    try std.testing.expectEqual(a.Decision.peer_quota, owner.take(&first, method, 1, .fulu, 1001));
+    try std.testing.expectEqual(a.Decision.allowed, owner.take(&third, method, 1, .fulu, 2000));
+    try std.testing.expect(owner.rows[reconnected].identity.eql(&first));
+    owner.release(reconnected);
+}
+
+test "reqresp overlapping connections retain identity accounting until the final retirement" {
+    var owner = try a.Limiter.init(std.testing.allocator, .{ .identities = 1, .peer = quotas(2, 1000), .global = quotas(100, 1000) });
+    defer owner.deinit(std.testing.allocator);
+    const old = owner.retain(&first, 0).?;
+    const replacement = owner.retain(&first, 0).?;
+    owner.release(old);
+    try std.testing.expect(!owner.tracks(&second, 1000));
+    try std.testing.expectEqual(std.math.maxInt(u64), owner.startAt(&second, true, 1000));
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), owner.eligibleAt(&second, method, 1, .fulu, 1000));
+    owner.release(replacement);
+    try std.testing.expect(owner.tracks(&second, 1000));
+    try std.testing.expectEqual(a.Decision.allowed, owner.start(&second, true, 1000));
+}
+
 test "reqresp request starts retain identity debt and isolate control from application churn" {
     var owner = try a.Limiter.init(std.testing.allocator, .{ .identities = 2, .peer = quotas(10, 1000), .global = quotas(20, 1000), .starts = .{ .tokens = 2, .period_ms = 1000 } });
     defer owner.deinit(std.testing.allocator);

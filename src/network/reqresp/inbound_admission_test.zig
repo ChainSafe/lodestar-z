@@ -13,6 +13,26 @@ const policy_fixture = @import("policy_fixture.zig");
 const Engine = @import("../quic/Engine.zig");
 const constants = @import("constants.zig");
 
+test "reqresp limiter connection replacement ignores stale retirement and reserves once" {
+    var opts = options(1);
+    opts.admission.limits.identities = 1;
+    var owner = try rr.init(std.testing.allocator, opts);
+    defer owner.deinit();
+    const identity: PeerId = .{ .bytes = @splat(1) };
+    const other: PeerId = .{ .bytes = @splat(2) };
+    const now = Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 });
+    const old: types.Handle = .{ .index = 0, .generation = 1 };
+    const replacement: types.Handle = .{ .index = 0, .generation = 2 };
+    try std.testing.expect(owner.connectionOpened(old, &identity, now));
+    try std.testing.expect(owner.connectionOpened(old, &identity, now));
+    try std.testing.expect(owner.connectionOpened(replacement, &identity, now));
+    owner.admission.disconnected(old);
+    try std.testing.expect(!owner.admission.limiter.tracks(&other, 1000));
+    owner.admission.disconnected(replacement);
+    owner.admission.disconnected(replacement);
+    try std.testing.expect(owner.admission.limiter.tracks(&other, 1000));
+}
+
 fn options(connections: u16) rr.Options {
     return .{
         .connections = connections,

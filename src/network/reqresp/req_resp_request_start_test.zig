@@ -357,7 +357,7 @@ test "reqresp request start preserves distinct protocol connection and identity 
     try std.testing.expectEqual(@as(u16, 3), owner.pendingCounts().inbound);
 }
 
-test "reqresp request start a request behind a waiter is still refused without an identity row" {
+test "reqresp request start a slow waiter retains identity accounting after debt expiry" {
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{ .admission = limits(1) });
     defer setup.deinit();
@@ -371,31 +371,28 @@ test "reqresp request start a request behind a waiter is still refused without a
     for (0..2) |_| _ = try request(&setup, .blocks_by_root_v2, blocks);
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(usize, 2), exchange.done);
-    // A waiter whose request bytes have not arrived stays owed its start past its row's expiry.
+    // An unfinished request stays owed its start after the previous starts replenish.
     const slow = try setup.openRaw(.blocks_by_root_v2);
     try exchange.pumps(10);
     const waiter = try waiterAt(owner, start);
     setup.shared.pair.advance(2 * refill_ms);
     const stranger: PeerId = .{ .bytes = @splat(9) };
-    try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&stranger, false, setup.shared.pair.now.millis()));
+    try std.testing.expectEqual(.identity_capacity, owner.admission.limiter.start(&stranger, false, setup.shared.pair.now.millis()));
     _ = try request(&setup, .blob_sidecars_by_root_v1, blobs);
     try exchange.pumps(20);
-    try std.testing.expectEqual(@as(?rr.Failure, .{ .peer_error = .{ .code = 139, .message_len = "Rate limited: identity capacity exhausted".len } }), exchange.client_failure);
-    try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blob_sidecars_by_root_v1, .identity_capacity));
+    try std.testing.expectEqual(@as(?rr.Failure, null), exchange.client_failure);
+    try std.testing.expectEqual(@as(u64, 0), refusals(owner, .blob_sidecars_by_root_v1, .identity_capacity));
+    try std.testing.expectEqual(@as(usize, 3), exchange.delivered_len);
     try std.testing.expectEqual(@as(u16, 1), owner.pendingCounts().inbound);
     try std.testing.expect(owner.inbound[waiter].request.running());
-    // The admitted waiter keeps waiting, now for a free row.
     var wire: [codec.frame_scratch_max]u8 = undefined;
     const encoded = try codec.encodeRequest(&.{}, &wire);
     try std.testing.expectEqual(encoded.len, try setup.shared.pair.client.write(slow, encoded, true));
     try exchange.pumps(20);
-    try std.testing.expectEqual(@as(usize, 2), exchange.delivered_len);
-    try std.testing.expectEqual(@as(usize, 1), waitingStarts(owner));
-    setup.shared.pair.advance(refill_ms);
-    try exchange.pumps(20);
-    try std.testing.expectEqual(@as(usize, 3), exchange.delivered_len);
-    try std.testing.expectEqual(waiter, exchange.delivered[2].index);
-    try std.testing.expectEqual(start + 3 * refill_ms, exchange.delivered[2].at_ms);
+    try std.testing.expectEqual(@as(usize, 4), exchange.delivered_len);
+    try std.testing.expectEqual(@as(usize, 0), waitingStarts(owner));
+    try std.testing.expectEqual(waiter, exchange.delivered[3].index);
+    try std.testing.expectEqual(start + 2 * refill_ms, exchange.delivered[3].at_ms);
 }
 
 /// A `.ready` request on connection index `connection` whose start accept deferred.
