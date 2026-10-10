@@ -112,6 +112,21 @@
                 .default = "v1.7.0-alpha.11",
                 .description = "Consensus spec tests version tag.",
             },
+            .ssz_spec_test_url = .{
+                .type = .string,
+                .default = "https://github.com/ethereum/ssz-specs",
+                .description = "Git repo URL for the independent SSZ reference tests.",
+            },
+            .ssz_spec_test_version = .{
+                .type = .string,
+                .default = "v0.0.1.dev2",
+                .description = "SSZ JSON fixture tag, matching Lodestar.",
+            },
+            .ssz_spec_test_sha256 = .{
+                .type = .string,
+                .default = "d83a63d7dd39a843eeffbe073562d89c4e2448c85e9df0bbcee857bd9ad63d19",
+                .description = "SHA-256 of the pinned SSZ test-vectors tar.gz archive.",
+            },
             .spec_test_out_dir = .{
                 .type = .string,
                 .default = "test/spec/spec_tests",
@@ -255,6 +270,12 @@
         .download_spec_tests = .{
             .root_module = .{
                 .root_source_file = "test/spec/download_spec_tests.zig",
+                .imports = .{.spec_test_options},
+            },
+        },
+        .download_ssz_spec_tests = .{
+            .root_module = .{
+                .root_source_file = "test/spec/download_ssz_spec_tests.zig",
                 .imports = .{.spec_test_options},
             },
         },
@@ -456,6 +477,7 @@
                     .bls,
                     .persistent_merkle_tree,
                     .hex,
+                    .yaml,
                 },
             },
         },

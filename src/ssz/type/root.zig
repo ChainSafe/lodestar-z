@@ -1,6 +1,7 @@
 pub const TypeKind = @import("type_kind.zig").TypeKind;
 pub const isBasicType = @import("type_kind.zig").isBasicType;
 pub const isFixedType = @import("type_kind.zig").isFixedType;
+pub const initValue = @import("value_init.zig").initValue;
 
 pub const BoolType = @import("bool.zig").BoolType;
 pub const UintType = @import("uint.zig").UintType;
@@ -13,6 +14,9 @@ pub const isBitVectorType = @import("bit_vector.zig").isBitVectorType;
 
 pub const ByteListType = @import("byte_list.zig").ByteListType;
 pub const isByteListType = @import("byte_list.zig").isByteListType;
+pub const ProgressiveByteListType = @import("progressive_byte_list.zig").ProgressiveByteListType;
+pub const ProgressiveByteListTypeWithOptions = @import("progressive_byte_list.zig").ProgressiveByteListTypeWithOptions;
+pub const isProgressiveByteListType = @import("progressive_byte_list.zig").isProgressiveByteListType;
 
 pub const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 pub const isByteVectorType = @import("byte_vector.zig").isByteVectorType;
@@ -38,11 +42,14 @@ pub const FixedProgressiveContainerType = @import("progressive_container.zig").F
 pub const VariableProgressiveContainerType = @import("progressive_container.zig").VariableProgressiveContainerType;
 
 pub const FixedProgressiveListType = @import("progressive_list.zig").FixedProgressiveListType;
+pub const FixedProgressiveListTypeWithOptions = @import("progressive_list.zig").FixedProgressiveListTypeWithOptions;
 pub const VariableProgressiveListType = @import("progressive_list.zig").VariableProgressiveListType;
+pub const VariableProgressiveListTypeWithOptions = @import("progressive_list.zig").VariableProgressiveListTypeWithOptions;
 
 pub const CompatibleUnionType = @import("compatible_union.zig").CompatibleUnionType;
 
 pub const ProgressiveBitListType = @import("progressive_bit_list.zig").ProgressiveBitListType;
+pub const ProgressiveBitListTypeWithOptions = @import("progressive_bit_list.zig").ProgressiveBitListTypeWithOptions;
 pub const isProgressiveBitListType = @import("progressive_bit_list.zig").isProgressiveBitListType;
 
 test {
@@ -52,6 +59,7 @@ test {
     _ = @import("bit_list.zig");
     _ = @import("bit_vector.zig");
     _ = @import("byte_list.zig");
+    _ = @import("progressive_byte_list.zig");
     _ = @import("byte_vector.zig");
     _ = @import("list.zig");
     _ = @import("progressive_list.zig");

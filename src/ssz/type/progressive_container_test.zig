@@ -203,6 +203,79 @@ test "memory_safety: variable progressive container byte deserialization preserv
     try std.testing.expectEqualSlices(bool, &.{ false, false }, out.items.items);
 }
 
+test "variable progressive container tree decoding rejects every truncated fixed prefix" {
+    const allocator = std.testing.allocator;
+    const ST = VariableProgressiveContainerType(struct {
+        flag: BoolType(),
+        bytes: FixedProgressiveListType(UintType(8)),
+        bits: @import("progressive_bit_list.zig").ProgressiveBitListType(),
+    }, &.{ 1, 0, 1, 0, 0, 1 });
+    const encoded = [_]u8{ 1, 9, 0, 0, 0, 9, 0, 0, 0, 1 };
+    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 128 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+    for (0..encoded.len) |length| {
+        try std.testing.expectError(error.InvalidSize, ST.readFieldRanges(encoded[0..length]));
+        try std.testing.expectError(error.InvalidSize, ST.tree.deserializeFromBytes(&pool, encoded[0..length]));
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    }
+    const root = try ST.tree.deserializeFromBytes(&pool, &encoded);
+    pool.unref(root);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "memory_safety: large progressive container tree materialization is atomic on allocation failure" {
+    const allocator = std.testing.allocator;
+    const Items = FixedProgressiveListType(UintType(8));
+    const ST = VariableProgressiveContainerType(struct {
+        large: ByteVectorType(64 * 1024),
+        first: Items,
+        second: Items,
+    }, &.{ 1, 0, 1, 0, 1 });
+    const source = try allocator.create(ST.Type);
+    defer allocator.destroy(source);
+    source.* = ST.default_value;
+    defer ST.deinit(allocator, source);
+    source.large[0] = 77;
+    source.large[source.large.len - 1] = 88;
+    try source.first.appendSlice(allocator, &.{ 1, 2, 3 });
+    try source.second.appendSlice(allocator, &.{ 4, 5, 6 });
+
+    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 8192 });
+    defer pool.deinit();
+    const initial_nodes = pool.getNodesInUse();
+    {
+        const root = try ST.tree.fromValue(&pool, source);
+        defer pool.unref(root);
+        try std.testing.checkAllAllocationFailures(allocator, struct {
+            fn run(checked: std.mem.Allocator, node_pool: *Node.Pool, node: Node.Id, expected: *const ST.Type) !void {
+                const out = try checked.create(ST.Type);
+                defer checked.destroy(out);
+                out.* = ST.default_value;
+                defer ST.deinit(checked, out);
+                out.large[0] = 9;
+                try out.first.appendSlice(checked, &.{ 8, 9 });
+                try out.second.appendSlice(checked, &.{ 10, 11 });
+                const before_root = node.getRoot(node_pool).*;
+                const before_nodes = node_pool.getNodesInUse();
+                ST.tree.toValue(checked, node, node_pool, out) catch |err| {
+                    try std.testing.expectEqual(@as(u8, 9), out.large[0]);
+                    try std.testing.expectEqual(@as(u8, 0), out.large[out.large.len - 1]);
+                    try std.testing.expectEqualSlices(u8, &.{ 8, 9 }, out.first.items);
+                    try std.testing.expectEqualSlices(u8, &.{ 10, 11 }, out.second.items);
+                    try std.testing.expectEqualSlices(u8, &before_root, node.getRoot(node_pool));
+                    try std.testing.expectEqual(before_nodes, node_pool.getNodesInUse());
+                    return err;
+                };
+                try std.testing.expect(ST.equals(expected, out));
+                try std.testing.expectEqualSlices(u8, &before_root, node.getRoot(node_pool));
+                try std.testing.expectEqual(before_nodes, node_pool.getNodesInUse());
+            }
+        }.run, .{ &pool, root, source });
+    }
+    try std.testing.expectEqual(initial_nodes, pool.getNodesInUse());
+}
+
 test "progressive container hashing streams sparse fields without allocation" {
     const allocator = std.testing.allocator;
     const active = comptime blk: {
@@ -235,4 +308,95 @@ test "progressive container hashing streams sparse fields without allocation" {
         try std.testing.expectEqualSlices(u8, root.getRoot(&pool), &actual);
         try std.testing.expect(!failing.has_induced_failure);
     }
+}
+
+test "sparse progressive container views commit and clone across subtree depths" {
+    const allocator = std.testing.allocator;
+    const Items = FixedProgressiveListType(UintType(64));
+    const ST = VariableProgressiveContainerType(struct {
+        a: UintType(64),
+        items: Items,
+        tail: ByteVectorType(32),
+    }, &.{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+    {
+        var expected = ST.default_value;
+        defer ST.deinit(allocator, &expected);
+        const view = try ST.TreeView.fromValue(allocator, &pool, &expected);
+        defer view.deinit();
+        try view.set("a", 42);
+        expected.a = 42;
+        const items = try view.get("items");
+        for (0..100) |i| {
+            try items.push(i);
+            try expected.items.append(allocator, i);
+        }
+        const tail: [32]u8 = @splat(7);
+        try view.setValue("tail", &tail);
+        expected.tail = tail;
+        var root: [32]u8 = undefined;
+        try ST.hashTreeRoot(allocator, &expected, &root);
+        try std.testing.expectEqualSlices(u8, &root, try view.hashTreeRoot());
+        try std.testing.expectEqual(@as(u64, 42), try view.getReadonly("a"));
+        const clone = try view.clone(.{ .transfer_cache = true });
+        defer clone.deinit();
+        try (try clone.get("items")).set(21, 999);
+        try clone.commit();
+        try std.testing.expectEqual(@as(u64, 21), try (try view.getReadonly("items")).get(21));
+        try std.testing.expectEqual(@as(u64, 999), try (try clone.getReadonly("items")).get(21));
+
+        const bytes = try allocator.alloc(u8, try view.serializedSize());
+        defer allocator.free(bytes);
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        const original_allocator = pool.allocator;
+        pool.allocator = failing.allocator();
+        _ = view.serializeIntoBytes(bytes) catch |err| {
+            pool.allocator = original_allocator;
+            return err;
+        };
+        pool.allocator = original_allocator;
+        try std.testing.expect(!failing.has_induced_failure);
+        const restored = try ST.TreeView.deserialize(allocator, &pool, bytes);
+        defer restored.deinit();
+        try std.testing.expectEqualSlices(u8, &root, try restored.hashTreeRoot());
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "sparse progressive container commit retries after every pool exhaustion point" {
+    const allocator = std.testing.allocator;
+    const ST = FixedProgressiveContainerType(struct { a: UintType(64), b: UintType(64), c: UintType(64) }, &.{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    var saw_failure = false;
+    for (0..40) |available| {
+        var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 128 });
+        defer pool.deinit();
+        const baseline = pool.getNodesInUse();
+        {
+            const view = try ST.TreeView.fromValue(allocator, &pool, &ST.default_value);
+            defer view.deinit();
+            try view.set("a", 1);
+            try view.set("b", 2);
+            try view.set("c", 3);
+            const original = view.getRoot();
+            var held: std.ArrayList(Node.Id) = .empty;
+            defer held.deinit(allocator);
+            while (pool.nodes.len - pool.getNodesInUse() > available) try held.append(allocator, try pool.createLeafFromUint(0));
+            defer pool.free(held.items);
+            view.commit() catch |err| {
+                try std.testing.expectEqual(error.PoolExhausted, err);
+                try std.testing.expectEqual(original, view.getRoot());
+                pool.free(held.items);
+                held.clearRetainingCapacity();
+                try view.commit();
+                saw_failure = true;
+            };
+            var expected: [32]u8 = undefined;
+            try ST.hashTreeRoot(&.{ .a = 1, .b = 2, .c = 3 }, &expected);
+            try std.testing.expectEqualSlices(u8, &expected, try view.hashTreeRoot());
+        }
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    }
+    try std.testing.expect(saw_failure);
 }
