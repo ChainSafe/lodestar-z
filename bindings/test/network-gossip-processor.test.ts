@@ -86,6 +86,35 @@ test("exchange actions validate roots, handles and verdicts, and stale handles a
       [{action: "fatal", count: 0, peerId: runtime.identity.peerId, type: "reportPeer"}, "InvalidNetworkInteger"],
       [{action: "fatal", count: 101, peerId: runtime.identity.peerId, type: "reportPeer"}, "InvalidNetworkInteger"],
       [{action: "bad", count: 1, peerId: runtime.identity.peerId, type: "reportPeer"}, "InvalidNetworkAction"],
+      [
+        {action: "fatal", context: {reason: "invented"}, count: 1, peerId: runtime.identity.peerId, type: "reportPeer"},
+        "InvalidNetworkAction",
+      ],
+      [
+        {
+          action: "fatal",
+          context: {origin: {connection: {generation: -1, index: 0}, endpoint: null}},
+          count: 1,
+          peerId: runtime.identity.peerId,
+          type: "reportPeer",
+        },
+        "InvalidNetworkInteger",
+      ],
+      [
+        {
+          action: "fatal",
+          context: {
+            origin: {
+              connection: {generation: 1, index: 0},
+              endpoint: {address: new Uint8Array(3), family: 4, port: 9000},
+            },
+          },
+          count: 1,
+          peerId: runtime.identity.peerId,
+          type: "reportPeer",
+        },
+        "InvalidNetworkBytes",
+      ],
     ] as const)
       expect(() => runtime.exchange([classify(handle, true), invalid as NativeAction], settleOnly)).toThrow(code);
     expect(

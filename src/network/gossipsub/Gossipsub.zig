@@ -57,12 +57,14 @@ retired_rpc_sent: metrics.RpcCounters = .{},
 iwant_outcomes: [metrics.iwant_outcome_count]u64 = @splat(0),
 delivery_metrics: metrics.Delivery = .{},
 validation_time: metrics.ValidationTime = .{},
-receive_timeouts: [constants.peers_cap]PeerId = undefined,
+receive_timeouts: [constants.peers_cap]ReceiveTimeout = undefined,
 receive_timeouts_len: u16 = 0,
 
 pub const Options = @import("options.zig").Options;
 
 pub const InitError = Allocator.Error || error{InvalidLimits} || topic_policy.Error;
+
+pub const ReceiveTimeout = struct { identity: PeerId, origin: types.PeerOrigin };
 
 pub const MessageId = topic_mod.MessageId;
 
@@ -173,7 +175,7 @@ pub const Counters = struct {
 };
 
 /// Borrowed until the next pump. Consume once after the protocol pass.
-pub fn receiveTimeouts(self: *const Gossipsub) []const PeerId {
+pub fn receiveTimeouts(self: *const Gossipsub) []const ReceiveTimeout {
     return self.receive_timeouts[0..self.receive_timeouts_len];
 }
 

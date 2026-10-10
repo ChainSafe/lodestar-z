@@ -17,11 +17,33 @@ function coalescingKey(action) {
   switch (action.type) {
     case "block":
       return `block:${Buffer.from(action.root).toString("hex")}`;
-    case "reportPeer":
-      return `report:${action.action}:${action.peerId}`;
+    case "reportPeer": {
+      const origin = action.context?.origin;
+      const endpoint = origin?.endpoint;
+      const address = endpoint
+        ? `${endpoint.family}:${Buffer.from(endpoint.address).toString("hex")}:${endpoint.port}`
+        : "unknown";
+      return `report:${action.action}:${action.peerId}:${action.context?.reason ?? "host"}:${origin ? `${origin.connection.index}:${origin.connection.generation}:${address}` : "unknown"}`;
+    }
     default:
       return action.type;
   }
+}
+
+/** @param {Extract<Action, {type: "reportPeer"}>} action */
+function copyReport(action) {
+  const copy = {...action};
+  if (!action.context) return copy;
+  const context = {...action.context};
+  copy.context = context;
+  if (context.origin) {
+    const {connection, endpoint} = context.origin;
+    context.origin = {
+      connection: {...connection},
+      endpoint: endpoint ? {...endpoint, address: new Uint8Array(endpoint.address)} : null,
+    };
+  }
+  return copy;
 }
 
 /** Obligations retain their order and precede coalesced requests in every exchange. */
@@ -72,7 +94,7 @@ export class ActionQueue {
       this.#reports++;
     }
     // A penalty is copied, so an entry in flight never changes.
-    this.#coalesced.set(key, action.type === "reportPeer" ? {...action} : action);
+    this.#coalesced.set(key, action.type === "reportPeer" ? copyReport(action) : action);
   }
 
   /** Moves up to `ACTION_MAX` queued actions into one batch; what arrives meanwhile queues for the next one. */

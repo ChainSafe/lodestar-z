@@ -1,3 +1,4 @@
+const PeerOrigin = @import("../types.zig").PeerOrigin;
 const identify_mod = @import("../identify/root.zig");
 const custody = @import("custody.zig");
 pub const PeerId = @import("../wire/peer_id.zig").PeerId;
@@ -12,6 +13,14 @@ pub const Metadata = @import("../control_values.zig").Metadata;
 pub const ForkContext = @import("../control_values.zig").ForkContext;
 pub const LocalState = @import("../control_values.zig").LocalState;
 pub const PeerAction = enum { fatal, low_tolerance, mid_tolerance, high_tolerance };
+pub const PeerReport = struct {
+    identity: PeerId,
+    action: PeerAction,
+    origin: ?PeerOrigin = null,
+    reason: Reason = .host,
+
+    pub const Reason = enum { host, gossip_validation, gossip_import, gossip_receive_timeout, reqresp_protocol, reqresp_response };
+};
 pub const ReputationDecision = enum { none, disconnect, ban };
 pub const DisconnectReason = enum {
     host,

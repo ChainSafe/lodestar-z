@@ -53,3 +53,33 @@ describe("ActionQueue", () => {
     expect(queue.take()).toEqual([report("peer-512")]);
   });
 });
+
+it("preserves endpoint evidence and separates reconnects, unknown origins and causes", () => {
+  const queue = new ActionQueue();
+  const origin = {
+    connection: {generation: 1, index: 1},
+    endpoint: {address: Uint8Array.of(192, 0, 2, 1), family: 4 as const, port: 9000},
+  };
+  const action: Extract<NativeAction, {type: "reportPeer"}> = {
+    action: "low_tolerance",
+    context: {origin, reason: "gossip_validation"},
+    count: 1,
+    peerId: "peer",
+    type: "reportPeer",
+  };
+  const original = structuredClone(action);
+  queue.enqueue(action);
+  queue.enqueue(action);
+  origin.connection.generation = 2;
+  origin.endpoint.address[3] = 2;
+  queue.enqueue(action);
+  queue.enqueue({...action, context: {...action.context, reason: "gossip_import"}});
+  queue.enqueue({...action, context: {reason: "gossip_validation"}});
+  const pending = queue.take();
+  expect(pending).toHaveLength(4);
+  expect(pending[0]).toEqual({...original, count: 2});
+  expect(pending[1]).toEqual(action);
+  expect(pending[2]).toMatchObject({context: {reason: "gossip_import"}});
+  expect(pending[3]).toMatchObject({context: {reason: "gossip_validation"}});
+  expect("context" in pending[3] && pending[3].context?.origin).toBeUndefined();
+});

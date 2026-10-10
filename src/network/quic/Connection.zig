@@ -79,6 +79,7 @@ direction: types.Direction = .inbound,
 conn: ?*c.quiche_conn = null,
 handshake: tls.HandshakeState = .{},
 peer: types.Address = .unspecified,
+receive_endpoint_known: bool = true,
 peer_sockaddr: binding.SockAddr = .unspecified,
 local_sockaddr: binding.SockAddr = .unspecified,
 expected_peer_id: ?PeerId = null,
@@ -122,6 +123,7 @@ pub fn open(
     self.handshake = .{ .now_unix = params.now.unixSeconds() };
     self.direction = params.direction;
     self.peer = params.peer;
+    self.receive_endpoint_known = true;
     self.peer_sockaddr = binding.SockAddr.fromAddress(params.peer);
     self.local_sockaddr = binding.SockAddr.fromAddress(params.local);
     self.expected_peer_id = params.expected_peer_id;

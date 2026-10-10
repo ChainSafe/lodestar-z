@@ -52,7 +52,6 @@ pub fn prepareConfiguration(self: *Runtime) !void {
     const io = self.owner.?.threaded.io();
     var seed: u64 = undefined;
     try io.randomSecure(std.mem.asBytes(&seed));
-    self.bridge.reports.seed = seed;
     const options = try self.owner.?.application.buildOptions(&self.owner.?.config, seed);
     self.owner.?.resolved = n.configuration.resolve(options) catch |err| switch (err) {
         error.InvalidLimits => return error.InvalidNetworkConfig,
@@ -210,7 +209,7 @@ fn applyReports(self: *Runtime, tick: n.Now) bool {
         const report = self.bridge.reports.next();
         self.unlock();
         const item = report orelse return false;
-        if (self.owner.?.core.reportPeer(&item.identity, item.action, tick) == null) {
+        if (self.owner.?.core.reportPeer(&item, tick) == null) {
             self.lock();
             self.bridge.reports.ignored +|= 1;
             self.unlock();

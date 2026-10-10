@@ -65,6 +65,9 @@ test "reqresp attribution keeps absolute deadlines while excluding host holds an
         const fault = events[0].peerFault();
         if (case == .remote) {
             try std.testing.expectEqual(.non_completion, fault.?.kind);
+            try std.testing.expectEqual(pair.shared.handles.client, fault.?.origin.connection);
+            try std.testing.expectEqual(pair.shared.pair.client.peerAddress(pair.shared.handles.client).?, fault.?.origin.endpoint.?);
+            try std.testing.expectEqual(fault.?.origin, events[0].failed.origin.?);
             try std.testing.expect(fault.?.identity.eql(&pair.shared.pair.client.peerId(pair.shared.handles.client).?));
         } else try std.testing.expect(fault == null);
         const old = events[0];

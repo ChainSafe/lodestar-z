@@ -1,44 +1,43 @@
 const std = @import("std");
 const n = @import("network");
 const t = n.peers.types;
-const identity_index = n.peers.identity_index;
 const capacity = 512;
-/// Reports of one action per identity beyond this add nothing.
+/// Saturates each queued identity, origin, reason and action at the peer score floor.
 pub const report_max = 100;
 const Row = struct {
     occupied: bool = false,
-    identity: n.PeerId = undefined,
+    report: t.PeerReport = undefined,
     counts: [4]u8 = @splat(0),
 };
-pub const Report = struct { identity: n.PeerId, action: t.PeerAction };
+pub const Report = t.PeerReport;
 
 pub const Table = struct {
     rows: [capacity]Row = @splat(.{}),
-    by_identity: [identity_index.capacity(capacity)]u16 = @splat(identity_index.empty),
-    seed: u64 = 0,
     pending: u32 = 0,
     ignored: u64 = 0,
     cursor: u16 = 0,
 
-    fn index(self: *Table) identity_index.Index {
-        return .{ .slots = &self.by_identity, .seed = self.seed };
-    }
-
-    /// Adds `count` reports of one action, saturating at `report_max` per identity and action. O(1) for a known
-    /// identity; a new one scans for a vacant row, O(entries).
-    pub fn addCount(self: *Table, identity: *const n.PeerId, action: t.PeerAction, count: u8) void {
-        const lookup = self.index();
-        const row_index = lookup.find(&self.rows, identity) orelse vacant: {
+    /// Reports from different connections, endpoints or causes must not merge.
+    pub fn addCount(self: *Table, report: *const Report, count: u8) void {
+        var vacant: ?usize = null;
+        const row_index = found: {
             for (&self.rows, 0..) |*row, i| {
-                if (row.occupied) continue;
-                row.* = .{ .occupied = true, .identity = identity.* };
-                lookup.insert(&self.rows, @intCast(i));
-                break :vacant @as(u16, @intCast(i));
+                if (!row.occupied) {
+                    if (vacant == null) vacant = i;
+                    continue;
+                }
+                if (row.report.identity.eql(&report.identity) and
+                    std.meta.eql(row.report.origin, report.origin) and row.report.reason == report.reason)
+                    break :found i;
             }
-            self.ignored +|= 1;
-            return;
+            const i = vacant orelse {
+                self.ignored +|= 1;
+                return;
+            };
+            self.rows[i] = .{ .occupied = true, .report = report.* };
+            break :found i;
         };
-        const counted = &self.rows[row_index].counts[@intFromEnum(action)];
+        const counted = &self.rows[row_index].counts[@intFromEnum(report.action)];
         // A hundred of the smallest penalty already reaches the score floor.
         const added = @min(count, report_max - counted.*);
         counted.* += added;
@@ -56,9 +55,9 @@ pub const Table = struct {
                 if (count.* == 0) continue;
                 count.* -= 1;
                 self.pending -= 1;
-                const report: Report = .{ .identity = row.identity, .action = @enumFromInt(action) };
+                var report = row.report;
+                report.action = @enumFromInt(action);
                 if (std.mem.allEqual(u8, &row.counts, 0)) {
-                    self.index().remove(&self.rows, &row.identity);
                     row.* = .{};
                 }
                 return report;

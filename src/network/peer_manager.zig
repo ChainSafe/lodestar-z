@@ -493,22 +493,22 @@ pub const PeerManager = struct {
         self.control.reStatusPeers(&self.catalog, now);
     }
     pub fn requestFault(self: *PeerManager, fault: *const ReqResp.PeerFault, now: Now) void {
-        const peer = self.catalog.find(&fault.identity) orelse return;
         switch (fault.kind) {
-            .protocol => _ = self.reportPeer(peer, .low_tolerance, now),
+            .protocol => _ = self.reportPeer(&.{ .identity = fault.identity, .origin = fault.origin, .action = .low_tolerance, .reason = .reqresp_protocol }, now),
             .non_completion => {
+                std.log.scoped(.network_peers).debug("peer_non_completion peer={f} connection={d}:{d} endpoint={any}", .{ logging.peer(&fault.identity), fault.origin.connection.index, fault.origin.connection.generation, fault.origin.endpoint });
+                const peer = self.catalog.find(&fault.identity) orelse return;
                 _ = self.catalog.nonCompletion(peer, now.millis());
                 self.selection_revision = null;
             },
         }
     }
-    pub fn reportPeer(
-        self: *PeerManager,
-        peer: t.PeerRef,
-        action: t.PeerAction,
-        now: Now,
-    ) ?t.ReputationDecision {
-        const decision = self.catalog.report(peer, action, now.millis()) orelse return null;
+    /// Identity reputation may outlive a connection. Endpoint evidence always stays with
+    /// the original observation, including when the catalog has forgotten that identity.
+    pub fn reportPeer(self: *PeerManager, report: *const t.PeerReport, now: Now) ?t.ReputationDecision {
+        std.log.scoped(.network_peers).debug("peer_report peer={f} action={s} reason={s} origin={any}", .{ logging.peer(&report.identity), @tagName(report.action), @tagName(report.reason), report.origin });
+        const peer = self.catalog.find(&report.identity) orelse return null;
+        const decision = self.catalog.report(peer, report.action, now.millis()) orelse return null;
         self.selection_revision = null;
         if (decision != .none) _ = self.disconnect(
             peer,

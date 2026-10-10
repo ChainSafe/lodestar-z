@@ -366,6 +366,14 @@ fn handshakeLimitMs(self: *const Engine, slot: *const Connection) u64 {
     return self.limits.handshake_timeout_ms;
 }
 
+/// QUIC may accept stream data from a path before validating it. Once received traffic
+/// mixes endpoints, stream reads cannot recover which path supplied their bytes.
+pub fn receiveEndpoint(self: *const Engine, conn: Handle) ?Address {
+    const slot = self.liveView(conn) orelse return null;
+    if (slot.peer_id == null or !slot.receive_endpoint_known) return null;
+    return slot.peer;
+}
+
 pub fn peerAddress(self: *const Engine, conn: Handle) ?Address {
     const slot = self.liveView(conn) orelse return null;
     assert(slot.state != .free);
@@ -920,10 +928,12 @@ fn feed(self: *Engine, index: u16, datagram: []u8, from: *const Address, require
     const slot = &self.registry.slots[index];
     assert(slot.state != .free);
     if (slot.state == .closed) return !require_progress;
-    const received_before = if (require_progress) slot.receivedPackets() else 0;
+    const different_source = !from.eql(slot.peer);
+    const received_before = if (require_progress or different_source) slot.receivedPackets() else 0;
     const source = binding.SockAddr.fromAddress(from.*);
     const destination = binding.SockAddr.fromAddress(self.localFor(from.*).?);
     const received = if (slot.recv(datagram, &source, &destination)) |_| true else |_| false;
+    if (different_source and slot.receivedPackets() != received_before) slot.receive_endpoint_known = false;
     if (require_progress and slot.receivedPackets() == received_before and !slot.isFinished()) return false;
     if (received) slot.answered = true;
     // Admission permits must be released before receiving the next Initial in this batch.
@@ -944,6 +954,7 @@ fn observePath(self: *Engine, index: u16) void {
     const peer = slot.drainPathEvents() orelse return;
     assert(slot.state != .free);
     if (peer.eql(slot.peer)) return;
+    slot.receive_endpoint_known = false;
     slot.peer = peer;
     slot.peer_sockaddr = binding.SockAddr.fromAddress(peer);
     slot.path_changed_pending = peer;

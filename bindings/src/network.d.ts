@@ -335,6 +335,21 @@ export interface NativeConnection {
   index: number;
   generation: number;
 }
+/** Transport evidence copied when the work was observed. Null means mixed or unknown source paths. */
+export interface NativePeerOrigin {
+  readonly connection: NativeConnection;
+  readonly endpoint: IpEndpoint | null;
+}
+export interface NativePeerReportContext {
+  readonly origin?: NativePeerOrigin | null;
+  readonly reason?:
+    | "host"
+    | "gossip_validation"
+    | "gossip_import"
+    | "gossip_receive_timeout"
+    | "reqresp_protocol"
+    | "reqresp_response";
+}
 export interface NativePeerState {
   identity: PeerIdStr;
   connection: NativeConnection | null;
@@ -413,6 +428,7 @@ export type NativeRequestError = Error &
         code: "NetworkRequestFailed";
         reason: NativeRequestFailure;
         phase: NativeRequestPhase | null;
+        origin: NativePeerOrigin | null;
         /** Native already recorded this fault against the peer. */
         peerFault: "protocol" | "non_completion" | null;
         detail: string | null;
@@ -542,6 +558,7 @@ export interface GossipMessage {
   readonly slot: bigint | null;
   readonly peerId: PeerIdStr;
   readonly connection: NativeConnection;
+  readonly endpoint: IpEndpoint | null;
   readonly topic: string;
   readonly id: Uint8Array;
   readonly data: Uint8Array;
@@ -650,10 +667,12 @@ export interface NativeNetwork {
   /** Copies `root` before returning. Throws InvalidNetworkBytes unless it is a 32-byte Uint8Array. */
   blockImported(root: Uint8Array): void;
   /**
-   * Coalesces up to 512 distinct peer/action pairs between exchanges. Reports for additional pairs are dropped and
+   * Supply only the origin captured with the reported work. Omit it when unknown; a current peer snapshot cannot
+   * establish where earlier work came from. Identity-only reports never acquire endpoint attribution.
+   * Copies context and coalesces up to 512 distinct peer/action/origin/reason entries. Additional entries are dropped and
    * counted in lodestar_peers_report_peer_dropped_total. Throws, queueing nothing, for a malformed peer id or unknown action.
    */
-  reportPeer(peerId: PeerIdStr, action: NativePeerAction): void;
+  reportPeer(peerId: PeerIdStr, action: NativePeerAction, context?: NativePeerReportContext): void;
   dropQueuedGossip(): void;
   /**
    * Stops delivery of peer observations, dependency checks, serving starts and gossip. Irreversible and idempotent.

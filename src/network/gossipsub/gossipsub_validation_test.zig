@@ -26,6 +26,8 @@ test "gossip resolved attribution releases peer rows and scores late duplicates 
         try support.subscribe(&g, test_topic);
         const conn: Handle = .{ .index = 0, .generation = 1 };
         const source = support.addPeer(&g, conn, .v1_2).?;
+        const endpoint = Engine.Address{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 9000 } };
+        g.sessions.rows[source.index].receive_endpoint = endpoint;
         const old = g.logical(source.index);
         try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, source.index, "message", 1));
         const handle = inbox.last().handle;
@@ -37,6 +39,9 @@ test "gossip resolved attribution releases peer rows and scores late duplicates 
         g.connectionClosed(conn);
         const next = support.addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
         const current = g.logical(next.index);
+        const origin = g.messages.validation.find(inbox.last().id, 2).?.origin.?;
+        try std.testing.expectEqual(conn, origin.connection);
+        try std.testing.expectEqual(endpoint, origin.endpoint.?);
         try std.testing.expectEqual(old.index, current.index);
         try std.testing.expect(!g.peers.matches(old));
         g.overlay.rows[topic].mesh.set(next.index);

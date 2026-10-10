@@ -20,6 +20,7 @@ import type {
   NativeLogRecord,
   NativeNetwork,
   NativePeerAction,
+  NativePeerReportContext,
   NativePeerObservation,
   NativePeerSnapshot,
   NativeRequestProtocolId,
@@ -52,7 +53,7 @@ export type NativeAction =
   | {type: "block"; root: Uint8Array}
   | {type: "recheck"}
   | {type: "dropQueued"}
-  | {type: "reportPeer"; peerId: PeerIdStr; action: NativePeerAction; count: number};
+  | {type: "reportPeer"; peerId: PeerIdStr; action: NativePeerAction; count: number; context?: NativePeerReportContext};
 
 /** One exchange's delivery, which the host owns; frozen when it delivers nothing. */
 export interface NativeExchange {
@@ -269,6 +270,7 @@ export interface NativeGossipDependencyCheck {
 }
 
 export interface NativeGossipMessage {
+  endpoint: IpEndpoint | null;
   attestationData: string | null;
   slot: bigint | null;
   handle: NativeGossipHandle;

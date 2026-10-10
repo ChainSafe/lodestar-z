@@ -14,6 +14,7 @@ pub fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell) !Value
     const object = try env.createObject();
     try object.setNamedProperty("handle", try network_js.handle(env, token.index, token.generation));
     try object.setNamedProperty("connection", try network_js.connection(env, cell.connection));
+    try object.setNamedProperty("endpoint", if (cell.endpoint) |endpoint| try network_js.endpoint(env, endpoint) else try env.getNull());
     try object.setNamedProperty("peerId", try network_js.peerIdValue(env, &cell.identity));
     try object.setNamedProperty("topic", try env.createStringUtf8(cell.topic[0..cell.topic_len]));
     try object.setNamedProperty("id", try bytes(env, &cell.id));

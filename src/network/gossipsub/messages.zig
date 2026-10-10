@@ -27,6 +27,7 @@ const layout_mod = @import("layout.zig");
 const outbox_mod = @import("outbox.zig");
 const delivery = @import("delivery.zig");
 const metrics = @import("metrics.zig");
+const Address = @import("../types.zig").Address;
 const logging = @import("../logging.zig");
 
 /// Topic and payload slices are borrowed for the synchronous admission callback only.
@@ -35,6 +36,7 @@ pub const MessageEvent = struct {
     handle: Handle,
     id: topic_mod.MessageId,
     peer: Engine.Handle,
+    endpoint: ?Address = null,
     topic: []const u8,
     bytes: []const u8,
     identity: PeerId,
@@ -100,6 +102,7 @@ pub const Source = struct {
     peer: PeerRef,
     session: SessionRef,
     connection: Engine.Handle,
+    endpoint: ?Address = null,
 };
 
 const FastEntry = struct {
@@ -269,7 +272,7 @@ pub const Messages = struct {
             .canonical = canonical,
             .maximum_compressed = maximum,
             .compressed = msg.data,
-            .event = .{ .source = source.peer, .identity = context.peers.rows[source.peer.index].identity, .admitted_ms = now, .deadline = now +| self.validation.timeout_ms, .handle = undefined, .id = id, .peer = source.connection, .topic = msg.topic, .bytes = workspace.scratch[0..size] },
+            .event = .{ .source = source.peer, .identity = context.peers.rows[source.peer.index].identity, .admitted_ms = now, .deadline = now +| self.validation.timeout_ms, .handle = undefined, .id = id, .peer = source.connection, .endpoint = source.endpoint, .topic = msg.topic, .bytes = workspace.scratch[0..size] },
         };
         const sink = workspace.sink.?;
         if (!sink.admit(sink.context, &candidate)) {
@@ -331,7 +334,10 @@ pub const Messages = struct {
             if (verdict == .accept) context.peers.scores.deliverEligible(entry.source.index, entry.topic, entry.source_eligible) else context.peers.invalid(entry.source, entry.topic);
             for (entry.duplicates[0..entry.duplicate_len]) |d| {
                 assert(context.peers.matches(d.peer));
-                if (verdict == .reject) context.peers.invalid(d.peer, entry.topic) else if (d.eligible) context.peers.scores.creditMesh(d.peer.index, entry.topic);
+                if (verdict == .reject) {
+                    context.peers.invalid(d.peer, entry.topic);
+                    std.log.scoped(.network_gossip).debug("invalid_duplicate peer={f} origin={any}", .{ logging.peer(&context.peers.rows[d.peer.index].identity), d.origin });
+                } else if (d.eligible) context.peers.scores.creditMesh(d.peer.index, entry.topic);
             }
         }
         self.validation.finish(&self.store, context.peers, handle, verdict, now);
@@ -342,7 +348,7 @@ pub const Messages = struct {
             .ignore => counts.ignored +|= 1,
         }
         context.validation_time.observe(now -| result.admitted_ms);
-        if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, result.id, @tagName(verdict), result.topicString(), logging.peer(&result.source), now -| result.admitted_ms });
+        if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} origin={any} elapsed_ms={d}", .{ handle.index, handle.generation, result.id, @tagName(verdict), result.topicString(), logging.peer(&result.source), entry.origin, now -| result.admitted_ms });
         return .{ .applied = result };
     }
 
@@ -354,9 +360,12 @@ pub const Messages = struct {
 fn recordDuplicate(context: *const Context, entry: *Attribution, source: *const Source, topic: u16, now: u64) void {
     const ref = source.peer;
     const eligible = context.overlay.inMesh(topic, source.session.index) and now -| entry.admitted_ms <= context.peers.scores.topic_params[topic].mesh_delivery_window_ms;
-    if (!Validation.duplicate(entry, context.peers, ref, eligible) or entry.state != .resolved) return;
+    if (!Validation.duplicate(entry, context.peers, ref, eligible)) return;
+    entry.duplicates[entry.duplicate_len - 1].origin = .{ .connection = source.connection, .endpoint = source.endpoint };
+    if (entry.state != .resolved) return;
     if (entry.verdict == .reject) {
         context.peers.invalid(ref, topic);
+        std.log.scoped(.network_gossip).debug("invalid_duplicate peer={f} connection={d}:{d} endpoint={any}", .{ logging.peer(&context.peers.rows[ref.index].identity), source.connection.index, source.connection.generation, source.endpoint });
     } else if (entry.verdict == .accept and eligible) context.peers.scores.creditMesh(ref.index, topic);
 }
 
