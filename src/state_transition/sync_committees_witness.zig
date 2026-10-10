@@ -6,8 +6,9 @@
 //! The witness is a sibling branch from the `sync_committees` subtree up to the
 //! state root, ordered by descending gindex. The path through the BeaconState
 //! tree differs across forks because the container layout changes: pre-electra
-//! the sync committees live at gindices 54/55 (4 siblings), electra and later
-//! at gindices 86/87 (5 siblings).
+//! the sync committees live at gindices 54/55 (4 siblings), electra and fulu
+//! at gindices 86/87 (5 siblings). Gloas uses separate single branches because
+//! its committees at gindices 2945/2946 are not siblings.
 //!
 //! Tests are ported from lodestar:
 //! packages/beacon-node/test/unit/chain/lightclient/proof.test.ts
@@ -15,17 +16,26 @@ const std = @import("std");
 
 const ForkSeq = @import("config").ForkSeq;
 const Node = @import("persistent_merkle_tree").Node;
+const constants = @import("constants");
+
+const current_gindex_gloas = constants.CURRENT_SYNC_COMMITTEE_GINDEX_GLOAS;
+const next_gindex_gloas = constants.NEXT_SYNC_COMMITTEE_GINDEX_GLOAS;
 
 /// Witness data needed to prove the current and next sync committee roots
 /// against the beacon state root. Used by the light-client server.
 ///
 /// Witness branch is sorted by descending gindex.
-/// Pre-electra: 4 witness entries. Post-electra: 5 witness entries.
+/// Pre-electra: 4 shared entries. Electra/fulu: 5 shared entries.
+/// Gloas: no shared witness; each committee has its own leaf-to-root branch.
 pub const SyncCommitteeWitness = struct {
     witness_buf: [5][32]u8,
     witness_len: u8 = 0,
     current_sync_committee_root: [32]u8,
     next_sync_committee_root: [32]u8,
+    gloas_branches: ?struct {
+        current: [std.math.log2_int(u64, current_gindex_gloas)][32]u8,
+        next: [std.math.log2_int(u64, next_gindex_gloas)][32]u8,
+    } = null,
 
     pub fn witness(self: *const SyncCommitteeWitness) []const [32]u8 {
         return self.witness_buf[0..self.witness_len];
@@ -43,12 +53,18 @@ pub fn getSyncCommitteesWitness(
     out: *SyncCommitteeWitness,
 ) !void {
     std.debug.assert(fork.gte(.altair));
+    out.gloas_branches = null;
     const n1 = root_node;
 
     var current: Node.Id = undefined;
     var next: Node.Id = undefined;
-    // Layout from electra onward: sync committees sit deeper in the tree.
-    if (fork.gte(.electra)) {
+    if (fork.gte(.gloas)) {
+        out.gloas_branches = .{ .current = undefined, .next = undefined };
+        out.current_sync_committee_root = try getCommitteeBranch(current_gindex_gloas, root_node, pool, &out.gloas_branches.?.current);
+        out.next_sync_committee_root = try getCommitteeBranch(next_gindex_gloas, root_node, pool, &out.gloas_branches.?.next);
+        out.witness_len = 0;
+        return;
+    } else if (fork.gte(.electra)) {
         const n2 = try Node.Id.getLeft(n1, pool);
         const n5 = try Node.Id.getRight(n2, pool);
         const n10 = try Node.Id.getLeft(n5, pool);
@@ -65,7 +81,7 @@ pub fn getSyncCommitteesWitness(
         const w3 = try Node.Id.getLeft(n2, pool); // gindex 4
         const w4 = try Node.Id.getRight(n1, pool); // gindex 3
 
-        out.witness_buf = .{
+        out.witness_buf[0..5].* = .{
             w0.getRoot(pool).*,
             w1.getRoot(pool).*,
             w2.getRoot(pool).*,
@@ -89,7 +105,7 @@ pub fn getSyncCommitteesWitness(
         const w2 = try Node.Id.getRight(n3, pool); // gindex 7
         const w3 = try Node.Id.getLeft(n1, pool); // gindex 2
 
-        out.witness_buf = .{
+        out.witness_buf[0..5].* = .{
             w0.getRoot(pool).*,
             w1.getRoot(pool).*,
             w2.getRoot(pool).*,
@@ -101,6 +117,28 @@ pub fn getSyncCommitteesWitness(
 
     out.current_sync_committee_root = current.getRoot(pool).*;
     out.next_sync_committee_root = next.getRoot(pool).*;
+}
+
+/// Committee fields are ordinary branch nodes even in the progressive state.
+/// Walk once from the state root and store each sibling in leaf-to-root order.
+fn getCommitteeBranch(
+    comptime gindex: u64,
+    root_node: Node.Id,
+    pool: *Node.Pool,
+    branch: *[std.math.log2_int(u64, gindex)][32]u8,
+) ![32]u8 {
+    const depth = std.math.log2_int(u64, gindex);
+    var node = root_node;
+    for (0..depth) |i| {
+        const branch_index = depth - 1 - i;
+        const is_right = (gindex >> @intCast(branch_index)) & 1 != 0;
+        const left = try node.getLeft(pool);
+        const right = try node.getRight(pool);
+        const sibling = if (is_right) left else right;
+        branch[branch_index] = sibling.getRoot(pool).*;
+        node = if (is_right) right else left;
+    }
+    return node.getRoot(pool).*;
 }
 
 test {

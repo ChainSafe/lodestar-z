@@ -12,6 +12,8 @@ const bigint_fields = .{
     .{ ct.deneb.ExecutionPayloadHeader, "excess_blob_gas" },
     .{ ct.gloas.ExecutionPayload, "blob_gas_used" },
     .{ ct.gloas.ExecutionPayload, "excess_blob_gas" },
+    .{ ct.gloas.ExecutionPayloadBid, "gas_limit" },
+    .{ ct.gloas.ExecutionPayloadBid, "execution_payment" },
     .{ ct.electra.BeaconState, "deposit_requests_start_index" },
     .{ ct.electra.BeaconState, "deposit_balance_to_consume" },
     .{ ct.electra.BeaconState, "exit_balance_to_consume" },
@@ -48,7 +50,9 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
             if (ST.Type == u64 and value.* == constants.FAR_FUTURE_EPOCH) {
                 return try (try env.getGlobal()).getNamedProperty("Infinity");
             }
-            return try env.createInt64(@intCast(value.*));
+            // Number fields follow Lodestar's floating-point representation;
+            // converting through i64 would trap for otherwise valid u64 values.
+            return try env.createDouble(@floatFromInt(value.*));
         },
         .bool => {
             return try env.getBoolean(value.*);
@@ -70,7 +74,7 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
                 return arr;
             }
         },
-        .list => {
+        .list, .progressive_list => {
             if (comptime ssz.isBitListType(ST)) {
                 return try bitArrayToNapiValue(env, value.data.items, value.bit_len);
             } else if (comptime ssz.isByteListType(ST)) {
@@ -86,14 +90,6 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
                 }
                 return arr;
             }
-        },
-        .progressive_list => {
-            const arr = try env.createArrayWithLength(value.items.len);
-            for (value.items, 0..) |*v, i| {
-                const napi_element = try sszValueToNapiValue(env, ST.Element, v);
-                try arr.setElement(@intCast(i), napi_element);
-            }
-            return arr;
         },
         .progressive_bit_list => {
             return try bitArrayToNapiValue(env, value.data.items, value.bit_len);
@@ -171,14 +167,14 @@ pub fn numberSliceToNapiValue(
             const bytes_numbers_ptr: [*]ET = @ptrCast(@alignCast(bytes));
             const bytes_numbers = bytes_numbers_ptr[0..numbers.len];
             for (numbers, 0..) |num, i| {
-                bytes_numbers[i] = @intCast(num);
+                bytes_numbers[i] = std.math.cast(ET, num) orelse return error.IntegerOutOfRange;
             }
         }
         return try env.createTypedarray(typed_array_type, numbers.len, buf, 0);
     } else {
         const arr = try env.createArrayWithLength(numbers.len);
         for (numbers, 0..) |num, i| {
-            const napi_element = try env.createInt64(@intCast(num));
+            const napi_element = try env.createDouble(@floatFromInt(num));
             try arr.setElement(@intCast(i), napi_element);
         }
         return arr;
