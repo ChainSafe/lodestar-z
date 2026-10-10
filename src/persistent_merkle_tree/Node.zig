@@ -296,9 +296,15 @@ pub const Pool = struct {
             .chunked_leaf_scratch = undefined,
         };
 
-        var list = std.MultiArrayList(Node).empty;
-        try list.setCapacity(opts.page_allocator, total_capacity);
-        list.len = total_capacity;
+        const NodeArrays = std.MultiArrayList(Node);
+        const byte_count = std.math.mul(usize, total_capacity, NodeArrays.capacityInBytes(1)) catch {
+            return error.InvalidPoolCapacity;
+        };
+        // Leave unused payload/root pages untouched. Allocator.alloc/free poison
+        // the entire reservation in ReleaseSafe. Node constructors initialize
+        // the fields used by their kind before returning the node.
+        const bytes = opts.page_allocator.rawAlloc(byte_count, .of(Node), @returnAddress()) orelse return error.OutOfMemory;
+        var list: NodeArrays = .{ .bytes = bytes, .len = total_capacity, .capacity = total_capacity };
         pool.nodes = list.slice();
         std.debug.assert(pool.nodes.capacity == total_capacity);
 
@@ -344,8 +350,8 @@ pub const Pool = struct {
                 else => {},
             }
         }
-        var list = self.nodes.toMultiArrayList();
-        list.deinit(self.page_allocator);
+        const list = self.nodes.toMultiArrayList();
+        self.page_allocator.rawFree(list.bytes[0..std.MultiArrayList(Node).capacityInBytes(list.capacity)], .of(Node), @returnAddress());
         self.* = undefined;
     }
 
