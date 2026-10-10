@@ -34,6 +34,7 @@ pub const Transport = struct {
         std.Io.RandomSecureError || error{ClockOutOfRange};
 
     pub const send_burst_max: u16 = 256;
+    pub const receive_per_turn_max: u16 = 256;
 
     pub const WorkLimits = struct {
         /// Datagrams sent per turn.
@@ -44,7 +45,7 @@ pub const Transport = struct {
 
         pub fn validate(self: WorkLimits) error{InvalidLimits}!void {
             if (self.send_per_turn_max == 0 or self.send_per_turn_max > send_burst_max) return error.InvalidLimits;
-            if (self.receive_per_turn_max == 0 or self.receive_per_turn_max > constants.receive_batch_max) return error.InvalidLimits;
+            if (self.receive_per_turn_max == 0 or self.receive_per_turn_max > Transport.receive_per_turn_max) return error.InvalidLimits;
             if (self.burst_per_connection == 0 or self.burst_per_connection > self.send_per_turn_max) return error.InvalidLimits;
         }
     };
@@ -102,6 +103,8 @@ pub const Transport = struct {
         sent_bytes: u64 = 0,
         received_datagrams: u64 = 0,
         sent_datagrams: u64 = 0,
+        receive_turns: u64 = 0,
+        receive_budget_exhausted: u64 = 0,
     };
 
     /// The I/O provider must honor std.Io.randomSecure's external entropy contract.
@@ -373,6 +376,10 @@ pub const Transport = struct {
         assert(self.batch_len == 0);
         var eligible = ready;
         var count: u32 = 0;
+        defer {
+            self.counters.receive_turns +|= 1;
+            self.counters.receive_budget_exhausted +|= @intFromBool(count == self.work_limits.receive_per_turn_max);
+        }
         while (count < self.work_limits.receive_per_turn_max) : (count += 1) {
             const admitted = switch (try self.receiveDatagram(io, result, &eligible)) {
                 .timeout => break,

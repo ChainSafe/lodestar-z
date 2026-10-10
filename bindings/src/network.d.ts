@@ -223,6 +223,12 @@ export interface NativeApplicationConfig extends NativeRuntimeConfig {
   /** Startup copies the derived network settings; this instance need not outlive initialization. */
   beaconConfig: BeaconConfig;
   resources: NativeResources;
+  transport?: {
+    /** Initial congestion window, 1 to 64 packets. Defaults to 10. */
+    initialCongestionWindowPackets: number;
+    /** Maximum received datagrams per owner turn, 1 to 256. Defaults to 32. */
+    receiveDatagramsPerTurn: number;
+  };
   identify: {agentVersion: string; protocolVersion: string};
   serveLightClients: boolean;
   /** The threshold native records are kept at from initialization, until setLogLevel selects another. */

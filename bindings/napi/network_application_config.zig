@@ -8,6 +8,7 @@ const network_logs = @import("network_logs.zig");
 
 pub const Config = struct {
     resources: Resources,
+    transport: Transport = .{},
     agent: [256]u8,
     agent_len: u16,
     version: [64]u8,
@@ -28,7 +29,8 @@ pub const Config = struct {
         return .{
             .seed = seed,
             .forks = common.chain.forks[0..common.chain.boundary_count],
-            .limits = .{ .connections_max = r.connectionCapacity, .handshaking_max = r.handshakingCapacity, .dialing_max = r.dialingCapacity, .receive_budget_bytes = r.receiveBudgetBytes },
+            .limits = .{ .connections_max = r.connectionCapacity, .handshaking_max = r.handshakingCapacity, .dialing_max = r.dialingCapacity, .receive_budget_bytes = r.receiveBudgetBytes, .initial_congestion_window_packets = self.transport.initialCongestionWindowPackets },
+            .work_limits = .{ .receive_per_turn_max = self.transport.receiveDatagramsPerTurn },
             .peers = .{ .capacity = r.peerCapacity, .target_peers = r.targetPeers, .max_peers = r.maxPeers, .min_outbound = r.minOutbound, .outbound_reserve = r.outboundReserve },
             .application_requests_max = 32,
             .admission_policy = common.chain.requestPolicy(),
@@ -39,6 +41,11 @@ pub const Config = struct {
         };
     }
 };
+const Transport = struct {
+    initialCongestionWindowPackets: u16 = 10,
+    receiveDatagramsPerTurn: u16 = 32,
+};
+
 pub const Resources = struct {
     peerCapacity: u16,
     targetPeers: u16,
@@ -71,7 +78,15 @@ const required = .{ "beaconConfig", "identitySecretKey", "bind", "local", "disco
 
 pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out: *Config) !void {
     const remembered = try value.hasNamedProperty("rememberedPeers");
-    if (remembered) try decode.completeObject(value, &(required ++ .{"rememberedPeers"})) else try decode.completeObject(value, &required);
+    try decode.object(value, &(required ++ .{ "rememberedPeers", "transport" }));
+    inline for (required) |name| _ = try decode.get(value, name);
+    out.transport = .{};
+    if (try value.hasNamedProperty("transport")) {
+        const transport = try decode.get(value, "transport");
+        try decode.completeObject(transport, &.{ "initialCongestionWindowPackets", "receiveDatagramsPerTurn" });
+        out.transport.initialCongestionWindowPackets = @intCast(try decode.integer(try decode.get(transport, "initialCongestionWindowPackets"), 64));
+        out.transport.receiveDatagramsPerTurn = @intCast(try decode.integer(try decode.get(transport, "receiveDatagramsPerTurn"), n.Transport.receive_per_turn_max));
+    }
     try cfg.parse(value, beacon, common);
     errdefer common.wipe();
     const resources = try decode.get(value, "resources");

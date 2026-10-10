@@ -7,6 +7,7 @@ const peer_metrics = @import("../peers/metrics_export.zig");
 const gossip_metrics = @import("../gossipsub/metrics_export.zig");
 const timing = @import("timing.zig");
 const topic_metrics = @import("../gossipsub/topic_metrics.zig");
+const gossip_turn = @import("../gossipsub/turn.zig");
 const policy_metrics = @import("../peers/policy_metrics.zig");
 
 const Context = @import("context.zig").Context;
@@ -27,6 +28,7 @@ pub const registry = prom.Registry(Context, .{
     writeRuntime,
     writeNativeCounters,
     writeSockets,
+    writeQuic,
     writeGossipResources,
     writeRequestResources,
     writePeerCloses,
@@ -80,6 +82,19 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
     }
     try peer_metrics.writeDiscoveryCounters(&self.owner.peer_manager, self.owner.discovery, w);
     try gossip_metrics.writeQueueDrops(self.owner.protocols.gossipsub, w);
+}
+
+fn writeQuic(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    const transport = &self.owner.transport;
+    const snapshot = transport.engine.metricsSnapshot(self.running);
+    try snapshot.write(w);
+    try w.scalar(.{ .name = "lodestar_quic_receive_turns_total", .kind = .counter, .help = "QUIC socket receive turns" }, transport.counters.receive_turns);
+    try w.scalar(.{ .name = "lodestar_quic_receive_budget_exhausted_total", .kind = .counter, .help = "QUIC receive turns that consumed the datagram budget; more data may remain in the socket" }, transport.counters.receive_budget_exhausted);
+    try w.scalar(.{ .name = "lodestar_quic_receive_datagrams_per_turn", .kind = .gauge, .help = "Configured QUIC receive datagram budget per network turn" }, transport.work_limits.receive_per_turn_max);
+    try w.scalar(.{ .name = "lodestar_quic_initial_congestion_window_packets", .kind = .gauge, .help = "Configured initial QUIC congestion window in packets" }, transport.engine.limits.initial_congestion_window_packets);
+    const windows = try w.family(.{ .name = "lodestar_quic_receive_window_bytes", .kind = .gauge, .help = "Configured per-connection and per-stream QUIC receive flow control limits", .labels = &.{"scope"}, .unit = .bytes });
+    try windows.sample(.{"connection"}, transport.engine.connection_window);
+    try windows.sample(.{"stream"}, transport.engine.stream_window);
 }
 
 fn writeSockets(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -294,6 +309,10 @@ fn writeBridge(self: *const Context, w: *prom.Encoder) prom.Error!void {
 }
 
 fn writeGossipExecution(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    const gossip = self.owner.protocols.gossipsub;
+    try w.enums(.{ .name = "gossipsub_pump_budget_exhausted_total", .kind = .counter, .help = "Gossip pumps that exhausted a work budget", .labels = &.{"budget"} }, gossip_turn.Budget, &gossip.counters.pump_budget_exhausted);
+    try w.scalar(.{ .name = "gossipsub_stream_write_total", .kind = .counter, .help = "Gossip QUIC stream write calls" }, gossip.sessions.writes);
+    try w.scalar(.{ .name = "gossipsub_stream_write_blocked_total", .kind = .counter, .help = "Gossip QUIC stream writes blocked or partially accepted by QUIC" }, gossip.sessions.blocked_writes);
     try w.scalar(.{
         .name = "lodestar_gossip_validation_expired_executing_count",
         .kind = .gauge,

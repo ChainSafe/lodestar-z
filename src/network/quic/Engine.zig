@@ -1,4 +1,5 @@
 const std = @import("std");
+const metrics = @import("metrics.zig");
 const binding = @import("binding.zig");
 const Connection = @import("Connection.zig");
 const constants = @import("../constants.zig");
@@ -61,12 +62,14 @@ pub const Limits = struct {
     outbound_max: ?u16 = null,
     outbound_reserved: u16 = 0,
     receive_budget_bytes: u64 = bounds.receive_budget_bytes,
+    initial_congestion_window_packets: u16 = bounds.initial_congestion_window_packets,
     idle_timeout_ms: u64 = bounds.idle_timeout_ms,
     handshake_timeout_ms: u64 = bounds.handshake_timeout_ms,
     unanswered_dial_timeout_ms: u64 = bounds.unanswered_dial_timeout_ms,
     keep_alive_ms: u64 = bounds.keep_alive_ms,
 
     pub fn validate(wanted: *const Limits) error{InvalidLimits}!void {
+        if (wanted.initial_congestion_window_packets == 0 or wanted.initial_congestion_window_packets > 64) return error.InvalidLimits;
         if (wanted.connections_max == 0) return error.InvalidLimits;
         if (wanted.connections_max > bounds.connections_max_ceiling) return error.InvalidLimits;
         if (wanted.handshaking_max == 0 or wanted.handshaking_max > wanted.connections_max) {
@@ -194,6 +197,7 @@ pub fn init(allocator: std.mem.Allocator, options: Options) Error!Engine {
         wanted.idle_timeout_ms,
         connection_window,
         stream_window,
+        wanted.initial_congestion_window_packets,
     ) catch return error.OutOfMemory;
     errdefer config.deinit();
 
@@ -244,6 +248,14 @@ pub fn failSend(self: *Engine, conn: Handle) bool {
     if (slot.state == .closed) return false;
     self.markClosed(conn.index, .send_failed);
     return true;
+}
+
+pub fn metricsSnapshot(self: *const Engine, running: bool) metrics.Snapshot {
+    var result: metrics.Snapshot = .{ .counters = self.registry.retired_metrics };
+    for (self.registry.activeIndices()) |index| {
+        if (self.registry.slots[index].conn) |conn| result.observe(conn, running);
+    }
+    return result;
 }
 
 pub fn memoryPlan(self: *const Engine) MemoryPlan {

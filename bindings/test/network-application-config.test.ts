@@ -210,3 +210,28 @@ test.each([
   Reflect.set(config, "rememberedPeers", peers());
   expect(() => startRuntime(config)).toThrow(code);
 });
+
+test.each([
+  ["initialCongestionWindowPackets", 0, "InvalidNetworkConfig"],
+  ["initialCongestionWindowPackets", 65, "InvalidNetworkInteger"],
+  ["receiveDatagramsPerTurn", 0, "InvalidNetworkConfig"],
+  ["receiveDatagramsPerTurn", 257, "InvalidNetworkInteger"],
+] as const)("rejects transport %s=%s", (field, value, error) => {
+  const config = applicationConfig();
+  config.transport = {initialCongestionWindowPackets: 10, receiveDatagramsPerTurn: 32, [field]: value};
+  expect(() => startRuntime(config, () => undefined)).toThrow(error);
+});
+
+test("accepts transport overrides and exposes their effective values", async () => {
+  const config = applicationConfig();
+  config.transport = {initialCongestionWindowPackets: 32, receiveDatagramsPerTurn: 128};
+  const runtime = startRuntime(config, () => undefined);
+  try {
+    await runtime.identity;
+    const metrics = runtime.getMetrics();
+    expect(metrics).toContain("lodestar_quic_initial_congestion_window_packets 32");
+    expect(metrics).toContain("lodestar_quic_receive_datagrams_per_turn 128");
+  } finally {
+    await runtime.close();
+  }
+});

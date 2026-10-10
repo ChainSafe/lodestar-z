@@ -162,6 +162,7 @@ pub const Outbox = struct {
     pressure_pending: bool = false,
     pressure_log_due_ms: u64 = 0,
     last_drop: DropReason = .data_descriptors,
+    last_drop_kind: ?topic.Kind = null,
 
     pub fn subscriptionChanged(self: *Outbox, index: usize, now: u64) void {
         self.subscription_dirty.set(index);
@@ -305,6 +306,7 @@ pub const Outbox = struct {
                 error.KindDescriptors => .data_kind_descriptors,
                 error.KindBytes => .data_kind_bytes,
             });
+            self.last_drop_kind = store.get(h).?.kind;
             return .full;
         };
         self.countRpc(&store.get(h).?.frame, &.{ .message = 1 });
@@ -318,6 +320,7 @@ pub const Outbox = struct {
         self.drops[@intFromEnum(reason)] +|= 1;
         self.pressure_pending = true;
         self.last_drop = reason;
+        self.last_drop_kind = null;
     }
     pub fn pending(self: *const Outbox) bool {
         return self.data.count != 0 or self.control.count != 0 or self.critical.count != 0;
@@ -403,6 +406,7 @@ pub const Outbox = struct {
             .rpc_sent = self.rpc_sent,
             .pressure_log_due_ms = self.pressure_log_due_ms,
             .last_drop = self.last_drop,
+            .last_drop_kind = self.last_drop_kind,
             .ready = false,
         };
         self.subscription_dirty.setRangeValue(.{ .start = 0, .end = self.subscription_dirty.bit_length }, false);

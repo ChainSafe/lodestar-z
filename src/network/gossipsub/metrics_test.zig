@@ -75,3 +75,16 @@ test "score populations count cumulative gates, distinct mesh peers and empty sc
     const connected_mean = try std.fmt.bufPrint(&mean, "lodestar_gossip_score_avg_min_max_avg {d}\n", .{@as(f64, -54.25) / 6});
     try std.testing.expect(std.mem.find(u8, output, connected_mean) != null);
 }
+
+test "gossip queue residence measures completion and excludes cancellations" {
+    var delivery: metrics.Delivery = .{};
+    delivery.completed(.{ .origin = .forward, .kind = .beacon_block, .enqueued_ms = 100 }, 400);
+    delivery.completed(.{ .origin = .iwant, .kind = .beacon_attestation, .enqueued_ms = 900 }, 1000);
+    delivery.cancelled(&.{ 2, 0, 0 });
+    const blocks = delivery.residence[@intFromEnum(policy.Kind.beacon_block)];
+    try std.testing.expectEqual(@as(u64, 1), blocks.count);
+    try std.testing.expectEqual(@as(u128, 300), blocks.sum);
+    const attestations = delivery.residence[@intFromEnum(policy.Kind.beacon_attestation)];
+    try std.testing.expectEqual(@as(u64, 1), attestations.count);
+    try std.testing.expectEqual(@as(u128, 100), attestations.sum);
+}
