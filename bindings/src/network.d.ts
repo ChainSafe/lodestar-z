@@ -117,7 +117,10 @@ export interface NativeGossipStartupPolicy {
   activeSendTimeoutMs: bigint;
   /** Distinct large payloads per kind, shared across recipients. */
   activeSendItems: Readonly<Record<NativeTopicKind, number>>;
+  /** Absolute lifetime of an incomplete frame larger than the private receive buffer. */
   largeFrameTimeoutMs: bigint;
+  /** Shared pool capacity, in multiples of 4096. Frames consume pages only as bytes arrive. */
+  receiveBufferBytes: number;
   seenTtlMs: bigint;
   retainedScoreMs: bigint;
   opportunisticGraftIntervalMs: bigint;
@@ -142,7 +145,6 @@ export type NativeTopicKind =
   | "data_column_sidecar";
 
 export interface NativeRuntimeConfig {
-  profile: "small" | "beaconNode";
   identitySecretKey: Uint8Array;
   /** IPv6 listeners accept only IPv6; IPv4 and IPv6 listeners may share a port. */
   bind: IpEndpoint | readonly IpEndpoint[];

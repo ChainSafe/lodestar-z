@@ -281,7 +281,7 @@ test "gossipsub protocol stack preserves a remotely half-closed outbound stream 
 }
 
 fn compositionAllocationPrefix(allocator: std.mem.Allocator) !void {
-    const resolved = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
+    const resolved = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })}, .receive_arena_bytes = 16 * 1024 * 1024, .seen_capacity = 4096, .mcache_capacity = 256, .validation_capacity = 64, .mcache_arena_bytes = 16 * 1024 * 1024 }, .peers = .{ .capacity = 64, .outbound_reserve = 4, .target_peers = 8, .max_peers = 12, .min_outbound = 2 }, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     var protocols = try Protocols.init(allocator, .{ .reqresp = resolved.core.protocols.reqresp, .gossipsub = resolved.core.protocols.gossipsub, .router = .{ .negotiations_max = 2 } }, &try protocols_test_support.fixtureLocal(.{}));
     defer protocols.deinit();
     try std.testing.expectEqual(@as(usize, 12), protocols.gossipsub.sessions.rows.len);

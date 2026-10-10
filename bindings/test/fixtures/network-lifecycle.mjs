@@ -133,7 +133,6 @@ if (mode === "exit") {
 } else if (mode === "close-batches") {
   // No other I/O or timer keeps this process alive while the public pump drains several completion batches.
   const config = applicationConfig();
-  config.profile = "beaconNode";
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
   config.resources.nativeBudgetBytes = 512 * 1024 * 1024;
   const settlements = new Settlements();
@@ -280,7 +279,6 @@ if (mode === "exit") {
   // Native's notifier finalizes while several batches of completions remain: the owner still delivers every one, then
   // the close.
   const config = applicationConfig();
-  config.profile = "beaconNode";
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
   config.resources.nativeBudgetBytes = 512 * 1024 * 1024;
   const runtime = startRuntime(config);

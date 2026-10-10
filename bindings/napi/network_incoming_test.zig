@@ -182,7 +182,6 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
         owner.* = .{};
         runtime.owner = owner;
         const resolved = try n.configuration.resolve(.{
-            .profile = .small,
             .seed = 1,
             .gossip = .{ .topic_policy = &test_support.topic_policy },
             .forks = &pair.forks,

@@ -694,6 +694,10 @@ pub const NetworkCore = struct {
                 pm.requestFault(fault, now);
             }
         }
+        if (self.protocols.applications_open) for (self.protocols.gossipsub.receiveTimeouts()) |*identity| {
+            const peer = pm.catalog.find(identity) orelse continue;
+            _ = pm.reportPeer(peer, .low_tolerance, now);
+        };
         pm.identified(identify_results[0..counts.identify]);
         self.controlEvents(controls[0..counts.control], now);
         self.maintainControl(now);

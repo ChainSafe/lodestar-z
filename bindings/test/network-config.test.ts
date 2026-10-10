@@ -40,9 +40,30 @@ const cases: readonly [string, (config: NativeApplicationConfig) => void, string
     "InvalidOptions",
   ],
   [
-    "unknown profile",
+    "removed profile selector",
     (c) => {
-      Object.assign(c, {profile: "unknown"});
+      Object.assign(c, {profile: "small"});
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "unaligned receive buffer",
+    (c) => {
+      c.gossipPolicy.receiveBufferBytes = 16 * 1024 * 1024 + 1;
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "receive buffer smaller than a legal frame",
+    (c) => {
+      c.gossipPolicy.receiveBufferBytes = 4096;
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "zero large frame timeout",
+    (c) => {
+      c.gossipPolicy.largeFrameTimeoutMs = 0n;
     },
     "InvalidNetworkConfig",
   ],

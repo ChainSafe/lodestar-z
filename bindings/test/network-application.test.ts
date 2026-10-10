@@ -292,7 +292,6 @@ test("bounded typed stores refuse the third intent and unwind malformed input", 
 
 test("actual 200/210 resources resolve and publish complete capacity", async () => {
   const config = applicationConfig();
-  config.profile = "beaconNode";
   config.resources = {
     bridgeBudgetBytes: 512 * 1024 * 1024,
     connectionCapacity: 256,

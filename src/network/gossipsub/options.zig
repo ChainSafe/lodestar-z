@@ -68,9 +68,9 @@ pub const Options = struct {
     /// Ordinary per-peer compressed-copy/decode/hash byte credits; one legal oversized item may use the shared allowance.
     decompress_per_peer_bytes: usize = 4 * 1024 * 1024,
     /// Absolute large receive-frame lifetime and receive progress timeout.
-    large_frame_timeout_ms: u64 = 10_000,
+    large_frame_timeout_ms: u64 = 6_000,
     body_buffer_bytes: usize = constants.body_buffer_len,
-    receive_arena_bytes: usize = 32 * 1024 * 1024,
+    receive_arena_bytes: usize = 128 * 1024 * 1024,
     seen_ttl_ms: u64 = constants.seenTtlMs(preset.preset.SLOTS_PER_EPOCH, 12),
     gossip_factor: f64 = 0.25,
     retained_score_ms: u64 = 100 * preset.preset.SLOTS_PER_EPOCH * 12_000,

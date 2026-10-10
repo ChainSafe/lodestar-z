@@ -5,6 +5,7 @@ const constants = @import("constants.zig");
 const std = @import("std");
 const Engine = @import("../quic/Engine.zig");
 const test_support = @import("test_support.zig");
+const receive_pool = @import("receive_pool.zig");
 
 test "session slots track connection generations" {
     var sessions = try std.testing.allocator.create(Sessions);
@@ -70,11 +71,14 @@ test "gossip receive contention reclaims a larger partial frame and preserves co
     var sessions = try test_support.sessions(std.testing.allocator, 4);
     defer sessions.deinit(std.testing.allocator);
     for (0..4) |i| _ = sessions.addPeer(.{ .index = @intCast(i), .generation = 1 }).?;
+    defer {
+        for (0..4) |i| _ = sessions.resetRx(@intCast(i));
+    }
     const incoming = &sessions.rows[0].io;
     const stalled = &sessions.rows[1].io;
     const complete = &sessions.rows[2].io;
     const pages = sessions.receive_pool.next.len;
-    const page_bytes = @import("receive_pool.zig").page_bytes;
+    const page_bytes = receive_pool.page_bytes;
     for (0..pages) |i| {
         const io = &sessions.rows[1 + i % 3].io;
         @memset(sessions.receive_pool.writable(&io.overflow).?, 7);
@@ -83,6 +87,7 @@ test "gossip receive contention reclaims a larger partial frame and preserves co
     stalled.reader.declared = constants.GOSSIP_MAX_SIZE;
     stalled.reader.filled = stalled.body.len + stalled.overflow.len;
     sessions.rows[3].io.reader.declared = constants.GOSSIP_MAX_SIZE;
+    sessions.rows[3].io.reader.filled = sessions.rows[3].io.body.len + sessions.rows[3].io.overflow.len;
     complete.startRpc("done");
     try std.testing.expect(sessions.receive_pool.writable(&incoming.overflow) == null);
     try std.testing.expectEqual(@as(?u16, 1), sessions.receiveVictim(0));
@@ -93,4 +98,39 @@ test "gossip receive contention reclaims a larger partial frame and preserves co
     try std.testing.expect(stalled.discarding);
     for (0..4) |i| _ = sessions.resetRx(@intCast(i));
     try std.testing.expectEqual(pages, sessions.receive_pool.free_pages);
+}
+
+test "gossip receive eviction prefers early frames without protecting nearly complete frames" {
+    var sessions = try test_support.sessions(std.testing.allocator, 4);
+    defer sessions.deinit(std.testing.allocator);
+    const page_bytes = receive_pool.page_bytes;
+    for (0..4) |i| {
+        _ = sessions.addPeer(.{ .index = @intCast(i), .generation = 1 }).?;
+        const io = &sessions.rows[i].io;
+        for (0..i + 1) |_| {
+            _ = sessions.receive_pool.writable(&io.overflow).?;
+            io.overflow.len += page_bytes;
+        }
+        io.reader.filled = io.body.len + io.overflow.len;
+        io.reader.declared = io.reader.filled + 1;
+    }
+    defer {
+        for (0..4) |i| _ = sessions.resetRx(@intCast(i));
+    }
+    // All frames are nearly complete: the largest still loses.
+    try std.testing.expectEqual(@as(?u16, 3), sessions.receiveVictim(0));
+    try std.testing.expectEqual(@as(?u16, null), sessions.receiveVictim(3));
+    const early = &sessions.rows[1].io;
+    early.reader.declared = early.reader.filled * 4 + 1;
+    try std.testing.expectEqual(@as(?u16, 1), sessions.receiveVictim(3));
+    // At exactly 25%, page count decides again.
+    early.reader.declared = early.reader.filled * 4;
+    try std.testing.expectEqual(@as(?u16, null), sessions.receiveVictim(3));
+    early.reader.declared = early.reader.filled * 4 + 1;
+    sessions.rows[2].io.reader.declared = sessions.rows[2].io.reader.filled * 4 + 1;
+    try std.testing.expectEqual(@as(?u16, 2), sessions.receiveVictim(3));
+    sessions.rows[2].io.startRpc("done");
+    try std.testing.expectEqual(@as(?u16, 1), sessions.receiveVictim(3));
+    sessions.discardFrame(early);
+    try std.testing.expectEqual(@as(?u16, null), sessions.receiveVictim(3));
 }

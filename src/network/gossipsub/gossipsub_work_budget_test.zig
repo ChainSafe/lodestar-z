@@ -223,8 +223,8 @@ test "gossipsub maximum IWANT shares oversized allowance with data and makes pro
 }
 
 test "gossipsub IHAVE maximum advertisement shares oversized allowance with data and makes progress" {
-    const small = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
-    var options = small.core.protocols.gossipsub;
+    const fixture = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })}, .receive_arena_bytes = 16 * 1024 * 1024 }, .limits = .{ .connections_max = 16, .handshaking_max = 8, .dialing_max = 4 }, .peers = .{ .capacity = 64, .outbound_reserve = 4, .target_peers = 8, .max_peers = 12, .min_outbound = 2 }, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
+    var options = fixture.core.protocols.gossipsub;
     options.work_per_pump = 1;
     options.decompress_per_peer_bytes = 1;
     var g = try support.init(std.testing.allocator, options);

@@ -15,15 +15,15 @@ const policy_fixture = @import("../reqresp/policy_fixture.zig");
 
 test "gossipsub legal maximum host acceptance forwards retained pages through actual IO" {
     var setup: test_pair.Pair = .{};
-    const small = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
-    try setup.initOpts(small.core.protocols.gossipsub, small.core.protocols.gossipsub);
+    const fixture = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })}, .receive_arena_bytes = 16 * 1024 * 1024 }, .limits = .{ .connections_max = 16, .handshaking_max = 8, .dialing_max = 4 }, .peers = .{ .capacity = 64, .outbound_reserve = 4, .target_peers = 8, .max_peers = 12, .min_outbound = 2 }, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
+    try setup.initOpts(fixture.core.protocols.gossipsub, fixture.core.protocols.gossipsub);
     defer setup.deinit();
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(setup.shared.client.gossipsub, topic);
     try support.subscribe(setup.shared.server.gossipsub, topic);
     for (0..20) |_| try setup.pumpOnce();
     const destination = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
-    // The small profile finds sessions among 16 connection slots.
+    // Session lookup uses the configured 16 connection slots.
     const source = support.addPeer(setup.shared.server.gossipsub, .{ .index = 7, .generation = 1 }, .v1_2).?;
     setup.shared.server.gossipsub.overlay.rows[setup.shared.server.gossipsub.overlay.findTopic(topic).?].mesh.set(destination);
     const payload = try std.testing.allocator.alloc(u8, constants.MAX_PAYLOAD_SIZE);

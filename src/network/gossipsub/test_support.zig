@@ -224,7 +224,7 @@ pub fn ageHistory(g: *Gossipsub) void {
 }
 
 pub fn sessions(a: std.mem.Allocator, capacity: u16) !sessions_mod.Sessions {
-    const options: options_mod.Options = .{ .connected_capacity = capacity, .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} };
+    const options: options_mod.Options = .{ .receive_arena_bytes = 16 * 1024 * 1024, .connected_capacity = capacity, .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} };
     return sessions_mod.Sessions.init(a, &options, &layout.Layout.init(&options));
 }
 

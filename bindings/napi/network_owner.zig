@@ -347,7 +347,6 @@ test "a command queued after wait planning executes in the turn whose poll obser
     runtime.owner = owner;
     const key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{71}));
     const resolved = try n.configuration.resolve(.{
-        .profile = .small,
         .seed = 1,
         .gossip = .{ .topic_policy = &test_support.topic_policy },
         .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }},
@@ -423,7 +422,6 @@ test "queued request and disconnect share the protocol turn clock while latency 
     runtime.owner = owner;
     const key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{71}));
     const resolved = try n.configuration.resolve(.{
-        .profile = .small,
         .seed = 1,
         .gossip = .{ .topic_policy = &test_support.topic_policy },
         .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }},
