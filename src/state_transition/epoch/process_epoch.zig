@@ -77,6 +77,10 @@ pub fn processEpoch(
         try observeEpochTransitionStep(.{ .step = .process_pending_consolidations }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
     }
 
+    if (comptime fork.gte(.gloas)) {
+        try @import("process_builder_pending_payments.zig").processBuilderPendingPayments(allocator, state, epoch_cache);
+    }
+
     timer = time.start(io);
     const num_update = try processEffectiveBalanceUpdates(fork, allocator, epoch_cache, state, cache);
     try observeEpochTransitionStep(.{ .step = .process_effective_balance_updates }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
@@ -109,6 +113,9 @@ pub fn processEpoch(
         timer = time.start(io);
         try processProposerLookahead(fork, allocator, epoch_cache, state, cache);
         try observeEpochTransitionStep(.{ .step = .process_proposer_lookahead }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
+    }
+    if (comptime fork.gte(.gloas)) {
+        try @import("process_ptc_window.zig").processPtcWindow(allocator, epoch_cache, state, cache);
     }
 }
 

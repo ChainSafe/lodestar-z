@@ -40,8 +40,8 @@ pub fn processEffectiveBalanceUpdates(
     defer if (cache.balances == null) {
         allocator.free(balances);
     };
-    var previous_epoch_participation: *types.altair.EpochParticipation.TreeView = undefined;
-    var current_epoch_participation: *types.altair.EpochParticipation.TreeView = undefined;
+    var previous_epoch_participation: *@import("fork_types").ForkTypes(if (fork.gte(.gloas)) .gloas else .altair).EpochParticipation.TreeView = undefined;
+    var current_epoch_participation: *@import("fork_types").ForkTypes(if (fork.gte(.gloas)) .gloas else .altair).EpochParticipation.TreeView = undefined;
     if (comptime fork.gte(.altair)) {
         previous_epoch_participation = try state.previousEpochParticipation();
         current_epoch_participation = try state.currentEpochParticipation();

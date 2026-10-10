@@ -17,10 +17,6 @@ const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 /// Inactivity score is `uint64` (8 bytes).
 const INACTIVITY_SCORE_SIZE: usize = types.primitive.Uint64.fixed_size;
 
-// BeaconState field indices are stable across forks.
-const BEACON_STATE_VALIDATORS_FIELD_INDEX: usize = types.phase0.BeaconState.getFieldIndex("validators");
-const BEACON_STATE_INACTIVITY_SCORES_FIELD_INDEX: usize = types.altair.BeaconState.getFieldIndex("inactivity_scores");
-
 pub const MigrateStateOutput = struct {
     state: AnyBeaconState,
     modified_validators: []ValidatorIndex,
@@ -100,6 +96,17 @@ fn loadStateForFork(
     const ranges = try StateST.readFieldRanges(state_bytes);
 
     const validators_field_index = comptime StateST.getFieldIndex("validators");
+    const validators_range = ranges[validators_field_index];
+    const new_validators_bytes = state_bytes[validators_range[0]..validators_range[1]];
+
+    // List and ProgressiveList have different roots for identical bytes. Sharing across this
+    // boundary would silently insert the wrong tree shape; same-layout loads still share nodes.
+    if (out_fork.gte(.gloas) != seed_fork.gte(.gloas)) {
+        const migrated_view = try StateST.TreeView.deserialize(allocator, pool, state_bytes);
+        errdefer migrated_view.deinit();
+        const modified = try findModifiedAndAppendedValidators(allocator, seed_state, new_validators_bytes, seed_validators_bytes);
+        return .{ .state = @unionInit(AnyBeaconState, @tagName(out_fork), migrated_view), .modified_validators = modified };
+    }
 
     const seed_validators_node = try validatorsNodeId(seed_state);
 
@@ -116,8 +123,6 @@ fn loadStateForFork(
     );
     errdefer migrated_view.deinit();
 
-    const validators_range = ranges[validators_field_index];
-    const new_validators_bytes = state_bytes[validators_range[0]..validators_range[1]];
     const modified_validators = try loadValidators(allocator, StateST, migrated_view, pool, seed_validators_node, new_validators_bytes, seed_validators_bytes);
     errdefer allocator.free(modified_validators);
 
@@ -151,7 +156,8 @@ fn loadInactivityScores(
 ) !void {
     if (inactivity_scores_bytes.len % INACTIVITY_SCORE_SIZE != 0) return error.InvalidSize;
 
-    const seed_scores = try types.altair.InactivityScores.TreeView.init(allocator, pool, seed_scores_node);
+    const Scores = StateST.getFieldType("inactivity_scores");
+    const seed_scores = try Scores.TreeView.init(allocator, pool, seed_scores_node);
     defer seed_scores.deinit();
 
     var migrated_scores = try seed_scores.clone(.{ .transfer_cache = false });
@@ -203,7 +209,8 @@ fn loadValidators(
         if (bytes.len % types.phase0.Validator.fixed_size != 0) return error.InvalidSize;
     }
 
-    const seed_validators = try types.phase0.Validators.TreeView.init(allocator, pool, seed_validators_node);
+    const Validators = StateST.getFieldType("validators");
+    const seed_validators = try Validators.TreeView.init(allocator, pool, seed_validators_node);
     defer seed_validators.deinit();
 
     const seed_count = try seed_validators.length();
@@ -267,6 +274,43 @@ fn loadValidators(
     return out_slice;
 }
 
+/// Reports actual changed and appended validators even when the two state layouts cannot
+/// share roots. This keeps the pubkey cache correct when loading an unrelated branch.
+fn findModifiedAndAppendedValidators(
+    allocator: Allocator,
+    seed_state: *AnyBeaconState,
+    new_bytes: []const u8,
+    seed_bytes_opt: ?[]const u8,
+) ![]ValidatorIndex {
+    const element_size = types.phase0.Validator.fixed_size;
+    if (new_bytes.len % element_size != 0) return error.InvalidSize;
+    var validators = try seed_state.validators();
+    const old_count = try validators.length();
+    const new_count = new_bytes.len / element_size;
+    const common_count = @min(old_count, new_count);
+    var allocated: ?[]u8 = null;
+    defer if (allocated) |bytes| allocator.free(bytes);
+    const old_bytes = seed_bytes_opt orelse blk: {
+        const bytes = try allocator.alloc(u8, try validators.serializedSize());
+        allocated = bytes;
+        _ = try validators.serializeIntoBytes(bytes);
+        break :blk bytes;
+    };
+    if (old_bytes.len % element_size != 0 or old_bytes.len / element_size < common_count) return error.InvalidSize;
+    var modified: std.ArrayList(ValidatorIndex) = .empty;
+    errdefer modified.deinit(allocator);
+    try findModifiedIndices(element_size, allocator, old_bytes[0 .. common_count * element_size], new_bytes[0 .. common_count * element_size], &modified);
+    if (new_count > old_count) {
+        try modified.ensureUnusedCapacity(allocator, new_count - old_count);
+        for (old_count..new_count) |index| modified.appendAssumeCapacity(@intCast(index));
+    }
+    return modified.toOwnedSlice(allocator);
+}
+
+fn listPool(view: anytype) *Node.Pool {
+    return if (comptime @hasField(@TypeOf(view.*), "chunks")) view.chunks.state.pool else view.state.pool;
+}
+
 const ScoresDiffContext = struct {
     old_bytes: []u8,
     has_more_validators: bool,
@@ -278,7 +322,7 @@ const ScoresDiffContext = struct {
 /// Snapshot the seed scores (serialized bytes plus counts) needed to diff against the new bytes.
 fn buildScoresDiffContext(
     allocator: Allocator,
-    migrated_scores: *types.altair.InactivityScores.TreeView,
+    migrated_scores: anytype,
     inactivity_scores_bytes: []const u8,
 ) !ScoresDiffContext {
     const old_validator_count = try migrated_scores.length();
@@ -303,7 +347,7 @@ fn buildScoresDiffContext(
 
 /// Write each modified inactivity score into `migrated_scores` from `inactivity_scores_bytes`.
 fn applyScoreDiffs(
-    migrated_scores: *types.altair.InactivityScores.TreeView,
+    migrated_scores: anytype,
     inactivity_scores_bytes: []const u8,
     modified_validators: []const ValidatorIndex,
 ) !void {
@@ -320,11 +364,11 @@ fn applyScoreDiffs(
 /// or return a trimmed (or empty) view when shrinking. Returns the resulting view.
 fn syncScoresLength(
     allocator: Allocator,
-    migrated_scores: *types.altair.InactivityScores.TreeView,
+    migrated_scores: anytype,
     inactivity_scores_bytes: []const u8,
     old_validator_count: usize,
     new_validator_count: usize,
-) !*types.altair.InactivityScores.TreeView {
+) !@TypeOf(migrated_scores) {
     if (new_validator_count >= old_validator_count) {
         var idx: usize = old_validator_count;
         while (idx < new_validator_count) : (idx += 1) {
@@ -337,14 +381,12 @@ fn syncScoresLength(
     }
 
     if (new_validator_count == 0) {
-        const pool = migrated_scores.chunks.state.pool;
-        const empty_root = try types.altair.InactivityScores.tree.fromValue(
-            pool,
-            &types.altair.InactivityScores.default_value,
-        );
+        const Scores = @TypeOf(migrated_scores.*).SszType;
+        const pool = listPool(migrated_scores);
+        const empty_root = try Scores.tree.fromValue(pool, &Scores.default_value);
         errdefer pool.unref(empty_root);
 
-        const empty_scores = try types.altair.InactivityScores.TreeView.init(allocator, pool, empty_root);
+        const empty_scores = try Scores.TreeView.init(allocator, pool, empty_root);
         migrated_scores.deinit();
         return empty_scores;
     }
@@ -358,7 +400,7 @@ fn syncScoresLength(
 /// freshly deserialized from `new_validators_bytes`.
 fn applyModifiedValidators(
     allocator: Allocator,
-    migrated_validators: *types.phase0.Validators.TreeView,
+    migrated_validators: anytype,
     new_validators_bytes: []const u8,
     modified_validators: []const ValidatorIndex,
 ) !void {
@@ -382,7 +424,7 @@ fn applyModifiedValidators(
 /// `new_validators_bytes`, recording each appended index in `modified_validators`.
 fn appendNewValidators(
     allocator: Allocator,
-    migrated_validators: *types.phase0.Validators.TreeView,
+    migrated_validators: anytype,
     new_validators_bytes: []const u8,
     start_index: usize,
     end_index: usize,
@@ -411,18 +453,16 @@ fn appendNewValidators(
 /// Shrink `migrated_validators` to `new_count`, returning a trimmed (or empty) view.
 fn trimValidators(
     allocator: Allocator,
-    migrated_validators: *types.phase0.Validators.TreeView,
+    migrated_validators: anytype,
     new_count: usize,
-) !*types.phase0.Validators.TreeView {
+) !@TypeOf(migrated_validators) {
     if (new_count == 0) {
-        const pool = migrated_validators.chunks.state.pool;
-        const empty_root = try types.phase0.Validators.tree.fromValue(
-            pool,
-            &types.phase0.Validators.default_value,
-        );
+        const Validators = @TypeOf(migrated_validators.*).SszType;
+        const pool = listPool(migrated_validators);
+        const empty_root = try Validators.tree.fromValue(pool, &Validators.default_value);
         errdefer pool.unref(empty_root);
 
-        const empty_validators = try types.phase0.Validators.TreeView.init(allocator, pool, empty_root);
+        const empty_validators = try Validators.TreeView.init(allocator, pool, empty_root);
         migrated_validators.deinit();
         return empty_validators;
     }
@@ -434,14 +474,14 @@ fn trimValidators(
 
 fn validatorsNodeId(state: *AnyBeaconState) !Node.Id {
     return switch (state.*) {
-        inline else => |s| s.root.getNodeAtDepth(s.pool, @TypeOf(s.*).SszType.chunk_depth, BEACON_STATE_VALIDATORS_FIELD_INDEX),
+        inline else => |s| s.root.getNode(s.pool, comptime @TypeOf(s.*).SszType.getFieldGindex("validators")),
     };
 }
 
 fn inactivityScoresNodeId(state: *AnyBeaconState) !Node.Id {
     return switch (state.*) {
         .phase0 => error.InvalidAtFork,
-        inline else => |s| s.root.getNodeAtDepth(s.pool, @TypeOf(s.*).SszType.chunk_depth, BEACON_STATE_INACTIVITY_SCORES_FIELD_INDEX),
+        inline else => |s| s.root.getNode(s.pool, comptime @TypeOf(s.*).SszType.getFieldGindex("inactivity_scores")),
     };
 }
 
@@ -918,4 +958,57 @@ test "memory_safety: loadState releases new inactivity scores on failure" {
     }
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
     try std.testing.expectEqualSlices(u8, &seed_root, try seed.hashTreeRoot());
+}
+
+test "loadState shares Gloas subtrees and refuses sharing across the progressive fork" {
+    const allocator = std.testing.allocator;
+    inline for (.{ .{ ForkSeq.gloas, ForkSeq.gloas }, .{ ForkSeq.fulu, ForkSeq.gloas }, .{ ForkSeq.gloas, ForkSeq.fulu } }) |forks| {
+        const Seed = ForkTypes(forks[0]).BeaconState;
+        const Target = ForkTypes(forks[1]).BeaconState;
+        var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 750_000 });
+        defer pool.deinit();
+        const baseline = pool.getNodesInUse();
+        {
+            var seed_value = Seed.default_value;
+            defer Seed.deinit(allocator, &seed_value);
+            var target_value = Target.default_value;
+            defer Target.deinit(allocator, &target_value);
+            for (0..4) |i| {
+                var validator = types.phase0.Validator.default_value;
+                validator.pubkey[0] = @intCast(i);
+                if (i < 3) {
+                    try seed_value.validators.append(allocator, validator);
+                    try seed_value.inactivity_scores.append(allocator, i);
+                }
+                if (i == 1) validator.pubkey[1] = 99;
+                try target_value.validators.append(allocator, validator);
+                try target_value.inactivity_scores.append(allocator, if (i == 1) 99 else i);
+            }
+            const seed_view = try Seed.TreeView.fromValue(allocator, &pool, &seed_value);
+            var seed = @unionInit(AnyBeaconState, @tagName(forks[0]), seed_view);
+            defer seed.deinit();
+            const seed_root = (try seed.hashTreeRoot()).*;
+            const bytes = try allocator.alloc(u8, Target.serializedSize(&target_value));
+            defer allocator.free(bytes);
+            _ = Target.serializeIntoBytes(&target_value, bytes);
+            var expected_root: [32]u8 = undefined;
+            try Target.hashTreeRoot(allocator, &target_value, &expected_root);
+            var result = try loadStateForFork(allocator, &pool, forks[1], forks[0], &seed, Target, bytes, null);
+            defer result.state.deinit();
+            defer allocator.free(result.modified_validators);
+            try std.testing.expectEqualSlices(ValidatorIndex, &.{ 1, 3 }, result.modified_validators);
+            try std.testing.expectEqualSlices(u8, &expected_root, try result.state.hashTreeRoot());
+            try std.testing.expectEqualSlices(u8, &seed_root, try seed.hashTreeRoot());
+            const source_validators = try seed.validators();
+            const loaded_validators = try result.state.validators();
+            const source_first = (try source_validators.getReadonly(0)).getRoot();
+            const loaded_first = (try loaded_validators.getReadonly(0)).getRoot();
+            if (forks[0] == forks[1]) {
+                try std.testing.expectEqual(source_first, loaded_first);
+            } else {
+                try std.testing.expect(source_first != loaded_first);
+            }
+        }
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    }
 }

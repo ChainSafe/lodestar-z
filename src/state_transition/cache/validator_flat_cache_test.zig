@@ -125,3 +125,108 @@ test "ValidatorFlatCache patches grown cells even where the trees match" {
     try expectInSync(&cache, view);
     try testing.expectEqual(@as(usize, 91), cache.last_patched);
 }
+
+fn expectProgressiveInSync(cache: *ValidatorFlatCache, view: *types.gloas.Validators.TreeView) !void {
+    try view.commit();
+    const count = try view.length();
+    try cache.syncProgressive(view.getRoot(), count);
+    const fields = cache.fields.slice();
+    var it = view.iteratorReadonly(0);
+    for (0..count) |i| try testing.expect(std.meta.eql(fields.get(i), ValidatorFields.fromValidator(try it.nextValuePtr())));
+}
+
+test "progressive ValidatorFlatCache diffs shared subtrees across growth truncation and layouts" {
+    const allocator = testing.allocator;
+    const Progressive = types.gloas.Validators;
+    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 8192 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+    {
+        var value: Progressive.Type = .empty;
+        defer value.deinit(allocator);
+        for (0..342) |i| try value.append(allocator, testValidator(i));
+        const view = try Progressive.TreeView.fromValue(allocator, &pool, &value);
+        defer view.deinit();
+        const sibling = try view.clone(.{});
+        defer sibling.deinit();
+        var cache = ValidatorFlatCache.init(allocator, &pool);
+        defer cache.deinit();
+        try expectProgressiveInSync(&cache, view);
+        try testing.expectEqual(@as(usize, 342), cache.last_patched);
+        try expectProgressiveInSync(&cache, view);
+        try testing.expectEqual(@as(usize, 0), cache.last_patched);
+        for ([_]usize{ 0, 4, 5, 20, 21, 84, 85, 340, 341 }) |i| try (try view.get(i)).set("exit_epoch", 1234 + i);
+        try expectProgressiveInSync(&cache, view);
+        try testing.expectEqual(@as(usize, 9), cache.last_patched);
+        try expectProgressiveInSync(&cache, sibling);
+        try testing.expectEqual(@as(usize, 9), cache.last_patched);
+        try expectProgressiveInSync(&cache, view);
+        for (342..400) |i| try view.pushValue(&testValidator(i));
+        try expectProgressiveInSync(&cache, view);
+        try testing.expectEqual(@as(usize, 58), cache.last_patched);
+        const shortened = try view.sliceTo(84);
+        defer shortened.deinit();
+        try expectProgressiveInSync(&cache, shortened);
+        try testing.expectEqual(@as(usize, 0), cache.last_patched);
+        try expectProgressiveInSync(&cache, view);
+        try testing.expectEqual(@as(usize, 315), cache.last_patched);
+
+        // The same packed validator payloads have compatible values but a different list shape.
+        const before = try Validators.TreeView.fromValue(allocator, &pool, &value);
+        defer before.deinit();
+        try expectInSync(&cache, before);
+        try testing.expectEqual(@as(usize, 342), cache.last_patched);
+        try expectProgressiveInSync(&cache, sibling);
+        try testing.expectEqual(@as(usize, 342), cache.last_patched);
+        try cache.syncProgressive(sibling.getRoot(), 5);
+        try expectProgressiveInSync(&cache, sibling);
+        try testing.expectEqual(@as(usize, 337), cache.last_patched);
+    }
+    try testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "memory_safety: progressive ValidatorFlatCache initial and appended subtrees survive allocation failure" {
+    const allocator = testing.allocator;
+    const Progressive = types.gloas.Validators;
+    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+    {
+        var value: Progressive.Type = .empty;
+        defer value.deinit(allocator);
+        for (0..342) |i| try value.append(allocator, testValidator(i));
+        const view = try Progressive.TreeView.fromValue(allocator, &pool, &value);
+        defer view.deinit();
+        var backing = testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+        try testing.checkAllAllocationFailures(backing.allocator(), struct {
+            fn run(cache_allocator: std.mem.Allocator, source: *Progressive.TreeView) !void {
+                const source_pool = source.chunks.state.pool;
+                const live_nodes = source_pool.getNodesInUse();
+                defer testing.expectEqual(live_nodes, source_pool.getNodesInUse()) catch @panic("cache leaked tree nodes");
+                var cache = ValidatorFlatCache.init(cache_allocator, source_pool);
+                defer cache.deinit();
+                var old_len: usize = 0;
+                // Prefixes cover an empty cache, exact subtree boundaries, and a final
+                // partial subtree. The retained tree stays identical through each fill.
+                for ([_]usize{ 0, 5, 85, 342 }) |new_len| {
+                    cache.syncProgressive(source.getRoot(), new_len) catch |err| {
+                        try testing.expectEqual(@as(usize, 0), cache.len());
+                        try testing.expectEqual(@as(?Node.Id, null), cache.synced_root);
+                        return err;
+                    };
+                    try testing.expectEqual(new_len - old_len, cache.last_patched);
+                    var it = source.iteratorReadonly(0);
+                    for (0..new_len) |i| try testing.expect(std.meta.eql(
+                        cache.fields.get(i),
+                        ValidatorFields.fromValidator(try it.nextValuePtr()),
+                    ));
+                    old_len = new_len;
+                }
+                cache.invalidate();
+                try expectProgressiveInSync(&cache, source);
+                try testing.expectEqual(@as(usize, 342), cache.last_patched);
+            }
+        }.run, .{view});
+    }
+    try testing.expectEqual(baseline, pool.getNodesInUse());
+}

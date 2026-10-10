@@ -38,6 +38,19 @@ pub fn processOperations(
     body: *const BeaconBlockBody(block_type, fork),
     opts: ProcessBlockOpts,
 ) !void {
+    if (comptime fork.gte(.gloas)) {
+        const limits = @import("preset").preset;
+        if (body.inner.proposer_slashings.items.len > limits.MAX_PROPOSER_SLASHINGS or
+            body.inner.attester_slashings.items.len > limits.MAX_ATTESTER_SLASHINGS_ELECTRA or
+            body.inner.attestations.items.len > limits.MAX_ATTESTATIONS_ELECTRA or
+            body.inner.voluntary_exits.items.len > limits.MAX_VOLUNTARY_EXITS or
+            body.inner.bls_to_execution_changes.items.len > limits.MAX_BLS_TO_EXECUTION_CHANGES or
+            body.inner.payload_attestations.items.len > limits.MAX_PAYLOAD_ATTESTATIONS)
+        {
+            return error.TooManyBlockOperations;
+        }
+    }
+
     // verify that outstanding deposits are processed up to the maximum number of deposits.
     // Fulu removes support for the former (Eth1 bridge) deposit mechanism: `body.deposits` must be empty.
     const max_deposits: u64 = if (comptime fork.gte(.fulu)) 0 else try getEth1DepositCount(fork, state, null);
@@ -83,7 +96,7 @@ pub fn processOperations(
 
     {
         const timer = time.start(io);
-        try processAttestations(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, body.inner.attestations.items, opts.verify_signature);
+        try @import("process_attestations.zig").processAttestationsWithParent(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, body.inner.attestations.items, opts.parent_slot, opts.verify_signature);
         try metrics.state_transition.process_operations_step.observe(
             .{ .step = .processAttestations },
             time.durationSeconds(time.since(io, timer)),
@@ -121,6 +134,12 @@ pub fn processOperations(
             .{ .step = .processBlsToExecutionChange },
             time.durationSeconds(time.since(io, timer)),
         );
+    }
+
+    if (comptime fork.gte(.gloas)) {
+        for (body.inner.payload_attestations.items) |*attestation| {
+            try @import("process_payload_attestation.zig").processPayloadAttestation(allocator, io, config, epoch_cache, state, attestation, opts.verify_signature);
+        }
     }
 
     // Gloas (ePBS): execution_requests moved to ExecutionPayloadEnvelope

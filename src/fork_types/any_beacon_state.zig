@@ -1,4 +1,5 @@
 const std = @import("std");
+const ListView = @import("list_view.zig").ListView;
 const Allocator = std.mem.Allocator;
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
@@ -193,7 +194,8 @@ pub const AnyBeaconState = union(ForkSeq) {
     /// Get a Merkle proof for the finalized root in the beacon state.
     pub fn getFinalizedRootProof(self: *AnyBeaconState, allocator: Allocator) !SingleProof {
         const gindex_value: u64 = switch (self.*) {
-            .electra, .fulu, .gloas => constants.FINALIZED_ROOT_GINDEX_ELECTRA,
+            .electra, .fulu => constants.FINALIZED_ROOT_GINDEX_ELECTRA,
+            .gloas => constants.FINALIZED_ROOT_GINDEX_GLOAS,
             else => constants.FINALIZED_ROOT_GINDEX,
         };
         return self.getSingleProof(allocator, gindex_value);
@@ -391,9 +393,10 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn validators(self: *AnyBeaconState) !*ct.phase0.Validators.TreeView {
+    pub fn validators(self: *AnyBeaconState) !ListView(ct.phase0.Validators, ct.gloas.Validators) {
         return switch (self.*) {
-            inline else => |state| try state.get("validators"),
+            .gloas => |state| .{ .gloas = try state.get("validators") },
+            inline else => |state| .{ .pre_gloas = try state.get("validators") },
         };
     }
 
@@ -440,9 +443,10 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn balances(self: *AnyBeaconState) !*ct.phase0.Balances.TreeView {
+    pub fn balances(self: *AnyBeaconState) !ListView(ct.phase0.Balances, ct.gloas.Balances) {
         return switch (self.*) {
-            inline else => |state| try state.get("balances"),
+            .gloas => |state| .{ .gloas = try state.get("balances") },
+            inline else => |state| .{ .pre_gloas = try state.get("balances") },
         };
     }
 
@@ -507,10 +511,11 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn previousEpochParticipation(self: *AnyBeaconState) !*ct.altair.EpochParticipation.TreeView {
+    pub fn previousEpochParticipation(self: *AnyBeaconState) !ListView(ct.altair.EpochParticipation, ct.gloas.EpochParticipation) {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |state| try state.get("previous_epoch_participation"),
+            .gloas => |state| .{ .gloas = try state.get("previous_epoch_participation") },
+            inline else => |state| .{ .pre_gloas = try state.get("previous_epoch_participation") },
         };
     }
 
@@ -521,10 +526,11 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn currentEpochParticipation(self: *AnyBeaconState) !*ct.altair.EpochParticipation.TreeView {
+    pub fn currentEpochParticipation(self: *AnyBeaconState) !ListView(ct.altair.EpochParticipation, ct.gloas.EpochParticipation) {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |state| try state.get("current_epoch_participation"),
+            .gloas => |state| .{ .gloas = try state.get("current_epoch_participation") },
+            inline else => |state| .{ .pre_gloas = try state.get("current_epoch_participation") },
         };
     }
 
@@ -550,7 +556,8 @@ pub const AnyBeaconState = union(ForkSeq) {
                 );
 
                 // Reset current_epoch_participation by rebuilding a zeroed SSZ List of the same length.
-                const new_current_root = try ct.altair.EpochParticipation.tree.zeros(
+                const Participation = @TypeOf(current_epoch_participation.*).SszType;
+                const new_current_root = try Participation.tree.zeros(
                     state.pool,
                     length,
                 );
@@ -617,10 +624,11 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn inactivityScores(self: *AnyBeaconState) !*ct.altair.InactivityScores.TreeView {
+    pub fn inactivityScores(self: *AnyBeaconState) !ListView(ct.altair.InactivityScores, ct.gloas.InactivityScores) {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |state| try state.get("inactivity_scores"),
+            .gloas => |state| .{ .gloas = try state.get("inactivity_scores") },
+            inline else => |state| .{ .pre_gloas = try state.get("inactivity_scores") },
         };
     }
 
@@ -839,45 +847,69 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn pendingDeposits(self: *AnyBeaconState) !*ct.electra.PendingDeposits.TreeView {
+    pub fn pendingDeposits(self: *AnyBeaconState) !ListView(ct.electra.PendingDeposits, ct.gloas.PendingDeposits) {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |state| try state.get("pending_deposits"),
+            .gloas => |state| .{ .gloas = try state.get("pending_deposits") },
+            inline else => |state| .{ .pre_gloas = try state.get("pending_deposits") },
         };
     }
 
-    pub fn setPendingDeposits(self: *AnyBeaconState, deposits: *ct.electra.PendingDeposits.TreeView) !void {
+    pub fn setPendingDeposits(self: *AnyBeaconState, deposits: ListView(ct.electra.PendingDeposits, ct.gloas.PendingDeposits)) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |state| try state.set("pending_deposits", deposits),
+            .gloas => |state| try state.set("pending_deposits", switch (deposits) {
+                .gloas => |view| view,
+                else => return error.InvalidAtFork,
+            }),
+            inline else => |state| try state.set("pending_deposits", switch (deposits) {
+                .pre_gloas => |view| view,
+                else => return error.InvalidAtFork,
+            }),
         };
     }
 
-    pub fn pendingPartialWithdrawals(self: *AnyBeaconState) !*ct.electra.PendingPartialWithdrawals.TreeView {
+    pub fn pendingPartialWithdrawals(self: *AnyBeaconState) !ListView(ct.electra.PendingPartialWithdrawals, ct.gloas.PendingPartialWithdrawals) {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |state| try state.get("pending_partial_withdrawals"),
+            .gloas => |state| .{ .gloas = try state.get("pending_partial_withdrawals") },
+            inline else => |state| .{ .pre_gloas = try state.get("pending_partial_withdrawals") },
         };
     }
 
-    pub fn setPendingPartialWithdrawals(self: *AnyBeaconState, pending_partial_withdrawals: *ct.electra.PendingPartialWithdrawals.TreeView) !void {
+    pub fn setPendingPartialWithdrawals(self: *AnyBeaconState, pending_partial_withdrawals: ListView(ct.electra.PendingPartialWithdrawals, ct.gloas.PendingPartialWithdrawals)) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |state| try state.set("pending_partial_withdrawals", pending_partial_withdrawals),
+            .gloas => |state| try state.set("pending_partial_withdrawals", switch (pending_partial_withdrawals) {
+                .gloas => |view| view,
+                else => return error.InvalidAtFork,
+            }),
+            inline else => |state| try state.set("pending_partial_withdrawals", switch (pending_partial_withdrawals) {
+                .pre_gloas => |view| view,
+                else => return error.InvalidAtFork,
+            }),
         };
     }
 
-    pub fn pendingConsolidations(self: *AnyBeaconState) !*ct.electra.PendingConsolidations.TreeView {
+    pub fn pendingConsolidations(self: *AnyBeaconState) !ListView(ct.electra.PendingConsolidations, ct.gloas.PendingConsolidations) {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |state| try state.get("pending_consolidations"),
+            .gloas => |state| .{ .gloas = try state.get("pending_consolidations") },
+            inline else => |state| .{ .pre_gloas = try state.get("pending_consolidations") },
         };
     }
 
-    pub fn setPendingConsolidations(self: *AnyBeaconState, consolidations: *ct.electra.PendingConsolidations.TreeView) !void {
+    pub fn setPendingConsolidations(self: *AnyBeaconState, consolidations: ListView(ct.electra.PendingConsolidations, ct.gloas.PendingConsolidations)) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |state| try state.set("pending_consolidations", consolidations),
+            .gloas => |state| try state.set("pending_consolidations", switch (consolidations) {
+                .gloas => |view| view,
+                else => return error.InvalidAtFork,
+            }),
+            inline else => |state| try state.set("pending_consolidations", switch (consolidations) {
+                .pre_gloas => |view| view,
+                else => return error.InvalidAtFork,
+            }),
         };
     }
 

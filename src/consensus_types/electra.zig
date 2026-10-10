@@ -58,6 +58,7 @@ pub const HistoricalSummary = capella.HistoricalSummary;
 pub const BlobIdentifier = deneb.BlobIdentifier;
 pub const ExecutionPayload = deneb.ExecutionPayload;
 pub const ExecutionPayloadHeader = deneb.ExecutionPayloadHeader;
+pub const VersionedHashes = deneb.VersionedHashes;
 pub const BlobKzgCommitments = deneb.BlobKzgCommitments;
 
 pub const PendingDeposit = ssz.FixedContainerType(struct {
@@ -103,6 +104,13 @@ pub const ExecutionRequests = ssz.VariableContainerType(struct {
     deposits: ssz.FixedListType(DepositRequest, preset.MAX_DEPOSIT_REQUESTS_PER_PAYLOAD, .{}),
     withdrawals: ssz.FixedListType(WithdrawalRequest, preset.MAX_WITHDRAWAL_REQUESTS_PER_PAYLOAD, .{}),
     consolidations: ssz.FixedListType(ConsolidationRequest, preset.MAX_CONSOLIDATION_REQUESTS_PER_PAYLOAD, .{}),
+});
+
+pub const NewPayloadRequest = ssz.VariableContainerType(struct {
+    execution_payload: ExecutionPayload,
+    versioned_hashes: VersionedHashes,
+    parent_beacon_block_root: p.Root,
+    execution_requests: ExecutionRequests,
 });
 
 pub const SingleAttestation = ssz.FixedContainerType(struct {

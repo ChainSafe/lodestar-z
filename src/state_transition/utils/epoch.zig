@@ -47,7 +47,7 @@ pub fn computeExitEpochAndUpdateChurn(
 ) !u64 {
     const state_earliest_exit_epoch = try state.earliestExitEpoch();
     var earliest_exit_epoch = @max(state_earliest_exit_epoch, computeActivationExitEpoch(epoch_cache.epoch));
-    const per_epoch_churn = getActivationExitChurnLimit(epoch_cache);
+    const per_epoch_churn = if (comptime fork.gte(.gloas)) @import("validator.zig").getExitChurnLimit(epoch_cache) else getActivationExitChurnLimit(epoch_cache);
 
     const state_exit_balance_to_consume = try state.exitBalanceToConsume();
     // New epoch for exits.
@@ -79,7 +79,7 @@ pub fn computeConsolidationEpochAndUpdateChurn(
 ) !u64 {
     const state_earliest_consolidation_epoch = try state.earliestConsolidationEpoch();
     var earliest_consolidation_epoch = @max(state_earliest_consolidation_epoch, computeActivationExitEpoch(epoch_cache.epoch));
-    const per_epoch_consolidation_churn = getConsolidationChurnLimit(epoch_cache);
+    const per_epoch_consolidation_churn = @import("validator.zig").getConsolidationChurnLimitForFork(fork, epoch_cache);
 
     const state_consolidation_balance_to_consume = try state.consolidationBalanceToConsume();
 

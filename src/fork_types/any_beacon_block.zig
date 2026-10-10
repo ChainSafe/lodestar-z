@@ -601,6 +601,7 @@ pub const AnyBeaconBlockBody = union(enum) {
     pub fn attesterSlashings(self: *const AnyBeaconBlockBody) AnyAttesterSlashings {
         return switch (self.*) {
             inline .phase0, .altair, .full_bellatrix, .blinded_bellatrix, .full_capella, .blinded_capella, .full_deneb, .blinded_deneb => |body| .{ .phase0 = body.attester_slashings },
+            .full_gloas => |body| .{ .gloas = body.attester_slashings },
             inline else => |body| .{ .electra = body.attester_slashings },
         };
     }
@@ -608,6 +609,7 @@ pub const AnyBeaconBlockBody = union(enum) {
     pub fn attestations(self: *const AnyBeaconBlockBody) AnyAttestations {
         return switch (self.*) {
             inline .phase0, .altair, .full_bellatrix, .blinded_bellatrix, .full_capella, .blinded_capella, .full_deneb, .blinded_deneb => |body| .{ .phase0 = body.attestations },
+            .full_gloas => |body| .{ .gloas = body.attestations },
             inline else => |body| .{ .electra = body.attestations },
         };
     }
