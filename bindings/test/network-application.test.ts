@@ -382,10 +382,20 @@ test("peer penalties accumulate while the command lane is full", async () => {
     const [, remote] = await Promise.all([a.identity, b.identity]);
     await Promise.all([a.applyIntent(localIntent(first), 100n), b.applyIntent(localIntent(second), 100n)]);
     await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
+    const observed = (await a.getPeers()).peers.find((peer) => peer.identity === remote.peerId);
+    if (!observed?.connection) throw Error("Missing connected peer");
+    const origin = {connection: observed.connection, endpoint: observed.endpoint};
     const pending = Array.from({length: 31}, () => a.getIdentity());
     expect(() => a.getIdentity()).toThrow("NetworkCommandFull");
-    // Reports coalesce per identity and action, as the host's ledger batches them into one action.
-    exchange(a, settleOnly, [{action: "high_tolerance", count: 3, peerId: remote.peerId, type: "reportPeer"}]);
+    exchange(a, settleOnly, [
+      {
+        action: "high_tolerance",
+        context: {origin, reason: "gossip_validation"},
+        count: 3,
+        peerId: remote.peerId,
+        type: "reportPeer",
+      },
+    ]);
     await Promise.all(pending);
     let score = 0;
     for (let i = 0; i < 100; i++) {
@@ -399,7 +409,15 @@ test("peer penalties accumulate while the command lane is full", async () => {
     expect((await a.getIdentity()).peerId).toBe(a.identity.peerId);
 
     await a.disconnect(remote.peerId);
-    exchange(a, settleOnly, [{action: "low_tolerance", count: 1, peerId: remote.peerId, type: "reportPeer"}]);
+    exchange(a, settleOnly, [
+      {
+        action: "low_tolerance",
+        context: {origin, reason: "gossip_import"},
+        count: 1,
+        peerId: remote.peerId,
+        type: "reportPeer",
+      },
+    ]);
     for (let i = 0; i < 100; i++) {
       const retained = (await a.getPeers()).peers.find((peer) => peer.identity === remote.peerId);
       if (retained && retained.score < -12.9) break;

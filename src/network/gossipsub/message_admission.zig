@@ -135,6 +135,7 @@ pub const Admission = struct {
         var reservation = owner.validation.reserve(self.event.id).?;
         const payload = owner.history.admitPayload(&owner.store, self.event.id, self.event.topic, self.compressed).?;
         self.event.handle = reservation.commit(&owner.store, self.context.peers, payload, self.source.peer, self.topic_index, self.event.admitted_ms);
+        owner.validation.attribution(self.event.handle).origin = .{ .connection = self.source.connection, .endpoint = self.source.endpoint };
         owner.validation.attribution(self.event.handle).source_eligible = self.context.overlay.inMesh(self.topic_index, self.source.session.index);
         owner.store.seal(payload);
         _ = owner.seen.add(self.event.id, self.event.admitted_ms);

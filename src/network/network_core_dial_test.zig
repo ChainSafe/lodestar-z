@@ -277,7 +277,7 @@ test "core competing one-shot attempt expires during selected peer ban cooldown"
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.peer_manager.snapshots(&snapshots);
     try std.testing.expect(!std.meta.eql(attempt, snapshots[0].connection.?));
-    try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.peer_manager.reportPeer(snapshots[0].peer, .fatal, setup.pair.now).?);
+    try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.peer_manager.reportPeer(&.{ .identity = setup.client.peer_manager.catalog.get(snapshots[0].peer).?.identity, .action = .fatal }, setup.pair.now).?);
     _ = try setup.turn(&setup.client, .{});
     setup.pair.advance(10_000);
     _ = setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents);

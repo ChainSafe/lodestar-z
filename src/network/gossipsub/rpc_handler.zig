@@ -56,7 +56,7 @@ fn onMessage(self: *Gossipsub, index: u16, msg: protobuf.Message, turn: *Turn, p
     const now = turn.now;
     const context = self.messageContext();
     const workspace = turn.workspace(peer);
-    const source: messages_mod.Source = .{ .peer = self.logical(index), .session = self.sessions.ref(index), .connection = self.sessions.rows[index].conn };
+    const source: messages_mod.Source = .{ .peer = self.logical(index), .session = self.sessions.ref(index), .connection = self.sessions.rows[index].conn, .endpoint = self.sessions.rows[index].receive_endpoint };
     const result = self.messages.receive(&context, &workspace, &source, msg, now.millis());
     // The turn offers a message refused for work again, so only its final outcome counts.
     if (result == .deferred) return .credits;
@@ -66,7 +66,7 @@ fn onMessage(self: *Gossipsub, index: u16, msg: protobuf.Message, turn: *Turn, p
         .ignored => return .done,
         .invalid => |reason| {
             const conn = self.sessions.rows[index].conn;
-            std.log.scoped(.network_gossip).debug("invalid_message connection={d}:{d} topic={s} reason={s} compressed_bytes={d}", .{ conn.index, conn.generation, msg.topic, @tagName(reason), msg.data.len });
+            std.log.scoped(.network_gossip).debug("invalid_message connection={d}:{d} endpoint={any} topic={s} reason={s} compressed_bytes={d}", .{ conn.index, conn.generation, source.endpoint, msg.topic, @tagName(reason), msg.data.len });
             return .done;
         },
         .duplicate => |id| {

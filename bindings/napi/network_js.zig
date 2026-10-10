@@ -44,6 +44,14 @@ pub fn peerIdValue(env: napi.Env, identity: *const network.PeerId) !Value {
     return env.createStringUtf8(identity.toText(&text));
 }
 
+pub fn peerOrigin(env: napi.Env, value: ?network.types.PeerOrigin) !Value {
+    const origin = value orelse return env.getNull();
+    const object = try env.createObject();
+    try object.setNamedProperty("connection", try connection(env, origin.connection));
+    try object.setNamedProperty("endpoint", if (origin.endpoint) |address| try endpoint(env, address) else try env.getNull());
+    return object;
+}
+
 pub fn endpoint(env: napi.Env, value: network.Address) !Value {
     const object = try env.createObject();
     switch (value) {

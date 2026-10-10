@@ -192,9 +192,10 @@ export class NativePump {
   /**
    * @param {string} peerId
    * @param {NativePeerAction} action
+   * @param {import("./network.js").NativePeerReportContext} [context]
    */
-  reportPeer(peerId, action) {
-    this.#coalesce({action, count: 1, peerId, type: "reportPeer"});
+  reportPeer(peerId, action, context) {
+    this.#coalesce({action, context, count: 1, peerId, type: "reportPeer"});
   }
 
   /**
@@ -460,6 +461,7 @@ export class NativePump {
         attestationData: message.attestationData,
         connection: message.connection,
         data: message.data,
+        endpoint: message.endpoint,
         id: message.id,
         peerId: message.peerId,
         receivedAtUnixMs: message.receivedAtUnixMs,

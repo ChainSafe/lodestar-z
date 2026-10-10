@@ -11,6 +11,13 @@ pub const Handle = struct {
     generation: u32,
 };
 
+/// Captured with the observed work, never reconstructed from a later identity lookup.
+/// A null endpoint means the transport cannot attribute the work to one source path.
+pub const PeerOrigin = struct {
+    connection: Handle,
+    endpoint: ?Address,
+};
+
 pub const StreamHandle = struct {
     conn: Handle,
     id: u64,

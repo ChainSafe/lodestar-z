@@ -41,9 +41,9 @@ class NativeNetwork {
     this.#runtime.checkAction({root, type: "block"});
     this.#pump.block(root);
   }
-  reportPeer(peerId, action) {
-    this.#runtime.checkAction({action, count: 1, peerId, type: "reportPeer"});
-    this.#pump.reportPeer(peerId, action);
+  reportPeer(peerId, action, context) {
+    this.#runtime.checkAction({action, context, count: 1, peerId, type: "reportPeer"});
+    this.#pump.reportPeer(peerId, action, context);
   }
   dropQueuedGossip() {
     this.#pump.dropQueued();

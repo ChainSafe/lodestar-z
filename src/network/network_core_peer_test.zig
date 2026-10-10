@@ -435,7 +435,7 @@ test "core direct removal clears both pins and gossip score reads have no feedba
     gossip_test.penalize(setup.client.protocols.gossipsub, conn, 7);
     const before = setup.client.peer_manager.gossipScore(setup.client.protocols.gossipsub, snapshots[0].peer, setup.pair.now).?;
     try std.testing.expect(std.math.isFinite(before));
-    _ = setup.client.peer_manager.reportPeer(snapshots[0].peer, .high_tolerance, setup.pair.now);
+    _ = setup.client.peer_manager.reportPeer(&.{ .identity = setup.client.peer_manager.catalog.get(snapshots[0].peer).?.identity, .action = .high_tolerance }, setup.pair.now);
     try std.testing.expectEqual(
         before,
         setup.client.peer_manager.gossipScore(setup.client.protocols.gossipsub, snapshots[0].peer, setup.pair.now).?,
@@ -523,11 +523,11 @@ test "core native Goodbye immediately removes relevance and delayed Status canno
     try setup.step(0);
     try std.testing.expectEqual(
         t.ReputationDecision.none,
-        setup.client.peer_manager.reportPeer(peer, .low_tolerance, setup.pair.now).?,
+        setup.client.peer_manager.reportPeer(&.{ .identity = setup.client.peer_manager.catalog.get(peer).?.identity, .action = .low_tolerance }, setup.pair.now).?,
     );
     try std.testing.expectEqual(
         t.ReputationDecision.disconnect,
-        setup.client.peer_manager.reportPeer(peer, .low_tolerance, setup.pair.now).?,
+        setup.client.peer_manager.reportPeer(&.{ .identity = setup.client.peer_manager.catalog.get(peer).?.identity, .action = .low_tolerance }, setup.pair.now).?,
     );
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.peerCounts().relevant);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().connected);

@@ -387,6 +387,7 @@ pub fn serviceSession(self: *Gossipsub, router: *Router, engine: *Engine, index:
     const now = turn.now;
     const session = &self.sessions.rows[index];
     assert(session.active);
+    session.receive_endpoint = engine.receiveEndpoint(session.conn);
     switch (session.outbound) {
         .closing => {
             logSendPressure(session, &self.peers.rows[session.logical.index].identity, &self.options, now.millis());
@@ -494,7 +495,10 @@ pub fn expireSession(self: *Gossipsub, router: *Router, engine: *Engine, index: 
                 const attributable = !io.discarding and !unread and (io.reader.declaredLen() orelse 0) > io.body.len;
                 if (attributable) {
                     std.debug.assert(g.receive_timeouts_len < g.receive_timeouts.len);
-                    g.receive_timeouts[g.receive_timeouts_len] = g.peers.rows[peer.logical.index].identity;
+                    g.receive_timeouts[g.receive_timeouts_len] = .{
+                        .identity = g.peers.rows[peer.logical.index].identity,
+                        .origin = .{ .connection = peer.conn, .endpoint = engine.receiveEndpoint(peer.conn) },
+                    };
                     g.receive_timeouts_len += 1;
                     g.counters.receive_discards[@intFromEnum(Gossipsub.ReceiveDiscard.timeout)] += 1;
                     g.peers.rows[peer.logical.index].large_frame_denied_until = now_ms +| g.options.pressure_timeout_ms;

@@ -109,7 +109,7 @@ test "core custody coverage tolerates negative gossip scores but excludes poor r
     try expect(setup.client.peer_manager.gossipScore(g, peer.peer, setup.pair.now).? < 0);
     try equal(@as(u16, 0), setup.client.peer_manager.coverageDeficits().custody_groups);
 
-    try equal(.none, setup.client.peer_manager.reportPeer(peer.peer, .mid_tolerance, setup.pair.now).?);
+    try equal(.none, setup.client.peer_manager.reportPeer(&.{ .identity = setup.client.peer_manager.catalog.get(peer.peer).?.identity, .action = .mid_tolerance }, setup.pair.now).?);
     setup.client.peer_manager.reconcile(g, setup.pair.now);
     try equal(@as(u16, 4), setup.client.peer_manager.coverageDeficits().custody_groups);
 }
@@ -476,7 +476,7 @@ test "core reconciliation reads do not decay reputation or schedule peer removal
     const view: *const PeerManager = &setup.client.peer_manager;
     const deficits = view.coverageDeficits();
     const need = view.discoveryNeed();
-    try std.testing.expectEqual(.none, setup.client.peer_manager.reportPeer(snapshot.peer, .high_tolerance, setup.pair.now).?);
+    try std.testing.expectEqual(.none, setup.client.peer_manager.reportPeer(&.{ .identity = setup.client.peer_manager.catalog.get(snapshot.peer).?.identity, .action = .high_tolerance }, setup.pair.now).?);
     setup.pair.advance(100);
     try setup.client.addDirectPeer(&snapshot.identity, &.{support.server_address}, setup.pair.now);
     const incompatible: t.Status = .{ .fork_digest = @splat(1) };
@@ -556,7 +556,7 @@ test "core reconciliation raw mutators and deadlines invalidate once" {
     _ = setup.client.protocols.gossipsub.scoreSnapshot(conn, clock);
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, clock);
     try std.testing.expectEqual(fresh + 1, setup.client.peer_manager.counters.selections);
-    _ = setup.client.peer_manager.reportPeer(peer, .high_tolerance, clock);
+    _ = setup.client.peer_manager.reportPeer(&.{ .identity = setup.client.peer_manager.catalog.get(peer).?.identity, .action = .high_tolerance }, clock);
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, clock);
     const penalized = setup.client.peer_manager.counters.selections;
     const health = setup.client.peer_manager.catalog.get(peer).?.score;
@@ -623,7 +623,7 @@ test "core reconciliation ban expiry still defers until strict score recovery" {
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.peer_manager.snapshots(&snapshots);
     const peer = snapshots[0].peer;
-    try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.peer_manager.reportPeer(peer, .fatal, setup.pair.now).?);
+    try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.peer_manager.reportPeer(&.{ .identity = setup.client.peer_manager.catalog.get(peer).?.identity, .action = .fatal }, setup.pair.now).?);
     setup.pair.advance(2_001);
     for (0..4) |_| try setup.step(0);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.connection == null);

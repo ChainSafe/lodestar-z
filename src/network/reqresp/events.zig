@@ -34,6 +34,7 @@ pub const Failure = union(enum) {
 
 pub const PeerFault = struct {
     identity: PeerId,
+    origin: types.PeerOrigin,
     kind: Kind,
 
     pub const Kind = enum { protocol, non_completion };
@@ -54,6 +55,7 @@ pub const Event = union(enum) {
         request: RequestHandle,
         reason: Failure,
         phase: ?RequestPhase = null,
+        origin: ?types.PeerOrigin = null,
         peer_fault: ?PeerFault = null,
         message: [codec.error_message_max]u8 = @splat(0),
 

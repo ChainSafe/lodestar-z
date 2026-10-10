@@ -209,7 +209,7 @@ test "core local pruning records automatic redial backoff separately from peer f
     try std.testing.expectEqual(@as(u64, 0), pruned.goodbye_until_ms);
     try std.testing.expectEqual(@as(f64, 0), pruned.score);
     try std.testing.expectEqual(t.DisconnectReason.count_pruning, pruned.disconnect_reason.?);
-    try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.peer_manager.reportPeer(peer, .fatal, setup.pair.now).?);
+    try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.peer_manager.reportPeer(&.{ .identity = setup.client.peer_manager.catalog.get(peer).?.identity, .action = .fatal }, setup.pair.now).?);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.ban_until_ms > pruned.redial_until_ms);
 }
 
@@ -276,7 +276,7 @@ test "core records a buffered Goodbye before transport cancellation and preserve
         const body = try codec.encodeRequest(&reason, &wire_bytes);
         try std.testing.expectEqual(body.len, try setup.pair.client.write(stream, body, true));
         try setup.pair.pump();
-        if (local_ban) try std.testing.expectEqual(t.ReputationDecision.ban, setup.server.peer_manager.reportPeer(peer, .fatal, setup.pair.now).?);
+        if (local_ban) try std.testing.expectEqual(t.ReputationDecision.ban, setup.server.peer_manager.reportPeer(&.{ .identity = setup.server.peer_manager.catalog.get(peer).?.identity, .action = .fatal }, setup.pair.now).?);
         try std.testing.expect(setup.pair.client.close(conn, 0));
         try setup.pair.pump();
         _ = try setup.turn(&setup.server, .{});

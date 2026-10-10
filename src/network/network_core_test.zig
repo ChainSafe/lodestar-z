@@ -600,7 +600,7 @@ fn failureAndReplacement(a: *NetworkCore, b: *NetworkCore) !void {
         target = snapshot.peer;
     };
     const now = try Now.read(std.testing.io);
-    try std.testing.expectEqual(t.ReputationDecision.ban, a.reportPeer(&a.peer_manager.catalog.get(target.?).?.identity, .fatal, now).?);
+    try std.testing.expectEqual(t.ReputationDecision.ban, a.reportPeer(&.{ .identity = a.peer_manager.catalog.get(target.?).?.identity, .action = .fatal }, now).?);
     var faults: FaultIo = .{ .receive = .{ .socket = a.transport.sockets.primary().handle } };
     const faulty_io = faults.io();
     const deadline = a.peer_manager.control.connections[target.?.index].closing.?.deadline_ms;
@@ -924,7 +924,7 @@ test "core candidate identities do not expose admitted APIs or enlarge snapshot 
     try std.testing.expect(!node.isConnected(&peer));
     try std.testing.expect(!node.closePeer(&peer, now));
     try std.testing.expect(!node.reStatusPeer(&peer, now));
-    try std.testing.expect(node.reportPeer(&peer, .fatal, now) == null);
+    try std.testing.expect(node.reportPeer(&.{ .identity = peer, .action = .fatal }, now) == null);
     try std.testing.expectError(error.StalePeer, node.sendReqRespRequest(&peer, .ping_v1, &.{}, &.{}, .{}, now));
     var snapshots: [4]t.Snapshot = undefined;
     try std.testing.expectEqual(@as(usize, 0), try node.completeSnapshots(&snapshots));

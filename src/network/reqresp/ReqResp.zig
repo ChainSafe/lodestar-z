@@ -745,10 +745,12 @@ pub fn complete(owner: *ReqResp, engine: *Engine, router: *Router, record: *Requ
             .outbound => owner.outbound[index].identity,
             .inbound => owner.inbound[index].identity,
         },
+        .origin = .{ .connection = record.conn, .endpoint = engine.receiveEndpoint(record.conn) },
         .kind = kind,
     } else null;
     switch (terminal) {
         .failed => |*failed| {
+            failed.origin = .{ .connection = record.conn, .endpoint = engine.receiveEndpoint(record.conn) };
             failed.peer_fault = fault;
             if (failed.reason == .peer_error) {
                 const len = failed.reason.peer_error.message_len;

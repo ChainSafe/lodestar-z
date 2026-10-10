@@ -41,7 +41,7 @@ pub const Action = union(enum) {
     block: [32]u8,
     recheck,
     drop_queued,
-    report_peer: struct { identity: n.PeerId, action: n.peers.types.PeerAction, count: u8 },
+    report_peer: struct { report: n.peers.types.PeerReport, count: u8 },
 };
 const CheckView = struct { root: [32]u8, slot: u64, identity: n.PeerId, topic: [g.topic_max]u8, topic_len: u16 };
 
@@ -96,7 +96,7 @@ pub const Failure = enum { stopped, contract };
 fn applyLocked(runtime: *Runtime, actions: []const Action, now: u64) void {
     if (runtime.bridge.stop or runtime.bridge.quiescent) return;
     for (actions) |action| switch (action) {
-        .report_peer => |report| runtime.bridge.reports.addCount(&report.identity, report.action, report.count),
+        .report_peer => |report| runtime.bridge.reports.addCount(&report.report, report.count),
         else => if (runtime.bridge.gossip) |*table| switch (action) {
             .verdict => |verdict| _ = table.report(verdict.token, verdict.verdict, now),
             .classify => |check| _ = table.classify(check.token, check.available),

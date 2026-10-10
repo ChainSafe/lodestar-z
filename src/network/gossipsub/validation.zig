@@ -1,3 +1,4 @@
+const PeerOrigin = @import("../types.zig").PeerOrigin;
 const std = @import("std");
 const mcache = @import("mcache.zig");
 const storage = @import("message_store.zig");
@@ -16,7 +17,7 @@ pub const PeerRef = @import("peer_book.zig").Ref;
 pub const Verdict = enum { accept, reject, ignore };
 pub const Outcome = union(enum) { applied: Verdict, already_resolved, expired, stale_handle };
 pub const duplicates_max = 16;
-pub const Duplicate = struct { peer: PeerRef, eligible: bool };
+pub const Duplicate = struct { peer: PeerRef, eligible: bool, origin: ?PeerOrigin = null };
 pub const Entry = struct {
     available_link: lists.Link = .{},
     deadline_link: lists.Link = .{},
@@ -40,6 +41,7 @@ pub const Attribution = struct {
     id: topic_mod.MessageId = undefined,
     /// Pending validation owns these peers; resolved attribution only compares their generations.
     source: PeerRef = undefined,
+    origin: ?PeerOrigin = null,
     topic: u16 = undefined,
     admitted_ms: u64 = 0,
     source_eligible: bool = false,

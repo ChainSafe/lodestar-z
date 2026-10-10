@@ -1,3 +1,4 @@
+const Address = @import("../types.zig").Address;
 const std = @import("std");
 const constants = @import("constants.zig");
 const index_list = @import("../index_list.zig");
@@ -28,6 +29,7 @@ pub const Session = struct {
     active: bool = false,
     generation: u64 = 0,
     conn: Handle = undefined,
+    receive_endpoint: ?Address = null,
     in_stream: ?StreamHandle = null,
     dont_send: [constants.dont_send_cap]MessageId = undefined,
     dont_send_until: [constants.dont_send_cap]u64 = undefined,

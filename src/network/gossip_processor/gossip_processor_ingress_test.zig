@@ -108,6 +108,8 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
     @memset(row.io.body, 0xa5);
     var actual: [6000]u8 = undefined;
     for (table.cells[0..2], 0..) |*cell, i| {
+        try t.expectEqual(pair.shared.handles.server, cell.connection);
+        try t.expectEqual(pair.shared.pair.server.peerAddress(cell.connection).?, cell.endpoint.?);
         table.copyPayload(cell, &actual);
         try t.expectEqualSlices(u8, &payloads[i], &actual);
     }

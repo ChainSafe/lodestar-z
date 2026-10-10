@@ -42,12 +42,16 @@ test "engine validates a routed packet that arrives from another source path" {
     const handles = try connectPair(&pair);
     var storage: [8]Engine.Event = undefined;
 
+    try std.testing.expectEqual(client_address, pair.server.receiveEndpoint(handles.server).?);
+    const original: types.PeerOrigin = .{ .connection = handles.server, .endpoint = pair.server.receiveEndpoint(handles.server) };
     pair.client_source = rebound_address;
     const stream = try pair.client.openStream(handles.client);
     try std.testing.expectEqual(bulk.len, try pair.client.write(stream, &bulk, false));
     try pair.pump();
 
     try std.testing.expectEqual(rebound_address, pair.server.peerAddress(handles.server).?);
+    try std.testing.expect(pair.server.receiveEndpoint(handles.server) == null);
+    try std.testing.expectEqual(client_address, original.endpoint.?);
     const events = pair.events(&pair.server, &storage);
     try std.testing.expectEqual(@as(usize, 2), events.len);
     try std.testing.expectEqual(rebound_address, try expectPathChanged(events[0], handles.server));
@@ -88,6 +92,7 @@ test "engine keeps the validated path while a new source remains unvalidated" {
         try std.testing.expectEqual(client_address, pair.server.peerAddress(handles.server).?);
     }
     try std.testing.expect(inbound != null);
+    try std.testing.expect(pair.server.receiveEndpoint(handles.server) == null);
 
     pair.client_source = client_address;
     pair.drop_to_address = null;
@@ -98,6 +103,7 @@ test "engine keeps the validated path while a new source remains unvalidated" {
     try std.testing.expectEqualSlices(u8, &bulk, sink[0..bulk.len]);
     try std.testing.expectEqualStrings("bye", sink[bulk.len..]);
     try std.testing.expectEqual(client_address, pair.server.peerAddress(handles.server).?);
+    try std.testing.expect(pair.server.receiveEndpoint(handles.server) == null);
     try std.testing.expect(pair.server.peerId(handles.server) != null);
     for (pair.events(&pair.server, &storage)) |event| {
         try std.testing.expect(event != .path_changed);

@@ -292,9 +292,8 @@ pub const NetworkCore = struct {
         const connection = self.peer_manager.catalog.rowFor(peer).?.connection orelse return false;
         return self.peer_manager.reStatusPeer(peer, connection, now);
     }
-    pub fn reportPeer(self: *NetworkCore, identity: *const t.PeerId, action: t.PeerAction, now: Now) ?t.ReputationDecision {
-        const peer = self.peer_manager.catalog.find(identity) orelse return null;
-        return self.peer_manager.reportPeer(peer, action, now);
+    pub fn reportPeer(self: *NetworkCore, report: *const t.PeerReport, now: Now) ?t.ReputationDecision {
+        return self.peer_manager.reportPeer(report, now);
     }
     pub fn updateStatus(self: *NetworkCore, status: *const t.Status) !void {
         if (self.peer_manager.phase != .running) return error.Stopped;
@@ -694,9 +693,8 @@ pub const NetworkCore = struct {
                 pm.requestFault(fault, now);
             }
         }
-        if (self.protocols.applications_open) for (self.protocols.gossipsub.receiveTimeouts()) |*identity| {
-            const peer = pm.catalog.find(identity) orelse continue;
-            _ = pm.reportPeer(peer, .low_tolerance, now);
+        if (self.protocols.applications_open) for (self.protocols.gossipsub.receiveTimeouts()) |*report| {
+            _ = pm.reportPeer(&.{ .identity = report.identity, .origin = report.origin, .action = .low_tolerance, .reason = .gossip_receive_timeout }, now);
         };
         pm.identified(identify_results[0..counts.identify]);
         self.controlEvents(controls[0..counts.control], now);

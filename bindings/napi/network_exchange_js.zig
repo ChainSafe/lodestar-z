@@ -69,15 +69,19 @@ pub fn parseAction(value: Value) !Action {
         .recheck => .recheck,
         .dropQueued => .drop_queued,
         .reportPeer => .{ .report_peer = .{
-            .identity = try decode.peerIdFrom(try decode.get(value, "peerId")),
-            .action = try name(n.peers.types.PeerAction, try decode.get(value, "action"), error.InvalidNetworkAction),
+            .report = .{
+                .identity = try decode.peerIdFrom(try decode.get(value, "peerId")),
+                .action = try name(n.peers.types.PeerAction, try decode.get(value, "action"), error.InvalidNetworkAction),
+                .origin = try reportOrigin(try decode.get(value, "context")),
+                .reason = try reportReason(try decode.get(value, "context")),
+            },
             .count = try reportCount(try decode.get(value, "count")),
         } },
     };
 }
 
 fn name(comptime T: type, value: Value, invalid: anyerror) !T {
-    var text: [16]u8 = undefined;
+    var text: [32]u8 = undefined;
     const len = decode.text(value, &text) catch return invalid;
     return std.meta.stringToEnum(T, text[0..len]) orelse invalid;
 }
@@ -88,6 +92,32 @@ fn handle(value: Value) !g.Token {
     const generation = try decode.bigint(try decode.get(value, "generation"));
     if (generation == 0) return error.InvalidGossipHandle;
     return .{ .index = @intCast(index), .generation = generation };
+}
+
+fn reportOrigin(context: Value) !?n.types.PeerOrigin {
+    if (try context.typeof() == .undefined) return null;
+    try decode.object(context, &.{ "origin", "reason" });
+    const origin = try decode.get(context, "origin");
+    if (try origin.typeof() == .undefined or try origin.typeof() == .null) return null;
+    try decode.object(origin, &.{ "connection", "endpoint" });
+    const connection = try decode.get(origin, "connection");
+    try decode.object(connection, &.{ "index", "generation" });
+    const generation = try decode.integer(try decode.get(connection, "generation"), std.math.maxInt(u32));
+    const endpoint = try decode.get(origin, "endpoint");
+    return .{
+        .connection = .{
+            .index = @intCast(try decode.integer(try decode.get(connection, "index"), std.math.maxInt(u16))),
+            .generation = @intCast(generation),
+        },
+        .endpoint = if (try endpoint.typeof() == .null) null else n.Address.fromNetwork(try decode.endpoint(endpoint)),
+    };
+}
+
+fn reportReason(context: Value) !n.peers.types.PeerReport.Reason {
+    if (try context.typeof() == .undefined) return .host;
+    const value = try decode.get(context, "reason");
+    if (try value.typeof() == .undefined) return .host;
+    return name(n.peers.types.PeerReport.Reason, value, error.InvalidNetworkAction);
 }
 
 fn reportCount(value: Value) !u8 {
