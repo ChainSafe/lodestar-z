@@ -725,6 +725,11 @@ pub const NetworkCore = struct {
                 if (admission.displaced) |old| {
                     self.releaseConnection(.{ .peer = admission.peer, .conn = old }, now);
                 }
+                if (!self.protocols.reqresp.connectionOpened(connected.conn, &connected.peer_id, now)) {
+                    std.log.scoped(.network_peers).debug("peer_admission_refused peer={f} connection={d}:{d} reason=reqresp_identity_capacity", .{ logging.peer(&connected.peer_id), connected.conn.index, connected.conn.generation });
+                    self.closeConnection(admission.peer, connected.conn, .capacity, now);
+                    return;
+                }
                 _ = self.protocols.gossipsub.peerConnected(quic, connected.conn, admission.direct, now);
             },
             .closed => |*closed| {

@@ -13,9 +13,14 @@ const ns_per_ms = 1_000_000;
 const Row = struct {
     identity: PeerId = undefined,
     occupied: bool = false,
+    connections: u16 = 0,
     debt: [Protocol.count]u128 = @splat(0),
     expires_ns: u128 = 0,
     starts_ns: [2]u128 = @splat(0),
+
+    fn reusable(self: *const Row, now_ns: u128) bool {
+        return self.connections == 0 and (!self.occupied or self.expires_ns <= now_ns);
+    }
 };
 
 pub const Limiter = struct {
@@ -49,6 +54,28 @@ pub const Limiter = struct {
         return .{ .allocated_bytes = self.rows.len * @sizeOf(Row) };
     }
 
+    /// Holds identity bookkeeping through connection retirement, without refunding existing debt.
+    pub fn retain(self: *Limiter, identity: *const PeerId, now_ms: u64) ?u16 {
+        var reclaim: ?u16 = null;
+        for (self.rows, 0..) |*row, index| {
+            if (row.occupied and row.identity.eql(identity)) {
+                std.debug.assert(row.connections < std.math.maxInt(u16));
+                row.connections += 1;
+                return @intCast(index);
+            }
+            if (reclaim == null and row.reusable(@as(u128, now_ms) * ns_per_ms)) reclaim = @intCast(index);
+        }
+        const index = reclaim orelse return null;
+        self.rows[index] = .{ .identity = identity.*, .occupied = true, .connections = 1 };
+        return index;
+    }
+
+    pub fn release(self: *Limiter, index: u16) void {
+        const row = &self.rows[index];
+        std.debug.assert(row.occupied and row.connections > 0);
+        row.connections -= 1;
+    }
+
     pub fn start(self: *Limiter, identity: *const PeerId, control: bool, now_ms: u64) Decision {
         const now_ns = @as(u128, now_ms) * ns_per_ms;
         var reclaim: ?*Row = null;
@@ -58,7 +85,7 @@ pub const Limiter = struct {
                 found = row;
                 break;
             }
-            if (reclaim == null and (!row.occupied or row.expires_ns <= now_ns)) reclaim = row;
+            if (reclaim == null and row.reusable(now_ns)) reclaim = row;
         }
         const row = found orelse reclaim orelse return .identity_capacity;
         const class = @intFromBool(control);
@@ -74,7 +101,7 @@ pub const Limiter = struct {
     pub fn tracks(self: *const Limiter, identity: *const PeerId, now_ms: u64) bool {
         const now_ns = @as(u128, now_ms) * ns_per_ms;
         for (self.rows) |*row| {
-            if (!row.occupied or row.expires_ns <= now_ns or row.identity.eql(identity)) return true;
+            if (row.reusable(now_ns) or (row.occupied and row.identity.eql(identity))) return true;
         }
         return false;
     }
@@ -94,13 +121,13 @@ pub const Limiter = struct {
                 room = true;
                 break;
             }
-            room = room or !row.occupied or row.expires_ns <= now_ns;
-            expires = @min(expires, row.expires_ns);
+            room = room or row.reusable(now_ns);
+            if (row.connections == 0) expires = @min(expires, row.expires_ns);
         }
         const period_ns = @as(u128, quota.period_ms) * ns_per_ms;
         const charge = (period_ns + quota.tokens - 1) / quota.tokens;
         const due = @max(if (room) 0 else expires, previous + charge -| period_ns);
-        return @max(now_ms, std.math.cast(u64, (due + ns_per_ms - 1) / ns_per_ms) orelse std.math.maxInt(u64));
+        return @max(now_ms, std.math.cast(u64, (due +| (ns_per_ms - 1)) / ns_per_ms) orelse std.math.maxInt(u64));
     }
 
     pub fn eligibleAt(self: *const Limiter, identity: *const PeerId, which: Protocol, cost: u128, fork: ForkSeq, now_ms: u64) ?u64 {
@@ -118,13 +145,13 @@ pub const Limiter = struct {
                 room = true;
                 break;
             }
-            room = room or !row.occupied or row.expires_ns <= now_ns;
-            expires = @min(expires, row.expires_ns);
+            room = room or row.reusable(now_ns);
+            if (row.connections == 0) expires = @min(expires, row.expires_ns);
         }
         const peer_charge = (cost * peer.period_ms * ns_per_ms + peer.tokens - 1) / peer.tokens;
         const global_charge = (cost * global.period_ms * ns_per_ms + global.tokens - 1) / global.tokens;
         const due = @max(if (room) 0 else expires, debt + peer_charge -| (@as(u128, peer.period_ms) * ns_per_ms), self.global[index] + global_charge -| (@as(u128, global.period_ms) * ns_per_ms));
-        return @max(now_ms, std.math.cast(u64, (due + ns_per_ms - 1) / ns_per_ms) orelse std.math.maxInt(u64));
+        return @max(now_ms, std.math.cast(u64, (due +| (ns_per_ms - 1)) / ns_per_ms) orelse std.math.maxInt(u64));
     }
 
     /// Legal requests can exceed a configured burst; admission reserves at most one full burst.
@@ -164,7 +191,7 @@ pub const Limiter = struct {
                 found = row;
                 break;
             }
-            if (reclaim == null and (!row.occupied or row.expires_ns <= now_ns)) reclaim = row;
+            if (reclaim == null and row.reusable(now_ns)) reclaim = row;
         }
         const row = found orelse reclaim orelse return .identity_capacity;
         const previous = if (found != null) row.debt[index] else 0;

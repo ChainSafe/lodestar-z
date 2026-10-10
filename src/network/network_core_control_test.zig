@@ -16,6 +16,56 @@ const InboundPhase = @import("reqresp/metrics.zig").InboundPhase;
 const capabilities_mod = @import("capabilities.zig");
 const time = @import("time.zig");
 
+test "core peer admission protects idle control identities from limiter churn" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..80) |_| try setup.step(1);
+    setup.pair.advance(16_000);
+    const limiter = &setup.client.protocols.reqresp.admission.limiter;
+    const now = setup.pair.now.millis();
+    for (0..limiter.rows.len - 1) |index| {
+        const identity: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 10))) };
+        try std.testing.expectEqual(.allowed, limiter.start(&identity, false, now));
+    }
+    const excess: t.PeerId = .{ .bytes = @splat(200) };
+    try std.testing.expectEqual(.identity_capacity, limiter.start(&excess, false, now));
+    const remote = setup.server.peerId();
+    try std.testing.expectEqual(.allowed, limiter.start(&remote, true, now));
+    for (0..80) |_| try setup.step(1);
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.snapshots(&snapshots));
+    try std.testing.expect(snapshots[0].relevant);
+}
+
+test "core peer admission refuses new identities while limiter debt fills the table" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    const limiter = &setup.client.protocols.reqresp.admission.limiter;
+    const now = setup.pair.now.millis();
+    for (0..limiter.rows.len) |index| {
+        const identity: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 10))) };
+        try std.testing.expectEqual(.allowed, limiter.start(&identity, false, now));
+    }
+    _ = try setup.pair.dial();
+    for (0..80) |_| try setup.step(0);
+    const catalog = &setup.client.peer_manager.catalog;
+    try std.testing.expectEqual(@as(u16, 0), catalog.connectedCount());
+    const remote = setup.server.peerId();
+    const refused = catalog.get(catalog.find(&remote).?).?;
+    var closed: [1]t.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), catalog.pollEvents(&closed));
+    try std.testing.expectEqual(t.DisconnectReason.capacity, closed[0].closed.reason);
+    try std.testing.expectEqual(@as(u64, 0), refused.ban_until_ms);
+    try std.testing.expect(!limiter.tracks(&remote, now));
+    for (limiter.rows, 0..) |*row, index| {
+        const identity: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 10))) };
+        try std.testing.expect(row.identity.eql(&identity));
+        try std.testing.expectEqual(@as(u16, 0), row.connections);
+    }
+}
+
 /// Hands peer control a reply the remote did not send, as the owner hands it a real one, and rekeys.
 fn reply(node: *NetworkCore, op: *const control_protocol.Operation, event: rr.ReqResp.Event, now: Now) void {
     const manager = &node.peer_manager;

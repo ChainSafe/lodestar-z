@@ -104,6 +104,15 @@ pub const Options = struct {
         return limits;
     }
 
+    pub fn deliveryKindLimits(o: *const Options) ?gossip_limits.Limits {
+        var limits = o.payload_limits orelse return null;
+        for (&limits) |*limit| {
+            limit.items = @max(1, limit.items / 4);
+            limit.bytes /= 4;
+        }
+        return limits;
+    }
+
     pub fn validate(o: *const Options) (error{InvalidLimits} || topic_policy_mod.Error)!void {
         _ = try topic_policy_mod.validate(o.topic_policy);
         try score_mod.validateParams(o.score_params);

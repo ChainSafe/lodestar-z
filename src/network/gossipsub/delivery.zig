@@ -37,6 +37,8 @@ pub const Pool = struct {
     protected: usize,
     /// The part of each peer's protected share that only local publications may use.
     local_descriptors: usize = 0,
+    /// Per-recipient allowances for forwards and IWANT responses, resolved at startup.
+    kind_limits: ?gossip_limits.Limits = null,
 
     pub fn capacity(peers: usize, validations: usize) usize {
         assert(peers > 0 and peers <= constants.peers_cap);
@@ -130,17 +132,17 @@ pub const Queue = struct {
         return if (class == .local) local else self.count - local;
     }
 
-    pub fn append(self: *Queue, store: *const storage.Store, message: storage.Handle, origin: Origin, limits: Limits, now: u64) error{ Descriptors, PoolFull, Bytes }!void {
+    pub fn append(self: *Queue, store: *const storage.Store, message: storage.Handle, origin: Origin, limits: Limits, now: u64) error{ Descriptors, PoolFull, Bytes, KindDescriptors, KindBytes }!void {
         const entry = store.get(message).?;
         assert(!entry.provisional and entry.history and self.bytes <= limits.bytes);
         assert(self.pool.local_descriptors < per_peer_limit and limits.local_bytes <= limits.bytes);
         const kind = @intFromEnum(entry.kind);
         const class = classOf(origin);
-        if (class == .ordinary) if (store.limits) |allowances| {
+        if (class == .ordinary) if (self.pool.kind_limits) |*allowances| {
             const allowance = allowances[kind];
-            // A recipient may queue a quarter of a kind, or one maximum-sized message.
-            if (self.ordinary_kind_entries[kind] >= @max(1, allowance.items / 4)) return error.Descriptors;
-            if (self.ordinary_kind_entries[kind] > 0 and entry.len > allowance.bytes / 4 -| self.ordinary_kind_bytes[kind]) return error.Bytes;
+            if (self.ordinary_kind_entries[kind] >= allowance.items) return error.KindDescriptors;
+            // One legal message may exceed the kind's byte allowance.
+            if (self.ordinary_kind_entries[kind] > 0 and entry.len > allowance.bytes -| self.ordinary_kind_bytes[kind]) return error.KindBytes;
         };
         const reserved_bytes = if (class == .local) 0 else limits.local_bytes -| self.local_bytes;
         if (if (class == .local) self.count >= per_peer_limit else self.full()) return error.Descriptors;

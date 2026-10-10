@@ -395,6 +395,35 @@ test "metrics preserve outgoing queue refusals across session retirement and reu
     try contains(try f.render(false), "gossipsub_ihave_budget_skipped_total 7\n");
 }
 
+test "metrics distinguish gossip kind allowances from recipient queue capacity" {
+    var f = try Fixture.init(&.{});
+    defer f.deinit();
+    const g = f.node.protocols.gossipsub;
+    const peer = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
+    _ = try g.publish("/eth2/00000000/beacon_block/ssz_snappy", "payload", now);
+    const message = g.messages.history.message(g.messages.history.head);
+    const tx = &g.sessions.rows[peer.index].io.tx;
+    const limits = g.deliveryLimits();
+    g.sessions.deliveries.kind_limits = @splat(.{ .items = 1, .bytes = 8192 });
+    try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, message, .forward, limits, 1));
+    try std.testing.expectEqual(.full, tx.queueData(&g.messages.store, message, .iwant, limits, 1));
+    tx.data.reset();
+    g.sessions.deliveries.kind_limits = @splat(.{ .items = 8, .bytes = 1 });
+    try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, message, .forward, limits, 1));
+    try std.testing.expectEqual(.full, tx.queueData(&g.messages.store, message, .iwant, limits, 1));
+    try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, message, .publication, limits, 1));
+    const before = try f.render(true);
+    try contains(before, "gossipsub_queue_drops_total{reason=\"data_kind_descriptors\"} 1\n");
+    try contains(before, "gossipsub_queue_drops_total{reason=\"data_kind_bytes\"} 1\n");
+    try contains(before, "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 0\n");
+    try contains(before, "gossipsub_queue_drops_total{reason=\"data_bytes\"} 0\n");
+    g.connectionClosed(g.sessions.rows[peer.index].conn);
+    const after = try f.render(false);
+    try contains(after, "gossipsub_queue_drops_total{reason=\"data_kind_descriptors\"} 1\n");
+    try contains(after, "gossipsub_queue_drops_total{reason=\"data_kind_bytes\"} 1\n");
+}
+
 test "metrics preserve gossip RPC admissions through cancellation retirement and slot reuse" {
     var f = try Fixture.init(&.{});
     defer f.deinit();

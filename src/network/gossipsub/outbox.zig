@@ -17,7 +17,7 @@ pub const control_frames = 128;
 pub const critical_frames = 2 * constants.topics_cap;
 pub const critical_bytes = critical_frames * (32 + topic.topic_max_len);
 pub const QueueResult = enum { queued, full };
-pub const DropReason = enum { data_descriptors, data_pool, data_bytes, control_frames, control_bytes, critical_frames, critical_bytes, token_exhausted, active_capacity };
+pub const DropReason = enum { data_descriptors, data_pool, data_bytes, control_frames, control_bytes, critical_frames, critical_bytes, token_exhausted, active_capacity, data_kind_descriptors, data_kind_bytes };
 pub const drop_reason_count = @typeInfo(DropReason).@"enum".fields.len;
 /// Storage for encoding one control frame, which the gossip owner shares across its outboxes.
 pub const ControlScratch = [32 + topic.topic_max_len + constants.gossip_ids_max * (constants.message_id_length + 2)]u8;
@@ -302,6 +302,8 @@ pub const Outbox = struct {
                 error.Descriptors => .data_descriptors,
                 error.PoolFull => .data_pool,
                 error.Bytes => .data_bytes,
+                error.KindDescriptors => .data_kind_descriptors,
+                error.KindBytes => .data_kind_bytes,
             });
             return .full;
         };
