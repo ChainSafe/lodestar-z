@@ -72,11 +72,12 @@
     "@biomejs/biome": "^2.3.11",
     "@chainsafe/benchmark": "2.1.0",
     "@chainsafe/biomejs-config": "^1.0.0",
-    "@lodestar/config": "^1.39.1",
-    "@lodestar/era": "^1.39.1",
-    "@lodestar/state-transition": "^1.39.1",
-    "@lodestar/types": "^1.39.1",
+    "@lodestar/config": "1.50.0-dev.b726a05a4d",
+    "@lodestar/era": "1.50.0-dev.b726a05a4d",
+    "@lodestar/state-transition": "1.50.0-dev.b726a05a4d",
+    "@lodestar/types": "1.50.0-dev.b726a05a4d",
     "@types/node": "^25.0.9",
+    "libp2p": "3.3.9",
     "tsx": "^4.20.6",
     "vitest": "^4.0.17"
   }

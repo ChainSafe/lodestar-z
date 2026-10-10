@@ -1,0 +1,10 @@
+minimumReleaseAgeExclude:
+  - "@lodestar/*"
+
+overrides:
+  "@chainsafe/lodestar-z": "link:."
+  "@lodestar/config": "1.50.0-dev.b726a05a4d"
+  "@lodestar/params": "1.50.0-dev.b726a05a4d"
+  "@lodestar/reqresp": "1.50.0-dev.b726a05a4d"
+  "@lodestar/types": "1.50.0-dev.b726a05a4d"
+  "@lodestar/utils": "1.50.0-dev.b726a05a4d"
