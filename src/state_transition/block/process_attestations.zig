@@ -26,6 +26,25 @@ pub fn processAttestations(
     attestations: []const ForkTypes(fork).Attestation.Type,
     verify_signatures: bool,
 ) !void {
+    return processAttestationsWithParent(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, attestations, null, verify_signatures);
+}
+
+pub fn processAttestationsWithParent(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    io: std.Io,
+    config: *const BeaconConfig,
+    epoch_cache: *EpochCache,
+    state: *BeaconState(fork),
+    proposer_rewards: *ProposerRewards,
+    slashings_cache: *SlashingsCache,
+    attestations: []const ForkTypes(fork).Attestation.Type,
+    parent_slot: ?u64,
+    verify_signatures: bool,
+) !void {
+    if (comptime fork.gte(.gloas)) {
+        if (attestations.len > @import("preset").preset.MAX_ATTESTATIONS_ELECTRA) return error.TooManyBlockOperations;
+    }
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
     if (comptime fork == .phase0) {
         for (attestations) |attestation| {
@@ -40,7 +59,7 @@ pub fn processAttestations(
             );
         }
     } else {
-        try processAttestationsAltair(
+        try @import("./process_attestation_altair.zig").processAttestationsAltairWithParent(
             fork,
             allocator,
             io,
@@ -50,6 +69,7 @@ pub fn processAttestations(
             proposer_rewards,
             slashings_cache,
             attestations,
+            parent_slot,
             verify_signatures,
         );
     }

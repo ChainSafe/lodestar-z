@@ -90,6 +90,15 @@ pub fn slashValidator(
         proposer_rewards.slashing += whistleblower_reward;
     }
 
+    if (comptime fork.gte(.gloas)) {
+        var payments = try state.inner.get("builder_pending_payments");
+        for (0..2 * preset.SLOTS_PER_EPOCH) |i| {
+            var payment: types.gloas.BuilderPendingPayment.Type = undefined;
+            try payments.getValue(undefined, i, &payment);
+            if (payment.proposer_index == slashed_index) try payments.setValue(i, &types.gloas.BuilderPendingPayment.default_value);
+        }
+    }
+
     if (fork.gte(.altair)) {
         var previous_participation = try state.previousEpochParticipation();
         if ((try previous_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {

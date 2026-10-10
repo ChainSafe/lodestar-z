@@ -786,6 +786,10 @@ pub const EpochCache = struct {
 
     /// Consumer takes ownership of the returned array and must free it with `allocator`.
     pub fn getAttestingIndicesElectra(self: *const EpochCache, allocator: Allocator, attestation: *const types.electra.Attestation.Type) !std.ArrayList(ValidatorIndex) {
+        return self.getAttestingIndicesPostElectra(.electra, allocator, attestation);
+    }
+
+    pub fn getAttestingIndicesPostElectra(self: *const EpochCache, comptime fork: ForkSeq, allocator: Allocator, attestation: *const @import("fork_types").ForkTypes(fork).Attestation.Type) !std.ArrayList(ValidatorIndex) {
         const aggregation_bits = attestation.aggregation_bits;
         const committee_bits = attestation.committee_bits;
         const data = attestation.data;

@@ -11,6 +11,7 @@ const supported_forks = [_]ForkSeq{
     .deneb,
     .electra,
     .fulu,
+    .gloas,
 };
 
 const supported_test_runners = [_]RunnerKind{
@@ -99,6 +100,7 @@ pub fn writeTestRoot(comptime kinds: []const RunnerKind, writer: *std.Io.Writer)
         \\const testing = @import("std").testing;
         \\
         \\comptime {{
+        \\    testing.refAllDecls(@import("./test_case.zig"));
         \\
     , .{});
     inline for (kinds) |kind| {

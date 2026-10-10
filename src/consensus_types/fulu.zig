@@ -78,12 +78,20 @@ pub const SignedBeaconBlockHeader = electra.SignedBeaconBlockHeader;
 // Execution payload remains the same as Electra
 pub const ExecutionPayload = electra.ExecutionPayload;
 pub const ExecutionPayloadHeader = electra.ExecutionPayloadHeader;
+pub const VersionedHashes = electra.VersionedHashes;
+pub const NewPayloadRequest = electra.NewPayloadRequest;
 
 // DAS-related custom types
 pub const RowIndex = p.Uint64;
 pub const ColumnIndex = p.Uint64;
 pub const CustodyIndex = p.Uint64;
 pub const Cell = ssz.ByteVectorType(c.BYTES_PER_FIELD_ELEMENT * preset.FIELD_ELEMENTS_PER_CELL);
+pub const DataColumnIndices = ssz.FixedListType(ColumnIndex, @import("preset").NUMBER_OF_COLUMNS, .{});
+
+pub const DataColumnsByRootIdentifier = ssz.VariableContainerType(struct {
+    block_root: p.Root,
+    columns: DataColumnIndices,
+});
 
 // New containers for Data Availability Sampling
 pub const DataColumnSidecar = ssz.VariableContainerType(struct {

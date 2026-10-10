@@ -82,7 +82,7 @@ pub fn computeBlockRewards(
     for (body.inner.attester_slashings.items) |*slashing| {
         var indices: std.ArrayList(ValidatorIndex) = .empty;
         defer indices.deinit(allocator);
-        try findAttesterSlashableIndices(allocator, slashing, &indices);
+        try @import("../utils/attestation.zig").findAttesterSlashableIndicesFromSlices(allocator, slashing.attestation_1.attesting_indices.items, slashing.attestation_2.attesting_indices.items, &indices);
         for (indices.items) |offender| {
             attester_slashings += @divFloor(try effectiveBalance(fork, allocator, fork_state, offender), quotient);
         }

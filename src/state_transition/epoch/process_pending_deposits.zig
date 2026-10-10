@@ -31,7 +31,8 @@ pub fn processPendingDeposits(
 ) !void {
     const next_epoch = epoch_cache.epoch + 1;
     const deposit_balance_to_consume = try state.depositBalanceToConsume();
-    const available_for_processing = deposit_balance_to_consume + getActivationExitChurnLimit(epoch_cache);
+    const churn_limit = if (comptime fork.gte(.gloas)) @import("../utils/validator.zig").getActivationBalanceChurnLimit(epoch_cache) else getActivationExitChurnLimit(epoch_cache);
+    const available_for_processing = deposit_balance_to_consume + churn_limit;
     const finalized_slot = computeStartSlotAtEpoch(try state.finalizedEpoch());
 
     var processed_amount: u64 = 0;

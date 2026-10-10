@@ -320,11 +320,15 @@ pub const EpochTransitionCache = struct {
 
         var reused_cache = try getReusedEpochTransitionCache(
             allocator,
-            validators_view.chunks.state.pool,
+            state.nodePool(),
             validator_count,
         );
         const validator_flat_cache = &reused_cache.validator_flat_cache;
-        try validator_flat_cache.sync(validators_view.getRoot(), validator_count);
+        if (fork_seq.gte(.gloas)) {
+            try validator_flat_cache.syncProgressive(validators_view.getRoot(), validator_count);
+        } else {
+            try validator_flat_cache.sync(validators_view.getRoot(), validator_count);
+        }
 
         // Clone before being mutated in processEffectiveBalanceUpdates
         try epoch_cache.beforeEpochTransition();
