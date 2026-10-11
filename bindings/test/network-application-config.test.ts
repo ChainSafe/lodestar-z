@@ -44,6 +44,9 @@ test.each([
 
 test.each([
   (c: ReturnType<typeof applicationConfig>) => {
+    Reflect.set(c, "traceGossip", 1);
+  },
+  (c: ReturnType<typeof applicationConfig>) => {
     Reflect.set(c.resources, "extra", 1);
   },
   (c: ReturnType<typeof applicationConfig>) => {

@@ -2,6 +2,8 @@ const std = @import("std");
 const storage = @import("message_store.zig");
 const constants = @import("constants.zig");
 const gossip_limits = @import("../gossip_limits.zig");
+const trace = @import("trace.zig");
+const Connection = @import("../quic/Engine.zig").Handle;
 const assert = std.debug.assert;
 const none = std.math.maxInt(u32);
 
@@ -21,6 +23,7 @@ pub const Transmission = struct {
     kind: gossip_limits.Kind,
     len: u32,
     frame_len: u32,
+    traced: bool = false,
 };
 
 /// A frame that QUIC accepted in full.
@@ -108,6 +111,7 @@ const local_run_bytes = 64 * 1024;
 const Fifo = struct { head: u32 = none, tail: u32 = none };
 
 pub const Queue = struct {
+    trace_connection: ?Connection = null,
     pool: *Pool,
     fifos: [2]Fifo = @splat(.{}),
     origins: [origin_count]usize = @splat(0),
@@ -155,6 +159,7 @@ pub const Queue = struct {
             .kind = entry.kind,
             .len = entry.len,
             .frame_len = @intCast(entry.frameLen()),
+            .traced = self.trace_connection != null and trace.selected(entry.kind, entry.id),
         };
         const fifo = &self.fifos[@intFromEnum(class)];
         if (fifo.tail == none) fifo.head = slot else self.pool.slots[fifo.tail].next = slot;
@@ -167,6 +172,10 @@ pub const Queue = struct {
         self.origins[@intFromEnum(origin)] += 1;
         self.bytes += entry.len;
         if (class == .local) self.local_bytes += entry.len;
+        if (self.pool.slots[slot].tx.traced) {
+            const conn = self.trace_connection.?;
+            std.log.scoped(.network_gossip_trace).info("queued message_id={x} kind={s} message={d}:{d} connection={d}:{d} origin={s} bytes={d}", .{ entry.id, @tagName(entry.kind), message.index, message.generation, conn.index, conn.generation, @tagName(origin), entry.len });
+        }
     }
 
     /// Whether an ordinary frame would be refused for want of a descriptor.
@@ -184,17 +193,25 @@ pub const Queue = struct {
             if (now_ms < tx.enqueued_ms +| timeout_ms) {
                 if (store.get(tx.message)) |entry| if (entry.history) return tx;
             }
-            self.remove(class);
+            self.remove(class, if (now_ms >= tx.enqueued_ms +| timeout_ms) .queue_expired else .payload_evicted);
             self.current = null;
         }
         unreachable;
     }
 
     pub fn complete(self: *Queue) Receipt {
+        return self.finish(.quic_accepted);
+    }
+
+    pub fn refuseActive(self: *Queue) Receipt {
+        return self.finish(.active_capacity);
+    }
+
+    fn finish(self: *Queue, event: TraceEvent) Receipt {
         const class = self.current.?;
         const tx = &self.pool.slots[self.fifos[@intFromEnum(class)].head].tx;
         const receipt: Receipt = .{ .origin = tx.origin, .kind = tx.kind, .enqueued_ms = tx.enqueued_ms };
-        self.remove(class);
+        self.remove(class, event);
         self.current = null;
         return receipt;
     }
@@ -226,10 +243,24 @@ pub const Queue = struct {
         return result;
     }
 
-    fn remove(self: *Queue, class: Class) void {
+    const TraceEvent = enum { active, quic_accepted, queue_expired, payload_evicted, active_capacity, cancelled };
+
+    pub fn traceStarted(self: *const Queue) void {
+        const tx = &self.pool.slots[self.fifos[@intFromEnum(self.current.?)].head].tx;
+        self.traceEvent(tx, .active);
+    }
+
+    fn traceEvent(self: *const Queue, tx: *const Transmission, event: TraceEvent) void {
+        if (!tx.traced) return;
+        const conn = self.trace_connection.?;
+        std.log.scoped(.network_gossip_trace).info("send message={d}:{d} connection={d}:{d} outcome={s} enqueued_ms={d}", .{ tx.message.index, tx.message.generation, conn.index, conn.generation, @tagName(event), tx.enqueued_ms });
+    }
+
+    fn remove(self: *Queue, class: Class, event: TraceEvent) void {
         const fifo = &self.fifos[@intFromEnum(class)];
         const slot = fifo.head;
         const tx = &self.pool.slots[slot].tx;
+        self.traceEvent(tx, event);
         const len = tx.len;
         if (class == .ordinary) {
             self.ordinary_kind_entries[@intFromEnum(tx.kind)] -= 1;
@@ -245,7 +276,7 @@ pub const Queue = struct {
     }
 
     pub fn reset(self: *Queue) void {
-        for (0..self.count) |_| self.remove(if (self.classCount(.local) > 0) .local else .ordinary);
+        for (0..self.count) |_| self.remove(if (self.classCount(.local) > 0) .local else .ordinary, .cancelled);
         assert(self.count == 0 and self.bytes == 0 and self.local_bytes == 0);
         assert(self.fifos[0].head == none and self.fifos[1].head == none);
         self.current = null;

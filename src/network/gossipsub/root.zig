@@ -8,6 +8,7 @@ pub const constants = @import("constants.zig");
 pub const protocol = @import("protocol.zig");
 pub const protobuf = @import("protobuf.zig");
 pub const topic_policy = @import("topic_policy.zig");
+pub const trace = @import("trace.zig");
 pub const topic = @import("topic.zig");
 pub const sha256 = @import("sha256.zig");
 pub const mcache = @import("mcache.zig");

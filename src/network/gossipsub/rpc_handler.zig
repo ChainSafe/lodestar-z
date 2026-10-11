@@ -15,6 +15,7 @@ const Credits = @import("turn.zig").Credits;
 const Progress = @import("turn.zig").Progress;
 const Now = @import("../types.zig").Now;
 const MessageId = topic_mod.MessageId;
+const trace = @import("trace.zig");
 const assert = std.debug.assert;
 
 pub fn receiveItem(self: *Gossipsub, session: sessions_mod.SessionRef, item: protobuf.Item, turn: *Turn, peer: *Credits) Progress {
@@ -60,6 +61,19 @@ fn onMessage(self: *Gossipsub, index: u16, msg: protobuf.Message, turn: *Turn, p
     const result = self.messages.receive(&context, &workspace, &source, msg, now.millis());
     // The turn offers a message refused for work again, so only its final outcome counts.
     if (result == .deferred) return .credits;
+    if (self.trace_gossip) if (topic_mod.parseCanonical(msg.topic)) |topic| {
+        const id: ?MessageId = switch (result) {
+            .admitted => |value| value.id,
+            .duplicate => |value| value,
+            .refused => |value| if (value == .identified) value.identified else null,
+            else => null,
+        };
+        if (id) |value| if (trace.selected(topic.name.kind, value)) {
+            const io = &self.sessions.rows[index].io;
+            const conn = source.connection;
+            std.log.scoped(.network_gossip_trace).info("receive message_id={x} kind={s} connection={d}:{d} outcome={s} bytes={d} frame_started_ms={?d} frame_complete_ms={?d}", .{ value, @tagName(topic.name.kind), conn.index, conn.generation, @tagName(result), msg.data.len, io.frame_since, if (io.rpc) |rpc| rpc.completed_ms else null });
+        };
+    };
     const counts = self.topic_metrics.get(msg.topic);
     counts.received +|= 1;
     switch (result) {

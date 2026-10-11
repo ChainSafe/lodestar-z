@@ -171,7 +171,9 @@ test.each([
   "reject",
   "ignore",
 ] as const)("real gossip %s preserves wire identity and exact-once verdict admission", async (verdict) => {
-  const pair = await gossipPair();
+  const pair = await gossipPair(30000n, undefined, (config) => {
+    config.traceGossip = verdict === "accept";
+  });
   try {
     const input = blockPayload(4000, 7);
     const before = Date.now();
@@ -222,6 +224,34 @@ test.each([
       },
       {timeout: 5000}
     );
+    const sentTrace = (await pair.left.drainLogs(256)).records.filter((r) => r.scope === "network_gossip_trace");
+    const receivedTrace = pair.right.drainLogs(256).records.filter((r) => r.scope === "network_gossip_trace");
+    if (verdict === "accept") {
+      const id = Buffer.from(message.id).toString("hex");
+      expect(sentTrace.map((r) => r.message.split(" ")[0])).toEqual(["queued", "send", "send"]);
+      expect(sentTrace[0].message).toContain(`message_id=${id}`);
+      expect(sentTrace[1].message).toContain("outcome=active");
+      expect(sentTrace[2].message).toContain("outcome=quic_accepted");
+      const delivery = sentTrace[0].message.match(/ message=(\d+:\d+) connection=(\d+:\d+)/)?.[0];
+      expect(delivery).toBeDefined();
+      expect(sentTrace[1].message).toContain(delivery);
+      expect(sentTrace[2].message).toContain(delivery);
+      expect(receivedTrace.map((r) => r.message.split(" ")[0]).sort()).toEqual([
+        "handed_to_js",
+        "receive",
+        "validation",
+      ]);
+      for (const record of receivedTrace) {
+        expect(record.message).toContain(`message_id=${id}`);
+        expect(record.truncated).toBe(false);
+      }
+      const receive = receivedTrace.find((r) => r.message.startsWith("receive "));
+      expect(receive?.message).toMatch(/frame_started_ms=\d+ frame_complete_ms=\d+/);
+      expect(receivedTrace.find((r) => r.message.startsWith("validation "))?.message).toContain("verdict=accept");
+    } else {
+      expect(sentTrace).toEqual([]);
+      expect(receivedTrace).toEqual([]);
+    }
     const page = await pair.right.getGossipDiagnostics();
     expect(page.ownerSequence).toBeGreaterThan(0n);
     expect(page.observedUnixMs).toBeGreaterThanOrEqual(BigInt(before - 1000));

@@ -2,13 +2,14 @@ const std = @import("std");
 const prom = @import("metrics/registry.zig");
 const peer_id = @import("wire/peer_id.zig");
 
-pub const Scope = enum { network_runtime, network_core, network_quic, network_peers, network_reqresp, network_reqresp_errors, network_gossip, network_mesh, network_discovery, network_bridge, network_gossip_errors };
+pub const Scope = enum { network_runtime, network_core, network_quic, network_peers, network_reqresp, network_reqresp_errors, network_gossip, network_mesh, network_discovery, network_bridge, network_gossip_errors, network_gossip_trace };
 pub const capacity = 2048;
 pub const message_capacity = 768;
 pub const drain_max = 256;
 const scope_count = @typeInfo(Scope).@"enum".fields.len;
 const level_count = @typeInfo(std.log.Level).@"enum".fields.len;
 pub const scope_levels: []const std.log.ScopeLevel = &.{
+    .{ .scope = .network_gossip_trace, .level = .info },
     .{ .scope = .network_runtime, .level = .debug },
     .{ .scope = .network_core, .level = .debug },
     .{ .scope = .network_quic, .level = .debug },

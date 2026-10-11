@@ -4,6 +4,7 @@ const active_send = @import("active_send.zig");
 const protobuf = @import("protobuf.zig");
 const constants = @import("constants.zig");
 const topic = @import("topic.zig");
+const trace = @import("trace.zig");
 const assert = std.debug.assert;
 const ItemKind = std.meta.Tag(protobuf.Item);
 const delivery = @import("delivery.zig");
@@ -306,7 +307,11 @@ pub const Outbox = struct {
                 error.KindDescriptors => .data_kind_descriptors,
                 error.KindBytes => .data_kind_bytes,
             });
-            self.last_drop_kind = store.get(h).?.kind;
+            const entry = store.get(h).?;
+            self.last_drop_kind = entry.kind;
+            if (self.data.trace_connection) |conn| if (trace.selected(entry.kind, entry.id)) {
+                std.log.scoped(.network_gossip_trace).info("queue_refused message_id={x} kind={s} connection={d}:{d} reason={s}", .{ entry.id, @tagName(entry.kind), conn.index, conn.generation, @errorName(err) });
+            };
             return .full;
         };
         self.countRpc(&store.get(h).?.frame, &.{ .message = 1 });
@@ -335,13 +340,14 @@ pub const Outbox = struct {
                     self.active = .control;
                 } else if (self.data.next(store, now_ms, self.queue_timeout_ms)) |tx| {
                     const acquired = active_send.Frame.acquire(store, tx.message, &self.small_frame, now_ms, self.active_send_timeout_ms) orelse {
-                        const receipt = self.data.complete();
+                        const receipt = self.data.refuseActive();
                         self.dropped(.active_capacity);
                         self.last_drop_kind = receipt.kind;
                         self.control_burst = 0;
                         continue;
                     };
                     self.active = .{ .data = acquired.frame };
+                    self.data.traceStarted();
                     self.active_deadline_ms = acquired.deadline_ms;
                 } else if (self.critical.count > 0 or self.control.count > 0) {
                     self.control_burst = 0;

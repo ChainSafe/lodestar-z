@@ -240,6 +240,14 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
     // Close may have freed these cells meanwhile; a freed token is ignored. Not counted as delivered items.
     if (runtime.bridge.gossip) |*table| for (selection.acknowledged[0..selection.acknowledged_count]) |token| table.acknowledge(token);
     if (selection.gossip) |*batch| {
+        if (runtime.owner) |owner| if (owner.application.trace_gossip) {
+            const previous = n.logging.bind(&runtime.logs);
+            defer _ = n.logging.bind(previous);
+            const table = &runtime.bridge.gossip.?;
+            for (batch.tokens[0..batch.len]) |token| if (table.get(token)) |cell| {
+                if (n.gossipsub.trace.selected(cell.kind, cell.id)) std.log.scoped(.network_gossip_trace).info("handed_to_js message_id={x} kind={s} slot={?d} admitted_ms={d}", .{ cell.id, @tagName(cell.kind), cell.metadata.slot, cell.admitted_ms });
+            };
+        };
         runtime.bridge.gossip.?.finish(batch, true);
     }
     if (runtime.bridge.quiescent) if (runtime.bridge.gossip) |*table| table.trim();
