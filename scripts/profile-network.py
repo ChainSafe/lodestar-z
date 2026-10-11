@@ -9,6 +9,9 @@ Enable --network.native.traceGossip for correlated lifecycle logs. All captures
 use CLOCK_MONOTONIC, matching nativeMonotonicMs. CPU stacks use DWARF; keep the
 matching addon and executable until `perf script`/`perf report` have symbolized
 both the application and its libraries. `perf` and its viewers own CPU analysis.
+Use perf's libunwind backend when decoding LLD-linked addons: libdw can misread
+their load addresses and truncate call chains. Recent perf supports selecting
+it with `perf script --unwind-style=libunwind` when that backend is built in.
 """
 import argparse
 import json
@@ -24,7 +27,7 @@ def main():
     parser.add_argument("owner_tid", type=int)
     parser.add_argument("output", type=Path)
     parser.add_argument("--seconds", type=int, default=120, choices=range(1, 601), metavar="1..600")
-    parser.add_argument("--frequency", type=int, default=499, choices=range(1, 1000), metavar="1..999")
+    parser.add_argument("--frequency", type=int, default=199, choices=range(1, 1000), metavar="1..999")
     parser.add_argument("--port", type=int, default=9001)
     parser.add_argument("--service", default="beacon")
     args = parser.parse_args()
@@ -41,11 +44,12 @@ def main():
         if link.startswith("socket:["):
             inodes.add(link[8:-1])
     metadata = {"pid": args.pid, "owner_tid": args.owner_tid, "seconds": args.seconds,
-                "frequency": args.frequency, "start_unix_ns": time.time_ns(), "start_mono_ns": time.monotonic_ns()}
+                "frequency": args.frequency, "stack_bytes": 61440,
+                "start_unix_ns": time.time_ns(), "start_mono_ns": time.monotonic_ns()}
     metadata["perf"] = subprocess.check_output(["perf", "version"], text=True).strip()
     commands = {
         "cpu": ["perf", "record", "--clockid", "mono", "-F", str(args.frequency), "-t", str(args.owner_tid),
-                "--call-graph", "dwarf,16384", "-o", str(args.output / "cpu.data"), "--", "sleep", str(args.seconds)],
+                "--call-graph", f"dwarf,{metadata['stack_bytes']}", "-o", str(args.output / "cpu.data"), "--", "sleep", str(args.seconds)],
         "sched": ["perf", "record", "--clockid", "mono", "-a", "-e", "sched:sched_switch", "--filter",
                   f"prev_pid == {args.owner_tid} || next_pid == {args.owner_tid}",
                   "-e", "sched:sched_waking", "--filter", f"pid == {args.owner_tid}",
