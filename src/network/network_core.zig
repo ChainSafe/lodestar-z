@@ -19,6 +19,7 @@ const KeyPair = @import("wire/keys.zig").KeyPair;
 const Sockets = @import("udp").Sockets;
 const Reservations = @import("reservations.zig").Reservations;
 const timing = @import("metrics/timing.zig");
+const TurnTiming = @import("turn_timing.zig").TurnTiming;
 const identify_mod = @import("identify/root.zig");
 const configuration = @import("configuration.zig");
 const router = @import("router.zig");
@@ -125,6 +126,7 @@ pub const NetworkCore = struct {
     schedule: control_values.ForkSchedule,
     counters: Counters = .{},
     step_duration: timing.Duration = .{},
+    turn_timing: TurnTiming = .{},
     /// Zero-wait turns, counted under every source already due; readiness tests and the idle
     /// benchmarks read them to show an idle owner does not spin.
     due_now_turns: [wake_sources.source_count]u64 = @splat(0),
@@ -157,6 +159,7 @@ pub const NetworkCore = struct {
         self.schedule = startup.schedule;
         self.counters = .{};
         self.step_duration = .{};
+        self.turn_timing = .{};
         self.due_now_turns = @splat(0);
         self.host_wake = null;
         self.current_slot = startup.slot;
@@ -590,7 +593,7 @@ pub const NetworkCore = struct {
         self.counters.readiness_failures +|= @intFromBool(readiness.failure != null);
         self.counters.transport_failures +|= @intFromBool(input.clock_failure != null);
         const start = timing.now(io);
-        defer self.step_duration.observe(timing.now(io) -| start);
+        self.turn_timing.begin(start);
         self.last_now = tick;
         var result: Result = .{
             .transport = self.transport.beginTurn(tick),
@@ -598,9 +601,15 @@ pub const NetworkCore = struct {
             .cancelled = readiness.cancelled,
             .failure = readiness.failure orelse input.clock_failure,
         };
+        defer {
+            const end = timing.now(io);
+            self.step_duration.observe(end -| start);
+            self.turn_timing.finish(end, result.transport.datagrams_received, result.transport.datagrams_sent);
+        }
         if (!result.cancelled and self.discoveryOnly(&result.readiness, tick, outputs, host)) {
             result.discovery_only = true;
             self.discover(io, tick, &result);
+            self.turn_timing.mark(io, .maintenance);
             return result;
         }
         // A failed poll reports no readiness, so both sockets are drained anyway.
@@ -612,9 +621,11 @@ pub const NetworkCore = struct {
                 self.counters.transport_failures +|= 1;
             };
         }
+        self.turn_timing.mark(io, .receive);
         result.transport.events = self.transport.process(tick, self.native_events);
         result.transport.events_pending = self.transport.engine.eventsPending();
         result.transport_events = self.native_events[0..result.transport.events];
+        self.turn_timing.mark(io, .transport);
         if (!result.cancelled) {
             if (host.handler) |handler| {
                 const due = if (host.deadline) |deadline| deadline.compare(.lte, tick.monotonic) else false;
@@ -623,17 +634,21 @@ pub const NetworkCore = struct {
                 }
             } else self.host_runnable = false;
         }
+        self.turn_timing.mark(io, .host);
         result.counts = self.process(self.native_events[0..result.transport.events], tick, outputs);
+        self.turn_timing.mark(io, .protocols);
         if (self.peer_manager.phase == .running and !result.cancelled) {
             // This turn's coverage selection already ran, without a second protocol pump.
             if (self.discovery != null) self.discover(io, tick, &result);
             if (!result.cancelled and input.clock_failure == null) self.dial(io, tick, &result);
         }
+        self.turn_timing.mark(io, .maintenance);
         if (!result.cancelled) self.transport.flush(io, tick, &result.transport) catch |err| {
             result.cancelled = true;
             result.failure = result.failure orelse err;
             self.counters.transport_failures +|= 1;
         };
+        self.turn_timing.mark(io, .send);
         return result;
     }
 

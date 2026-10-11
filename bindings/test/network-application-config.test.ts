@@ -47,6 +47,9 @@ test.each([
     Reflect.set(c, "traceGossip", 1);
   },
   (c: ReturnType<typeof applicationConfig>) => {
+    Reflect.set(c, "traceTurns", 1);
+  },
+  (c: ReturnType<typeof applicationConfig>) => {
     Reflect.set(c.resources, "extra", 1);
   },
   (c: ReturnType<typeof applicationConfig>) => {
@@ -227,6 +230,7 @@ test.each([
 
 test("accepts transport overrides and exposes their effective values", async () => {
   const config = applicationConfig();
+  config.traceTurns = true;
   config.transport = {initialCongestionWindowPackets: 32, receiveDatagramsPerTurn: 128};
   const runtime = startRuntime(config, () => undefined);
   try {
