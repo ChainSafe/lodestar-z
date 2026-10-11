@@ -288,7 +288,7 @@ fn datagramsCounted(node: *const NetworkCore) u64 {
     return total;
 }
 
-test "a junk flood on the discovery socket costs discovery-only turns in batches" {
+test "discovery returns to polling after each datagram without waking unrelated owners" {
     if (!NetworkCore.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{64}));
     var opts = options(&key);
@@ -308,13 +308,13 @@ test "a junk flood on the discovery socket costs discovery-only turns in batches
     for (0..40) |_| try sender.send(std.testing.io, &target, "junk datagram");
     const visits = Visits.capture(&node);
     const counted = datagramsCounted(&node);
-    for ([_]u16{ NetworkCore.discovery_batch_max, 40 - NetworkCore.discovery_batch_max }) |expected| {
+    for (0..40) |_| {
         const before = datagramsCounted(&node);
         const now = try currentTime();
         const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 5_000)));
         try std.testing.expect(result.failure == null);
         try std.testing.expect(result.readiness.discoveryReady() and result.discovery_only);
-        try std.testing.expectEqual(expected, datagramsCounted(&node) - before);
+        try std.testing.expectEqual(@as(u64, 1), datagramsCounted(&node) - before);
         try std.testing.expectEqual(@as(u32, 0), result.transport.datagrams_sent);
     }
     try std.testing.expectEqual(counted + 40, datagramsCounted(&node));

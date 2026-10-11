@@ -578,13 +578,12 @@ test "core discovery advancement does not wait for datagrams" {
     defer sender.close(std.testing.io);
     try sender.send(std.testing.io, &node.discovery.?.transport.sockets.primary().address, "invalid");
     const now = try Now.read(std.testing.io);
-    // The readable datagram keeps the drain going until a receive finds the socket empty.
-    const drained = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
-    try std.testing.expect(drained.failure == null);
+    const received = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
+    try std.testing.expect(received.failure == null);
     const rejected = &node.discovery.?.datagram_rejections[@intFromEnum(d.types.RejectReason.malformed_packet)];
     try std.testing.expectEqual(@as(u64, 1), rejected.*);
     const after_datagram = faults.receive_calls;
-    try std.testing.expect(after_datagram >= 2);
+    try std.testing.expectEqual(@as(usize, 1), after_datagram);
     const idle = driver.step(&node, faults.io(), node.last_now, .{}, .deadlineOnly(time.optionalMilliseconds(node.last_now.millis())));
     try std.testing.expect(idle.failure == null);
     try std.testing.expectEqual(@as(u64, 1), rejected.*);

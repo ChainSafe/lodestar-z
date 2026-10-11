@@ -14,7 +14,6 @@ const wake_sources = @import("wake_sources.zig");
 const control_values = @import("control_values.zig");
 const ControlProtocol = @import("control_protocol.zig").ControlProtocol;
 const advertisement = @import("advertisement.zig");
-const constants = @import("constants.zig");
 const KeyPair = @import("wire/keys.zig").KeyPair;
 const Sockets = @import("udp").Sockets;
 const Reservations = @import("reservations.zig").Reservations;
@@ -34,8 +33,6 @@ const logging = @import("logging.zig");
 pub const NetworkCore = struct {
     pub const wait = @import("wait.zig");
 
-    /// Discovery datagrams drained per turn, matching the QUIC receive batch.
-    pub const discovery_batch_max: u32 = constants.receive_batch_max;
     pub const controls_per_turn = 32;
     pub const identify_per_turn = 8;
     pub const dials_per_turn = 4;
@@ -835,31 +832,27 @@ pub const NetworkCore = struct {
         return !pending.schedule().due(tick.monotonic);
     }
 
-    /// Steps discovery once per datagram, up to discovery_batch_max, handling each step's
-    /// candidates and learned endpoints before the next. Admission runs before decode as always.
+    /// Each response may verify several ENRs; return to polling between datagrams.
     fn discover(self: *NetworkCore, io: std.Io, tick: Now, result: *Result) void {
         const owned = self.discovery.?;
         const need = self.peer_manager.discoveryNeed();
         owned.request(need.query(tick.millis() +| 1_000), tick.millis()) catch unreachable;
         const candidates = &owned.candidates;
         var eligible: [2]bool = if (result.readiness.failure == null) result.readiness.discovery else @splat(true);
-        for (0..discovery_batch_max) |_| {
-            const progress = owned.advance(io, tick.millis(), &eligible, candidates) catch |err| peers.Discovery.Result{ .cancelled = err == error.Canceled, .failure = .{ .cause = err, .stage = .coordinator } };
-            const endpoints = owned.learnedEndpoints(progress.learned);
-            if (!std.meta.eql(endpoints, owned.endpoints)) {
-                _ = self.updateLocalWithEndpoints(&self.peer_manager.local, self.schedule, endpoints, tick) catch |err| {
-                    std.log.scoped(.network_discovery).warn("endpoint_update_failed reason={s}", .{@errorName(err)});
-                };
-            }
-            const intake = self.peer_manager.discoveredBatch(self.protocols.gossipsub, candidates[0..progress.candidates], tick);
-            if (progress.candidates > 0) std.log.scoped(.network_discovery).debug("candidates_received count={d} refused={d}", .{ progress.candidates, intake.refused });
-            if (progress.failure) |failure| {
-                std.log.scoped(.network_discovery).debug("discovery_failed stage={s} reason={s}", .{ @tagName(failure.stage), @errorName(failure.cause) });
-                result.failure = result.failure orelse failure.cause;
-            }
-            result.cancelled = result.cancelled or progress.cancelled;
-            if (result.cancelled or progress.datagrams == 0) break;
+        const progress = owned.advance(io, tick.millis(), &eligible, candidates) catch |err| peers.Discovery.Result{ .cancelled = err == error.Canceled, .failure = .{ .cause = err, .stage = .coordinator } };
+        const endpoints = owned.learnedEndpoints(progress.learned);
+        if (!std.meta.eql(endpoints, owned.endpoints)) {
+            _ = self.updateLocalWithEndpoints(&self.peer_manager.local, self.schedule, endpoints, tick) catch |err| {
+                std.log.scoped(.network_discovery).warn("endpoint_update_failed reason={s}", .{@errorName(err)});
+            };
         }
+        const intake = self.peer_manager.discoveredBatch(self.protocols.gossipsub, candidates[0..progress.candidates], tick);
+        if (progress.candidates > 0) std.log.scoped(.network_discovery).debug("candidates_received count={d} refused={d}", .{ progress.candidates, intake.refused });
+        if (progress.failure) |failure| {
+            std.log.scoped(.network_discovery).debug("discovery_failed stage={s} reason={s}", .{ @tagName(failure.stage), @errorName(failure.cause) });
+            result.failure = result.failure orelse failure.cause;
+        }
+        result.cancelled = result.cancelled or progress.cancelled;
     }
 };
 
