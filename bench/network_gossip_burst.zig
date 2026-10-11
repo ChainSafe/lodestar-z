@@ -59,6 +59,7 @@ const Options = struct {
     calls_per_pump: u32 = 0,
     calls_per_peer: u32 = 0,
     sample_ms: u32 = 250,
+    receive_per_turn: u16 = 32,
     /// Active validators from which the hub scores attestation subnets as Lodestar does, leaving
     /// every other kind unscored as Lodestar leaves columns; zero keeps the default score parameters.
     validators: u32 = 0,
@@ -85,7 +86,7 @@ const Options = struct {
             self.topics == 0 or self.topics > Kind.beacon_attestation.countMax() or self.slow > 4 or @as(u32, self.slow) + self.duplicates >= self.mesh or
             (self.slow > 0 and self.slow_rate == 0) or (self.burst > 0 and self.window_ms == 0) or self.durationMs() > 30_000 or
             self.delay_ms > 10_000 or self.exchange_ms > 1_000 or self.batch == 0 or self.batch > 1024 or self.columns > 4096 or self.sample_ms < 10 or
-            self.messages() > messages_max) return error.InvalidOptions;
+            self.receive_per_turn == 0 or self.receive_per_turn > network.Transport.receive_per_turn_max or self.messages() > messages_max) return error.InvalidOptions;
     }
 };
 
@@ -316,11 +317,12 @@ fn hubResolved(chain: *const Chain, options: *const Options) !network.configurat
     const limits = processorLimits(chain, options);
     return network.configuration.resolve(.{
         .seed = 7,
+        .work_limits = .{ .receive_per_turn_max = options.receive_per_turn },
         .forks = chain.network_config.forks[0..chain.network_config.boundary_count],
         .admission_policy = chain.network_config.requestPolicy(),
         .limits = .{ .connections_max = 242, .handshaking_max = 32, .handshaking_per_source_max = 32, .dialing_max = 32, .receive_budget_bytes = 512 * mib },
         .peers = .{ .capacity = 420, .outbound_reserve = 32, .target_peers = 200, .max_peers = 210, .min_outbound = 50 },
-        .byte_limit = 768 * mib,
+        .byte_limit = 2048 * mib,
         .router = .{ .capabilities = chain.update.capabilities },
         .gossip = .{
             .topic_policy = chain.network_config.topics[0..chain.network_config.boundary_count],
@@ -396,7 +398,6 @@ fn spokeResolved(chain: *const Chain, options: *const Options, index: u16, slow:
         .admission_policy = chain.network_config.requestPolicy(),
         .limits = if (slow) slow_limits else .{ .connections_max = 16, .handshaking_max = 8, .dialing_max = 4, .receive_budget_bytes = 64 * mib },
         .peers = .{ .capacity = 64, .outbound_reserve = 4, .target_peers = 8, .max_peers = 12, .min_outbound = 2 },
-        .reqresp = .{ .outbound_max = 18, .serving_max = 18 },
         .socket_buffers = .{ .quic = .{ .receive = 4 * mib, .send = 4 * mib } },
         .router = .{ .capabilities = chain.update.capabilities },
         .gossip = .{
@@ -720,7 +721,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const hub_resolved = try hubResolved(chain, options);
     const policy = &hub_resolved.core.protocols.gossipsub;
     std.debug.print("case=gossip_burst preset={s} chain_preset={s} optimize={s} peers={d} topics={d} mesh={d} recipients={d} slow={d} slow_rate={d} attestation_ssz_bytes={d} burst={d} window_ms={d} background={d} duplicates={d} duplicate_ms={d} lead_ms={d} tail_ms={d} delay_ms={d} exchange_ms={d} batch={d} columns={d} column_bytes={d} validators={d} messages={d}\n", .{ parsed.name, @tagName(preset.active_preset), @tagName(@import("builtin").mode), options.peers, options.topics, options.mesh, options.mesh - 1, options.slow, options.slow_rate, chain.attestation_bytes, options.burst, options.window_ms, options.background, options.duplicates, options.duplicate_ms, options.lead_ms, options.tail_ms, options.delay_ms, options.exchange_ms, options.batch, options.columns, options.column_bytes, options.validators, schedule.messages.len });
-    std.debug.print("case=gossip_burst hub calls_per_pump={d} calls_per_peer={d} peers_per_pump={d} per_peer_descriptors={d} local_descriptors={d} attestation_items={d} validation_capacity={d}\n", .{ policy.calls_per_pump, policy.calls_per_peer, policy.peers_per_pump, gossip.delivery.per_peer_limit, policy.tx_local_descriptors, policy.payload_limits.?[@intFromEnum(Kind.beacon_attestation)].items, policy.validation_capacity });
+    std.debug.print("case=gossip_burst hub receive_per_turn={d} calls_per_pump={d} calls_per_peer={d} peers_per_pump={d} per_peer_descriptors={d} local_descriptors={d} attestation_items={d} validation_capacity={d}\n", .{ options.receive_per_turn, policy.calls_per_pump, policy.calls_per_peer, policy.peers_per_pump, gossip.delivery.per_peer_limit, policy.tx_local_descriptors, policy.payload_limits.?[@intFromEnum(Kind.beacon_attestation)].items, policy.validation_capacity });
 
     const hub = try allocator.create(network.NetworkCore);
     defer allocator.destroy(hub);
