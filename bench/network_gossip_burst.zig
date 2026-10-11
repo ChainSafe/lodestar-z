@@ -320,7 +320,7 @@ fn hubResolved(chain: *const Chain, options: *const Options) !network.configurat
         .admission_policy = chain.network_config.requestPolicy(),
         .limits = .{ .connections_max = 242, .handshaking_max = 32, .handshaking_per_source_max = 32, .dialing_max = 32, .receive_budget_bytes = 512 * mib },
         .peers = .{ .capacity = 420, .outbound_reserve = 32, .target_peers = 200, .max_peers = 210, .min_outbound = 50 },
-        .byte_limit = 768 * mib,
+        .byte_limit = 4096 * mib,
         .router = .{ .capabilities = chain.update.capabilities },
         .gossip = .{
             .topic_policy = chain.network_config.topics[0..chain.network_config.boundary_count],
@@ -392,11 +392,12 @@ fn spokeResolved(chain: *const Chain, options: *const Options, index: u16, slow:
     const slow_limits: network.Limits = .{ .connections_max = 16, .handshaking_max = 8, .dialing_max = 4, .receive_budget_bytes = 16 * mib };
     return network.configuration.resolve(.{
         .seed = 1_000 + index,
+        .byte_limit = 4 * 1024 * 1024 * 1024,
         .forks = chain.network_config.forks[0..chain.network_config.boundary_count],
         .admission_policy = chain.network_config.requestPolicy(),
         .limits = if (slow) slow_limits else .{ .connections_max = 16, .handshaking_max = 8, .dialing_max = 4, .receive_budget_bytes = 64 * mib },
         .peers = .{ .capacity = 64, .outbound_reserve = 4, .target_peers = 8, .max_peers = 12, .min_outbound = 2 },
-        .reqresp = .{ .outbound_max = 18, .serving_max = 18 },
+        .reqresp = .{ .outbound_max = 24, .serving_max = 24 },
         .socket_buffers = .{ .quic = .{ .receive = 4 * mib, .send = 4 * mib } },
         .router = .{ .capabilities = chain.update.capabilities },
         .gossip = .{
