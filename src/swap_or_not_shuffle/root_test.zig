@@ -46,6 +46,43 @@ test "innerShuffleList generic over u64" {
     try std.testing.expectEqualSlices(u64, &input, &actual);
 }
 
+fn expectListShuffleMatchesComputeShuffledIndex(list_size: u32) !void {
+    const allocator = std.testing.allocator;
+    const seed = [_]u8{0x5a} ** SEED_SIZE;
+    const rounds = shuffle.SHUFFLE_ROUNDS_MAINNET;
+
+    var reference = try shuffle.ComputeShuffledIndex.init(allocator, &seed, list_size, rounds);
+    defer reference.deinit();
+
+    const positions = try allocator.alloc(u32, list_size);
+    defer allocator.free(positions);
+
+    for (positions, 0..) |*position, i| position.* = @intCast(i);
+    try shuffle.unshuffleList(u32, positions, &seed, rounds);
+    for (positions, 0..) |position, i| {
+        try std.testing.expectEqual(try reference.get(@intCast(i)), position);
+    }
+
+    try shuffle.shuffleList(u32, positions, &seed, rounds);
+    for (positions, 0..) |position, i| {
+        try std.testing.expectEqual(@as(u32, @intCast(i)), position);
+    }
+}
+
+test "list shuffle matches ComputeShuffledIndex for list sizes 2 through 64" {
+    // Sizes below 16 only swap one pair at a time; longer lists also take eight-pair steps.
+    for (2..65) |list_size| {
+        try expectListShuffleMatchesComputeShuffledIndex(@intCast(list_size));
+    }
+}
+
+test "list shuffle matches ComputeShuffledIndex for list sizes around source hash boundaries" {
+    // One source hash decides 256 positions.
+    for ([_]u32{ 255, 256, 257, 511, 512, 513, 1023, 1024, 1025 }) |list_size| {
+        try expectListShuffleMatchesComputeShuffledIndex(list_size);
+    }
+}
+
 test "unshuffleList matches spec test vector" {
     // seed 0x4fe91d85d6bc19b20413659c61f3c690a1c4d48be41cab8363a130cebabada97
     const seed = [_]u8{
