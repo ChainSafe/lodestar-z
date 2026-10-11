@@ -23,6 +23,7 @@ const outbox_mod = @import("outbox.zig");
 const metrics = @import("metrics.zig");
 const logging = @import("../logging.zig");
 const delivery = @import("delivery.zig");
+const trace = @import("trace.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 
 const assert = std.debug.assert;
@@ -40,6 +41,7 @@ peers: peers_mod.PeerBook,
 messages: messages_mod.Messages,
 /// The sink and its context must outlive every pump that uses them.
 message_sink: ?*const MessageSink = null,
+trace_gossip: bool = false,
 cycle: heartbeat_cycle.Cycle,
 /// The clock that bounds each maintenance slice.
 clock: std.Io = std.Io.Threaded.global_single_threaded.io(),
@@ -273,6 +275,7 @@ pub fn addPeer(self: *Gossipsub, conn: Handle, metadata: *const peers_mod.Metada
     }
     const ref = admission_result.admitted.peer;
     self.sessions.rows[handle.index].logical = ref;
+    self.sessions.rows[handle.index].io.tx.data.trace_connection = if (self.trace_gossip) conn else null;
     return .{ .admitted = handle };
 }
 
@@ -354,6 +357,9 @@ pub fn report(self: *Gossipsub, handle: ValidationHandle, verdict: Verdict, now:
     const result = self.messages.report(&context, handle, verdict, now.millis());
     if (result == .applied) {
         const applied = &result.applied;
+        if (self.trace_gossip) if (topic_mod.parseCanonical(applied.topicString())) |topic| {
+            if (trace.selected(topic.name.kind, applied.id)) std.log.scoped(.network_gossip_trace).info("validation message_id={x} kind={s} verdict={s} admitted_ms={d}", .{ applied.id, @tagName(topic.name.kind), @tagName(applied.verdict), applied.admitted_ms });
+        };
         if (applied.forward) |forward| {
             if (self.deliver(self.overlay.mesh(forward.topic), forward.message, forward.source, now.millis()).queued > 0) self.topic_metrics.get(applied.topicString()).forwarded +|= 1;
         }

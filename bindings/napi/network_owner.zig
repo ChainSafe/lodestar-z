@@ -81,6 +81,7 @@ pub fn initialize(self: *Runtime) !void {
         .discovery = if (self.owner.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.owner.?.config.discovery_sequence, .advertisement = self.owner.?.config.advertisement, .fixed = self.owner.?.config.fixed, .bootstrap = self.owner.?.records[0..self.owner.?.config.bootstrap_count] } else null,
     });
     self.owner.?.core_live = true;
+    self.owner.?.core.protocols.gossipsub.trace_gossip = self.owner.?.application.trace_gossip;
     try self.owner.?.core.setHostWake(self.bridge.wake.?.read_fd);
 
     try publishMetrics(self, try Now.read(io));

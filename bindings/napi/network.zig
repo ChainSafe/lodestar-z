@@ -77,6 +77,9 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     runtime.retain();
     errdefer runtime.release();
     runtime.thread = try std.Thread.spawn(.{ .stack_size = std.Thread.SpawnConfig.default_stack_size }, network_owner.run, .{runtime});
+    runtime.thread.?.setName(std.Io.Threaded.global_single_threaded.io(), "network-owner") catch |err| {
+        std.log.scoped(.network_runtime).debug("owner_thread_name_failed reason={s}", .{@errorName(err)});
+    };
     self.runtime = runtime;
     return .{ .val = holder };
 }

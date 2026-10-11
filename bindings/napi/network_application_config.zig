@@ -8,6 +8,7 @@ const network_logs = @import("network_logs.zig");
 
 pub const Config = struct {
     resources: Resources,
+    trace_gossip: bool = false,
     transport: Transport = .{},
     agent: [256]u8,
     agent_len: u16,
@@ -78,8 +79,9 @@ const required = .{ "beaconConfig", "identitySecretKey", "bind", "local", "disco
 
 pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out: *Config) !void {
     const remembered = try value.hasNamedProperty("rememberedPeers");
-    try decode.object(value, &(required ++ .{ "rememberedPeers", "transport" }));
+    try decode.object(value, &(required ++ .{ "rememberedPeers", "transport", "traceGossip" }));
     inline for (required) |name| _ = try decode.get(value, name);
+    out.trace_gossip = if (try value.hasNamedProperty("traceGossip")) try decode.boolean(try decode.get(value, "traceGossip")) else false;
     out.transport = .{};
     if (try value.hasNamedProperty("transport")) {
         const transport = try decode.get(value, "transport");

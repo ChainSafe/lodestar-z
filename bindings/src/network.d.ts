@@ -220,6 +220,8 @@ export interface NativeRememberedPeersSnapshot extends NativeRememberedPeers {
 }
 
 export interface NativeApplicationConfig extends NativeRuntimeConfig {
+  /** Bounded lifecycle logs for blocks and a stable 1/64 column sample. Defaults to false. */
+  traceGossip?: boolean;
   /** Startup copies the derived network settings; this instance need not outlive initialization. */
   beaconConfig: BeaconConfig;
   resources: NativeResources;

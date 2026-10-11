@@ -11,6 +11,7 @@ const delivery = @import("delivery.zig");
 pub const TimeoutReason = enum { active_send, subscriptions, receive_frame, send_queue };
 
 pub const ActiveRpc = struct {
+    completed_ms: ?u64 = null,
     reader: protobuf.RpcReader,
     ihave_allowed: ?bool = null,
     item: ?protobuf.RpcReader.ItemRange = null,
@@ -105,7 +106,7 @@ pub const PeerIo = struct {
             self.unread_start += consumed;
         }
         const complete = self.reader.declared != null and self.reader.filled == self.reader.declared.?;
-        if (complete and !self.discarding) self.rpc = .{ .reader = protobuf.RpcReader.initView(.{
+        if (complete and !self.discarding) self.rpc = .{ .completed_ms = now_ms, .reader = protobuf.RpcReader.initView(.{
             .prefix = self.body[0..@min(self.reader.filled, self.body.len)],
             .pool = pool,
             .first = self.overflow.first,
