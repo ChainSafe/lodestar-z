@@ -60,15 +60,33 @@ test "network chain resolves same epoch forks BPO contexts and clock identity" {
     try std.testing.expectEqualDeep(fulu, try chain_config.update(local, null, 3 * preset.preset.SLOTS_PER_EPOCH));
 }
 
-test "network chain rejects every scheduled unsupported fork at startup" {
-    for ([_]u64{ 0, 3, 8, constants.FAR_FUTURE_EPOCH - 1 }) |epoch| {
+test "network chain advertises scheduled Gloas but rejects activation" {
+    for ([_]u64{ 3, 8, constants.FAR_FUTURE_EPOCH - 1 }) |epoch| {
         var input = fixture();
         input.ELECTRA_FORK_EPOCH = 0;
         input.FULU_FORK_EPOCH = 0;
         input.GLOAS_FORK_EPOCH = epoch;
         const cfg = config.BeaconConfig.init(input, @splat(0));
-        try std.testing.expectError(error.UnsupportedNetworkFork, chain.Config.init(&cfg, false));
+        const derived = try chain.Config.init(&cfg, false);
+        const local: LocalState = .{ .metadata = .{ .custody_group_count = 8 }, .status = .{ .earliest_available_slot = 0 } };
+        const slot = @as(u64, @min(epoch - 1, 16)) * preset.preset.SLOTS_PER_EPOCH;
+        const update = try derived.update(local, null, slot);
+        try std.testing.expectEqual(.fulu, update.local.fork.fork);
+        try std.testing.expectEqual(epoch, update.schedule.next_epoch);
+        try std.testing.expectEqual(input.GLOAS_FORK_VERSION, update.schedule.next_version);
+        try std.testing.expectEqual(config.fork_digest.computeForkDigest(&cfg, epoch), update.schedule.next_digest);
+        for (derived.forks[0..derived.boundary_count]) |fork| try std.testing.expect(fork.fork.lt(.gloas));
+        if (epoch < 16) {
+            try std.testing.expectError(error.UnsupportedNetworkFork, derived.update(local, null, epoch * preset.preset.SLOTS_PER_EPOCH));
+            try std.testing.expectError(error.UnsupportedNetworkFork, derived.update(local, null, (epoch + 1) * preset.preset.SLOTS_PER_EPOCH));
+        }
     }
+    var input = fixture();
+    input.ELECTRA_FORK_EPOCH = 0;
+    input.FULU_FORK_EPOCH = 0;
+    input.GLOAS_FORK_EPOCH = 0;
+    const cfg = config.BeaconConfig.init(input, @splat(0));
+    try std.testing.expectError(error.UnsupportedNetworkFork, chain.Config.init(&cfg, false));
 }
 
 test "network chain derives fixed request storage and historical blob limits independently of BPO" {

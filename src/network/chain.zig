@@ -18,6 +18,7 @@ pub const Boundary = struct { epoch: u64, fork: config.ForkSeq, digest: [4]u8, v
 pub const Config = struct {
     boundaries: [boundary_max]Boundary = undefined,
     boundary_count: u8 = 0,
+    unsupported_fork: ?Boundary = null,
     forks: [boundary_max]ForkEntry = undefined,
     topics: [boundary_max]topics.Boundary = undefined,
     policy: policy.Policy,
@@ -41,7 +42,7 @@ pub const Config = struct {
         for (cfg.forks_ascending_epoch_order, 0..) |fork, i| {
             if (i > 0 and fork.epoch < cfg.forks_ascending_epoch_order[i - 1].epoch) return error.InvalidNetworkChain;
             if (fork.epoch == constants.FAR_FUTURE_EPOCH) continue;
-            if (fork.fork_seq.gte(.gloas)) return error.UnsupportedNetworkFork;
+            if (fork.fork_seq.gte(.gloas)) continue;
             epochs[count] = fork.epoch;
             count += 1;
         }
@@ -64,10 +65,17 @@ pub const Config = struct {
             .custody_requirement = @intCast(chain.CUSTODY_REQUIREMENT),
             .serve_light_clients = serve_light_clients,
         };
+        if (chain.GLOAS_FORK_EPOCH != constants.FAR_FUTURE_EPOCH) result.unsupported_fork = .{
+            .epoch = chain.GLOAS_FORK_EPOCH,
+            .fork = .gloas,
+            .version = chain.GLOAS_FORK_VERSION,
+            .digest = config.fork_digest.computeForkDigest(cfg, chain.GLOAS_FORK_EPOCH),
+        };
         for (epochs[0..count]) |epoch| {
             if (result.boundary_count > 0 and result.boundaries[result.boundary_count - 1].epoch == epoch) continue;
             _ = std.math.mul(u64, epoch, preset.preset.SLOTS_PER_EPOCH) catch return error.InvalidNetworkChain;
             const fork = cfg.forkInfoAtEpoch(epoch);
+            if (fork.fork_seq.gte(.gloas)) continue;
             const digest = config.fork_digest.computeForkDigest(cfg, epoch);
             result.boundaries[result.boundary_count] = .{ .epoch = epoch, .fork = fork.fork_seq, .version = fork.version, .digest = digest };
             for (result.forks[0..result.boundary_count]) |prior| {
@@ -119,13 +127,13 @@ pub const Config = struct {
 
     pub fn update(self: *const Config, local: values.LocalState, endpoints: ?advertisement.Endpoints, slot: u64) !values.LocalUpdate {
         const epoch = slot / preset.preset.SLOTS_PER_EPOCH;
+        if (self.unsupported_fork) |fork| if (epoch >= fork.epoch) return error.UnsupportedNetworkFork;
         var index: usize = 0;
         for (self.boundaries[0..self.boundary_count], 0..) |boundary, i| {
             if (boundary.epoch > epoch) break;
             index = i;
         }
         const current = self.boundaries[index];
-        if (current.fork.gte(.gloas)) return error.UnsupportedNetworkFork;
         var result: values.LocalUpdate = .{
             .local = local,
             .endpoints = endpoints,
@@ -142,6 +150,10 @@ pub const Config = struct {
         result.local.status.fork_digest = current.digest;
         if (index + 1 < self.boundary_count) {
             const next = self.boundaries[index + 1];
+            result.schedule.next_version = next.version;
+            result.schedule.next_epoch = next.epoch;
+            result.schedule.next_digest = next.digest;
+        } else if (self.unsupported_fork) |next| {
             result.schedule.next_version = next.version;
             result.schedule.next_epoch = next.epoch;
             result.schedule.next_digest = next.digest;

@@ -21,9 +21,10 @@ native class instances between addon versions is unsupported.
 
 The beacon node initializes one native network runtime per process, from its owning Node.js thread.
 Initialization installs complete configuration and initial protocol state before starting network
-work. Every configured hard fork whose activation epoch is not `FAR_FUTURE_EPOCH` must be supported,
-including forks that are not active yet. The host applies subscriptions and peer demand through
-ordinary runtime updates.
+work. Future unsupported hard forks may be scheduled and advertised, but the active fork and every
+requested gossip namespace must be supported. The host must upgrade before requesting an unsupported
+fork's subscriptions or activating that fork; native initialization and updates reject an active
+unsupported fork. The host applies subscriptions and peer demand through ordinary runtime updates.
 The application owns the network and explicitly closes it; dropping JavaScript references does not
 request shutdown. Once close begins, the binding retains its pump through delivery of outstanding
 completions and the close result, without waiting for host serving or validation tasks to retire.
