@@ -462,7 +462,10 @@ pub fn resourceSnapshot(self: *const Gossipsub) ResourceSnapshot {
 }
 
 fn heartbeat(self: *Gossipsub, now: Now) void {
-    for (self.sessions.rows) |*peer| peer.io.resetHeartbeat();
+    for (self.sessions.rows) |*peer| {
+        peer.io.resetHeartbeat();
+        peer.expireSuppressions(now.millis());
+    }
     self.peers.refresh(now.millis());
     // A frame held for a peer whose score fell below the graylist is released by its next
     // service, which resets the inbound stream.

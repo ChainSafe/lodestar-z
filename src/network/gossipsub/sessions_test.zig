@@ -134,3 +134,32 @@ test "gossip receive eviction prefers early frames without protecting nearly com
     sessions.discardFrame(early);
     try std.testing.expectEqual(@as(?u16, null), sessions.receiveVictim(3));
 }
+
+test "IDONTWANT history reclaims expired entries across ring wrap" {
+    var sessions = try test_support.sessions(std.testing.allocator, 1);
+    defer sessions.deinit(std.testing.allocator);
+    const ref = sessions.addPeer(.{ .index = 0, .generation = 1 }).?;
+    const peer = &sessions.rows[ref.index];
+    for (0..constants.dont_send_cap + 3) |i| {
+        var id: MessageId = @splat(0);
+        std.mem.writeInt(u64, id[0..8], i, .little);
+        peer.suppress(id, i, 10);
+    }
+    const last = constants.dont_send_cap + 2;
+    peer.expireSuppressions(last);
+    try std.testing.expectEqual(@as(u16, 10), peer.dont_send_len);
+    for (0..constants.dont_send_cap + 3) |i| {
+        var id: MessageId = @splat(0);
+        std.mem.writeInt(u64, id[0..8], i, .little);
+        try std.testing.expectEqual(i + 10 > last, peer.suppresses(id, last));
+    }
+    peer.expireSuppressions(last + 10);
+    try std.testing.expectEqual(@as(u16, 0), peer.dont_send_len);
+    peer.suppress(@splat(7), last + 10, 20);
+    peer.suppress(@splat(8), last + 11, 1);
+    peer.expireSuppressions(last + 12);
+    try std.testing.expect(peer.suppresses(@splat(7), last + 12));
+    try std.testing.expect(!peer.suppresses(@splat(8), last + 12));
+    peer.expireSuppressions(last + 30);
+    try std.testing.expectEqual(@as(u16, 0), peer.dont_send_len);
+}

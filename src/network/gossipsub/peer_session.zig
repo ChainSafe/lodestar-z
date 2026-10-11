@@ -65,6 +65,14 @@ pub const Session = struct {
         return next;
     }
 
+    pub fn expireSuppressions(self: *Session, now: u64) void {
+        for (0..self.dont_send_len) |_| {
+            const oldest = (@as(usize, self.dont_send_head) + constants.dont_send_cap - self.dont_send_len) % constants.dont_send_cap;
+            if (now < self.dont_send_until[oldest]) break;
+            self.dont_send_len -= 1;
+        }
+    }
+
     pub fn suppresses(self: *const Session, id: MessageId, now: u64) bool {
         for (0..self.dont_send_len) |offset| {
             const at = (@as(usize, self.dont_send_head) + constants.dont_send_cap - 1 - offset) %
