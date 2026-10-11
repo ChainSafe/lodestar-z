@@ -20,7 +20,7 @@ test.each([
   ["handshakingCapacity", 256],
   ["dialingCapacity", 64],
   ["receiveBudgetBytes", Number.MAX_SAFE_INTEGER],
-  ["nativeBudgetBytes", 1024 ** 3],
+  ["nativeBudgetBytes", 2 * 1024 ** 3],
   ["bridgeBudgetBytes", 1024 ** 3],
 ] as const)("rejects %s above its resource maximum", (field, maximum) => {
   const config = applicationConfig();
@@ -35,7 +35,7 @@ test.each([
   Number.NaN,
   Number.POSITIVE_INFINITY,
   Number.MAX_SAFE_INTEGER + 1,
-  1024 ** 3 + 1,
+  2 * 1024 ** 3 + 1,
 ])("rejects native byte ceiling %s", (value) => {
   const config = applicationConfig();
   config.resources.nativeBudgetBytes = value;
