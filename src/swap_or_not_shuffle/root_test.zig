@@ -13,6 +13,68 @@ const shuffle = @import("./root.zig");
 
 const SEED_SIZE = shuffle.SEED_SIZE;
 
+test "single-source shuffler matches cached shuffler across source boundaries and revisits" {
+    const counts = [_]u32{ 1, 3, 255, 256, 257, 2_178_249, std.math.maxInt(u32) };
+    for (counts) |count| {
+        for ([_]u8{ 0, 1, 104, 255 }) |seed_byte| {
+            const seed = [_]u8{seed_byte} ** SEED_SIZE;
+            // Include dynamic rounds beyond the native presets and the u8 round boundary.
+            for ([_]u32{ 0, 10, 90, 257 }) |rounds| {
+                var cached = try shuffle.ComputeShuffledIndex.init(std.testing.allocator, &seed, count, rounds);
+                defer cached.deinit();
+                var single = try shuffle.ComputeShuffledIndexSingleSource.init(std.testing.allocator, &seed, count, rounds);
+                defer single.deinit();
+                const positions = [_]u32{ 0, count - 1, 1, count / 2, 2, 127, 128, 254, 255, 256 };
+                for (positions) |index| {
+                    if (index >= count) continue;
+                    try std.testing.expectEqual(try cached.get(index), try single.get(index));
+                }
+                // Alternating distant and repeated inputs invalidates a single cached tag.
+                for (positions) |index| {
+                    if (index >= count) continue;
+                    try std.testing.expectEqual(try cached.get(count - 1), try single.get(count - 1));
+                    try std.testing.expectEqual(try cached.get(index), try single.get(index));
+                    try std.testing.expectEqual(try cached.get(0), try single.get(0));
+                }
+            }
+        }
+    }
+}
+
+test "single-source shuffler retains fixed scratch as positions change" {
+    var buffer: [4096]u8 = undefined;
+    var allocator = std.heap.FixedBufferAllocator.init(&buffer);
+    const seed = [_]u8{1} ** SEED_SIZE;
+    var single = try shuffle.ComputeShuffledIndexSingleSource.init(allocator.allocator(), &seed, 2_178_249, 90);
+    defer single.deinit();
+    const allocated = allocator.end_index;
+    for (0..256) |index| {
+        _ = try single.get(@intCast(index));
+        _ = try single.get(@intCast(2_178_248 - index));
+    }
+    try std.testing.expectEqual(allocated, allocator.end_index);
+}
+
+test "single-source shuffler validates seed before allocation" {
+    var empty = [_]u8{};
+    var allocator = std.heap.FixedBufferAllocator.init(&empty);
+    const bad_seed = [_]u8{0} ** (SEED_SIZE - 1);
+    try std.testing.expectError(
+        error.InvalidSeedLength,
+        shuffle.ComputeShuffledIndexSingleSource.init(allocator.allocator(), &bad_seed, 257, 90),
+    );
+}
+
+test "single-source shuffler reports allocation failure" {
+    var empty = [_]u8{};
+    var allocator = std.heap.FixedBufferAllocator.init(&empty);
+    const seed = [_]u8{0} ** SEED_SIZE;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        shuffle.ComputeShuffledIndexSingleSource.init(allocator.allocator(), &seed, 257, 90),
+    );
+}
+
 test "innerShuffleList roundtrip matches reference vector" {
     var input = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
     const seed = [_]u8{0} ** SEED_SIZE;

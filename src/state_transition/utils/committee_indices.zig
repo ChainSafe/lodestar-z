@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Allocator = std.mem.Allocator;
 const swap_or_not_shuffle = @import("swap_or_not_shuffle");
@@ -6,6 +7,12 @@ const swap_or_not_shuffle = @import("swap_or_not_shuffle");
 const ACTIVE_INDICES_LENGTH_MAX: usize = std.math.maxInt(u32);
 // The active-index bound keeps shuffled positions in u32; validator indices remain u64.
 const ComputeShuffledIndex = swap_or_not_shuffle.ComputeShuffledIndex;
+// Extra source-hash recomputation can outweigh cache savings with software SHA.
+const ProposerShuffledIndex = if (builtin.zig_backend != .stage2_c and switch (builtin.cpu.arch) {
+    .x86_64 => builtin.cpu.hasAll(.x86, &.{ .sha, .avx2 }),
+    .aarch64 => builtin.cpu.has(.aarch64, .sha2),
+    else => false,
+}) swap_or_not_shuffle.ComputeShuffledIndexSingleSource else ComputeShuffledIndex;
 
 pub fn computeProposerIndex(
     allocator: Allocator,
@@ -19,6 +26,7 @@ pub fn computeProposerIndex(
 ) !u64 {
     var out = [_]u64{0};
     try getCommitteeIndices(
+        ProposerShuffledIndex,
         allocator,
         seed,
         active_indices,
@@ -44,6 +52,7 @@ pub fn computeSyncCommitteeIndices(
     out: []u64,
 ) !void {
     try getCommitteeIndices(
+        ComputeShuffledIndex,
         allocator,
         seed,
         active_indices,
@@ -64,6 +73,7 @@ pub const ByteCount = enum(u8) {
 /// the same to Rust implementation with "out" param to simplify memory allocation
 /// T should be u32 for Bun or ValidatorIndex for zig consumer
 fn getCommitteeIndices(
+    comptime ShuffledIndex: type,
     allocator: Allocator,
     seed: *const [32]u8,
     active_indices: []const u64,
@@ -90,7 +100,7 @@ fn getCommitteeIndices(
         return error.InvalidIndexCount;
     }
 
-    var compute_shuffled_index = try ComputeShuffledIndex.init(
+    var compute_shuffled_index = try ShuffledIndex.init(
         allocator,
         seed,
         @intCast(active_indices.len),
@@ -148,118 +158,6 @@ fn getCommitteeIndices(
     }
 }
 
-test "ComputeShuffledIndex" {
-    const allocator = std.testing.allocator;
-    const seed = [_]u8{1} ** 32;
-    const index_count = 1000;
-    // SHUFFLE_ROUND_COUNT is 90 in ethereum mainnet
-    const rounds = 90;
-
-    var instance = try ComputeShuffledIndex.init(allocator, seed[0..], index_count, rounds);
-    defer instance.deinit();
-
-    const expected = [_]u32{ 789, 161, 541, 509, 498, 445, 270, 2, 505, 621, 947, 550, 338, 814, 285, 597, 169, 819, 644, 638, 751, 514, 750, 523, 303, 231, 391, 982, 409, 396, 641, 837 };
-
-    for (0..index_count) |i| {
-        if (i < 32) {
-            const shuffled_index = try instance.get(@intCast(i));
-            try std.testing.expectEqual(expected[i], shuffled_index);
-        }
-    }
-}
-
-test "compute_proposer_index" {
-    const allocator = std.testing.allocator;
-    const seed = [_]u8{1} ** 32;
-    const index_count = 1000;
-    // SHUFFLE_ROUND_COUNT is 90 in ethereum mainnet
-    const rounds = 90;
-    var active_indices = [_]u64{0} ** index_count;
-    for (0..index_count) |i| {
-        active_indices[i] = @intCast(i);
-    }
-    var effective_balance_increments = [_]u16{0} ** index_count;
-    for (0..index_count) |i| {
-        effective_balance_increments[i] = @intCast(32 + 32 * (i % 64));
-    }
-    // phase0
-    const MAX_EFFECTIVE_BALANCE: u64 = 32000000000;
-    const EFFECTIVE_BALANCE_INCREMENT: u32 = 1000000000;
-    const phase0_index = try computeProposerIndex(
-        allocator,
-        seed[0..],
-        active_indices[0..],
-        effective_balance_increments[0..],
-        ByteCount.One,
-        MAX_EFFECTIVE_BALANCE,
-        EFFECTIVE_BALANCE_INCREMENT,
-        rounds,
-    );
-    try std.testing.expectEqual(789, phase0_index);
-
-    // electra
-    const MAX_EFFECTIVE_BALANCE_ELECTRA: u64 = 2048000000000;
-    const electra_index = try computeProposerIndex(
-        allocator,
-        seed[0..],
-        active_indices[0..],
-        effective_balance_increments[0..],
-        ByteCount.Two,
-        MAX_EFFECTIVE_BALANCE_ELECTRA,
-        EFFECTIVE_BALANCE_INCREMENT,
-        rounds,
-    );
-    try std.testing.expectEqual(161, electra_index);
-}
-
-test "compute_sync_committee_indices" {
-    const allocator = std.testing.allocator;
-    const seed = [_]u8{ 74, 7, 102, 54, 84, 136, 68, 56, 19, 191, 186, 58, 72, 53, 151, 49, 220, 123, 42, 116, 59, 7, 73, 162, 110, 145, 93, 199, 163, 66, 85, 34 };
-    const vc = 1000;
-    // SHUFFLE_ROUND_COUNT is 90 in ethereum mainnet
-    const rounds = 90;
-    var active_indices = [_]u64{0} ** vc;
-    for (0..vc) |i| {
-        active_indices[i] = @intCast(i);
-    }
-    var effective_balance_increments = [_]u16{0} ** vc;
-    for (0..vc) |i| {
-        effective_balance_increments[i] = @intCast(32 + 32 * (i % 64));
-    }
-
-    // only get first 32 indices to make it easier to test
-    var out = [_]u64{0} ** 32;
-
-    // phase0
-    const MAX_EFFECTIVE_BALANCE: u64 = 32000000000;
-    const EFFECTIVE_BALANCE_INCREMENT: u32 = 1000000000;
-    try computeSyncCommitteeIndices(
-        allocator,
-        seed[0..],
-        active_indices[0..],
-        effective_balance_increments[0..],
-        ByteCount.One,
-        MAX_EFFECTIVE_BALANCE,
-        EFFECTIVE_BALANCE_INCREMENT,
-        rounds,
-        out[0..],
-    );
-    const expected_phase0 = [_]u64{ 293, 726, 771, 677, 530, 475, 322, 66, 521, 106, 774, 23, 508, 410, 526, 44, 213, 948, 248, 903, 85, 853, 171, 679, 309, 791, 851, 817, 609, 119, 128, 983 };
-    try std.testing.expectEqualSlices(u64, expected_phase0[0..], out[0..]);
-
-    // electra
-    const MAX_EFFECTIVE_BALANCE_ELECTRA: u64 = 2048000000000;
-    try computeSyncCommitteeIndices(
-        allocator,
-        seed[0..],
-        active_indices[0..],
-        effective_balance_increments[0..],
-        ByteCount.Two,
-        MAX_EFFECTIVE_BALANCE_ELECTRA,
-        EFFECTIVE_BALANCE_INCREMENT,
-        rounds,
-        out[0..],
-    );
-    const expected_electra = [_]u64{ 726, 475, 521, 23, 508, 410, 213, 948, 248, 85, 171, 309, 791, 817, 119, 126, 651, 416, 273, 471, 739, 290, 588, 840, 665, 945, 496, 158, 757, 616, 226, 766 };
-    try std.testing.expectEqualSlices(u64, expected_electra[0..], out[0..]);
+test {
+    _ = @import("committee_indices_test.zig");
 }

@@ -278,6 +278,77 @@ pub const ComputeShuffledIndex = struct {
     }
 };
 
+/// Single-index shuffling with one tagged source hash per round. Cache misses
+/// recompute the same hash, keeping scratch space proportional to rounds even
+/// when many distinct positions are visited. Caller retains ownership until deinit.
+/// For nonzero rounds, get requires index_count > 0, as checked by the native sampler.
+pub const ComputeShuffledIndexSingleSource = struct {
+    const RoundCache = struct {
+        pivot: ?u32 = null,
+        // Every u32 position divided by 256 is smaller than this empty tag.
+        position_div: u32 = std.math.maxInt(u32),
+        source: [Sha256.digest_length]u8 = undefined,
+    };
+
+    allocator: Allocator,
+    round_cache: []RoundCache,
+    pivot_buffer: [PIVOT_VIEW_SIZE]u8,
+    source_buffer: [TOTAL_SIZE]u8,
+    index_count: u32,
+
+    pub fn init(allocator: Allocator, seed: []const u8, index_count: u32, rounds: u32) !ComputeShuffledIndexSingleSource {
+        if (seed.len != SEED_SIZE) {
+            return error.InvalidSeedLength;
+        }
+        const round_cache = try allocator.alloc(RoundCache, rounds);
+        @memset(round_cache, .{});
+
+        var pivot_buffer = [_]u8{0} ** PIVOT_VIEW_SIZE;
+        var source_buffer = [_]u8{0} ** TOTAL_SIZE;
+        @memcpy(pivot_buffer[0..SEED_SIZE], seed);
+        @memcpy(source_buffer[0..SEED_SIZE], seed);
+        return .{
+            .allocator = allocator,
+            .round_cache = round_cache,
+            .pivot_buffer = pivot_buffer,
+            .source_buffer = source_buffer,
+            .index_count = index_count,
+        };
+    }
+
+    pub fn deinit(self: *ComputeShuffledIndexSingleSource) void {
+        self.allocator.free(self.round_cache);
+    }
+
+    pub fn get(self: *ComputeShuffledIndexSingleSource, index: u32) !u32 {
+        const index_count = self.index_count;
+        var permuted = index;
+        for (self.round_cache, 0..) |*cache, round| {
+            const pivot = cache.pivot orelse blk: {
+                self.pivot_buffer[SEED_SIZE] = @intCast(round % 256);
+                var digest: [Sha256.digest_length]u8 = undefined;
+                Sha256.hash(&self.pivot_buffer, &digest, .{});
+                const pivot: u32 = @intCast(std.mem.readInt(u64, digest[0..8], .little) % index_count);
+                cache.pivot = pivot;
+                break :blk pivot;
+            };
+            const flip = (pivot +% index_count -% permuted) % index_count;
+            const position = @max(permuted, flip);
+            const position_div = position / 256;
+            if (cache.position_div != position_div) {
+                self.source_buffer[SEED_SIZE] = @intCast(round % 256);
+                std.mem.writeInt(u32, self.source_buffer[PIVOT_VIEW_SIZE..][0..POSITION_WINDOW_SIZE], position_div, .little);
+                Sha256.hash(&self.source_buffer, &cache.source, .{});
+                cache.position_div = position_div;
+            }
+            const byte = cache.source[@intCast(position % 256 / 8)];
+            const bit = (byte >> @intCast(position % 8)) & 1;
+            permuted = if (bit == 1) flip else permuted;
+        }
+        return permuted;
+    }
+};
+
 /// Pre-electra the byte count for the random value is 1, post-electra it is 2.
 pub const ByteCount = enum(u8) {
     one = 1,
