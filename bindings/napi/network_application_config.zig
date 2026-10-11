@@ -71,7 +71,7 @@ const resource_maxima: Resources = .{
     .handshakingCapacity = 256,
     .dialingCapacity = n.peers.Dialing.attempts_max,
     .receiveBudgetBytes = 9007199254740991,
-    .nativeBudgetBytes = 1024 * 1024 * 1024,
+    .nativeBudgetBytes = 2 * 1024 * 1024 * 1024,
     .bridgeBudgetBytes = 1024 * 1024 * 1024,
 };
 
