@@ -203,7 +203,7 @@ test "ListType - sanity" {
     try BytesBytes.deserializeFromBytes(allocator, bb_buf, &bb_decoded);
 }
 
-test "memory_safety: fixed list tree reads reuse output capacity without traversal allocations" {
+test "memory_safety: fixed list tree reads allocate only fresh output" {
     const allocator = std.testing.allocator;
     inline for (.{ UintType(64), BoolType(), PoolExhaustionCheckpoint }) |Element| {
         inline for (.{ false, true }) |chunked| {
@@ -235,24 +235,28 @@ test "memory_safety: fixed list tree reads reuse output capacity without travers
                     const zero = try List.tree.zeros(&pool, len);
                     defer pool.unref(zero);
 
-                    var out = List.default_value;
-                    defer List.deinit(failing.allocator(), &out);
-                    try out.ensureTotalCapacity(failing.allocator(), len);
-                    failing.fail_index = failing.alloc_index;
-                    failing.resize_fail_index = failing.resize_index;
-                    defer {
-                        failing.fail_index = std.math.maxInt(usize);
-                        failing.resize_fail_index = std.math.maxInt(usize);
-                    }
+                    for ([_]Node.Id{ node, zero }, 0..) |input, input_index| {
+                        var out = List.default_value;
+                        defer List.deinit(failing.allocator(), &out);
+                        failing.fail_index = failing.alloc_index + @intFromBool(len != 0);
+                        failing.resize_fail_index = failing.resize_index;
+                        defer {
+                            failing.fail_index = std.math.maxInt(usize);
+                            failing.resize_fail_index = std.math.maxInt(usize);
+                        }
 
-                    try List.tree.toValue(failing.allocator(), node, &pool, &out);
-                    try std.testing.expect(List.equals(&value, &out));
-                    try std.testing.expectEqualSlices(u8, &before, node.getRoot(&pool));
-                    try List.tree.toValue(failing.allocator(), zero, &pool, &out);
-                    for (out.items) |item| {
-                        try std.testing.expect(Element.equals(&Element.default_value, &item));
+                        try List.tree.toValue(failing.allocator(), input, &pool, &out);
+                        try std.testing.expectEqual(@as(usize, len), out.items.len);
+                        if (input_index == 0) {
+                            try std.testing.expect(List.equals(&value, &out));
+                            try std.testing.expectEqualSlices(u8, &before, node.getRoot(&pool));
+                        } else {
+                            for (out.items) |item| {
+                                try std.testing.expect(Element.equals(&Element.default_value, &item));
+                            }
+                        }
+                        try std.testing.expect(!failing.has_induced_failure);
                     }
-                    try std.testing.expect(!failing.has_induced_failure);
                 }
             }
         }
