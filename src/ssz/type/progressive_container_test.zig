@@ -9,6 +9,7 @@ const UintType = @import("uint.zig").UintType;
 const FixedListType = @import("list.zig").FixedListType;
 const FixedProgressiveContainerType = @import("progressive_container.zig").FixedProgressiveContainerType;
 const VariableProgressiveContainerType = @import("progressive_container.zig").VariableProgressiveContainerType;
+const expectDecoderValue = @import("test_utils.zig").expectDecoderValue;
 
 test "ProgressiveContainerType " {
     // Square with active_fields=[1, 0, 1]
@@ -180,7 +181,7 @@ test "memory_safety: fixed progressive container byte deserialization preserves 
     try std.testing.expect(!out.b);
 }
 
-test "memory_safety: variable progressive container byte deserialization preserves out on malformed input" {
+test "memory_safety: variable progressive container byte deserialization leaves default out on error" {
     const Items = FixedProgressiveListType(BoolType());
     const Container = VariableProgressiveContainerType(struct {
         a: UintType(8),
@@ -188,8 +189,6 @@ test "memory_safety: variable progressive container byte deserialization preserv
     }, &.{ 1, 1 });
     var out = Container.default_value;
     defer Container.deinit(std.testing.allocator, &out);
-    out.a = 7;
-    try out.items.appendSlice(std.testing.allocator, &.{ false, false });
 
     try std.testing.expectError(
         error.invalidBoolean,
@@ -199,8 +198,96 @@ test "memory_safety: variable progressive container byte deserialization preserv
             &out,
         ),
     );
-    try std.testing.expectEqual(@as(u8, 7), out.a);
-    try std.testing.expectEqualSlices(bool, &.{ false, false }, out.items.items);
+    try std.testing.expectEqual(@as(u8, 0), out.a);
+    try std.testing.expectEqual(@as(usize, 0), out.items.items.len);
+    try std.testing.expectEqual(@as(usize, 0), out.items.capacity);
+}
+
+test "variable progressive container decoders transfer successful results to the caller" {
+    const Container = VariableProgressiveContainerType(struct {
+        a: UintType(8),
+        items: FixedProgressiveListType(UintType(8)),
+    }, &.{ 1, 1 });
+
+    var value = Container.default_value;
+    defer Container.deinit(std.testing.allocator, &value);
+
+    value.a = 7;
+    try value.items.appendSlice(std.testing.allocator, &.{ 1, 2, 3 });
+
+    inline for (.{ .bytes, .json, .tree }) |source| {
+        var out = Container.default_value;
+        defer Container.deinit(std.testing.allocator, &out);
+        try expectDecoderValue(Container, &value, &out, source);
+    }
+}
+
+test "memory_safety: progressive container failures discard partial nested results" {
+    const allocator = std.testing.allocator;
+    const Items = FixedProgressiveListType(UintType(8));
+    const Lists = @import("progressive_list.zig").VariableProgressiveListType(Items);
+    const Container = VariableProgressiveContainerType(struct {
+        lists: Lists,
+        tail: Items,
+    }, &.{ 1, 1 });
+    var value = Container.default_value;
+    defer Container.deinit(allocator, &value);
+    try value.lists.append(allocator, .empty);
+    try value.lists.items[0].appendSlice(allocator, &.{ 1, 2, 3 });
+    try value.tail.appendSlice(allocator, &.{ 4, 5, 6 });
+
+    const bytes = try allocator.alloc(u8, Container.serializedSize(&value));
+    defer allocator.free(bytes);
+    _ = Container.serializeIntoBytes(&value, bytes);
+
+    var json: std.Io.Writer.Allocating = .init(allocator);
+    defer json.deinit();
+    var writer: std.json.Stringify = .{ .writer = &json.writer };
+    try Container.serializeIntoJson(allocator, &writer, &value);
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool.deinit();
+    const root = try Container.tree.fromValue(&pool, &value);
+    defer pool.unref(root);
+
+    inline for (.{ .bytes, .json, .tree }) |source| {
+        try std.testing.checkAllAllocationFailures(allocator, struct {
+            fn run(
+                failing: std.mem.Allocator,
+                encoded: []const u8,
+                text: []const u8,
+                input_pool: *Node.Pool,
+                input_root: Node.Id,
+                expected: *const Container.Type,
+            ) !void {
+                var out = Container.default_value;
+                defer Container.deinit(failing, &out);
+                const result = switch (source) {
+                    .bytes => Container.deserializeFromBytes(failing, encoded, &out),
+                    .json => blk: {
+                        var scanner = std.json.Scanner.initCompleteInput(failing, text);
+                        defer scanner.deinit();
+                        break :blk Container.deserializeFromJson(failing, &scanner, &out);
+                    },
+                    .tree => Container.tree.toValue(failing, input_root, input_pool, &out),
+                    else => unreachable,
+                };
+                result catch |err| {
+                    try std.testing.expectEqual(error.OutOfMemory, err);
+                    try std.testing.expectEqual(@as(usize, 0), out.lists.items.len);
+                    try std.testing.expectEqual(@as(usize, 0), out.lists.capacity);
+                    try std.testing.expectEqual(@as(usize, 0), out.tail.items.len);
+                    try std.testing.expectEqual(@as(usize, 0), out.tail.capacity);
+                    return err;
+                };
+                try std.testing.expect(Container.equals(expected, &out));
+            }
+        }.run, .{ bytes, json.written(), &pool, root, &value });
+    }
 }
 
 test "progressive container hashing streams sparse fields without allocation" {
