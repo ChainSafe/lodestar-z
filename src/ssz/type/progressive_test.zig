@@ -177,15 +177,15 @@ test "bounded_fuzz: progressive decoders agree on seeded and mutated canonical e
         zeroes[0..160], zeroes[0..671], zeroes[0..672], zeroes[0..673], zeroes[0..1024], &zeroes,
     };
     inline for (.{ false, true }) |chunked| {
-        try mutateDecoderCorpus(ssz.FixedProgressiveListTypeWithOptions(ssz.UintType(64), .{ .limit = 128, .chunked_leaf = chunked }), &pool, &list_seeds);
-        try mutateDecoderCorpus(ssz.FixedProgressiveListTypeWithOptions(ssz.BoolType(), .{ .limit = 1024, .chunked_leaf = chunked }), &pool, &list_seeds);
+        try mutateDecoderCorpus(ssz.FixedProgressiveListType(ssz.UintType(64), .{ .limit = 128, .chunked_leaf = chunked }), &pool, &list_seeds);
+        try mutateDecoderCorpus(ssz.FixedProgressiveListType(ssz.BoolType(), .{ .limit = 1024, .chunked_leaf = chunked }), &pool, &list_seeds);
     }
-    const Bytes = ssz.ProgressiveByteListTypeWithOptions(.{ .limit = 1024, .chunked_leaf = true });
-    const Bits = ssz.ProgressiveBitListTypeWithOptions(.{ .limit = 4096 });
+    const Bytes = ssz.ProgressiveByteListType(.{ .limit = 1024, .chunked_leaf = true });
+    const Bits = ssz.ProgressiveBitListType(.{ .limit = 4096 });
     try mutateDecoderCorpus(Bytes, &pool, &list_seeds);
     try mutateDecoderCorpus(Bits, &pool, &.{ &.{}, &.{0}, &.{1}, &.{128}, &.{255}, &.{ 0, 1 }, zeroes[0..512], &zeroes });
 
-    const ByteLists = ssz.VariableProgressiveListTypeWithOptions(Bytes, .{ .limit = 16 });
+    const ByteLists = ssz.VariableProgressiveListType(Bytes, .{ .limit = 16 });
     try mutateDecoderCorpus(ByteLists, &pool, &.{ &.{}, &.{ 4, 0, 0, 0 }, &.{ 4, 0, 0, 0, 255 }, &.{ 8, 0, 0, 0, 9, 0, 0, 0, 1, 2 }, &.{ 255, 255, 255, 255 }, &zeroes });
     const Fixed = ssz.FixedProgressiveContainerType(struct { flag: ssz.BoolType(), count: ssz.UintType(64) }, &.{ 0, 1, 0, 0, 1 });
     try mutateDecoderCorpus(Fixed, &pool, &.{ &.{}, zeroes[0..8], zeroes[0..9], &.{ 1, 255, 255, 255, 255, 255, 255, 255, 255 }, &.{ 2, 0, 0, 0, 0, 0, 0, 0, 0 } });
@@ -196,6 +196,6 @@ test "bounded_fuzz: progressive decoders agree on seeded and mutated canonical e
     }
     const Union = ssz.CompatibleUnionType(.{ .{ 1, Bytes }, .{ 7, Bytes }, .{ 19, Bytes } });
     try mutateDecoderCorpus(Union, &pool, &.{ &.{}, &.{0}, &.{ 1, 0, 0, 0, 0, 0, 0, 0, 0 }, &.{7}, &.{ 7, 255, 128 }, &.{ 19, 1 }, &.{ 19, 0 }, &.{255} });
-    const Unions = ssz.VariableProgressiveListTypeWithOptions(Union, .{ .limit = 16 });
+    const Unions = ssz.VariableProgressiveListType(Union, .{ .limit = 16 });
     try mutateDecoderCorpus(Unions, &pool, &.{ &.{}, &.{ 4, 0, 0, 0, 7 }, &.{ 4, 0, 0, 0, 19, 1 }, &.{ 8, 0, 0, 0, 9, 0, 0, 0, 7, 19, 1 }, &.{ 4, 0, 0, 0, 255 } });
 }

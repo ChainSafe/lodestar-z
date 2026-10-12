@@ -126,7 +126,7 @@ test "memory_safety: progressive container tree.fromValue reclaims unpublished n
 }
 
 test "memory_safety: nested progressive tree.fromValue reclaims unpublished nodes on pool exhaustion" {
-    const Items = FixedProgressiveListType(UintType(8));
+    const Items = FixedProgressiveListType(UintType(8), .{});
     const Container = VariableProgressiveContainerType(struct {
         a: UintType(64),
         items: Items,
@@ -181,7 +181,7 @@ test "memory_safety: fixed progressive container byte deserialization preserves 
 }
 
 test "memory_safety: variable progressive container byte deserialization leaves default out on error" {
-    const Items = FixedProgressiveListType(BoolType());
+    const Items = FixedProgressiveListType(BoolType(), .{});
     const Container = VariableProgressiveContainerType(struct {
         a: UintType(8),
         items: Items,
@@ -206,8 +206,8 @@ test "variable progressive container tree decoding rejects every truncated fixed
     const allocator = std.testing.allocator;
     const ST = VariableProgressiveContainerType(struct {
         flag: BoolType(),
-        bytes: FixedProgressiveListType(UintType(8)),
-        bits: @import("progressive_bit_list.zig").ProgressiveBitListType(),
+        bytes: FixedProgressiveListType(UintType(8), .{}),
+        bits: @import("progressive_bit_list.zig").ProgressiveBitListType(.{}),
     }, &.{ 1, 0, 1, 0, 0, 1 });
     const encoded = [_]u8{ 1, 9, 0, 0, 0, 9, 0, 0, 0, 1 };
     var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 128 });
@@ -225,7 +225,7 @@ test "variable progressive container tree decoding rejects every truncated fixed
 
 test "memory_safety: large progressive container tree materialization is atomic on allocation failure" {
     const allocator = std.testing.allocator;
-    const Items = FixedProgressiveListType(UintType(8));
+    const Items = FixedProgressiveListType(UintType(8), .{});
     const ST = VariableProgressiveContainerType(struct {
         large: ByteVectorType(64 * 1024),
         first: Items,
@@ -311,7 +311,7 @@ test "progressive container hashing streams sparse fields without allocation" {
 
 test "sparse progressive container views commit and clone across subtree depths" {
     const allocator = std.testing.allocator;
-    const Items = FixedProgressiveListType(UintType(64));
+    const Items = FixedProgressiveListType(UintType(64), .{});
     const ST = VariableProgressiveContainerType(struct {
         a: UintType(64),
         items: Items,

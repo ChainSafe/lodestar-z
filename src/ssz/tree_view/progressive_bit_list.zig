@@ -12,8 +12,9 @@ pub fn ProgressiveBitListTreeView(comptime ST: type) type {
         root: Node.Id,
         value: ?ST.Type = null,
         dirty: bool = false,
-        pub const SszType = ST;
+
         const Self = @This();
+        pub const SszType = ST;
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
             _ = try ST.tree.length(root, pool);
@@ -70,21 +71,6 @@ pub fn ProgressiveBitListTreeView(comptime ST: type) type {
             if (index >= value.bit_len) return error.IndexOutOfBounds;
             try value.set(self.allocator, index, bit);
             self.dirty = true;
-        }
-
-        pub fn growTo(self: *Self, len: usize) !void {
-            if (len > ST.limit) return error.LengthOverLimit;
-            const value = try self.getValue();
-            if (len < value.bit_len) return error.InvalidLength;
-            try value.resize(self.allocator, len);
-            self.dirty = true;
-        }
-
-        pub fn push(self: *Self, bit: bool) !void {
-            const len = try self.length();
-            if (len >= ST.limit) return error.LengthOverLimit;
-            try self.growTo(len + 1);
-            try self.set(len, bit);
         }
 
         pub fn commit(self: *Self) !void {

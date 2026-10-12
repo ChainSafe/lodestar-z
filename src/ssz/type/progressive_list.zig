@@ -17,12 +17,8 @@ pub const TypeOpts = struct {
     limit: usize = std.math.maxInt(usize),
 };
 
-pub fn FixedProgressiveListType(comptime ST: type) type {
-    return FixedProgressiveListTypeWithOptions(ST, .{});
-}
-
 /// Chunked storage applies within subtrees of at least ChunkedLeaf.K chunks, preserving SSZ roots.
-pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: TypeOpts) type {
+pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) type {
     comptime {
         if (!isFixedType(ST)) {
             @compileError("ST must be fixed type");
@@ -562,11 +558,7 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: Ty
     };
 }
 
-pub fn VariableProgressiveListType(comptime ST: type) type {
-    return VariableProgressiveListTypeWithOptions(ST, .{});
-}
-
-pub fn VariableProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: TypeOpts) type {
+pub fn VariableProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) type {
     comptime {
         if (isFixedType(ST)) {
             @compileError("ST must not be fixed type");

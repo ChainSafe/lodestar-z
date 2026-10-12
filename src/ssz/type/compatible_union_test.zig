@@ -10,11 +10,11 @@ const CompatibleUnionType = @import("compatible_union.zig").CompatibleUnionType;
 const initValue = @import("value_init.zig").initValue;
 
 test "memory_safety: composed compatible unions decode with no SSZ default and survive OOM" {
-    const Items = FixedProgressiveListType(BoolType());
+    const Items = FixedProgressiveListType(BoolType(), .{});
     const Inner = CompatibleUnionType(.{ .{ 1, Items }, .{ 2, Items } });
     const Nested = CompatibleUnionType(.{ .{ 3, Inner }, .{ 4, Inner } });
     const Container = @import("progressive_container.zig").VariableProgressiveContainerType(struct { body: Nested }, &.{ 0, 1 });
-    const List = @import("progressive_list.zig").VariableProgressiveListType(Nested);
+    const List = @import("progressive_list.zig").VariableProgressiveListType(Nested, .{});
     try std.testing.expect(!@hasDecl(Inner, "default_value"));
     try std.testing.expect(!@hasDecl(Nested, "default_value"));
     inline for (.{ Nested, Container, List }) |ST| {
@@ -134,7 +134,7 @@ test "memory_safety: compatible union clone preserves out on OOM" {
 }
 
 test "memory_safety: compatible union byte deserialization preserves out on malformed input" {
-    const Items = FixedProgressiveListType(BoolType());
+    const Items = FixedProgressiveListType(BoolType(), .{});
     const Union = CompatibleUnionType(.{
         .{ 1, Items },
         .{ 2, Items },
