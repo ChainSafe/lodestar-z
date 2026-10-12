@@ -42,8 +42,7 @@ pub fn ProgressiveByteListTypeWithOptions(comptime options: progressive_list.Typ
             try writer.print("\"0x{x}\"", .{value.items});
         }
 
-        /// The initialized output is replaced only after the entire hex string
-        /// validates and its allocation succeeds.
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromJson(allocator: std.mem.Allocator, source: *std.json.Scanner, out: *Type) !void {
             const text = switch (try source.next()) {
                 .string => |value| value,
@@ -59,7 +58,6 @@ pub fn ProgressiveByteListTypeWithOptions(comptime options: progressive_list.Typ
             errdefer replacement.deinit(allocator);
             try replacement.resize(allocator, length);
             _ = std.fmt.hexToBytes(replacement.items, digits) catch return error.InvalidJson;
-            out.deinit(allocator);
             out.* = replacement;
         }
     };

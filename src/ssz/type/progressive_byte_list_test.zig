@@ -30,8 +30,10 @@ test "progressive byte lists use hex JSON while uint8 lists retain arrays" {
     writer = .{ .writer = &output.writer };
     try Numbers.serializeIntoJson(testing.allocator, &writer, &value);
     try testing.expectEqualStrings("[\"0\",\"255\",\"18\"]", output.written());
-    try decode(Bytes, testing.allocator, "\"0x\"", &value);
-    try testing.expectEqual(@as(usize, 0), value.items.len);
+    var empty = Bytes.default_value;
+    defer Bytes.deinit(testing.allocator, &empty);
+    try decode(Bytes, testing.allocator, "\"0x\"", &empty);
+    try testing.expectEqual(@as(usize, 0), empty.items.len);
 }
 
 test "progressive byte lists preserve generic roots and mutable view identity" {
@@ -65,30 +67,32 @@ test "progressive byte lists preserve generic roots and mutable view identity" {
     try testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
-test "progressive byte JSON rejects malformed and oversized input without replacing output" {
+test "progressive byte JSON leaves default out on malformed and oversized input" {
     const Bytes = ssz.ProgressiveByteListTypeWithOptions(.{ .limit = 3 });
     var value = Bytes.default_value;
     defer Bytes.deinit(testing.allocator, &value);
-    try value.append(testing.allocator, 170);
     for ([_][]const u8{ "\"\"", "\"0\"", "\"00\"", "\"0x0\"", "\"0xgg\"", "[]", "null" }) |text| {
         try testing.expectError(error.InvalidJson, decode(Bytes, testing.allocator, text, &value));
-        try testing.expectEqualSlices(u8, &.{170}, value.items);
+        try testing.expectEqual(@as(usize, 0), value.items.len);
+        try testing.expectEqual(@as(usize, 0), value.capacity);
     }
     try testing.expectError(error.LengthOverLimit, decode(Bytes, testing.allocator, "\"0x00112233\"", &value));
-    try testing.expectEqualSlices(u8, &.{170}, value.items);
+    try testing.expectEqual(@as(usize, 0), value.items.len);
+    try testing.expectEqual(@as(usize, 0), value.capacity);
     try decode(Bytes, testing.allocator, "\"0x001122\"", &value);
     try testing.expectEqualSlices(u8, &.{ 0, 17, 34 }, value.items);
 }
 
-test "memory_safety: progressive byte JSON preserves old output on every allocation failure" {
+test "memory_safety: progressive byte JSON leaves default out on every allocation failure" {
     try testing.checkAllAllocationFailures(testing.allocator, struct {
         fn run(allocator: std.mem.Allocator) !void {
             const Bytes = ssz.ProgressiveByteListType();
             var value = Bytes.default_value;
             defer Bytes.deinit(allocator, &value);
-            try value.append(allocator, 170);
             decode(Bytes, allocator, "\"0x00112233445566778899aabbccddeeff\"", &value) catch |err| {
-                try testing.expectEqualSlices(u8, &.{170}, value.items);
+                try testing.expectEqual(error.OutOfMemory, err);
+                try testing.expectEqual(@as(usize, 0), value.items.len);
+                try testing.expectEqual(@as(usize, 0), value.capacity);
                 return err;
             };
             try testing.expectEqual(@as(usize, 16), value.items.len);
