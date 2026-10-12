@@ -282,8 +282,8 @@ test "memory_safety: variable list tree reads allocate only materialized values"
     var failing = std.testing.FailingAllocator.init(allocator, .{});
     var out = List.default_value;
     defer List.deinit(failing.allocator(), &out);
-    try out.ensureTotalCapacity(failing.allocator(), value.items.len);
-    failing.fail_index = failing.alloc_index;
+    // The output buffer is the only allocation: empty elements own no memory.
+    failing.fail_index = failing.alloc_index + 1;
     failing.resize_fail_index = failing.resize_index;
 
     try List.tree.toValue(failing.allocator(), node, &pool, &out);
