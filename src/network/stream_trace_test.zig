@@ -83,7 +83,7 @@ test "stream capture wraps byte storage and recovers from metadata overflow" {
         try std.testing.expect(!batch.reset and !batch.pending);
         try std.testing.expectEqualSlices(u8, &bytes, batch.data);
     }
-    for (0..8193) |_| capture.pathChanged(conn, address, address);
+    for (0..capture.events.len + 1) |_| capture.pathChanged(conn, address, address);
     capture.streamClosed(stream, false);
     const snapshot = capture.drain();
     try std.testing.expect(snapshot.reset and !snapshot.pending);

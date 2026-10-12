@@ -10,7 +10,7 @@ const Protocol = @import("protocol.zig").Protocol;
 pub const chunk_max = 64 * 1024;
 pub const drain_bytes_max = 1024 * 1024;
 pub const drain_events_max = 512;
-const events_max = 8192;
+const events_max = 65536;
 const bytes_max = 16 * 1024 * 1024;
 
 pub const Connection = struct {
