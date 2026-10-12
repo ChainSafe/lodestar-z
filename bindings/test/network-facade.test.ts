@@ -7,6 +7,7 @@ import type {
   NativeHost,
   NativeLogRecord,
   NativeNetwork,
+  NativeStreamTraceEvent,
   Verdict,
 } from "../src/network.js";
 import {createNativeNetwork} from "../src/network.js";
@@ -27,6 +28,32 @@ import {BLOCKS} from "./utils/network-incoming.js";
 import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
 
 const TOPIC = topicName();
+
+test("stream tracing captures negotiated traffic and remains drainable after close", async () => {
+  const {network, peers} = await facadeWithPeers(host(), 1, (config, index) => {
+    config.traceStreams = index === 0;
+  });
+  const events: NativeStreamTraceEvent[] = [];
+  try {
+    await network.publish(TOPIC, blockPayload(4));
+    await expect
+      .poll(() => {
+        const batch = network.drainStreamTrace();
+        expect(batch.reset).toBe(false);
+        expect(batch.droppedBytes).toBe(0n);
+        events.push(...batch.events);
+        return events.some((event) => event.type === "data" && event.direction === "outbound");
+      })
+      .toBe(true);
+    expect(events.some((event) => event.type === "connection" && event.remoteAddr.includes("/quic-v1"))).toBe(true);
+    expect(events.some((event) => event.type === "stream" && event.protocol.startsWith("/meshsub/"))).toBe(true);
+    expect(events.every((event) => event.observedAtNs > 0n)).toBe(true);
+    await network.close();
+    expect(() => network.drainStreamTrace()).not.toThrow();
+  } finally {
+    await Promise.allSettled([network.close(), ...peers.map((peer) => peer.stop())]);
+  }
+}, 15_000);
 
 function blockPayload(byte: number): Uint8Array {
   const bytes = new Uint8Array(4000).fill(byte);

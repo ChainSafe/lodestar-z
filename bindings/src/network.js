@@ -87,6 +87,9 @@ class NativeNetwork {
   metrics() {
     return this.#runtime.getMetrics() + this.#pump.metrics();
   }
+  drainStreamTrace() {
+    return this.#runtime.drainStreamTrace();
+  }
   setLogLevel(level) {
     this.#runtime.setLogLevel(level);
   }

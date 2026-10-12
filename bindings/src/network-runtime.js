@@ -31,6 +31,9 @@ export class NativeRuntime {
   drainLogs(maxRecords = 256) {
     return this.#native.drainLogs(maxRecords);
   }
+  drainStreamTrace() {
+    return this.#native.drainStreamTrace();
+  }
   setLogLevel(level) {
     this.#native.setLogLevel(level);
   }

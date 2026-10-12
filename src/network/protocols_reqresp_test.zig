@@ -8,6 +8,8 @@ const harness = @import("protocols_reqresp_test_support.zig");
 const policy_fixture = @import("reqresp/policy_fixture.zig");
 const admission_fixture = @import("reqresp/admission_fixture.zig");
 const protocols_test_support = @import("protocols_test_support.zig");
+const stream_trace = @import("stream_trace.zig");
+const codec = @import("reqresp/codec.zig");
 
 const support = @import("quic/test_support.zig");
 const reservedOptions = @import("reqresp/control_fixture.zig").reservedOptions;
@@ -64,6 +66,46 @@ test "protocol stack round trips a status request through the collapsed host loo
     try roundTrip(&setup, 5);
     try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
+}
+
+test "protocol stack stream capture contains application framing exactly once" {
+    var setup: Pair = .{};
+    try setup.init(.{ .outbound_max = 4, .serving_max = 4 }, .{ .outbound_max = 4, .serving_max = 4 });
+    defer setup.deinit();
+    var capture = try stream_trace.Capture.init(std.testing.allocator, std.testing.io, setup.shared.pair.client.limits.connections_max);
+    defer capture.deinit(std.testing.allocator);
+    capture.connected(setup.shared.handles.client, &setup.shared.pair.server_ctx.local_peer_id, support.server_address, support.client_address, .outbound);
+    setup.shared.pair.client.stream_capture = &capture;
+    defer setup.shared.pair.client.stream_capture = null;
+    try roundTrip(&setup, 5);
+    const batch = capture.drain();
+    try std.testing.expect(!batch.reset and !batch.pending);
+    var alias: ?u64 = null;
+    var outgoing: [1024]u8 = undefined;
+    var incoming: [1024]u8 = undefined;
+    var sent: usize = 0;
+    var received: usize = 0;
+    for (batch.events) |event| switch (event.payload) {
+        .stream => |stream| if (stream.protocol == .reqresp and stream.protocol.reqresp == .status_v1) {
+            try std.testing.expect(alias == null);
+            alias = stream.id;
+        },
+        .data => |data| if (data.stream == alias) {
+            const bytes = batch.data[data.offset..][0..data.length];
+            if (data.direction == .outbound) {
+                @memcpy(outgoing[sent..][0..bytes.len], bytes);
+                sent += bytes.len;
+            } else {
+                @memcpy(incoming[received..][0..bytes.len], bytes);
+                received += bytes.len;
+            }
+        },
+        else => {},
+    };
+    try std.testing.expect(alias != null);
+    var encoded: [1024]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, try codec.encodeRequest(&statusBytes(5), &encoded), outgoing[0..sent]);
+    try std.testing.expectEqualSlices(u8, try codec.encodeChunk(0, null, &statusBytes(6), &encoded), incoming[0..received]);
 }
 
 test "protocol stack reclaims inbound sinks across more requests than it has slots" {
@@ -162,7 +204,6 @@ test "protocol stack preserves drained native stream events across a partial req
     const stream = setup.shared.server.reqresp.inbound[incoming.?.index].request.stream;
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
-    const codec = @import("reqresp/codec.zig");
     var wire: [codec.frame_scratch_max]u8 = undefined;
     const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
     try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
@@ -209,7 +250,6 @@ test "protocol stack request work remains bounded and rotates between live strea
         if (received == incoming.len) break;
     }
     try std.testing.expectEqual(incoming.len, received);
-    const codec = @import("reqresp/codec.zig");
     var wire: [codec.frame_scratch_max]u8 = undefined;
     const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
     for (incoming) |handle| {
@@ -236,7 +276,6 @@ test "protocol stack reqresp slot is serviced only after a stream event or its d
     try setup.init(.{}, .{ .progress_timeout_ms = 1_000 });
     defer setup.deinit();
     const server = &setup.shared.server.reqresp;
-    const codec = @import("reqresp/codec.zig");
     // Two accepted ping streams whose request bytes have not arrived.
     const fed = try setup.openRaw(.ping_v1);
     try setup.awaitRawSelection(fed, .ping_v1);

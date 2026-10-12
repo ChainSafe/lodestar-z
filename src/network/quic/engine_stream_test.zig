@@ -2,6 +2,7 @@ const std = @import("std");
 const binding = @import("binding.zig");
 const Engine = @import("Engine.zig");
 const limits = @import("limits.zig");
+const trace = @import("../stream_trace.zig");
 const support = @import("test_support.zig");
 
 const Event = Engine.Event;
@@ -346,7 +347,14 @@ test "engine reports a blocked stream and recovers capacity after a pump" {
     defer pair.deinit();
     const handles = try connectPair(&pair);
 
+    var capture = try trace.Capture.init(std.testing.allocator, std.testing.io, @intCast(pair.client.registry.slots.len));
+    defer capture.deinit(std.testing.allocator);
+    capture.connected(handles.client, &pair.server_ctx.local_peer_id, server_address, client_address, .outbound);
+    pair.client.stream_capture = &capture;
+    defer pair.client.stream_capture = null;
+
     const stream = try pair.client.openStream(handles.client);
+    capture.selected(stream, .identify, .outbound, "");
     var payload: [bulk_length]u8 = undefined;
     for (&payload, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% 5);
 
@@ -394,6 +402,9 @@ test "engine reports a blocked stream and recovers capacity after a pump" {
         }
     }
     try std.testing.expectEqual(payload.len, received);
+    const captured = capture.drain();
+    try std.testing.expect(!captured.reset and !captured.pending);
+    try std.testing.expectEqualSlices(u8, &payload, captured.data);
 }
 
 test "engine bounds streams per connection" {

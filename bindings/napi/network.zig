@@ -13,6 +13,7 @@ const publication_js = @import("network_publication_js.zig");
 const incoming_js = @import("network_incoming_js.zig");
 const request_js = @import("network_request_js.zig");
 const exchange_mod = @import("network_exchange.zig");
+const stream_trace = @import("network_stream_trace.zig");
 const exchange_js = @import("network_exchange_js.zig");
 const command_js = @import("network_command_js.zig");
 const fatal = @import("network_fatal.zig");
@@ -248,6 +249,10 @@ pub fn getMetrics(self: *@This()) !js.Value {
 
 pub fn drainLogs(self: *@This(), limit: js.Value) !js.Value {
     return network_logs.drain(try self.owner(), limit.val);
+}
+
+pub fn drainStreamTrace(self: *@This()) !js.Value {
+    return stream_trace.drain(try self.owner());
 }
 
 pub fn setLogLevel(self: *@This(), level: js.Value) !void {

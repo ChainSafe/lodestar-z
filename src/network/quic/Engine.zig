@@ -11,6 +11,7 @@ const peer_id = @import("../wire/peer_id.zig");
 const TlsContext = @import("../tls/context.zig").Context;
 const types = @import("../types.zig");
 const logging = @import("../logging.zig");
+const stream_trace = @import("../stream_trace.zig");
 
 const assert = std.debug.assert;
 const c = binding.c;
@@ -159,6 +160,7 @@ retry_key: [32]u8,
 visits: Visits = .{},
 connection_metrics: ConnectionCounters = .{},
 admission_open: bool = true,
+stream_capture: ?*stream_trace.Capture = null,
 /// The received packet's token, borrowed by its header until the next receive. A field
 /// rather than a local so ReleaseSafe does not fill it for every datagram.
 header_token: [binding.Header.token_max]u8 = undefined,
@@ -418,7 +420,9 @@ pub fn read(self: *Engine, stream: StreamHandle, buf: []u8) StreamError!Read {
     const target = try self.readableStream(stream);
     var effects: Connection.Effects = .{};
     defer self.streamEffects(stream.conn.index, effects);
-    return target.slot.read(target.index, target.id, buf, &effects) catch |err| return streamError(err);
+    const result = target.slot.read(target.index, target.id, buf, &effects) catch |err| return streamError(err);
+    if (self.stream_capture) |capture| capture.data(stream, .inbound, buf[0..result.len]);
+    return result;
 }
 
 /// Names the owner that now holds the stream. The engine never interprets the route; it
@@ -470,7 +474,9 @@ pub fn write(self: *Engine, stream: StreamHandle, bytes: []const u8, fin: bool) 
     const target = try self.liveStream(stream);
     var effects: Connection.Effects = .{};
     defer self.streamEffects(stream.conn.index, effects);
-    return target.slot.write(target.index, target.id, bytes, fin, &effects) catch |err| return streamError(err);
+    const count = target.slot.write(target.index, target.id, bytes, fin, &effects) catch |err| return streamError(err);
+    if (self.stream_capture) |capture| capture.data(stream, .outbound, bytes[0..count]);
+    return count;
 }
 
 fn streamEffects(self: *Engine, index: u16, effects: Connection.Effects) void {
@@ -524,6 +530,16 @@ pub fn pollEvents(self: *Engine, events: []Event) usize {
         if (slot.close_event == .reported) _ = self.registry.released.insert(slots, "release_link", index);
     }
     assert(count <= events.len);
+    if (self.stream_capture) |capture| for (events[0..count]) |event| switch (event) {
+        .connected => |connected| {
+            const slot = &slots[connected.conn.index];
+            capture.connected(connected.conn, &connected.peer_id, slot.peer, self.localFor(slot.peer).?, connected.direction);
+        },
+        .path_changed => |changed| capture.pathChanged(changed.conn, changed.peer, self.localFor(changed.peer).?),
+        .stream_closed => |closed| capture.streamClosed(closed.stream, closed.reset_code != null),
+        .closed => |closed| capture.disconnected(closed.conn),
+        else => {},
+    };
     return count;
 }
 

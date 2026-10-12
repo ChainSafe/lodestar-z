@@ -10,6 +10,7 @@ pub const Config = struct {
     resources: Resources,
     trace_gossip: bool = false,
     trace_turns: bool = false,
+    trace_streams: bool = false,
     transport: Transport = .{},
     agent: [256]u8,
     agent_len: u16,
@@ -24,7 +25,8 @@ pub const Config = struct {
 
     pub fn buildOptions(self: *const Config, common: *const cfg.Config, seed: u64) !n.configuration.Options {
         const r = &self.resources;
-        if (r.nativeBudgetBytes <= @sizeOf(n.NetworkCore)) return error.NetworkNativeBudgetExceeded;
+        const capture_bytes = if (self.trace_streams) n.stream_trace.Capture.allocatedBytesFor(r.connectionCapacity) else 0;
+        if (r.nativeBudgetBytes <= @sizeOf(n.NetworkCore) + capture_bytes) return error.NetworkNativeBudgetExceeded;
         var gossip_options = common.gossip;
         gossip_options.ip_allowlist = common.allowlist[0..common.allowlist_count];
         gossip_options.topic_policy = common.chain.topics[0..common.chain.boundary_count];
@@ -39,7 +41,7 @@ pub const Config = struct {
             .gossip = gossip_options,
             .router = .{ .capabilities = (try common.chain.update(common.local, null, common.slot)).capabilities },
             .identify = .{ .agent = self.agent[0..self.agent_len], .protocol_version = self.version[0..self.version_len] },
-            .byte_limit = r.nativeBudgetBytes - @sizeOf(n.NetworkCore),
+            .byte_limit = r.nativeBudgetBytes - @sizeOf(n.NetworkCore) - capture_bytes,
         };
     }
 };
@@ -80,10 +82,11 @@ const required = .{ "beaconConfig", "identitySecretKey", "bind", "local", "disco
 
 pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out: *Config) !void {
     const remembered = try value.hasNamedProperty("rememberedPeers");
-    try decode.object(value, &(required ++ .{ "rememberedPeers", "transport", "traceGossip", "traceTurns" }));
+    try decode.object(value, &(required ++ .{ "rememberedPeers", "transport", "traceGossip", "traceTurns", "traceStreams" }));
     inline for (required) |name| _ = try decode.get(value, name);
     out.trace_gossip = if (try value.hasNamedProperty("traceGossip")) try decode.boolean(try decode.get(value, "traceGossip")) else false;
     out.trace_turns = if (try value.hasNamedProperty("traceTurns")) try decode.boolean(try decode.get(value, "traceTurns")) else false;
+    out.trace_streams = if (try value.hasNamedProperty("traceStreams")) try decode.boolean(try decode.get(value, "traceStreams")) else false;
     out.transport = .{};
     if (try value.hasNamedProperty("transport")) {
         const transport = try decode.get(value, "transport");

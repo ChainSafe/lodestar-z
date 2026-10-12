@@ -224,6 +224,8 @@ export interface NativeApplicationConfig extends NativeRuntimeConfig {
   traceGossip?: boolean;
   /** Network phase timing totals logged at most once per 50 ms. Defaults to false. */
   traceTurns?: boolean;
+  /** Capture negotiated stream bytes in a bounded buffer. Disabled by default. */
+  traceStreams?: boolean;
   /** Startup copies the derived network settings; this instance need not outlive initialization. */
   beaconConfig: BeaconConfig;
   resources: NativeResources;
@@ -667,6 +669,11 @@ export interface NativeHost {
 
 /** Promise-returning operations reject both admission errors and admitted operation failures. */
 export interface NativeNetwork {
+  /**
+   * Single consumer; requires traceStreams. Returns owned copies, also drainable after close.
+   * A reset batch replaces prior metadata and marks every live stream incomplete.
+   */
+  drainStreamTrace(): NativeStreamTraceBatch;
   readonly limits: NativeResolvedLimits;
   /** Native shutdown and its promised completions finished. A failed network cannot restart. */
   readonly closed: Promise<CloseResult>;
@@ -724,6 +731,29 @@ export interface NativeNetwork {
    * only the returned promise remains reachable. Host serving and validation tasks may finish later.
    */
   close(): Promise<CloseResult>;
+}
+
+export type NativeStreamTraceEvent = {observedAtNs: bigint} & (
+  | {
+      type: "connection";
+      id: bigint;
+      peerId: Uint8Array;
+      remoteAddr: string;
+      localAddr: string;
+      direction: "inbound" | "outbound";
+    }
+  | {type: "stream"; id: bigint; connection: bigint; protocol: string; direction: "inbound" | "outbound"}
+  | {type: "data"; stream: bigint; direction: "inbound" | "outbound"; data: Uint8Array}
+  | {type: "stream_closed"; stream: bigint; reset: boolean}
+  | {type: "connection_closed"; connection: bigint}
+);
+
+export interface NativeStreamTraceBatch {
+  readonly events: readonly NativeStreamTraceEvent[];
+  readonly reset: boolean;
+  readonly pending: boolean;
+  readonly bufferedBytes: number;
+  readonly droppedBytes: bigint;
 }
 
 /**

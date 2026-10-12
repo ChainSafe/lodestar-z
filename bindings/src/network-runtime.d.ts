@@ -19,6 +19,7 @@ import type {
   NativeLogLevel,
   NativeLogRecord,
   NativeNetwork,
+  NativeStreamTraceBatch,
   NativePeerAction,
   NativePeerReportContext,
   NativePeerObservation,
@@ -155,6 +156,7 @@ export type NativeEscalation = "generated_batch" | "completion_contract";
 
 export interface NativeNetworkApplicationRuntime {
   drainLogs(maxRecords?: number): NativeLogBatch;
+  drainStreamTrace(): NativeStreamTraceBatch;
   setLogLevel(level: NativeLogLevel): void;
   /** Prometheus text rendered by the network owner once per second. Counters survive close. */
   getMetrics(): string;

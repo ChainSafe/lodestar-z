@@ -37,6 +37,7 @@ pub const chain = @import("chain.zig");
 pub const configuration = @import("configuration.zig");
 pub const metrics = @import("metrics/export.zig");
 pub const logging = @import("logging.zig");
+pub const stream_trace = @import("stream_trace.zig");
 pub const identify = @import("identify/root.zig");
 pub const capabilities = @import("capabilities.zig");
 pub const peer_manager = @import("peer_manager.zig");

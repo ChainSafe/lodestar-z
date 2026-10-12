@@ -226,6 +226,9 @@ pub const Router = struct {
                 std.log.scoped(.network_quic).debug("inbound_negotiation_failed connection={d}:{d} stream={d} reason={s}", .{ result.stream.conn.index, result.stream.conn.generation, result.stream.id, @tagName(result.result.failed) });
             }
             const selected: ?Protocol = if (result.protocol_index) |index| Protocol.fromIndex(index) else null;
+            if (result.result == .ready) if (engine.stream_capture) |capture| {
+                capture.selected(result.stream, selected.?, result.direction, result.result.ready.leftover);
+            };
             outcome.* = .{
                 .stream = result.stream,
                 .direction = result.direction,

@@ -83,6 +83,10 @@ pub fn initialize(self: *Runtime) !void {
     self.owner.?.core_live = true;
     self.owner.?.core.turn_timing.enabled = self.owner.?.application.trace_turns;
     self.owner.?.core.protocols.gossipsub.trace_gossip = self.owner.?.application.trace_gossip;
+    if (self.owner.?.application.trace_streams) {
+        self.stream_capture = try n.stream_trace.Capture.init(allocator, std.Io.Threaded.global_single_threaded.io(), self.owner.?.resolved.limits.connections_max);
+        self.owner.?.core.transport.engine.stream_capture = &self.stream_capture.?;
+    }
     try self.owner.?.core.setHostWake(self.bridge.wake.?.read_fd);
 
     try publishMetrics(self, try Now.read(io));

@@ -83,6 +83,7 @@ const Bridge = struct {
 pub const Runtime = struct {
     bridge: Bridge = .{},
     logs: n.logging.Sink = .{},
+    stream_capture: ?n.stream_trace.Capture = null,
     metrics: network_metrics.Export = .{},
     refs: std.atomic.Value(u32) = .init(1),
     owner: ?*Owner = null,
@@ -188,6 +189,7 @@ pub const Runtime = struct {
     pub fn release(self: *Runtime) void {
         if (self.refs.fetchSub(1, .acq_rel) == 1) {
             self.destroyOwner();
+            if (self.stream_capture) |*capture| capture.deinit(allocator);
             self.metrics.deinit();
             if (self.bridge.stores) |stores| stores.destroy();
             if (self.bridge.peer_updates) |lane| allocator.destroy(lane);
