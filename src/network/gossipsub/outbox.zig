@@ -696,7 +696,7 @@ test "gossip full stale delivery queue yields to waiting control and returns eve
     const message = store.put(@splat(1), "topic", "payload").?;
     store.retainHistory(message);
     store.seal(message);
-    for (0..data_capacity) |i| try outbox.data.append(&store, message, if (i % 2 == 0) .publication else .iwant, .{ .bytes = 8192 }, 1);
+    for (0..data_capacity) |i| try outbox.data.append(&store, message, if (i % 2 == 0) .publication else .iwant, .{ .bytes = 1 << 20 }, 1);
     const token = outbox.appendControl("control", false, 2).?;
     outbox.control_burst = 4;
     store.releaseHistory(message);

@@ -22,7 +22,7 @@ test "gossip global descriptor pressure preserves every peer local reservation" 
     store.seal(message);
     var queues: [2]Queue = @splat(.{ .pool = &pool });
     defer for (&queues) |*queue| queue.reset();
-    const limits: Limits = .{ .bytes = 8192 };
+    const limits: Limits = .{ .bytes = 1 << 20 };
     for (0..per_peer_limit - 8) |_| try queues[0].append(&store, message, .forward, limits, 0);
     for (0..per_peer_reserve - 8) |_| try queues[1].append(&store, message, .iwant, limits, 0);
     try std.testing.expectEqual(@as(usize, 16), pool.available);
@@ -66,17 +66,18 @@ test "gossip shared deliveries preserve every peer reserve under global pressure
     store.retainHistory(message);
     store.seal(message);
     var queues: [3]Queue = @splat(.{ .pool = &pool });
-    for (0..per_peer_limit) |_| try queues[0].append(&store, message, .forward, .{ .bytes = 8192 }, 1);
-    try std.testing.expectError(error.Descriptors, queues[0].append(&store, message, .forward, .{ .bytes = 8192 }, 2));
+    const limits: Limits = .{ .bytes = 1 << 20 };
+    for (0..per_peer_limit) |_| try queues[0].append(&store, message, .forward, limits, 1);
+    try std.testing.expectError(error.Descriptors, queues[0].append(&store, message, .forward, limits, 2));
     for (queues[1..]) |*queue| {
-        for (0..per_peer_reserve) |_| try queue.append(&store, message, .forward, .{ .bytes = 8192 }, 3);
-        try std.testing.expectError(error.PoolFull, queue.append(&store, message, .forward, .{ .bytes = 8192 }, 4));
+        for (0..per_peer_reserve) |_| try queue.append(&store, message, .forward, limits, 3);
+        try std.testing.expectError(error.PoolFull, queue.append(&store, message, .forward, limits, 4));
     }
     try std.testing.expectEqual(@as(usize, 0), pool.available);
     try std.testing.expectEqual(@as(usize, 0), pool.protected);
     queues[1].reset();
-    try std.testing.expectError(error.PoolFull, queues[2].append(&store, message, .forward, .{ .bytes = 8192 }, 5));
-    for (0..per_peer_reserve) |_| try queues[1].append(&store, message, .forward, .{ .bytes = 8192 }, 6);
+    try std.testing.expectError(error.PoolFull, queues[2].append(&store, message, .forward, limits, 5));
+    for (0..per_peer_reserve) |_| try queues[1].append(&store, message, .forward, limits, 6);
     store.releaseHistory(message);
     for (&queues) |*queue| queue.reset();
     try std.testing.expectEqual(@as(usize, 3 * per_peer_reserve), pool.protected);

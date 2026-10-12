@@ -7,7 +7,7 @@ const Connection = @import("../quic/Engine.zig").Handle;
 const assert = std.debug.assert;
 const none = std.math.maxInt(u32);
 
-pub const per_peer_limit = 512;
+pub const per_peer_limit = 2048;
 pub const per_peer_reserve = 64;
 
 /// What produced a queued frame. Each delivery attempt has its own origin, so an IWANT response
