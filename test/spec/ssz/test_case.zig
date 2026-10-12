@@ -204,6 +204,160 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
     const serialized_len = try snappy.uncompress(serialized_snappy_bytes, serialized_buf);
     const serialized_expected = serialized_buf[0..serialized_len];
 
+    // test serialization - value to json
+
+    {
+        var aw_actual: std.Io.Writer.Allocating = .init(allocator);
+        defer aw_actual.deinit();
+        var write_stream_actual: std.json.Stringify = .{ .writer = &aw_actual.writer };
+
+        if (comptime ssz.isFixedType(ST)) {
+            try ST.serializeIntoJson(&write_stream_actual, value_expected);
+        } else {
+            try ST.serializeIntoJson(allocator, &write_stream_actual, value_expected);
+        }
+
+        const serialized_json_actual = try aw_actual.toOwnedSlice();
+        defer allocator.free(serialized_json_actual);
+
+        try std.testing.expectEqualSlices(u8, expected_json, serialized_json_actual);
+    }
+
+    try expectValidRoundTrips(ST, gpa, allocator, value_expected, serialized_expected, &root_expected);
+}
+
+/// Runs a fixture from https://github.com/ethereum/ssz-specs: one entry of a JSON file,
+/// selected by its test id.
+pub fn validJsonTestCase(comptime ST: type, gpa: Allocator, file_path: []const u8, test_id: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fixture = try readJsonFixture(allocator, file_path, test_id);
+
+    const root_hex = fixture.get("root").?.string;
+    const root_expected = try hex.hexToRoot(root_hex[0..66]);
+
+    const value_expected = try allocator.create(ST.Type);
+    value_expected.* = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
+    try parseJsonValue(ST, allocator, fixture.get("value").?, value_expected);
+
+    const serialized_expected = try hexAlloc(allocator, fixture.get("serialized").?.string);
+
+    try expectValidRoundTrips(ST, gpa, allocator, value_expected, serialized_expected, &root_expected);
+}
+
+pub fn invalidJsonTestCase(comptime ST: type, gpa: Allocator, file_path: []const u8, test_id: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fixture = try readJsonFixture(allocator, file_path, test_id);
+
+    const raw_hex = (fixture.get("rawBytes") orelse fixture.get("serialized").?).string;
+    const serialized = try hexAlloc(allocator, raw_hex);
+
+    try expectInvalid(ST, gpa, allocator, serialized);
+}
+
+fn readJsonFixture(allocator: Allocator, file_path: []const u8, test_id: []const u8) !std.json.ObjectMap {
+    const json_bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, file_path, allocator, .unlimited);
+    const json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_bytes, .{});
+    const fixture = json.object.get(test_id) orelse return error.UnknownTestId;
+    return fixture.object;
+}
+
+fn hexAlloc(allocator: Allocator, hex_str: []const u8) ![]u8 {
+    const buf = try allocator.alloc(u8, hex.hexByteLen(hex_str));
+    return try hex.hexToBytes(buf, hex_str);
+}
+
+/// Decodes the `value` of an ssz-specs fixture. The encoding is not the SSZ JSON mapping:
+/// collections and bitfields are wrapped in `{"data": ...}`, bitfields are bool arrays, and
+/// uints wider than 32 bits are decimal strings.
+fn parseJsonValue(comptime ST: type, allocator: Allocator, json: std.json.Value, out: *ST.Type) !void {
+    if (comptime ssz.isBitVectorType(ST)) {
+        const bits = (try unwrapData(json)).array.items;
+        if (bits.len != ST.length) return error.InvalidLength;
+        out.* = ST.Type.empty;
+        for (bits, 0..) |bit, i| {
+            try out.set(i, bit.bool);
+        }
+    } else if (comptime ssz.isBitListType(ST) or ssz.isProgressiveBitListType(ST)) {
+        const bits = (try unwrapData(json)).array.items;
+        out.* = try ST.Type.fromBitLen(allocator, bits.len);
+        for (bits, 0..) |bit, i| {
+            try out.set(allocator, i, bit.bool);
+        }
+    } else if (comptime ssz.isByteVectorType(ST)) {
+        const hex_str = json.string;
+        if (hex.hexByteLen(hex_str) != ST.length) return error.InvalidLength;
+        _ = try hex.hexToBytes(out, hex_str);
+    } else if (comptime ssz.isByteListType(ST)) {
+        const bytes = try hexAlloc(allocator, (try unwrapData(json)).string);
+        out.* = ST.Type.empty;
+        try out.resize(allocator, bytes.len);
+        @memcpy(out.items, bytes);
+    } else if (comptime ST.kind == .compatible_union) {
+        const selector = std.math.cast(u8, json.object.get("selector").?.integer) orelse return error.InvalidSelector;
+        const data = json.object.get("data").?;
+        inline for (ST._union_options) |option| {
+            if (selector == option.@"0") {
+                const option_type = option.@"1";
+                const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
+                out.* = @unionInit(ST.Type, field_name, if (comptime option_type.kind == .compatible_union) undefined else option_type.default_value);
+                try parseJsonValue(option_type, allocator, data, &@field(out.*, field_name));
+                return;
+            }
+        }
+        return error.InvalidSelector;
+    } else if (comptime ST.kind == .container or ST.kind == .progressive_container) {
+        inline for (ST.fields) |field| {
+            const field_json = json.object.get(field.name) orelse return error.MissingField;
+            try parseJsonValue(field.type, allocator, field_json, &@field(out, field.name));
+        }
+    } else if (comptime ST.kind == .list or ST.kind == .progressive_list) {
+        const items = (try unwrapData(json)).array.items;
+        out.* = ST.Type.empty;
+        try out.resize(allocator, items.len);
+        for (items, 0..) |item, i| {
+            out.items[i] = if (comptime ST.Element.kind == .compatible_union) undefined else ST.Element.default_value;
+            try parseJsonValue(ST.Element, allocator, item, &out.items[i]);
+        }
+    } else if (comptime ST.kind == .vector) {
+        const items = (try unwrapData(json)).array.items;
+        if (items.len != ST.length) return error.InvalidLength;
+        for (items, 0..) |item, i| {
+            try parseJsonValue(ST.Element, allocator, item, &out[i]);
+        }
+    } else if (comptime ST.kind == .uint) {
+        out.* = switch (json) {
+            .integer => |i| std.math.cast(ST.Type, i) orelse return error.InvalidUint,
+            .number_string, .string => |s| try std.fmt.parseInt(ST.Type, s, 10),
+            else => return error.InvalidUint,
+        };
+    } else if (comptime ST.kind == .bool) {
+        out.* = json.bool;
+    } else {
+        @compileError("unsupported ssz type kind");
+    }
+}
+
+fn unwrapData(json: std.json.Value) !std.json.Value {
+    return switch (json) {
+        .object => |o| o.get("data") orelse error.MissingData,
+        else => json,
+    };
+}
+
+fn expectValidRoundTrips(
+    comptime ST: type,
+    gpa: Allocator,
+    allocator: Allocator,
+    value_expected: *const ST.Type,
+    serialized_expected: []const u8,
+    root_expected: *const [32]u8,
+) !void {
     // test serialization - value to ssz
 
     {
@@ -232,31 +386,25 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
         try std.testing.expect(ST.equals(value_expected, value_actual));
     }
 
-    // test serialization - value to json
-
+    // test json round trip - value to json to value
     {
-        var aw_actual: std.Io.Writer.Allocating = .init(allocator);
-        defer aw_actual.deinit();
-        var write_stream_actual: std.json.Stringify = .{ .writer = &aw_actual.writer };
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        var write_stream: std.json.Stringify = .{ .writer = &aw.writer };
 
         if (comptime ssz.isFixedType(ST)) {
-            try ST.serializeIntoJson(&write_stream_actual, value_expected);
+            try ST.serializeIntoJson(&write_stream, value_expected);
         } else {
-            try ST.serializeIntoJson(allocator, &write_stream_actual, value_expected);
+            try ST.serializeIntoJson(allocator, &write_stream, value_expected);
         }
 
-        const serialized_json_actual = try aw_actual.toOwnedSlice();
-        defer allocator.free(serialized_json_actual);
+        const serialized_json = try aw.toOwnedSlice();
+        defer allocator.free(serialized_json);
 
-        try std.testing.expectEqualSlices(u8, expected_json, serialized_json_actual);
-    }
-
-    // test deserialization - json to value
-    {
         const value_actual = try allocator.create(ST.Type);
         value_actual.* = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
 
-        var scanner = std.json.Scanner.initCompleteInput(allocator, expected_json);
+        var scanner = std.json.Scanner.initCompleteInput(allocator, serialized_json);
         defer scanner.deinit();
 
         if (comptime ssz.isFixedType(ST)) {
@@ -276,7 +424,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
     } else {
         try ST.hashTreeRoot(allocator, value_expected, &root_actual_oneshot);
     }
-    try std.testing.expectEqualSlices(u8, &root_expected, &root_actual_oneshot);
+    try std.testing.expectEqualSlices(u8, root_expected, &root_actual_oneshot);
 
     var root_actual_serialized: [32]u8 = undefined;
     if (comptime ssz.isFixedType(ST)) {
@@ -284,13 +432,13 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
     } else {
         try ST.serialized.hashTreeRoot(allocator, serialized_expected, &root_actual_serialized);
     }
-    try std.testing.expectEqualSlices(u8, &root_expected, &root_actual_serialized);
+    try std.testing.expectEqualSlices(u8, root_expected, &root_actual_serialized);
 
     const Hasher = ssz.Hasher(ST);
     var hash_scratch: ssz.HasherData = if (comptime ssz.isBasicType(ST)) undefined else try Hasher.init(allocator);
     var root_actual: [32]u8 = undefined;
     try Hasher.hash(&hash_scratch, value_expected, &root_actual);
-    try std.testing.expectEqualSlices(u8, &root_expected, &root_actual);
+    try std.testing.expectEqualSlices(u8, root_expected, &root_actual);
 
     var pool = try Node.Pool.init(.{ .page_allocator = gpa, .allocator = gpa, .pool_size = 1_000_000 });
     defer pool.deinit();
@@ -300,7 +448,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
         const node = try ST.tree.fromValue(&pool, value_expected);
         defer pool.unref(node);
 
-        try std.testing.expectEqualSlices(u8, &root_expected, node.getRoot(&pool));
+        try std.testing.expectEqualSlices(u8, root_expected, node.getRoot(&pool));
 
         const value_from_tree = try allocator.create(ST.Type);
         value_from_tree.* = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
@@ -318,7 +466,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
         const node = try ST.tree.deserializeFromBytes(&pool, serialized_expected);
         defer pool.unref(node);
 
-        try std.testing.expectEqualSlices(u8, &root_expected, node.getRoot(&pool));
+        try std.testing.expectEqualSlices(u8, root_expected, node.getRoot(&pool));
 
         const serialized_size = if (comptime ssz.isFixedType(ST)) ST.fixed_size else try ST.tree.serializedSize(node, &pool);
         const serialized_from_tree = try allocator.alloc(u8, serialized_size);
@@ -342,8 +490,10 @@ pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir) !voi
     const serialized_len = try snappy.uncompress(serialized_snappy_bytes, serialized_buf);
     const serialized_expected = serialized_buf[0..serialized_len];
 
-    // test deserialization
+    try expectInvalid(ST, gpa, allocator, serialized_expected);
+}
 
+fn expectInvalid(comptime ST: type, gpa: Allocator, allocator: Allocator, serialized_expected: []const u8) !void {
     try std.testing.expectError(error.InvalidSSZ, validate(ST, serialized_expected));
 
     var value_actual: ST.Type = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;

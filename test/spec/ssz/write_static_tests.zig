@@ -1,5 +1,6 @@
 const std = @import("std");
 const spec_test_options = @import("spec_test_options");
+const consensus_types = @import("consensus_types");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
@@ -69,6 +70,11 @@ pub fn main(init: std.process.Init) !void {
 
             const type_name = g_test_entry.name;
 
+            if (!hasType(fork, type_name)) {
+                std.log.warn("skipping {s} {s}: not declared in consensus_types", .{ fork, type_name });
+                continue;
+            }
+
             const type_name_tests_dir_name = try std.fs.path.join(allocator, &[_][]const u8{
                 static_tests_dir_name,
                 type_name,
@@ -118,6 +124,19 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try file_writer.flush();
+}
+
+fn hasType(fork: []const u8, type_name: []const u8) bool {
+    inline for (@typeInfo(consensus_types).@"struct".decls) |fork_decl| {
+        const fork_types = @field(consensus_types, fork_decl.name);
+        if (@TypeOf(fork_types) == type and std.mem.eql(u8, fork_decl.name, fork)) {
+            inline for (@typeInfo(fork_types).@"struct".decls) |type_decl| {
+                if (std.mem.eql(u8, type_decl.name, type_name)) return true;
+            }
+            return false;
+        }
+    }
+    return false;
 }
 
 /// Assumes the following global decls

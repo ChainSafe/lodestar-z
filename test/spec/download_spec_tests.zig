@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const spec_test_options = @import("spec_test_options");
+const ssz_fixtures = @import("ssz/fixtures.zig");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
@@ -22,6 +23,14 @@ pub fn main(init: std.process.Init) !void {
             spec_test_options.spec_test_out_dir,
         );
     }
+    try download_and_extract_spec_test(
+        allocator,
+        io,
+        spec_test_options.ssz_spec_test_url,
+        ssz_fixtures.version,
+        ssz_fixtures.archive_name,
+        ssz_fixtures.out_dir,
+    );
 }
 
 fn write_version(io: std.Io) !void {
@@ -36,8 +45,9 @@ fn write_version(io: std.Io) !void {
         \\// Do not commit changes by hand.
         \\
         \\{s}
+        \\ssz-specs {s}
         \\
-    , .{spec_test_options.spec_test_version});
+    , .{ spec_test_options.spec_test_version, ssz_fixtures.version });
     try writer.end();
 }
 
