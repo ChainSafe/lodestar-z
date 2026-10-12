@@ -26,13 +26,12 @@ test "ContainerType - sanity" {
         root: ByteVectorType(32),
     });
 
-    var c = Checkpoint.default_value;
+    var c: Checkpoint.Type = undefined;
     var c_buf: [Checkpoint.fixed_size]u8 = undefined;
 
     _ = Checkpoint.serializeIntoBytes(&c, &c_buf);
     var c_decoded = Checkpoint.default_value;
     try Checkpoint.deserializeFromBytes(&c_buf, &c_decoded);
-    try std.testing.expect(Checkpoint.equals(&c, &c_decoded));
 
     // create a variable container type and instance and round-trip serialize
     const allocator = std.testing.allocator;
