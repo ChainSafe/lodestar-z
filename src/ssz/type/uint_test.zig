@@ -49,27 +49,30 @@ fn testFixed(
 test "UintType - sanity" {
     const Uint8 = UintType(8);
 
-    var u: Uint8.Type = undefined;
+    var u = Uint8.default_value;
     var u_buf: [Uint8.fixed_size]u8 = undefined;
     _ = Uint8.serializeIntoBytes(&u, &u_buf);
-    try Uint8.deserializeFromBytes(&u_buf, &u);
+    var u_decoded = Uint8.default_value;
+    try Uint8.deserializeFromBytes(&u_buf, &u_decoded);
+    try std.testing.expectEqual(u, u_decoded);
 
-    // Deserialize "255" into u;
+    // Deserialize "255".
     const input_json = "\"255\"";
     const allocator = std.testing.allocator;
     var json = std.json.Scanner.initCompleteInput(allocator, input_json);
     defer json.deinit();
-    try Uint8.deserializeFromJson(&json, &u);
+    var u_json = Uint8.default_value;
+    try Uint8.deserializeFromJson(&json, &u_json);
 
-    // Serialize u into "255"
+    // Serialize into "255"
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     var write_stream: std.json.Stringify = .{ .writer = &aw.writer };
-    try Uint8.serializeIntoJson(&write_stream, &u);
+    try Uint8.serializeIntoJson(&write_stream, &u_json);
     var cloned: Uint8.Type = undefined;
-    try Uint8.clone(&u, &cloned);
-    try expectEqualRoots(Uint8, u, cloned);
-    try expectEqualSerialized(Uint8, u, cloned);
+    try Uint8.clone(&u_json, &cloned);
+    try expectEqualRoots(Uint8, u_json, cloned);
+    try expectEqualSerialized(Uint8, u_json, cloned);
 
     const output = try aw.toOwnedSlice();
     defer allocator.free(output);

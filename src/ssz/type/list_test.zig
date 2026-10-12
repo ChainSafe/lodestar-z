@@ -183,7 +183,9 @@ test "ListType - sanity" {
     defer allocator.free(b_buf);
 
     _ = Bytes.serializeIntoBytes(&b, b_buf);
-    try Bytes.deserializeFromBytes(allocator, b_buf, &b);
+    var b_decoded = Bytes.default_value;
+    defer Bytes.deinit(allocator, &b_decoded);
+    try Bytes.deserializeFromBytes(allocator, b_buf, &b_decoded);
 
     // create a variable list type and instance and round-trip serialize
     const BytesBytes = VariableListType(Bytes, 32);
@@ -196,7 +198,9 @@ test "ListType - sanity" {
     defer allocator.free(bb_buf);
 
     _ = BytesBytes.serializeIntoBytes(&bb, bb_buf);
-    try BytesBytes.deserializeFromBytes(allocator, bb_buf, &bb);
+    var bb_decoded = BytesBytes.default_value;
+    defer BytesBytes.deinit(allocator, &bb_decoded);
+    try BytesBytes.deserializeFromBytes(allocator, bb_buf, &bb_decoded);
 }
 
 test "memory_safety: fixed list tree reads reuse output capacity without traversal allocations" {
