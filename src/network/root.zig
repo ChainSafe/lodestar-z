@@ -38,6 +38,7 @@ pub const configuration = @import("configuration.zig");
 pub const metrics = @import("metrics/export.zig");
 pub const logging = @import("logging.zig");
 pub const stream_trace = @import("stream_trace.zig");
+pub const xray = @import("xray/probe.zig");
 pub const identify = @import("identify/root.zig");
 pub const capabilities = @import("capabilities.zig");
 pub const peer_manager = @import("peer_manager.zig");
@@ -80,6 +81,7 @@ pub const Multiaddr = wire.multiaddr.Multiaddr;
 pub const KeyPair = wire.keys.KeyPair;
 
 test {
+    _ = xray;
     _ = @import("chain.zig");
     _ = gossip_processor;
     _ = peers;

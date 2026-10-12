@@ -83,9 +83,11 @@ pub fn initialize(self: *Runtime) !void {
     self.owner.?.core_live = true;
     self.owner.?.core.turn_timing.enabled = self.owner.?.application.trace_turns;
     self.owner.?.core.protocols.gossipsub.trace_gossip = self.owner.?.application.trace_gossip;
-    if (self.owner.?.application.trace_streams) {
-        self.stream_capture = try n.stream_trace.Capture.init(allocator, std.Io.Threaded.global_single_threaded.io(), self.owner.?.resolved.limits.connections_max);
-        self.owner.?.core.transport.engine.stream_capture = &self.stream_capture.?;
+    if (self.owner.?.application.xray) |*options| {
+        const peer = self.owner.?.core.peerId();
+        self.xray = try n.xray.Probe.create(allocator, std.Io.Threaded.global_single_threaded.io(), self.owner.?.resolved.limits.connections_max, &options.endpoint, &peer, self.owner.?.application.agent[0..self.owner.?.application.agent_len]);
+        self.owner.?.core.transport.engine.stream_capture = &self.xray.?.capture;
+        if (options.wait_for_attach) try self.xray.?.waitForAttach();
     }
     try self.owner.?.core.setHostWake(self.bridge.wake.?.read_fd);
 

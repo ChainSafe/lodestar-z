@@ -91,3 +91,38 @@ test "stream capture wraps byte storage and recovers from metadata overflow" {
     try std.testing.expect(snapshot.events[0].payload == .connection);
     try std.testing.expectEqual(@as(u64, 0), snapshot.dropped_bytes);
 }
+
+test "stream capture shares peer aliases and closes streams before their connection" {
+    var capture = try trace.Capture.init(a, std.testing.io, 2);
+    defer capture.deinit(a);
+    const other: t.Handle = .{ .index = 1, .generation = 1 };
+    capture.connected(conn, &peer, address, address, .inbound);
+    capture.connected(other, &peer, address, address, .outbound);
+    capture.selected(stream, .identify, .inbound, "");
+    try std.testing.expect(capture.ready.isSet());
+    const opened = capture.drain();
+    try std.testing.expect(!capture.ready.isSet());
+    try std.testing.expectEqual(opened.events[0].payload.connection.peer_alias, opened.events[1].payload.connection.peer_alias);
+    const alias = opened.events[2].payload.stream.id;
+    capture.disconnected(conn);
+    const closed = capture.drain();
+    try std.testing.expectEqual(@as(usize, 2), closed.events.len);
+    try std.testing.expectEqual(alias, closed.events[0].payload.stream_closed.stream);
+    try std.testing.expect(closed.events[0].payload.stream_closed.reset);
+    try std.testing.expect(closed.events[1].payload == .connection_closed);
+}
+
+test "stream capture shutdown closes live metadata and remains drainable" {
+    var capture = try trace.Capture.init(a, std.testing.io, 1);
+    defer capture.deinit(a);
+    capture.connected(conn, &peer, address, address, .inbound);
+    capture.selected(stream, .identify, .inbound, "final");
+    capture.close();
+    const batch = capture.drain();
+    try std.testing.expectEqualSlices(u8, "final", batch.data);
+    try std.testing.expectEqual(@as(usize, 5), batch.events.len);
+    try std.testing.expect(batch.events[3].payload == .stream_closed);
+    try std.testing.expect(batch.events[4].payload == .connection_closed);
+    capture.close();
+    try std.testing.expectEqual(@as(usize, 0), capture.drain().events.len);
+}

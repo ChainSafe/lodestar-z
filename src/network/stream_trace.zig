@@ -15,6 +15,7 @@ const bytes_max = 16 * 1024 * 1024;
 
 pub const Connection = struct {
     id: u64,
+    peer_alias: u64,
     peer: PeerId,
     remote: t.Address,
     local: t.Address,
@@ -50,6 +51,7 @@ pub const Batch = struct {
 
 pub const Capture = struct {
     mutex: std.Io.Mutex = .init,
+    ready: std.Io.Event = .unset,
     io: std.Io,
     connections: []ConnectionState,
     streams: []StreamState,
@@ -99,6 +101,11 @@ pub const Capture = struct {
         a.free(self.connections);
     }
 
+    /// The producer must have stopped before closing the remaining captured connections.
+    pub fn close(self: *Capture) void {
+        for (self.connections) |state| if (state.event != null) self.disconnected(state.handle);
+    }
+
     fn timestamp(self: *const Capture) u64 {
         return @intCast(@max(0, std.Io.Timestamp.now(self.io, .real).nanoseconds));
     }
@@ -130,12 +137,14 @@ pub const Capture = struct {
         self.len = 0;
         self.byte_head = 0;
         self.byte_len = 0;
+        self.ready.set(self.io);
     }
     fn append(self: *Capture, event: *const Event) void {
         if (self.gap) return;
         if (self.len == self.events.len) return self.lose();
         self.events[(self.head + self.len) % self.events.len] = event.*;
         self.len += 1;
+        self.ready.set(self.io);
     }
 
     pub fn connected(self: *Capture, handle: t.Handle, peer: *const PeerId, remote: t.Address, local: t.Address, direction: t.Direction) void {
@@ -143,7 +152,15 @@ pub const Capture = struct {
         defer self.unlock();
         const state = &self.connections[handle.index];
         std.debug.assert(state.event == null);
-        state.* = .{ .handle = handle, .event = .{ .observed_at_ns = self.timestamp(), .payload = .{ .connection = .{ .id = self.id(), .peer = peer.*, .remote = remote, .local = local, .direction = direction } } } };
+        const alias = self.id();
+        var peer_alias = alias;
+        for (self.connections) |other| if (other.event) |event| {
+            if (std.mem.eql(u8, &event.payload.connection.peer.bytes, &peer.bytes)) {
+                peer_alias = event.payload.connection.peer_alias;
+                break;
+            }
+        };
+        state.* = .{ .handle = handle, .event = .{ .observed_at_ns = self.timestamp(), .payload = .{ .connection = .{ .id = alias, .peer_alias = peer_alias, .peer = peer.*, .remote = remote, .local = local, .direction = direction } } } };
         self.append(&state.event.?);
     }
 
@@ -209,14 +226,17 @@ pub const Capture = struct {
         self.lock();
         defer self.unlock();
         const state = self.connection(handle) orelse return;
-        self.append(&.{ .observed_at_ns = self.timestamp(), .payload = .{ .connection_closed = state.event.?.payload.connection.id } });
         const start = @as(usize, handle.index) * limits.streams_per_connection;
+        for (self.streams[start..][0..limits.streams_per_connection]) |live| if (live.event) |event| {
+            self.append(&.{ .observed_at_ns = self.timestamp(), .payload = .{ .stream_closed = .{ .stream = event.payload.stream.id, .reset = true } } });
+        };
+        self.append(&.{ .observed_at_ns = self.timestamp(), .payload = .{ .connection_closed = state.event.?.payload.connection.id } });
         @memset(self.streams[start..][0..limits.streams_per_connection], .{});
         state.event = null;
     }
 
-    /// Single consumer only. Returned copies remain valid until its next drain. No JS work
-    /// runs under the mutex. If delivery fails, invalidate before the consumer drains again.
+    /// Single consumer only. Returned copies remain valid until its next drain. Encoding and
+    /// collector I/O run outside the mutex. Invalidate before discarding an undelivered batch.
     pub fn drain(self: *Capture) Batch {
         self.lock();
         defer self.unlock();
@@ -254,6 +274,7 @@ pub const Capture = struct {
                 self.len -= 1;
             }
         }
+        if (self.len == 0) self.ready.reset();
         return .{ .events = self.output_events[0..count], .data = self.output_bytes[0..bytes], .reset = reset, .pending = self.len > 0, .buffered_bytes = self.byte_len, .dropped_bytes = self.dropped_bytes };
     }
 
@@ -262,6 +283,12 @@ pub const Capture = struct {
         defer self.unlock();
         self.lose();
         self.dropped_bytes +|= undelivered_bytes;
+    }
+
+    pub fn stats(self: *Capture) struct { buffered_bytes: usize, dropped_bytes: u64 } {
+        self.lock();
+        defer self.unlock();
+        return .{ .buffered_bytes = self.byte_len, .dropped_bytes = self.dropped_bytes };
     }
 };
 

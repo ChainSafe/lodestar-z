@@ -10,7 +10,7 @@ pub const Config = struct {
     resources: Resources,
     trace_gossip: bool = false,
     trace_turns: bool = false,
-    trace_streams: bool = false,
+    xray: ?struct { endpoint: n.xray.Endpoint, wait_for_attach: bool } = null,
     transport: Transport = .{},
     agent: [256]u8,
     agent_len: u16,
@@ -25,7 +25,7 @@ pub const Config = struct {
 
     pub fn buildOptions(self: *const Config, common: *const cfg.Config, seed: u64) !n.configuration.Options {
         const r = &self.resources;
-        const capture_bytes = if (self.trace_streams) n.stream_trace.Capture.allocatedBytesFor(r.connectionCapacity) else 0;
+        const capture_bytes = if (self.xray != null) n.xray.Probe.allocatedBytesFor(r.connectionCapacity) else 0;
         if (r.nativeBudgetBytes <= @sizeOf(n.NetworkCore) + capture_bytes) return error.NetworkNativeBudgetExceeded;
         var gossip_options = common.gossip;
         gossip_options.ip_allowlist = common.allowlist[0..common.allowlist_count];
@@ -82,11 +82,21 @@ const required = .{ "beaconConfig", "identitySecretKey", "bind", "local", "disco
 
 pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out: *Config) !void {
     const remembered = try value.hasNamedProperty("rememberedPeers");
-    try decode.object(value, &(required ++ .{ "rememberedPeers", "transport", "traceGossip", "traceTurns", "traceStreams" }));
+    try decode.object(value, &(required ++ .{ "rememberedPeers", "transport", "traceGossip", "traceTurns", "xray" }));
     inline for (required) |name| _ = try decode.get(value, name);
     out.trace_gossip = if (try value.hasNamedProperty("traceGossip")) try decode.boolean(try decode.get(value, "traceGossip")) else false;
     out.trace_turns = if (try value.hasNamedProperty("traceTurns")) try decode.boolean(try decode.get(value, "traceTurns")) else false;
-    out.trace_streams = if (try value.hasNamedProperty("traceStreams")) try decode.boolean(try decode.get(value, "traceStreams")) else false;
+    out.xray = null;
+    if (try value.hasNamedProperty("xray")) {
+        const xray = try decode.get(value, "xray");
+        try decode.completeObject(xray, &.{ "address", "waitForAttach" });
+        var address: [256]u8 = undefined;
+        const length = try decode.text(try decode.get(xray, "address"), &address);
+        out.xray = .{
+            .endpoint = n.xray.Endpoint.parse(address[0..length]) catch return error.InvalidXrayAddress,
+            .wait_for_attach = try decode.boolean(try decode.get(xray, "waitForAttach")),
+        };
+    }
     out.transport = .{};
     if (try value.hasNamedProperty("transport")) {
         const transport = try decode.get(value, "transport");

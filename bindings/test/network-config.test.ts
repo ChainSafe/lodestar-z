@@ -5,6 +5,20 @@ import {applicationConfig, configureChain, discoveryConfig, startRuntime, testCh
 
 const cases: readonly [string, (config: NativeApplicationConfig) => void, string][] = [
   [
+    "invalid Xray endpoint",
+    (c) => {
+      c.xray = {address: "127.0.0.1:0", waitForAttach: false};
+    },
+    "InvalidXrayAddress",
+  ],
+  [
+    "removed stream polling",
+    (c) => {
+      Object.assign(c, {traceStreams: true});
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
     "missing BeaconConfig",
     (c) => {
       Reflect.deleteProperty(c, "beaconConfig");

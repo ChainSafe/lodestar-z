@@ -1,3 +1,6 @@
+import {randomFillSync} from "node:crypto";
+import {once} from "node:events";
+import {type Socket, createServer} from "node:net";
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test, vi} from "vitest";
 import type {
@@ -7,7 +10,6 @@ import type {
   NativeHost,
   NativeLogRecord,
   NativeNetwork,
-  NativeStreamTraceEvent,
   Verdict,
 } from "../src/network.js";
 import {createNativeNetwork} from "../src/network.js";
@@ -28,32 +30,6 @@ import {BLOCKS} from "./utils/network-incoming.js";
 import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
 
 const TOPIC = topicName();
-
-test("stream tracing captures negotiated traffic and remains drainable after close", async () => {
-  const {network, peers} = await facadeWithPeers(host(), 1, (config, index) => {
-    config.traceStreams = index === 0;
-  });
-  const events: NativeStreamTraceEvent[] = [];
-  try {
-    await network.publish(TOPIC, blockPayload(4));
-    await expect
-      .poll(() => {
-        const batch = network.drainStreamTrace();
-        expect(batch.reset).toBe(false);
-        expect(batch.droppedBytes).toBe(0n);
-        events.push(...batch.events);
-        return events.some((event) => event.type === "data" && event.direction === "outbound");
-      })
-      .toBe(true);
-    expect(events.some((event) => event.type === "connection" && event.remoteAddr.includes("/quic-v1"))).toBe(true);
-    expect(events.some((event) => event.type === "stream" && event.protocol.startsWith("/meshsub/"))).toBe(true);
-    expect(events.every((event) => event.observedAtNs > 0n)).toBe(true);
-    await network.close();
-    expect(() => network.drainStreamTrace()).not.toThrow();
-  } finally {
-    await Promise.allSettled([network.close(), ...peers.map((peer) => peer.stop())]);
-  }
-}, 15_000);
 
 function blockPayload(byte: number): Uint8Array {
   const bytes = new Uint8Array(4000).fill(byte);
@@ -138,6 +114,49 @@ async function received(peer: PeerRuntime, count: number): Promise<number[]> {
   await peer.exchange(verdicts, gossipAll);
   return bytes;
 }
+
+test("native Xray exports while JavaScript is blocked and reconnects after idle collector closure", async () => {
+  const sockets = new Set<Socket>();
+  let attaches = 0;
+  const collector = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => undefined);
+    socket.on("close", () => sockets.delete(socket));
+    socket.once("data", () => {
+      attaches++;
+      socket.write(Uint8Array.of(2, 4, 8, 3, 32, 1));
+    });
+    socket.on("data", () => undefined);
+  });
+  collector.listen(0, "127.0.0.1");
+  await once(collector, "listening");
+  const address = collector.address();
+  if (!address || typeof address === "string") throw Error("Expected TCP collector");
+  let fixture: Awaited<ReturnType<typeof facadeWithPeers>> | undefined;
+  try {
+    fixture = await facadeWithPeers(host(), 1, (config, index) => {
+      if (index === 0) config.xray = {address: `127.0.0.1:${address.port}`, waitForAttach: false};
+    });
+    const {network, peers} = fixture;
+    await expect.poll(() => attaches).toBe(1);
+    const before = metricValue(network.metrics(), "lodestar_xray_sent_bytes_total") ?? 0;
+    const payload = randomFillSync(blockPayload(0));
+    new DataView(payload.buffer).setBigUint64(100, 100n, true);
+    const sent = peers[0].publishGossip(TOPIC, payload, {allowZeroPeers: false});
+    // The subprocess produces traffic while this environment cannot run callbacks or timers.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    expect(metricValue(network.metrics(), "lodestar_xray_sent_bytes_total")).toBeGreaterThan(before + 4000);
+    await sent;
+    expect(metricValue(network.metrics(), "lodestar_xray_dropped_bytes_total")).toBe(0);
+    for (const socket of sockets) socket.destroy();
+    await expect.poll(() => attaches, {timeout: 5000}).toBe(2);
+  } finally {
+    await fixture?.network.close();
+    await Promise.all(fixture?.peers.map((peer) => peer.stop()) ?? []);
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => collector.close(() => resolve()));
+  }
+}, 30_000);
 
 test("a job's deferred handler runs only after the owner applied its verdicts, admitting forwarding", async () => {
   // More than one owner turn's 64 verdicts, and fewer rejects than a graylist costs.
