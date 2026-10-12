@@ -6,7 +6,7 @@ const ProgressiveBitListType = @import("progressive_bit_list.zig").ProgressiveBi
 
 test "ProgressiveBitListType - sanity" {
     const allocator = std.testing.allocator;
-    const Bits = ProgressiveBitListType();
+    const Bits = ProgressiveBitListType(.{});
     var b: Bits.Type = try Bits.Type.fromBitLen(allocator, 30);
     defer b.deinit(allocator);
 
@@ -26,7 +26,7 @@ test "ProgressiveBitListType - sanity" {
 
 test "ProgressiveBitListType - shrinking clears truncated bits" {
     const allocator = std.testing.allocator;
-    const Bits = ProgressiveBitListType();
+    const Bits = ProgressiveBitListType(.{});
     var bits = try Bits.Type.fromBitLen(allocator, 8);
     defer bits.deinit(allocator);
 
@@ -76,7 +76,7 @@ fn expectProgressiveFromValuePoolExhaustionReclaimsNodes(
 }
 
 test "memory_safety: progressive bit list tree.fromValue reclaims unpublished nodes on pool exhaustion" {
-    const Bits = ProgressiveBitListType();
+    const Bits = ProgressiveBitListType(.{});
     var value = try Bits.Type.fromBitLen(std.testing.allocator, 300);
     defer value.deinit(std.testing.allocator);
 
@@ -85,7 +85,7 @@ test "memory_safety: progressive bit list tree.fromValue reclaims unpublished no
 
 test "progressive bitlist hashing streams delimiter boundaries without allocation" {
     const allocator = std.testing.allocator;
-    const Bits = ProgressiveBitListType();
+    const Bits = ProgressiveBitListType(.{});
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 8192 });
     defer pool.deinit();
     for ([_]usize{ 0, 1, 7, 8, 255, 256, 257, 1279, 1280, 1281, 5376, 5377, 21760, 21761 }) |len| {

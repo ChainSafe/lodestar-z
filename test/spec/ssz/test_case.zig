@@ -380,7 +380,7 @@ test "tree invalid-case normalization preserves resource errors" {
     try std.testing.expectError(error.InvalidSSZ, deserializeTree(ssz.BoolType(), &pool, &.{2}));
     try std.testing.expectError(
         error.OutOfMemory,
-        deserializeTree(ssz.FixedProgressiveListType(ssz.BoolType()), &pool, &.{1}),
+        deserializeTree(ssz.FixedProgressiveListType(ssz.BoolType(), .{}), &pool, &.{1}),
     );
 }
 

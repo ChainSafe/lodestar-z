@@ -22,6 +22,7 @@ pub fn main(init: std.process.Init) !void {
             spec_test_options.spec_test_out_dir,
         );
     }
+    try @import("download_ssz_spec_tests.zig").download(allocator, io);
 }
 
 fn write_version(io: std.Io) !void {
@@ -36,8 +37,9 @@ fn write_version(io: std.Io) !void {
         \\// Do not commit changes by hand.
         \\
         \\{s}
+        \\SSZ {s} sha256:{s}
         \\
-    , .{spec_test_options.spec_test_version});
+    , .{ spec_test_options.spec_test_version, spec_test_options.ssz_spec_test_version, spec_test_options.ssz_spec_test_sha256 });
     try writer.end();
 }
 
@@ -49,6 +51,15 @@ fn download_and_extract_spec_test(
     test_name: []const u8,
     out_dir: []const u8,
 ) !void {
+    const extracted_path = try std.fs.path.join(allocator, &.{ out_dir, spec_test_version, test_name });
+    defer allocator.free(extracted_path);
+    if (std.Io.Dir.openDir(.cwd(), io, extracted_path, .{})) |extracted| {
+        extracted.close(io);
+        std.log.info("already extracted {s} {s}", .{ spec_test_version, test_name });
+        return;
+    } else |err| {
+        if (err != error.FileNotFound) return err;
+    }
     try download_spec_test_archive(allocator, io, spec_test_url, spec_test_version, test_name, out_dir);
     try extract_spec_test_archive(allocator, io, spec_test_version, test_name, out_dir);
 }

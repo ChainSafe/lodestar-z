@@ -13,6 +13,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const ListBasicTreeView = @import("../tree_view/root.zig").ListBasicTreeView;
 
 pub fn isByteListType(ST: type) bool {
+    if (@import("progressive_byte_list.zig").isProgressiveByteListType(ST)) return true;
     return ST.kind == .list and ST.Element.kind == .uint and ST.Element.fixed_size == 1 and ST == ByteListType(ST.limit);
 }
 
