@@ -93,7 +93,7 @@ fn decodeHex(fixture_allocator: Allocator, encoded: []const u8) ![]u8 {
 const Fixture = struct {
     value: std.json.Value,
     bytes: []const u8,
-    root: [32]u8,
+    root_hex: []const u8,
     rejected: bool,
 };
 
@@ -101,14 +101,18 @@ fn loadFixture(fixture_allocator: Allocator, file: []const u8, test_id: []const 
     const content = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, file, fixture_allocator, .limited(16 * 1024 * 1024));
     const parsed = try std.json.parseFromSlice(std.json.Value, fixture_allocator, content, .{ .parse_numbers = false });
     const case = parsed.value.object.get(test_id) orelse return error.MissingTestCase;
-    const root_hex = case.object.get("root").?.string;
-    try std.testing.expectEqual(66, root_hex.len);
     return .{
         .value = case.object.get("value").?,
         .bytes = try decodeHex(fixture_allocator, (case.object.get("rawBytes") orelse case.object.get("serialized").?).string),
-        .root = try hex.hexToRoot(root_hex),
+        .root_hex = case.object.get("root").?.string,
         .rejected = case.object.contains("rejectionReason"),
     };
+}
+
+/// Invalid fixtures carry an empty root, so root parsing stays on the valid path.
+fn parseRoot(root_hex: []const u8) ![32]u8 {
+    try std.testing.expectEqual(66, root_hex.len);
+    return hex.hexToRoot(root_hex[0..66]);
 }
 
 fn deserializeFromBytes(comptime ST: type, fixture_allocator: Allocator, bytes: []const u8, out: *ST.Type) !void {
@@ -262,16 +266,17 @@ pub fn run(comptime ST: type, backing_allocator: Allocator, file: []const u8, te
         return;
     }
 
+    const root = try parseRoot(fixture.root_hex);
     var expected: ST.Type = undefined;
     try parseValue(ST, fixture_allocator, fixture.value, &expected);
     try expectValueSerializesTo(ST, fixture_allocator, &expected, fixture.bytes);
     try expectBytesDeserializeTo(ST, fixture_allocator, fixture.bytes, &expected);
-    try expectHashTreeRoot(ST, fixture_allocator, &expected, fixture.bytes, &fixture.root);
-    const node = try expectTreeRoundTrip(ST, fixture_allocator, &pool, &expected, fixture.bytes, &fixture.root);
+    try expectHashTreeRoot(ST, fixture_allocator, &expected, fixture.bytes, &root);
+    const node = try expectTreeRoundTrip(ST, fixture_allocator, &pool, &expected, fixture.bytes, &root);
     defer pool.unref(node);
 
     if (comptime !containsUnion(ST) and @hasDecl(ST, "TreeView")) {
-        try expectViewRoundTrip(ST, backing_allocator, fixture_allocator, &pool, node, fixture.bytes, &fixture.root);
+        try expectViewRoundTrip(ST, backing_allocator, fixture_allocator, &pool, node, fixture.bytes, &root);
     }
 }
 
