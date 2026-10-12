@@ -279,10 +279,7 @@ fn gatherWritable(self: *Connection) void {
         const entry_index = self.table.find(id) orelse continue;
         if (!self.table.matches(entry_index, id)) continue;
         const entry = &self.table.entries[entry_index];
-        if (!entry.stopped and !entry.fin_sent) if (self.stopCode(id)) |code| {
-            self.table.stop(entry_index, code);
-            continue;
-        };
+        if (!entry.stopped and !entry.fin_sent and self.capacityNative(entry_index, id) == c.QUICHE_ERR_STREAM_STOPPED) continue;
         if (entry.write_lowat > 0) self.table.markReady(entry_index, .{ .writable = true });
     }
     var armed = self.table.armed;
@@ -291,7 +288,7 @@ fn gatherWritable(self: *Connection) void {
         const entry_index: u8 = @intCast(@ctz(armed));
         armed &= armed - 1;
         const entry = &self.table.entries[entry_index];
-        const available = c.quiche_conn_stream_capacity(conn, entry.id);
+        const available = self.capacityNative(entry_index, entry.id);
         if (available < 0 or available >= entry.write_lowat) self.table.markReady(entry_index, .{ .writable = true });
     }
 }
@@ -536,7 +533,7 @@ fn writeNative(self: *Connection, index: u8, id: u64, bytes: []const u8, fin: bo
         return error.StreamStopped;
     }
     const length = try self.streamResult(index, rc) orelse {
-        const available = c.quiche_conn_stream_capacity(self.conn.?, id);
+        const available = self.capacityNative(index, id);
         if (available < 0 and available != c.QUICHE_ERR_DONE) {
             self.finishStream(index, null);
             return error.UnknownStream;
@@ -554,7 +551,7 @@ fn writeNative(self: *Connection, index: u8, id: u64, bytes: []const u8, fin: bo
 pub fn capacity(self: *Connection, index: u8, id: u64) Error!usize {
     assert(self.conn != null and self.table.matches(index, id));
     if (self.table.entries[index].stopped) return error.StreamStopped;
-    return (try self.streamResult(index, c.quiche_conn_stream_capacity(self.conn.?, id))) orelse error.WouldBlock;
+    return (try self.streamResult(index, self.capacityNative(index, id))) orelse error.WouldBlock;
 }
 
 fn streamResult(self: *Connection, index: u8, rc: isize) Error!?usize {
@@ -583,13 +580,14 @@ pub fn streamReadable(self: *const Connection, index: u8, id: u64) bool {
     return c.quiche_conn_stream_readable(self.conn.?, id);
 }
 
-/// The peer's STOP_SENDING code when it stopped the stream. quiche frees a stopped stream
-/// once its reset is acknowledged, so the code is read while the stream still exists.
-fn stopCode(self: *Connection, id: u64) ?u64 {
-    assert(self.conn != null);
+/// Capture STOP before the query can reclaim the completed native stream.
+fn capacityNative(self: *Connection, index: u8, id: u64) isize {
+    assert(self.conn != null and self.table.matches(index, id));
+    if (self.table.entries[index].stopped) return c.QUICHE_ERR_STREAM_STOPPED;
     var code: u64 = 0;
-    const rc = c.quiche_conn_stream_send(self.conn.?, id, "", 0, false, &code);
-    return if (rc == c.QUICHE_ERR_STREAM_STOPPED) code else null;
+    const rc = c.quiche_conn_stream_capacity_with_error(self.conn.?, id, &code);
+    if (rc == c.QUICHE_ERR_STREAM_STOPPED) self.table.stop(index, code);
+    return rc;
 }
 
 pub fn shutdown(

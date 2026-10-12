@@ -77,6 +77,32 @@ test "engine reports a stopped write on a stream that is still readable" {
     try std.testing.expectEqualStrings("x", buffer[0..(try pair.server.read(inbound, &buffer)).len]);
 }
 
+test "engine capacity preserves a STOP code before gathering writable streams" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+    const stream = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(stream, "x", true);
+    try pair.pump();
+    var storage: [8]Event = undefined;
+    const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    var buffer: [1]u8 = undefined;
+    try std.testing.expect((try pair.server.read(inbound, &buffer)).fin);
+
+    const code = std.math.maxInt(u62);
+    pair.client.shutdown(stream, .read, code);
+    try pair.flush(&pair.client);
+    try std.testing.expectError(error.StreamStopped, pair.server.streamCapacity(inbound));
+    const ready = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), ready.len);
+    try std.testing.expect(ready[0].stream_ready.ready.writable);
+    try std.testing.expectError(error.StreamStopped, pair.server.write(inbound, "y", false));
+    const closed = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), closed.len);
+    try std.testing.expectEqual(@as(?u64, code), try expectStreamClosed(closed[0], inbound));
+}
+
 test "engine streams echo data with fin in both directions" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});

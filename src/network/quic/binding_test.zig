@@ -1,6 +1,8 @@
 const std = @import("std");
 const binding = @import("binding.zig");
+const Engine = @import("Engine.zig");
 const limits = @import("limits.zig");
+const support = @import("test_support.zig");
 
 test "quiche config initializes with the transport bounds" {
     var config = try binding.Config.init(
@@ -19,6 +21,53 @@ test "quiche error codes map to tagged errors" {
     try std.testing.expectError(error.StreamReset, binding.check(binding.c.QUICHE_ERR_STREAM_RESET));
     try std.testing.expectError(error.Unknown, binding.check(@as(isize, -999)));
     try std.testing.expectEqual(@as(usize, 7), try binding.check(@as(isize, 7)));
+}
+
+test "quiche capacity query leaves the error code untouched on success and unknown streams" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    binding.c.quiche_config_set_initial_max_stream_data_bidi_remote(pair.server.config.ptr, 4096);
+    const handles = try support.connectPair(&pair);
+    const stream = try pair.client.openStream(handles.client);
+    const conn = pair.client.registry.slots[handles.client.index].conn.?;
+    var code: u64 = 123;
+    try std.testing.expectEqual(@as(isize, 4096), binding.c.quiche_conn_stream_capacity_with_error(conn, stream.id, &code));
+    try std.testing.expectEqual(@as(u64, 123), code);
+
+    try std.testing.expectEqual(@as(usize, 4096), try pair.client.write(stream, &@as([4096]u8, @splat(1)), false));
+    try std.testing.expectEqual(@as(isize, 0), binding.c.quiche_conn_stream_capacity_with_error(conn, stream.id, &code));
+    try std.testing.expectEqual(@as(u64, 123), code);
+    try std.testing.expectEqual(@as(isize, binding.c.QUICHE_ERR_INVALID_STREAM_STATE), binding.c.quiche_conn_stream_capacity_with_error(conn, stream.id + 4, &code));
+    try std.testing.expectEqual(@as(u64, 123), code);
+}
+
+test "quiche capacity query returns the STOP code before reclaiming the stream" {
+    for ([_]u64{ 0, 7, std.math.maxInt(u62) }) |stop_code| {
+        var pair: support.Pair = .{};
+        try pair.init(.{}, .{});
+        defer pair.deinit();
+        const handles = try support.connectPair(&pair);
+        const stream = try pair.client.openStream(handles.client);
+        _ = try pair.client.write(stream, "x", true);
+        try pair.pump();
+        var events: [8]Engine.Event = undefined;
+        const inbound = try support.expectStreamOpened(pair.events(&pair.server, &events)[0], handles.server);
+        var buffer: [1]u8 = undefined;
+        try std.testing.expect((try pair.server.read(inbound, &buffer)).fin);
+
+        pair.client.shutdown(stream, .read, stop_code);
+        try pair.flush(&pair.client);
+        try pair.flush(&pair.server);
+        try pair.flush(&pair.client);
+
+        const conn = pair.server.registry.slots[handles.server.index].conn.?;
+        var code: u64 = std.math.maxInt(u64);
+        try std.testing.expectEqual(@as(isize, binding.c.QUICHE_ERR_STREAM_STOPPED), binding.c.quiche_conn_stream_capacity_with_error(conn, inbound.id, &code));
+        try std.testing.expectEqual(stop_code, code);
+        try std.testing.expectEqual(@as(isize, binding.c.QUICHE_ERR_INVALID_STREAM_STATE), binding.c.quiche_conn_stream_capacity_with_error(conn, inbound.id, &code));
+        try std.testing.expectEqual(stop_code, code);
+    }
 }
 
 test "socket addresses convert to posix storage" {
