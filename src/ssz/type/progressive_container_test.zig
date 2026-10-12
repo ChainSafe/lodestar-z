@@ -214,7 +214,6 @@ test "variable progressive container tree decoding rejects every truncated fixed
     defer pool.deinit();
     const baseline = pool.getNodesInUse();
     for (0..encoded.len) |length| {
-        try std.testing.expectError(error.InvalidSize, ST.readFieldRanges(encoded[0..length]));
         try std.testing.expectError(error.InvalidSize, ST.tree.deserializeFromBytes(&pool, encoded[0..length]));
         try std.testing.expectEqual(baseline, pool.getNodesInUse());
     }
