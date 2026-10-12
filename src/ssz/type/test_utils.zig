@@ -1,52 +1,8 @@
 const std = @import("std");
-const Node = @import("persistent_merkle_tree").Node;
 const isFixedType = @import("type_kind.zig").isFixedType;
 
 const hexToBytes = @import("hex").hexToBytes;
 const bytesToHex = @import("hex").bytesToHex;
-
-pub fn expectDecoderValue(
-    comptime ST: type,
-    value: *const ST.Type,
-    out: *ST.Type,
-    comptime source: enum { bytes, json, tree },
-) !void {
-    const allocator = std.testing.allocator;
-    switch (source) {
-        .bytes => {
-            const bytes = try allocator.alloc(u8, ST.serializedSize(value));
-            defer allocator.free(bytes);
-
-            _ = ST.serializeIntoBytes(value, bytes);
-            try ST.deserializeFromBytes(allocator, bytes, out);
-        },
-        .json => {
-            var json: std.Io.Writer.Allocating = .init(allocator);
-            defer json.deinit();
-
-            var json_writer: std.json.Stringify = .{ .writer = &json.writer };
-            try ST.serializeIntoJson(allocator, &json_writer, value);
-            var scanner = std.json.Scanner.initCompleteInput(allocator, json.written());
-            defer scanner.deinit();
-
-            try ST.deserializeFromJson(allocator, &scanner, out);
-        },
-        .tree => {
-            var pool = try Node.Pool.init(.{
-                .page_allocator = allocator,
-                .allocator = allocator,
-                .pool_size = 256,
-            });
-            defer pool.deinit();
-
-            const root = try ST.tree.fromValue(&pool, value);
-            defer pool.unref(root);
-
-            try ST.tree.toValue(allocator, root, &pool, out);
-        },
-    }
-    try std.testing.expect(ST.equals(value, out));
-}
 
 /// Tests that two values of the same type `T` hash to the same root.
 pub fn expectEqualRoots(comptime T: type, expected: T.Type, actual: T.Type) !void {

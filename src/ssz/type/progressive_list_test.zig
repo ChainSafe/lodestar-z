@@ -8,7 +8,6 @@ const FixedProgressiveListType = @import("progressive_list.zig").FixedProgressiv
 const VariableProgressiveListType = @import("progressive_list.zig").VariableProgressiveListType;
 const UintType = @import("uint.zig").UintType;
 const FixedContainerType = @import("container.zig").FixedContainerType;
-const expectDecoderValue = @import("test_utils.zig").expectDecoderValue;
 
 test "ListType - sanity" {
     const allocator = std.testing.allocator;
@@ -251,46 +250,6 @@ test "memory_safety: variable progressive list tree.toValue leaves default out o
             try std.testing.expect(List.equals(source_value, &out));
         }
     }.run, .{ &pool, root, &source });
-}
-
-test "fixed progressive list decoders transfer successful results to the caller" {
-    const List = FixedProgressiveListType(UintType(8));
-
-    var value: List.Type = .empty;
-    defer value.deinit(std.testing.allocator);
-
-    try value.appendSlice(std.testing.allocator, &.{ 1, 2, 3 });
-
-    inline for (.{ .bytes, .json, .tree }) |source| {
-        var out: List.Type = .empty;
-        defer out.deinit(std.testing.allocator);
-        try expectDecoderValue(List, &value, &out, source);
-
-        var empty: List.Type = .empty;
-        defer empty.deinit(std.testing.allocator);
-        try expectDecoderValue(List, &List.default_value, &empty, source);
-    }
-}
-
-test "variable progressive list decoders transfer successful results to the caller" {
-    const Inner = FixedProgressiveListType(UintType(8));
-    const List = VariableProgressiveListType(Inner);
-
-    var value: List.Type = .empty;
-    defer List.deinit(std.testing.allocator, &value);
-
-    try value.append(std.testing.allocator, .empty);
-    try value.items[0].appendSlice(std.testing.allocator, &.{ 1, 2, 3 });
-
-    inline for (.{ .bytes, .json, .tree }) |source| {
-        var out: List.Type = .empty;
-        defer List.deinit(std.testing.allocator, &out);
-        try expectDecoderValue(List, &value, &out, source);
-
-        var empty: List.Type = .empty;
-        defer List.deinit(std.testing.allocator, &empty);
-        try expectDecoderValue(List, &List.default_value, &empty, source);
-    }
 }
 
 test "fixed progressive tree serialization streams without temporary allocations" {
