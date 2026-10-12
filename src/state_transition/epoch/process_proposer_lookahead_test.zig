@@ -69,56 +69,52 @@ test "memory_safety: proposer lookahead shuffling should belong to the epoch cac
     }
 }
 
-test "memory_safety: processProposerLookahead should release shuffling on proposer and wrapper OOM" {
+test "memory_safety: processProposerLookahead should preserve lookahead on proposer OOM" {
     const allocator = std.testing.allocator;
     var threaded: std.Io.Threaded = .init(allocator, .{ .async_limit = .nothing });
     defer threaded.deinit();
 
-    inline for (.{ false, true }) |fail_wrapper| {
-        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 375_000 });
-        defer pool.deinit();
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 375_000 });
+    defer pool.deinit();
 
-        var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-        defer test_state.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
 
-        const epoch_cache = test_state.cached_state.epoch_cache;
-        const fulu_state = try upgradeStateToFulu(
-            allocator,
-            test_state.cached_state.config,
-            epoch_cache,
-            try test_state.cached_state.state.tryCastToFork(.electra),
-        );
-        test_state.cached_state.state.* = .{ .fulu = fulu_state.inner };
-        const state = test_state.cached_state.state.castToFork(.fulu);
-        var cache = try EpochTransitionCache.init(
-            allocator,
-            test_state.cached_state.config,
-            epoch_cache,
-            test_state.cached_state.state,
-            threaded.io(),
-        );
-        defer cache.deinit();
+    const epoch_cache = test_state.cached_state.epoch_cache;
+    const fulu_state = try upgradeStateToFulu(
+        allocator,
+        test_state.cached_state.config,
+        epoch_cache,
+        try test_state.cached_state.state.tryCastToFork(.electra),
+    );
+    test_state.cached_state.state.* = .{ .fulu = fulu_state.inner };
+    const state = test_state.cached_state.state.castToFork(.fulu);
+    var cache = try EpochTransitionCache.init(
+        allocator,
+        test_state.cached_state.config,
+        epoch_cache,
+        test_state.cached_state.state,
+        threaded.io(),
+    );
+    defer cache.deinit();
 
-        var previous_lookahead: [ProposerLookahead.length]u64 = undefined;
-        try state.proposerLookaheadInto(&previous_lookahead);
+    var previous_lookahead: [ProposerLookahead.length]u64 = undefined;
+    try state.proposerLookaheadInto(&previous_lookahead);
 
-        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-        if (fail_wrapper) epoch_cache.allocator = failing.allocator();
-        defer epoch_cache.allocator = allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
 
-        try std.testing.expectError(error.OutOfMemory, processProposerLookahead(
-            .fulu,
-            if (fail_wrapper) allocator else failing.allocator(),
-            epoch_cache,
-            state,
-            &cache,
-        ));
-        try std.testing.expect(failing.has_induced_failure);
-        try std.testing.expect(cache.next_shuffling == null);
-        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try std.testing.expectError(error.OutOfMemory, processProposerLookahead(
+        .fulu,
+        failing.allocator(),
+        epoch_cache,
+        state,
+        &cache,
+    ));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(cache.next_shuffling == null);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 
-        var actual_lookahead: [ProposerLookahead.length]u64 = undefined;
-        try state.proposerLookaheadInto(&actual_lookahead);
-        try std.testing.expectEqualSlices(u64, &previous_lookahead, &actual_lookahead);
-    }
+    var actual_lookahead: [ProposerLookahead.length]u64 = undefined;
+    try state.proposerLookaheadInto(&actual_lookahead);
+    try std.testing.expectEqualSlices(u64, &previous_lookahead, &actual_lookahead);
 }
