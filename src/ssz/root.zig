@@ -39,6 +39,7 @@ pub const VariableProgressiveContainerType = types.VariableProgressiveContainerT
 
 // Progressive list types
 pub const FixedProgressiveListType = types.FixedProgressiveListType;
+pub const FixedProgressiveListTypeWithOptions = types.FixedProgressiveListTypeWithOptions;
 pub const VariableProgressiveListType = types.VariableProgressiveListType;
 
 // Progressive bit list

@@ -5,6 +5,9 @@ const Node = @import("persistent_merkle_tree").Node;
 const BoolType = @import("bool.zig").BoolType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedProgressiveListType = @import("progressive_list.zig").FixedProgressiveListType;
+const FixedProgressiveListTypeWithOptions = @import("progressive_list.zig").FixedProgressiveListTypeWithOptions;
+const FixedContainerType = @import("container.zig").FixedContainerType;
+const StructContainerType = @import("container.zig").StructContainerType;
 const UintType = @import("uint.zig").UintType;
 const FixedListType = @import("list.zig").FixedListType;
 const FixedProgressiveContainerType = @import("progressive_container.zig").FixedProgressiveContainerType;
@@ -137,6 +140,62 @@ test "memory_safety: nested progressive tree.fromValue reclaims unpublished node
     try value.items.append(std.testing.allocator, 1);
 
     try expectProgressiveFromValuePoolExhaustionReclaimsNodes(Container, &value, 32);
+}
+
+test "progressive container composes chunked leaf and struct container list fields" {
+    const allocator = std.testing.allocator;
+    const record_fields = struct { a: UintType(64), b: UintType(64) };
+    const Records = FixedProgressiveListType(FixedContainerType(record_fields));
+    const active_fields = [_]u1{ 1, 0, 1, 1 };
+    const Plain = VariableProgressiveContainerType(struct {
+        slot: UintType(64),
+        records: Records,
+        balances: FixedProgressiveListType(UintType(64)),
+    }, &active_fields);
+    const Optimized = VariableProgressiveContainerType(struct {
+        slot: UintType(64),
+        records: FixedProgressiveListType(StructContainerType(record_fields)),
+        balances: FixedProgressiveListTypeWithOptions(UintType(64), .{ .chunked_leaf = true }),
+    }, &active_fields);
+
+    var value = Plain.default_value;
+    defer Plain.deinit(allocator, &value);
+    value.slot = 7;
+    try value.records.resize(allocator, 22);
+    for (value.records.items, 0..) |*record, i| record.* = .{ .a = i, .b = i + 100 };
+    // 341 chunks reach the subtrees that hold chunked leaves.
+    try value.balances.resize(allocator, 341 * 4 - 1);
+    for (value.balances.items, 0..) |*balance, i| balance.* = i;
+
+    const bytes = try allocator.alloc(u8, Plain.serializedSize(&value));
+    defer allocator.free(bytes);
+    _ = Plain.serializeIntoBytes(&value, bytes);
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 4096,
+    });
+    defer pool.deinit();
+
+    const plain = try Plain.tree.fromValue(&pool, &value);
+    defer pool.unref(plain);
+    const optimized = try Optimized.tree.deserializeFromBytes(&pool, bytes);
+    defer pool.unref(optimized);
+    try std.testing.expectEqualSlices(u8, plain.getRoot(&pool), optimized.getRoot(&pool));
+
+    var out = Optimized.default_value;
+    defer Optimized.deinit(allocator, &out);
+    try Optimized.tree.toValue(allocator, optimized, &pool, &out);
+    try std.testing.expectEqual(7, out.slot);
+    try std.testing.expect(Records.equals(&value.records, &out.records));
+    try std.testing.expectEqualSlices(u64, value.balances.items, out.balances.items);
+
+    const encoded = try allocator.alloc(u8, bytes.len);
+    defer allocator.free(encoded);
+    const size = try Optimized.tree.serializeIntoBytes(optimized, &pool, encoded);
+    try std.testing.expectEqual(bytes.len, size);
+    try std.testing.expectEqualSlices(u8, bytes, encoded);
 }
 
 test "memory_safety: variable progressive container clone preserves out on OOM" {

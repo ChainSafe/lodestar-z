@@ -326,6 +326,37 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
         _ = try ST.tree.serializeIntoBytes(node, &pool, serialized_from_tree);
         try std.testing.expectEqualSlices(u8, serialized_expected, serialized_from_tree);
     }
+
+    // test the chunked-leaf tree layout
+    if (comptime ChunkedLayout(ST)) |Chunked| {
+        const from_value = try Chunked.tree.fromValue(&pool, value_expected);
+        defer pool.unref(from_value);
+
+        try std.testing.expectEqualSlices(u8, &root_expected, from_value.getRoot(&pool));
+
+        const value_from_tree = try allocator.create(Chunked.Type);
+        value_from_tree.* = Chunked.default_value;
+        try Chunked.tree.toValue(allocator, from_value, &pool, value_from_tree);
+        try std.testing.expect(Chunked.equals(value_expected, value_from_tree));
+
+        const from_bytes = try Chunked.tree.deserializeFromBytes(&pool, serialized_expected);
+        defer pool.unref(from_bytes);
+
+        try std.testing.expectEqualSlices(u8, &root_expected, from_bytes.getRoot(&pool));
+
+        const serialized_size = try Chunked.tree.serializedSize(from_bytes, &pool);
+        const serialized_from_tree = try allocator.alloc(u8, serialized_size);
+        defer allocator.free(serialized_from_tree);
+        _ = try Chunked.tree.serializeIntoBytes(from_bytes, &pool, serialized_from_tree);
+        try std.testing.expectEqualSlices(u8, serialized_expected, serialized_from_tree);
+    }
+}
+
+/// Basic progressive lists can also store their chunks in chunked leaves. That layout has the same
+/// root and the same bytes, so it must pass the same vectors.
+fn ChunkedLayout(comptime ST: type) ?type {
+    if (ST.kind != .progressive_list or !ssz.isBasicType(ST.Element)) return null;
+    return ssz.FixedProgressiveListTypeWithOptions(ST.Element, .{ .chunked_leaf = true });
 }
 
 pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir) !void {
@@ -358,6 +389,12 @@ pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir) !voi
     defer pool.deinit();
 
     try std.testing.expectError(error.InvalidSSZ, deserializeTree(ST, &pool, serialized_expected));
+    if (comptime ChunkedLayout(ST)) |Chunked| {
+        try std.testing.expectError(
+            error.InvalidSSZ,
+            deserializeTree(Chunked, &pool, serialized_expected),
+        );
+    }
 }
 
 fn deserializeTree(comptime ST: type, pool: *Node.Pool, serialized: []const u8) !void {
