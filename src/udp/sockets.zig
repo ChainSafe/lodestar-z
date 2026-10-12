@@ -2,6 +2,7 @@ const std = @import("std");
 const net = std.Io.net;
 const assert = std.debug.assert;
 const compat = @import("compat.zig");
+const native_io = @import("native.zig");
 const os = @import("builtin").os.tag;
 const native_sockets = compat.native_sockets;
 const Address = @import("address.zig").Address;
@@ -102,7 +103,7 @@ pub const Sockets = struct {
     pub const Outgoing = struct { to: Address, bytes: []const u8 };
     /// Exclusively borrowed during sendMany; no pointers are retained after it returns.
     pub const BatchScratch = union {
-        native: compat.NativeScratch,
+        native: native_io.SendScratch,
         provider: struct {
             addresses: [capacity]net.IpAddress,
             messages: [capacity]net.OutgoingMessage,
@@ -111,6 +112,19 @@ pub const Sockets = struct {
         pub const capacity = 16;
     };
     pub const Datagram = struct { from: Address, bytes: []u8 };
+    pub const receive_batch_max = 16;
+    pub const ReceiveScratch = native_io.ReceiveScratch;
+    /// The caller owns buffer. Only slots in ReceiveOutcome.received have a message.
+    pub const ReceiveSlot = struct {
+        buffer: []u8,
+        message: net.IncomingMessage = undefined,
+
+        pub fn datagram(self: *const ReceiveSlot) DatagramError!Datagram {
+            return checkedDatagram(self.message, self.buffer);
+        }
+    };
+    /// Received slots remain valid even when a later receive fails.
+    pub const ReceiveOutcome = struct { received: usize = 0, failure: ?ReceiveError = null };
 
     /// Kernel socket buffer sizes in bytes.
     pub const Buffers = struct {
@@ -172,11 +186,11 @@ pub const Sockets = struct {
             for (self.values, self.native, &self.buffers, &short) |socket, native, *reported, *below| {
                 if (!native) continue;
                 const handle = (socket orelse continue).handle;
-                compat.setBuffer(handle, p.SO.RCVBUF, request.receive);
-                compat.setBuffer(handle, p.SO.SNDBUF, request.send);
-                const sizes: Buffers.Reported = .{ .receive = compat.readBuffer(handle, p.SO.RCVBUF), .send = compat.readBuffer(handle, p.SO.SNDBUF) };
+                native_io.setBuffer(handle, p.SO.RCVBUF, request.receive);
+                native_io.setBuffer(handle, p.SO.SNDBUF, request.send);
+                const sizes: Buffers.Reported = .{ .receive = native_io.readBuffer(handle, p.SO.RCVBUF), .send = native_io.readBuffer(handle, p.SO.SNDBUF) };
                 reported.* = sizes;
-                below.* = compat.capped(sizes.receive, request.receive) or compat.capped(sizes.send, request.send);
+                below.* = native_io.capped(sizes.receive, request.receive) or native_io.capped(sizes.send, request.send);
             }
         }
         return short;
@@ -190,7 +204,7 @@ pub const Sockets = struct {
         if (comptime os != .linux) return result;
         for (self.values, self.native, &self.drop_counts, &result) |socket, native, *count, *total| {
             if (!native) continue;
-            total.* = count.add(compat.readDrops(socket.?.handle) orelse continue);
+            total.* = count.add(native_io.readDrops(socket.?.handle) orelse continue);
         }
         return result;
     }
@@ -276,12 +290,54 @@ pub const Sockets = struct {
     }
 
     pub fn receiveDatagram(self: *Sockets, io: std.Io, buffer: []u8, timeout: std.Io.Timeout) DatagramError!Datagram {
-        return datagram(try self.receiveTimeout(io, buffer, timeout), buffer);
+        return checkedDatagram(try self.receiveTimeout(io, buffer, timeout), buffer);
     }
 
     /// `receiveReady` as a datagram.
     pub fn receiveReadyDatagram(self: *Sockets, io: std.Io, buffer: []u8, ready: *[2]bool) DatagramError!?Datagram {
-        return try datagram((try self.receiveReady(io, buffer, ready)) orelse return null, buffer);
+        return try checkedDatagram((try self.receiveReady(io, buffer, ready)) orelse return null, buffer);
+    }
+
+    /// Nonblocking receive into independent caller-owned buffers. Ready families alternate
+    /// batches; an empty family is cleared. Process received slots before reusing their buffers.
+    /// Supply between one and receive_batch_max slots; every consumed datagram occupies a slot,
+    /// including truncated datagrams, which ReceiveSlot.datagram rejects individually.
+    pub fn receiveManyReady(
+        self: *Sockets,
+        io: std.Io,
+        slots: []ReceiveSlot,
+        ready: *[2]bool,
+        scratch: *ReceiveScratch,
+    ) ReceiveOutcome {
+        assert(slots.len > 0 and slots.len <= receive_batch_max);
+        for (0..2) |_| {
+            const family = self.cursor;
+            self.cursor +%= 1;
+            if (!ready[family]) continue;
+            const socket = self.values[family] orelse {
+                ready[family] = false;
+                continue;
+            };
+            if (!self.native[family] and compat.threadedReceive(io))
+                return .{ .failure = error.IncompatibleProvider };
+            if (os == .linux and self.native[family] and compat.threadedReceive(io)) {
+                const count = native_io.receiveMany(io, socket.handle, slots, scratch) catch |err|
+                    return .{ .failure = err };
+                if (count > 0) return .{ .received = count };
+                ready[family] = false;
+            } else {
+                for (slots, 0..) |*slot, count| {
+                    const received = receiveNow(io, socket, slot.buffer, self.native[family]) catch |err|
+                        return .{ .received = count, .failure = err };
+                    slot.message = received orelse {
+                        ready[family] = false;
+                        if (count > 0) return .{ .received = count };
+                        break;
+                    };
+                } else return .{ .received = slots.len };
+            }
+        }
+        return .{};
     }
 
     pub fn sendTo(self: *const Sockets, io: std.Io, destination: Address, bytes: []const u8, payload_max: usize) SendError!void {
@@ -291,7 +347,7 @@ pub const Sockets = struct {
         const socket = self.values[family] orelse return error.AddressFamilyUnsupported;
         if (!self.native[family] and compat.threadedSend(io)) return error.IncompatibleProvider;
         if (native_sockets) {
-            if (self.native[family] and compat.threadedSend(io)) return compat.sendNative(io, socket.handle, &address, bytes);
+            if (self.native[family] and compat.threadedSend(io)) return native_io.send(io, socket.handle, &address, bytes);
         }
         try socket.send(io, &address, bytes);
     }
@@ -312,7 +368,7 @@ pub const Sockets = struct {
             const run = messages[begin..end];
             const outcome = if (native_sockets and self.native[family] and compat.threadedSend(io)) blk: {
                 scratch.* = .{ .native = undefined };
-                break :blk compat.sendManyNative(io, socket.handle, run, &scratch.native);
+                break :blk native_io.sendMany(io, socket.handle, run, &scratch.native);
             } else sendProvider(io, socket.handle, run, scratch);
             assert(outcome.sent <= run.len);
             assert((outcome.failure == null) == (outcome.sent == run.len));
@@ -339,7 +395,7 @@ pub const Sockets = struct {
         return duration.raw.nanoseconds <= 0;
     }
 
-    fn datagram(incoming: net.IncomingMessage, buffer: []u8) DatagramError!Datagram {
+    fn checkedDatagram(incoming: net.IncomingMessage, buffer: []u8) DatagramError!Datagram {
         if (incoming.from.getPort() == 0) return error.InvalidSourceAddress;
         if (incoming.flags.trunc) return error.DatagramTooLarge;
         assert(incoming.data.len <= buffer.len);
@@ -349,7 +405,7 @@ pub const Sockets = struct {
     fn receiveNow(io: std.Io, socket: net.Socket, buffer: []u8, native: bool) ReceiveError!?net.IncomingMessage {
         if (!native and compat.threadedReceive(io)) return error.IncompatibleProvider;
         if (native_sockets) {
-            if (native and compat.threadedReceive(io)) return compat.receiveNative(io, socket.handle, buffer);
+            if (native and compat.threadedReceive(io)) return native_io.receive(io, socket.handle, buffer);
         }
         return socket.receiveTimeout(io, buffer, .{ .duration = .{ .raw = .zero, .clock = .awake } }) catch |err| switch (err) {
             error.Timeout => null,

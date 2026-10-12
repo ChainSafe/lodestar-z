@@ -1,4 +1,5 @@
 const std = @import("std");
+const FaultIo = @import("fault_io");
 const Sockets = @import("sockets.zig").Sockets;
 const Address = @import("address.zig").Address;
 const payload_max = 1500;
@@ -387,4 +388,79 @@ test "UDP refuses a destination with port zero without panicking" {
     var socket = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer socket.close(std.testing.io);
     try std.testing.expectError(error.DestinationRefused, socket.sendTo(std.testing.io, Address.fromNetwork(.{ .ip4 = .loopback(0) }), "x", payload_max));
+}
+
+test "UDP receive batches preserve sources lengths truncation and buffer ownership" {
+    for ([_]bool{ false, true }) |provider| {
+        var target = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+        defer target.close(std.testing.io);
+        var other = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+        defer other.close(std.testing.io);
+        const payloads = [_][]const u8{ "first", "", "too large", "last" };
+        for (payloads, 0..) |payload, i| {
+            const sender = if (i % 2 == 0) &target else &other;
+            try sender.sendTo(std.testing.io, target.localAddress(), payload, 16);
+        }
+        var buffers: [4][5]u8 = undefined;
+        var slots: [4]Sockets.ReceiveSlot = undefined;
+        for (&slots, &buffers) |*slot, *buffer| slot.* = .{ .buffer = buffer };
+        var scratch: Sockets.ReceiveScratch = undefined;
+        var ready: [2]bool = .{ true, false };
+        var faults: FaultIo = .{};
+        const io = if (provider) faults.io() else std.testing.io;
+        const result = target.receiveManyReady(io, &slots, &ready, &scratch);
+        try std.testing.expectEqual(Sockets.ReceiveOutcome{ .received = 4 }, result);
+        for (&slots, payloads, 0..) |*slot, payload, i| {
+            try std.testing.expect(slot.message.data.ptr == &buffers[i]);
+            const sender = if (i % 2 == 0) &target else &other;
+            try std.testing.expect(Address.fromNetwork(slot.message.from).eql(sender.localAddress()));
+            if (i == 2) {
+                try std.testing.expectError(error.DatagramTooLarge, slot.datagram());
+            } else try std.testing.expectEqualStrings(payload, (try slot.datagram()).bytes);
+        }
+        try std.testing.expectEqual(Sockets.ReceiveOutcome{}, target.receiveManyReady(io, &slots, &ready, &scratch));
+        try std.testing.expect(!ready[0]);
+        try other.sendTo(std.testing.io, target.localAddress(), "new", 16);
+        ready = .{ true, false };
+        try std.testing.expectEqual(Sockets.ReceiveOutcome{ .received = 1 }, target.receiveManyReady(io, slots[0..1], &ready, &scratch));
+        try std.testing.expectEqualStrings("new", (try slots[0].datagram()).bytes);
+    }
+}
+
+test "UDP receive batches alternate ready families and leave unmarked input queued" {
+    var target = try Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    defer target.close(std.testing.io);
+    const local = target.localAddresses();
+    for (0..3) |_| for (local) |address| try target.sendTo(std.testing.io, address.?, "data", 16);
+    var buffers: [2][8]u8 = undefined;
+    var slots: [2]Sockets.ReceiveSlot = undefined;
+    for (&slots, &buffers) |*slot, *buffer| slot.* = .{ .buffer = buffer };
+    var scratch: Sockets.ReceiveScratch = undefined;
+    var ready: [2]bool = .{ false, true };
+    try std.testing.expectEqual(Sockets.ReceiveOutcome{ .received = 2 }, target.receiveManyReady(std.testing.io, &slots, &ready, &scratch));
+    try std.testing.expect((try slots[0].datagram()).from == .ip6);
+    ready = .{ true, true };
+    for ([_]usize{ 2, 1, 1 }, [_]usize{ 0, 1, 0 }) |count, family| {
+        try std.testing.expectEqual(Sockets.ReceiveOutcome{ .received = count }, target.receiveManyReady(std.testing.io, &slots, &ready, &scratch));
+        for (slots[0..count]) |*slot| try std.testing.expect((try slot.datagram()).from.eql(local[family].?));
+    }
+    try std.testing.expectEqual(Sockets.ReceiveOutcome{}, target.receiveManyReady(std.testing.io, &slots, &ready, &scratch));
+    try std.testing.expectEqual([2]bool{ false, false }, ready);
+}
+
+test "UDP provider receive batches keep their prefix on cancellation" {
+    var target = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer target.close(std.testing.io);
+    for ([_][]const u8{ "first", "next" }) |payload| try target.sendTo(std.testing.io, target.localAddress(), payload, 16);
+    var buffers: [2][8]u8 = undefined;
+    var slots: [2]Sockets.ReceiveSlot = undefined;
+    for (&slots, &buffers) |*slot, *buffer| slot.* = .{ .buffer = buffer };
+    var scratch: Sockets.ReceiveScratch = undefined;
+    var ready: [2]bool = .{ true, false };
+    var faults: FaultIo = .{ .receive = .{ .at = 2 } };
+    const result = target.receiveManyReady(faults.io(), &slots, &ready, &scratch);
+    try std.testing.expectEqual(Sockets.ReceiveOutcome{ .received = 1, .failure = error.Canceled }, result);
+    try std.testing.expectEqualStrings("first", (try slots[0].datagram()).bytes);
+    try std.testing.expectEqual(Sockets.ReceiveOutcome{ .received = 1 }, target.receiveManyReady(std.testing.io, &slots, &ready, &scratch));
+    try std.testing.expectEqualStrings("next", (try slots[0].datagram()).bytes);
 }

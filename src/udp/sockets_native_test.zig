@@ -221,10 +221,12 @@ test "UDP native batch preserves its successful prefix when the next call report
             if (self.installation != .installed) return;
             const destination = sender.primary().address;
             const broadcast: net.IpAddress = .{ .ip4 = .{ .bytes = @splat(255), .port = destination.ip4.port } };
-            // The first call sends one datagram before broadcast refusal. Its successful prefix
+            // The first call sends a segmented group before broadcast refusal. Its successful prefix
             // hides that errno; the next call sees the injected EAGAIN on its own unsent suffix.
             const messages = [_]Sockets.Outgoing{
-                .{ .to = Address.fromNetwork(destination), .bytes = "prefix" },
+                .{ .to = Address.fromNetwork(destination), .bytes = "first!" },
+                .{ .to = Address.fromNetwork(destination), .bytes = "second" },
+                .{ .to = Address.fromNetwork(destination), .bytes = "third!" },
                 .{ .to = Address.fromNetwork(broadcast), .bytes = "suffix" },
             };
             self.outcome = sendMany(sender, std.testing.io, &messages);
@@ -234,9 +236,10 @@ test "UDP native batch preserves its successful prefix when the next call report
     const thread = try std.Thread.spawn(.{}, Partial.run, .{ &partial, &sockets });
     thread.join();
     try partial.installation.require();
-    try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 1, .failure = error.WouldBlock }, partial.outcome);
+    try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 3, .failure = error.WouldBlock }, partial.outcome);
     var buffer: [16]u8 = undefined;
-    try std.testing.expectEqualStrings("prefix", (try readAny(&sockets, std.testing.io, &buffer)).?.data);
+    for ([_][]const u8{ "first!", "second", "third!" }) |expected|
+        try std.testing.expectEqualStrings(expected, (try readAny(&sockets, std.testing.io, &buffer)).?.data);
     try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
 }
 
@@ -295,4 +298,126 @@ test "dual-stack UDP stops at pressure without sending or retaining later famili
         try std.testing.expect(message.from == .ip4);
     }
     try std.testing.expectEqual(null, try target.receiveReadyDatagram(std.testing.io, &buffer, &ready));
+}
+
+test "UDP GSO segments separate buffers and preserves short and empty datagrams" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var target = try Sockets.bind(std.testing.io, loopbacks);
+    defer target.close(std.testing.io);
+    var scratch: Sockets.BatchScratch = undefined;
+    var buffers: [Sockets.BatchScratch.capacity][1_200]u8 = undefined;
+    var messages: [Sockets.BatchScratch.capacity]Sockets.Outgoing = undefined;
+    for (target.localAddresses()) |address| {
+        for (&messages, &buffers, 0..) |*message, *buffer, i| {
+            @memset(buffer, @intCast(i));
+            message.* = .{ .to = address.?, .bytes = if (i == buffers.len - 1) buffer[0..19] else buffer };
+        }
+        const sent = target.sendMany(std.testing.io, &messages, 1_200, &scratch);
+        try std.testing.expectEqual(Sockets.SendOutcome{ .sent = messages.len, .failure = null }, sent);
+        // One kernel message proves segmentation was used, not just the plain-send fallback.
+        try std.testing.expectEqual(messages.len, scratch.native.headers[0].hdr.iovlen);
+        var received: [1_200]u8 = undefined;
+        for (messages) |message| {
+            const packet = (try readAny(&target, std.testing.io, &received)).?;
+            try std.testing.expectEqualSlices(u8, message.bytes, packet.data);
+            try std.testing.expect(Address.fromNetwork(packet.from).eql(address.?));
+        }
+        try std.testing.expectEqual(null, try readAny(&target, std.testing.io, &received));
+        const sizes = [_]usize{ 8, 8, 3, 8, 0, 8, 8 };
+        for (messages[0..sizes.len], sizes, 0..) |*message, size, i| message.bytes = buffers[i][0..size];
+        try std.testing.expectEqual(Sockets.SendOutcome{ .sent = sizes.len, .failure = null }, target.sendMany(std.testing.io, messages[0..sizes.len], 1_200, &scratch));
+        for (messages[0..sizes.len]) |message|
+            try std.testing.expectEqualSlices(u8, message.bytes, (try readAny(&target, std.testing.io, &received)).?.data);
+        try std.testing.expectEqual(null, try readAny(&target, std.testing.io, &received));
+    }
+}
+
+test "UDP GSO fallback preserves an accepted prefix and the original destination failure" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var target = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer target.close(std.testing.io);
+    for ([_]std.os.linux.E{ .INVAL, .IO, .MSGSIZE, .NOPROTOOPT, .OPNOTSUPP }) |errno| {
+        for ([_]bool{ false, true }) |prefix| {
+            var fallback: GsoFallback = .{ .errno = errno, .prefix = prefix };
+            const thread = try std.Thread.spawn(.{}, GsoFallback.run, .{ &fallback, &target });
+            thread.join();
+            try fallback.installation.require();
+            try std.testing.expectEqual(Sockets.SendOutcome{
+                .sent = if (prefix) 2 else 3,
+                .failure = if (prefix) error.DestinationRefused else null,
+            }, fallback.outcome);
+            var buffer: [16]u8 = undefined;
+            for (0..fallback.outcome.sent) |_| try std.testing.expectEqualStrings("packet", (try readAny(&target, std.testing.io, &buffer)).?.data);
+            try std.testing.expectEqual(null, try readAny(&target, std.testing.io, &buffer));
+        }
+    }
+}
+
+const GsoFallback = struct {
+    errno: std.os.linux.E,
+    prefix: bool,
+    installation: native.Seccomp.Installation = undefined,
+    outcome: Sockets.SendOutcome = undefined,
+
+    fn run(self: *GsoFallback, socket: *const Sockets) void {
+        const linux = std.os.linux;
+        const bpf = linux.BPF;
+        const word: u32 = if (comptime @import("builtin").cpu.arch.endian() == .little) 0 else 4;
+        // Refuse a single GSO group; the fallback's multiple individual messages remain allowed.
+        const filter = [_]native.Seccomp.Instruction{
+            .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "nr") },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 3, .k = @intFromEnum(linux.SYS.sendmmsg) },
+            .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "arg2") + word },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 1, .k = 1 },
+            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(self.errno)) },
+            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ALLOW },
+        };
+        self.installation = native.Seccomp.install(&filter);
+        if (self.installation != .installed) return;
+        const valid = socket.localAddress();
+        var invalid = valid;
+        invalid.ip4.port = 0;
+        const messages = [_]Sockets.Outgoing{
+            .{ .to = valid, .bytes = "packet" },
+            .{ .to = valid, .bytes = "packet" },
+            .{ .to = if (self.prefix) invalid else valid, .bytes = "packet" },
+            .{ .to = invalid, .bytes = "packet" },
+        };
+        self.outcome = sendMany(socket, std.testing.io, messages[0..@as(usize, if (self.prefix) 4 else 3)]);
+    }
+};
+
+test "UDP native receive batches use one syscall and cancellation leaves the next batch queued" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const Checks = struct {
+        calls: usize = 0,
+        cancel: bool = false,
+        fn check(context: ?*anyopaque) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (self.cancel) return error.Canceled;
+        }
+    };
+    var target = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer target.close(std.testing.io);
+    for (0..Sockets.receive_batch_max + 1) |i|
+        try target.sendTo(std.testing.io, target.localAddress(), &.{@intCast(i)}, 1);
+    var buffers: [Sockets.receive_batch_max][1]u8 = undefined;
+    var slots: [Sockets.receive_batch_max]Sockets.ReceiveSlot = undefined;
+    for (&slots, &buffers) |*slot, *buffer| slot.* = .{ .buffer = buffer };
+    var scratch: Sockets.ReceiveScratch = undefined;
+    var ready: [2]bool = .{ true, false };
+    var checks: Checks = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.checkCancel = Checks.check;
+    const io: std.Io = .{ .userdata = &checks, .vtable = &vtable };
+    try std.testing.expectEqual(Sockets.ReceiveOutcome{ .received = slots.len }, target.receiveManyReady(io, &slots, &ready, &scratch));
+    try std.testing.expectEqual(@as(usize, 1), checks.calls);
+    for (&slots, 0..) |*slot, i|
+        try std.testing.expectEqualSlices(u8, &.{@intCast(i)}, (try slot.datagram()).bytes);
+    checks.cancel = true;
+    try std.testing.expectEqual(Sockets.ReceiveOutcome{ .failure = error.Canceled }, target.receiveManyReady(io, &slots, &ready, &scratch));
+    try std.testing.expectEqual(Sockets.ReceiveOutcome{ .received = 1 }, target.receiveManyReady(std.testing.io, &slots, &ready, &scratch));
+    try std.testing.expectEqualSlices(u8, &.{Sockets.receive_batch_max}, (try slots[0].datagram()).bytes);
+    try std.testing.expectEqual(Sockets.ReceiveOutcome{}, target.receiveManyReady(std.testing.io, &slots, &ready, &scratch));
 }

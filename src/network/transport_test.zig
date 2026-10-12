@@ -199,7 +199,7 @@ test "transport requests configured socket buffers and records the kernel's size
     try std.testing.expectEqual(null, sized.sockets.buffers[1]);
 }
 
-test "transport memory plan accounts for its send batch" {
+test "transport memory plan accounts for its packet batches" {
     var node: Transport = .{};
     try initTransport(&node, 28);
     defer node.deinit(std.testing.io);
@@ -207,4 +207,5 @@ test "transport memory plan accounts for its send batch" {
     try std.testing.expectEqual(node.engine.memoryPlan(), plan.engine);
     try std.testing.expectEqual(node.batch.buffers.len, plan.ready_batch_datagrams);
     try std.testing.expectEqual(@sizeOf(@TypeOf(node.batch)), plan.ready_batch_storage_bytes);
+    try std.testing.expectEqual(@sizeOf(@TypeOf(node.receive_batch)), plan.receive_batch_storage_bytes);
 }

@@ -19,7 +19,7 @@ pub const Transport = struct {
     work_limits: WorkLimits = .{},
     batch: SendBatch = .{},
     batch_len: u8 = 0,
-    receive_buffer: [constants.datagram_size_max]u8 = undefined,
+    receive_batch: ReceiveBatch = undefined,
 
     pub const Options = struct {
         host: *const keys.KeyPair,
@@ -50,8 +50,8 @@ pub const Transport = struct {
         }
     };
 
-    /// One sendmmsg batch. quiche writes each datagram straight into `buffers`, and datagrams of
-    /// different connections share a batch.
+    /// quiche writes each datagram straight into buffers. The socket sender may group adjacent
+    /// datagrams for segmentation offload; owners and budgets always count individual datagrams.
     pub const SendBatch = struct {
         buffers: [constants.send_batch_max][constants.datagram_size_max]u8 = undefined,
         outgoing: [constants.send_batch_max]Sockets.Outgoing = undefined,
@@ -60,21 +60,22 @@ pub const Transport = struct {
         owners: [constants.send_batch_max]types.Handle = undefined,
     };
 
-    /// Configured QUIC windows and the send batch, excluding native overhead.
+    pub const ReceiveBatch = struct {
+        buffers: [Sockets.receive_batch_max][constants.datagram_size_max]u8,
+        slots: [Sockets.receive_batch_max]Sockets.ReceiveSlot,
+        scratch: Sockets.ReceiveScratch,
+    };
+
+    /// Configured QUIC windows and packet batches, excluding native overhead.
     pub const MemoryPlan = struct {
         engine: Engine.MemoryPlan,
         ready_batch_datagrams: u8 = constants.send_batch_max,
         ready_batch_storage_bytes: u64 = @sizeOf(SendBatch),
+        receive_batch_storage_bytes: u64 = @sizeOf(ReceiveBatch),
     };
 
     pub const AdvanceError = Sockets.DatagramError;
     pub const DialError = Sockets.SendError || Engine.DialError || error{ DestinationUnreachable, MissingPeerId };
-
-    const Received = union(enum) {
-        datagram: Sockets.Datagram,
-        dropped,
-        timeout,
-    };
 
     pub const Progress = struct {
         now: Engine.Now,
@@ -246,8 +247,8 @@ pub const Transport = struct {
     }
 
     /// Non-blocking drain of the QUIC sockets into the engine, up to the receive budget. Reads
-    /// only the families `ready` marks, indexed like the sockets, alternating while both hold
-    /// datagrams. A family found empty is not read again this turn; a later arrival keeps its
+    /// only the families `ready` marks, indexed like the sockets, alternating bounded batches.
+    /// A family found empty is not read again this turn; a later arrival keeps its
     /// socket readable for the owner's next poll.
     pub fn receive(self: *Transport, io: std.Io, result: *Progress, ready: [2]bool) AdvanceError!void {
         return self.receiveBatch(io, result, ready);
@@ -380,37 +381,47 @@ pub const Transport = struct {
             self.counters.receive_turns +|= 1;
             self.counters.receive_budget_exhausted +|= @intFromBool(count == self.work_limits.receive_per_turn_max);
         }
-        while (count < self.work_limits.receive_per_turn_max) : (count += 1) {
-            const admitted = switch (try self.receiveDatagram(io, result, &eligible)) {
-                .timeout => break,
-                .dropped => continue,
-                .datagram => |datagram| datagram,
-            };
-            result.datagrams_received += 1;
-            // Version negotiation and retry replies use the idle batch buffer.
-            const outcome = self.engine.receive(admitted.bytes, &admitted.from, result.now, &self.batch.buffers[0]);
-            switch (outcome) {
-                .accepted => result.datagrams_accepted += 1,
-                .version_negotiation, .retry => |bytes| {
-                    self.sendReply(io, admitted.from, bytes) catch |err| {
-                        if (err == error.Canceled) return error.Canceled;
-                    };
-                    if (outcome == .version_negotiation) result.version_negotiations += 1;
-                },
-                .dropped => result.datagrams_dropped += 1,
+        while (count < self.work_limits.receive_per_turn_max) {
+            const room = @min(Sockets.receive_batch_max, self.work_limits.receive_per_turn_max - count);
+            const slots = self.receive_batch.slots[0..room];
+            for (slots, self.receive_batch.buffers[0..room]) |*slot, *buffer|
+                slot.* = .{ .buffer = buffer };
+            const received = self.sockets.receiveManyReady(io, slots, &eligible, &self.receive_batch.scratch);
+            for (slots[0..received.received]) |*slot| {
+                count += 1;
+                const datagram = slot.datagram() catch |err| {
+                    try self.recordReceiveError(result, err);
+                    continue;
+                };
+                self.counters.received_datagrams +|= 1;
+                self.counters.received_bytes +|= datagram.bytes.len;
+                try self.receivePacket(io, result, &datagram);
             }
+            if (received.failure) |err| {
+                count += 1;
+                try self.recordReceiveError(result, err);
+            } else if (received.received == 0) break;
         }
     }
 
-    fn receiveDatagram(
-        self: *Transport,
-        io: std.Io,
-        result: *Progress,
-        ready: *[2]bool,
-    ) AdvanceError!Received {
-        const received = self.sockets.receiveReadyDatagram(io, &self.receive_buffer, ready);
-        const datagram = received catch |err| switch (err) {
-            error.Timeout => return .timeout,
+    fn receivePacket(self: *Transport, io: std.Io, result: *Progress, datagram: *const Sockets.Datagram) AdvanceError!void {
+        result.datagrams_received += 1;
+        // Version negotiation and retry replies use the idle send batch buffer.
+        const outcome = self.engine.receive(datagram.bytes, &datagram.from, result.now, &self.batch.buffers[0]);
+        switch (outcome) {
+            .accepted => result.datagrams_accepted += 1,
+            .version_negotiation, .retry => |bytes| {
+                self.sendReply(io, datagram.from, bytes) catch |err| {
+                    if (err == error.Canceled) return error.Canceled;
+                };
+                if (outcome == .version_negotiation) result.version_negotiations += 1;
+            },
+            .dropped => result.datagrams_dropped += 1,
+        }
+    }
+
+    fn recordReceiveError(self: *Transport, result: *Progress, err: AdvanceError) AdvanceError!void {
+        switch (err) {
             error.DatagramTooLarge,
             error.InvalidSourceAddress,
             error.PortUnreachable,
@@ -420,15 +431,11 @@ pub const Transport = struct {
             => {
                 if (err == error.DatagramTooLarge) self.counters.received_datagrams +|= 1;
                 result.receive_errors += 1;
-                return .dropped;
             },
             else => return err,
-        };
-        const packet = datagram orelse return .timeout;
-        self.counters.received_datagrams +|= 1;
-        self.counters.received_bytes +|= packet.bytes.len;
-        return .{ .datagram = packet };
+        }
     }
+
     fn sendReply(self: *Transport, io: std.Io, destination: types.Address, bytes: []const u8) Sockets.SendError!void {
         self.sockets.sendTo(io, destination, bytes, constants.datagram_size_max) catch |err| {
             if (Sockets.SendDrops.Reason.fromError(err)) |reason| self.send_drops.add(reason, bytes.len);
@@ -446,7 +453,7 @@ pub const Transport = struct {
     }
 
     comptime {
-        assert(@sizeOf(Transport) <= 32 * 1_024);
+        assert(@sizeOf(Transport) <= 64 * 1_024);
         assert(send_burst_max % constants.send_batch_max == 0);
     }
 };

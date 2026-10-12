@@ -1047,3 +1047,30 @@ test "transport wait cancellation publishes existing events without flushing new
     try std.testing.expectEqual(@as(u32, 0), result.progress.datagrams_sent);
     try std.testing.expect(node.transport.schedule(1).runnable);
 }
+
+test "transport caps the final receive batch at the remaining budget including truncation" {
+    var node: Node = .{};
+    try node.init(43);
+    defer node.deinit();
+    const transport = &node.transport;
+    transport.work_limits.receive_per_turn_max = udp_mod.Sockets.receive_batch_max + 1;
+    const oversized = [_]u8{0} ** (constants.datagram_size_max + 1);
+    const socket = transport.sockets.primary();
+    for (0..20) |i| {
+        const payload: []const u8 = if (i == udp_mod.Sockets.receive_batch_max) &oversized else &.{0};
+        try socket.send(std.testing.io, &socket.address, payload);
+    }
+    const now = try Now.read(std.testing.io);
+    var first: Transport.Progress = .{ .now = now };
+    try transport.receive(std.testing.io, &first, .{ true, false });
+    try std.testing.expectEqual(@as(u32, 16), first.datagrams_received);
+    try std.testing.expectEqual(@as(u32, 1), first.receive_errors);
+    try std.testing.expectEqual(@as(u64, 1), transport.counters.receive_budget_exhausted);
+    var next: Transport.Progress = .{ .now = now };
+    try transport.receive(std.testing.io, &next, .{ true, false });
+    try std.testing.expectEqual(@as(u32, 3), next.datagrams_received);
+    try std.testing.expectEqual(@as(u32, 0), next.receive_errors);
+    try std.testing.expectEqual(@as(u64, 20), transport.counters.received_datagrams);
+    try std.testing.expectEqual(@as(u64, 19), transport.counters.received_bytes);
+    try std.testing.expectEqual(@as(u64, 1), transport.counters.receive_budget_exhausted);
+}
