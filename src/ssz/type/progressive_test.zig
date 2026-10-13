@@ -60,3 +60,26 @@ test "progressive accumulator enforces length and finish state" {
     try std.testing.expectError(error.InvalidState, accumulator.append(&root));
     try std.testing.expectError(error.InputTooLong, progressive.MerkleAccumulator.init(std.math.maxInt(usize)));
 }
+
+test "progressive chunk gindices address the built tree" {
+    const allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 512,
+    });
+    defer pool.deinit();
+
+    // Fills subtrees 0 to 3 and starts subtree 4.
+    var nodes: [86]Node.Id = undefined;
+    for (&nodes, 0..) |*node, i| node.* = try pool.createLeaf(&@as([32]u8, @splat(@truncate(i))));
+    const leaves = nodes;
+
+    const tree = try progressive.fillWithContents(allocator, &pool, &nodes);
+    defer pool.unref(tree);
+
+    for (leaves, 0..) |leaf, i| {
+        try std.testing.expectEqual(leaf, try tree.getNode(&pool, progressive.chunkGindex(i)));
+    }
+}

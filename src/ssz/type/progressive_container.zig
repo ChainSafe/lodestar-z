@@ -362,7 +362,8 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         pub fn getFieldGindex(comptime name: []const u8) Gindex {
             const field_i = getFieldIndex(name);
             const field_idx = comptime getActiveFieldIndex(active_fields, field_i);
-            return comptime progressive.chunkGindex(field_idx);
+            const chunk_gindex = comptime progressive.chunkGindex(field_idx);
+            return comptime Gindex.concat(&.{ @enumFromInt(2), chunk_gindex });
         }
     };
 }
@@ -691,7 +692,8 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
         pub fn getFieldGindex(comptime name: []const u8) Gindex {
             const field_i = getFieldIndex(name);
             const field_idx = comptime getActiveFieldIndex(active_fields, field_i);
-            return comptime progressive.chunkGindex(field_idx);
+            const chunk_gindex = comptime progressive.chunkGindex(field_idx);
+            return comptime Gindex.concat(&.{ @enumFromInt(2), chunk_gindex });
         }
 
         // Returns the bytes ranges of all fields, both variable and fixed size.

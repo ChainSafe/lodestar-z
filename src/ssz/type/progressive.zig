@@ -10,20 +10,24 @@ const scaling_factor = 4;
 pub fn chunkGindex(chunk_i: usize) Gindex {
     const subtree_i = subtreeIndex(chunk_i);
     var gindex: Gindex.Uint = 1;
-    var subtree_starting_index = 0;
+    var subtree_starting_index: usize = 0;
     for (0..subtree_i) |i| {
         gindex = gindex * 2 + 1;
         subtree_starting_index += subtreeLength(i);
     }
 
     gindex *= 2;
-    gindex *= try std.math.powi(usize, 2, subtreeDepth(subtree_i));
+    gindex = @shlExact(gindex, subtreeDepth(subtree_i));
     gindex += chunk_i - subtree_starting_index;
     return @enumFromInt(gindex);
 }
 
 pub fn subtreeIndex(chunk_i: usize) usize {
-    var left: usize = chunk_i;
+    return subtreeCount(chunk_i + 1) - 1;
+}
+
+pub fn subtreeCount(chunk_count: usize) usize {
+    var left: usize = chunk_count;
     var subtree_length: usize = base_count;
     var subtree_i: usize = 0;
     while (left > 0) {
@@ -158,7 +162,7 @@ pub const NodeIterator = struct {
 };
 
 pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
-    const subtree_count = subtreeIndex(out.len);
+    const subtree_count = subtreeCount(out.len);
     var n = root;
     var l: usize = 0;
     for (0..subtree_count) |subtree_i| {
@@ -195,7 +199,7 @@ pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
 }
 
 pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, nodes: *[node_count]Node.Id) !Node.Id {
-    const subtree_count = comptime subtreeIndex(node_count);
+    const subtree_count = comptime subtreeCount(node_count);
     var n: Node.Id = @enumFromInt(0);
     errdefer pool.unref(n);
 

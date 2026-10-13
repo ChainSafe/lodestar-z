@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const Node = @import("persistent_merkle_tree").Node;
-const Gindex = @import("persistent_merkle_tree").Gindex;
 const proof = @import("persistent_merkle_tree").proof;
 const BoolType = @import("bool.zig").BoolType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
@@ -84,6 +83,51 @@ test "ProgressiveContainerType - variable" {
     var f2: Foo.Type = Foo.default_value;
     defer Foo.deinit(allocator, &f2);
     try Foo.deserializeFromBytes(allocator, f_buf, &f2);
+}
+
+test "progressive container field gindices address the field nodes" {
+    const allocator = std.testing.allocator;
+    const active_fields = [_]u1{ 1, 1, 0, 1, 0, 0, 1 };
+    const Fixed = FixedProgressiveContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+        c: UintType(64),
+        d: UintType(64),
+    }, &active_fields);
+    const Variable = VariableProgressiveContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+        c: UintType(64),
+        d: FixedListType(UintType(8), 32, .{}),
+    }, &active_fields);
+
+    // Contents is gindex 2. Chunk 0 is its left child (4). Chunks 1 and 3 are chunks 0 and 2 of
+    // subtree 1 (10), so 40 and 42. Chunk 6 is chunk 1 of subtree 2 (22), so 22 * 16 + 1 = 353.
+    inline for (.{ Fixed, Variable }) |ST| {
+        try std.testing.expectEqual(4, @intFromEnum(comptime ST.getFieldGindex("a")));
+        try std.testing.expectEqual(40, @intFromEnum(comptime ST.getFieldGindex("b")));
+        try std.testing.expectEqual(42, @intFromEnum(comptime ST.getFieldGindex("c")));
+        try std.testing.expectEqual(353, @intFromEnum(comptime ST.getFieldGindex("d")));
+    }
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 64,
+    });
+    defer pool.deinit();
+
+    const value: Fixed.Type = .{ .a = 1, .b = 2, .c = 3, .d = 4 };
+
+    const root = try Fixed.tree.fromValue(&pool, &value);
+    defer pool.unref(root);
+
+    inline for (.{ "a", "b", "c", "d" }, .{ 1, 2, 3, 4 }) |name, field_value| {
+        const node = try root.getNode(&pool, comptime Fixed.getFieldGindex(name));
+        var expected: [32]u8 = @splat(0);
+        expected[0] = field_value;
+        try std.testing.expectEqualSlices(u8, &expected, node.getRoot(&pool));
+    }
 }
 
 fn expectProgressiveFromValuePoolExhaustionReclaimsNodes(
@@ -349,8 +393,7 @@ test "proofs materialize a struct progressive container" {
     const node = try Struct.tree.fromValue(&pool, &value);
     defer pool.unref(node);
 
-    // Field `b` is chunk 1: contents (2), next spine node (5), subtree 1 (10), its first chunk.
-    const gindex = Gindex.fromUint(40);
+    const gindex = comptime Struct.getFieldGindex("b");
     var expected = try proof.createSingleProof(allocator, &pool, plain, gindex);
     defer expected.deinit(allocator);
 
