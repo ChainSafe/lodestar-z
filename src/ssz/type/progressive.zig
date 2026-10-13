@@ -10,14 +10,14 @@ const scaling_factor = 4;
 pub fn chunkGindex(chunk_i: usize) Gindex {
     const subtree_i = subtreeIndex(chunk_i);
     var gindex: Gindex.Uint = 1;
-    var subtree_starting_index: usize = 0;
+    var subtree_starting_index = 0;
     for (0..subtree_i) |i| {
         gindex = gindex * 2 + 1;
         subtree_starting_index += subtreeLength(i);
     }
 
     gindex *= 2;
-    gindex = @shlExact(gindex, subtreeDepth(subtree_i));
+    gindex *= try std.math.powi(usize, 2, subtreeDepth(subtree_i));
     gindex += chunk_i - subtree_starting_index;
     return @enumFromInt(gindex);
 }
