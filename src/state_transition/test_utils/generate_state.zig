@@ -223,7 +223,6 @@ pub const TestCachedBeaconState = struct {
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state,
-            null,
         );
 
         return TestCachedBeaconState{

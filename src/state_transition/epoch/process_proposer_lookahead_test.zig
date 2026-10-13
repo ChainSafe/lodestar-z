@@ -8,6 +8,7 @@ const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeS
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const computeEpochShufflingForFork = @import("../utils/epoch_shuffling.zig").computeEpochShufflingForFork;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
+const startProposerLookaheadShuffling = @import("process_proposer_lookahead.zig").startProposerLookaheadShuffling;
 const processProposerLookahead = @import("process_proposer_lookahead.zig").processProposerLookahead;
 
 test "memory_safety: proposer lookahead shuffling should belong to the epoch cache allocator" {
@@ -33,10 +34,17 @@ test "memory_safety: proposer lookahead shuffling should belong to the epoch cac
             test_state.cached_state.config,
             test_state.cached_state.epoch_cache,
             test_state.cached_state.state,
-            if (start_async) std.testing.io else null,
         );
         defer cache.deinit();
-        try std.testing.expectEqual(start_async, cache.shuffling_job != null);
+        if (start_async) {
+            try startProposerLookaheadShuffling(
+                .fulu,
+                std.testing.io,
+                test_state.cached_state.epoch_cache,
+                test_state.cached_state.state.castToFork(.fulu),
+                &cache,
+            );
+        }
 
         const current_epoch = computeEpochAtSlot(try test_state.cached_state.state.slot());
         const new_epoch = current_epoch + preset.MIN_SEED_LOOKAHEAD + 1;
@@ -94,9 +102,9 @@ test "memory_safety: processProposerLookahead should preserve lookahead on propo
         test_state.cached_state.config,
         epoch_cache,
         test_state.cached_state.state,
-        threaded.io(),
     );
     defer cache.deinit();
+    try startProposerLookaheadShuffling(.fulu, threaded.io(), epoch_cache, state, &cache);
 
     var previous_lookahead: [ProposerLookahead.length]u64 = undefined;
     try state.proposerLookaheadInto(&previous_lookahead);
@@ -111,6 +119,7 @@ test "memory_safety: processProposerLookahead should preserve lookahead on propo
         &cache,
     ));
     try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(cache.shuffling_job != null);
     try std.testing.expect(cache.next_shuffling == null);
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 

@@ -176,7 +176,6 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 cloned_state.config,
                 cloned_state.epoch_cache,
                 cloned_state.state,
-                null,
             );
             defer epoch_transition_cache.deinit();
 

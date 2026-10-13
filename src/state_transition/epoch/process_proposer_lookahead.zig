@@ -18,6 +18,20 @@ const computeProposers = seed_utils.computeProposers;
 /// Updates `proposer_lookahead` during epoch processing.
 /// Shifts out the oldest epoch and appends the new epoch at the end.
 /// Uses active indices from the epoch transition cache for the new epoch.
+pub fn startProposerLookaheadShuffling(
+    comptime fork: ForkSeq,
+    io: std.Io,
+    epoch_cache: *const EpochCache,
+    state: *BeaconState(fork),
+    epoch_transition_cache: *EpochTransitionCache,
+) !void {
+    const current_epoch = computeEpochAtSlot(try state.slot());
+    const new_epoch = current_epoch + preset.MIN_SEED_LOOKAHEAD + 1;
+    var seed: [32]u8 = undefined;
+    try getSeed(fork, state, new_epoch, c.DOMAIN_BEACON_ATTESTER, &seed);
+    try epoch_transition_cache.startShuffling(epoch_cache.allocator, io, seed, new_epoch);
+}
+
 pub fn processProposerLookahead(
     comptime fork: ForkSeq,
     allocator: Allocator,

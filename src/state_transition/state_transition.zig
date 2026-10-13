@@ -75,7 +75,6 @@ pub fn processSlots(
                 config,
                 epoch_cache,
                 state,
-                io,
             );
             defer epoch_transition_cache.deinit();
             try observeEpochTransitionStep(.{ .step = .before_process_epoch }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
