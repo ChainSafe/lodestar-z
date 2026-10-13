@@ -59,7 +59,7 @@ test "request allocation prefixes release through retirement and terminal chunks
     const cell = table.get(token).?;
     cell.state = .terminal;
     cell.terminal = .done;
-    cell.chunk = .{ .len = 4, .fork = null };
+    cell.chunk = .{ .len = 4, .fork = null, .origin = .{ .connection = .{ .index = 0, .generation = 1 }, .endpoint = null } };
     @memcpy(cell.sink[0..4], "held");
     table.releasePayload(cell);
     try std.testing.expectEqual(@as(usize, 0), cell.input.len);

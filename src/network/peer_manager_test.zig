@@ -48,7 +48,7 @@ fn startProbe(manager: *PeerManager, generation: u32, now: Now) !wire.ControlRep
 }
 fn reply(manager: *PeerManager, observation: wire.ControlReply, bytes: []const u8, now: Now) void {
     var result = observation;
-    manager.controlReplied(&result, .{ .chunk = .{ .request = result.request.?, .bytes = bytes, .fork = null } }, now, 0);
+    manager.controlReplied(&result, .{ .chunk = .{ .request = result.request.?, .bytes = bytes, .fork = null, .origin = .{ .connection = result.conn, .endpoint = endpoint } } }, now, 0);
     result.received = true;
     manager.controlReplied(&result, .{ .done = .{ .request = result.request.?, .chunks = 1 } }, now, 0);
 }

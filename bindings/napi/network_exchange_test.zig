@@ -666,7 +666,7 @@ fn pulledDone(cell: *outgoing.Cell) void {
 fn pulledChunk(cell: *outgoing.Cell) void {
     cell.state = .native;
     cell.native = .{ .index = 0, .generation = 1, .direction = .outbound };
-    cell.chunk = .{ .len = 4, .fork = null };
+    cell.chunk = .{ .len = 4, .fork = null, .origin = .{ .connection = .{ .index = 0, .generation = 1 }, .endpoint = null } };
     cell.pulling = true;
 }
 

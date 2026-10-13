@@ -214,6 +214,7 @@ fn completeChunk(
         .request = request.handle(index),
         .bytes = payload,
         .fork = fork,
+        .origin = .{ .connection = request.conn, .endpoint = engine.receiveEndpoint(request.conn) },
     } });
 }
 

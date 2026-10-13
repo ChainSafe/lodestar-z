@@ -646,12 +646,15 @@ const done = {done: true, value: undefined};
 test("a final chunk waits for a delayed pull, and an outcome that arrives with no pull waits for the next", async () => {
   const {left, peer, right} = await servedPair();
   try {
+    const connected = (await right.getPeers()).peers.find((entry) => entry.identity === peer);
     const finished = right.request(peer, BLOCKS, new Uint8Array(32));
     const first = finished.next();
     const served = await takeIncoming(left);
     await served.respond(chunk(7), requestForks[0]);
     await served.finish();
-    expect((await first).value?.data).toEqual(chunk(7));
+    const received = (await first).value;
+    expect(received?.data).toEqual(chunk(7));
+    expect(received?.origin).toEqual({connection: connected?.connection, endpoint: connected?.endpoint});
     // The stream ends only once the next pull consumes its chunk, so meanwhile it keeps its cell and awaits nothing.
     await new Promise((resolve) => setTimeout(resolve, 30));
 
@@ -671,6 +674,10 @@ test("a final chunk waits for a delayed pull, and an outcome that arrives with n
     });
     expect(await timed.next()).toEqual(done);
     expect(value?.data).toEqual(chunk(9));
+    const origin = structuredClone(value?.origin);
+    expect(origin).toEqual(received?.origin);
+    await right.disconnect(peer);
+    expect(value?.origin).toEqual(origin);
   } finally {
     await Promise.all([left.stop(), right.close()]);
   }

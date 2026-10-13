@@ -17,7 +17,11 @@ fn awaitRequest(pair: *Pair) !rr.RequestHandle {
 fn awaitChunk(pair: *Pair) !void {
     for (0..40) |_| {
         try pair.pumpOnce();
-        for (pair.clientEvents()) |event| if (event == .chunk) return;
+        for (pair.clientEvents()) |event| if (event == .chunk) {
+            try std.testing.expectEqual(pair.shared.handles.client, event.chunk.origin.connection);
+            try std.testing.expectEqual(pair.shared.pair.client.peerAddress(pair.shared.handles.client).?, event.chunk.origin.endpoint.?);
+            return;
+        };
     }
     return error.MissingChunk;
 }

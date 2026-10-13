@@ -100,7 +100,7 @@ test "core fork revalidation protects retention but old replies never restore ap
     try std.testing.expectEqual(rr.Protocol.status_v2, op.protocol);
     var bytes: [wire.status_size_max]u8 = undefined;
     const length = try wire.encodeStatus(.status_v2, &setup.server.peer_manager.local.status, &bytes);
-    const old: rr.ReqResp.Event = .{ .chunk = .{ .request = op.request.?, .bytes = bytes[0..length], .fork = null } };
+    const old: rr.ReqResp.Event = .{ .chunk = .{ .request = op.request.?, .bytes = bytes[0..length], .fork = null, .origin = .{ .connection = op.conn, .endpoint = null } } };
     reply(&setup.client, op, old, setup.pair.now);
     try std.testing.expect(!setup.client.peer_manager.catalog.get(peer.peer).?.relevant);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer.peer).?.disconnect_reason == null);
@@ -998,7 +998,7 @@ test "control replacement retirement rekeys the current schedule without crediti
     const key = control.deadlines.get(peer.index);
     var bytes: [wire.status_size_max]u8 = undefined;
     const length = try wire.encodeStatus(.status_v1, &setup.server.peer_manager.local.status, &bytes);
-    reply(&setup.client, &previous, .{ .chunk = .{ .request = stale, .bytes = bytes[0..length], .fork = null } }, setup.pair.now);
+    reply(&setup.client, &previous, .{ .chunk = .{ .request = stale, .bytes = bytes[0..length], .fork = null, .origin = .{ .connection = previous.conn, .endpoint = null } } }, setup.pair.now);
     previous.received = true;
     reply(&setup.client, &previous, .{ .done = .{ .request = stale, .chunks = 1 } }, setup.pair.now);
     try std.testing.expectEqualDeep(schedule, row.*);

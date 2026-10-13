@@ -42,7 +42,7 @@ test "request table storage retires only after physical quiescence and final pin
     const cell = runtime.bridge.requests.?.get(token).?;
     cell.state = .native;
     cell.copying = true;
-    cell.chunk = .{ .len = 4, .fork = null };
+    cell.chunk = .{ .len = 4, .fork = null, .origin = .{ .connection = .{ .index = 0, .generation = 1 }, .endpoint = null } };
     runtime.bridge.quiescent = true;
     requests_mod.closeLocked(&runtime);
     runtime.retireRequestStorageLocked();
@@ -245,7 +245,7 @@ test "a pull that makes a completion due notifies once while armed, and only an 
     const cell = runtime.bridge.requests.?.get(token).?;
     cell.state = .native;
     cell.native = .{ .index = 0, .generation = 1, .direction = .outbound };
-    cell.chunk = .{ .len = 4, .fork = null };
+    cell.chunk = .{ .len = 4, .fork = null, .origin = .{ .connection = .{ .index = 0, .generation = 1 }, .endpoint = null } };
     const before = support.notifications.load(.acquire);
     runtime.lock();
     try std.testing.expect(!runtime.completionsReadyLocked());
@@ -376,7 +376,7 @@ test "the O(1) completion-ready state matches a full scan across state transitio
     try expectDueMatchesScan(&runtime);
     cell.state = .native;
     cell.native = .{ .index = 0, .generation = 1, .direction = .outbound };
-    cell.chunk = .{ .len = 4, .fork = null };
+    cell.chunk = .{ .len = 4, .fork = null, .origin = .{ .connection = .{ .index = 0, .generation = 1 }, .endpoint = null } };
     requests.refresh(cell);
     try expectDueMatchesScan(&runtime);
     cell.copying = true;
@@ -455,7 +455,7 @@ test "the O(1) completion-ready state matches a full scan across state transitio
             0 => outbound.state = random.enumValue(requests_mod.State),
             1 => outbound.copying = random.boolean(),
             2 => outbound.pulling = random.boolean(),
-            3 => outbound.chunk = if (random.boolean()) .{ .len = 1, .fork = null } else null,
+            3 => outbound.chunk = if (random.boolean()) .{ .len = 1, .fork = null, .origin = .{ .connection = .{ .index = 0, .generation = 1 }, .endpoint = null } } else null,
             4 => outbound.delivered = random.boolean(),
             5 => outbound.retiring = random.boolean(),
             6 => outbound.terminal = if (random.boolean()) .done else null,

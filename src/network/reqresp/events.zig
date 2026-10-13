@@ -42,7 +42,7 @@ pub const PeerFault = struct {
 
 pub const Event = union(enum) {
     /// Borrows the caller's sink until consume or terminal delivery.
-    chunk: struct { request: RequestHandle, bytes: []const u8, fork: ?config.ForkSeq },
+    chunk: struct { request: RequestHandle, bytes: []const u8, fork: ?config.ForkSeq, origin: types.PeerOrigin },
     done: struct { request: RequestHandle, chunks: u32 },
     failed: Failed,
     /// Borrows receive bytes until served/failed delivery, regardless of retained host execution.

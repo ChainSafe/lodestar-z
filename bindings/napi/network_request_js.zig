@@ -153,6 +153,7 @@ pub fn completion(env: napi.Env, runtime: *Runtime, delivered: requests.Completi
             try value.setNamedProperty("data", try env.createTypedarray(.uint8, chunk.len, buffer, 0));
             try value.setNamedProperty("fork", if (requests.forkLabel(chunk.fork)) |fork| try env.createStringUtf8(fork) else try env.getNull());
             try value.setNamedProperty("protocol", try env.createStringUtf8(cell.protocol.id()));
+            try value.setNamedProperty("origin", try network_js.peerOrigin(env, chunk.origin));
             try object.setNamedProperty("value", value);
         },
         .terminal => |terminal| if (terminal == .done)

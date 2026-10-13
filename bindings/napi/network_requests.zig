@@ -17,7 +17,7 @@ pub const Terminal = union(enum) {
     failed: struct { reason: rr.ReqResp.Failure, phase: ?rr.ReqResp.RequestPhase, origin: ?n.types.PeerOrigin = null, peer_fault: ?@FieldType(rr.ReqResp.PeerFault, "kind") = null },
 };
 pub const Rejection = enum { disconnected, protocol_disabled, invalid_request, invalid_request_options, too_many_requests, slots_exhausted, negotiation_table_full, transport };
-pub const Chunk = struct { len: usize, fork: ?@FieldType(n.types.ForkEntry, "fork") };
+pub const Chunk = struct { len: usize, fork: ?@FieldType(n.types.ForkEntry, "fork"), origin: n.types.PeerOrigin };
 pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,
@@ -369,7 +369,7 @@ pub fn capture(runtime: *Runtime, events: []const rr.ReqResp.Event, now: n.Now) 
             switch (event) {
                 .chunk => |chunk| {
                     std.debug.assert(cell.chunk == null and chunk.bytes.ptr == cell.sink.ptr and chunk.bytes.len <= cell.sink.len);
-                    if (!cell.cancel and !runtime.bridge.stop) cell.chunk = .{ .len = chunk.bytes.len, .fork = chunk.fork };
+                    if (!cell.cancel and !runtime.bridge.stop) cell.chunk = .{ .len = chunk.bytes.len, .fork = chunk.fork, .origin = chunk.origin };
                 },
                 .done => {
                     cell.native = null;

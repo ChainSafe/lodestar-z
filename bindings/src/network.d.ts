@@ -412,6 +412,8 @@ export interface NativeResponseChunk {
   data: Uint8Array;
   fork: NetworkFork | null;
   protocol: NativeRequestProtocolId;
+  /** Origin captured when this response was received, retained after request or connection retirement. */
+  origin: NativePeerOrigin;
 }
 export type NativeRequestPhase = "negotiation" | "request" | "response";
 export type NativeRequestRejection =
