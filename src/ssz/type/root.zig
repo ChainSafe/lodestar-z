@@ -39,7 +39,6 @@ pub const StructProgressiveContainerType = @import("progressive_container.zig").
 pub const VariableProgressiveContainerType = @import("progressive_container.zig").VariableProgressiveContainerType;
 
 pub const FixedProgressiveListType = @import("progressive_list.zig").FixedProgressiveListType;
-pub const FixedProgressiveListTypeWithOptions = @import("progressive_list.zig").FixedProgressiveListTypeWithOptions;
 pub const VariableProgressiveListType = @import("progressive_list.zig").VariableProgressiveListType;
 
 pub const CompatibleUnionType = @import("compatible_union.zig").CompatibleUnionType;

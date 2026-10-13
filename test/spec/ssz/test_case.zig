@@ -356,7 +356,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
 /// root and the same bytes, so it must pass the same vectors.
 fn ChunkedLayout(comptime ST: type) ?type {
     if (ST.kind != .progressive_list or !ssz.isBasicType(ST.Element)) return null;
-    return ssz.FixedProgressiveListTypeWithOptions(ST.Element, .{ .chunked_leaf = true });
+    return ssz.FixedProgressiveListType(ST.Element, .{ .chunked_leaf = true });
 }
 
 pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir) !void {
@@ -417,7 +417,7 @@ test "tree invalid-case normalization preserves resource errors" {
     try std.testing.expectError(error.InvalidSSZ, deserializeTree(ssz.BoolType(), &pool, &.{2}));
     try std.testing.expectError(
         error.OutOfMemory,
-        deserializeTree(ssz.FixedProgressiveListType(ssz.BoolType()), &pool, &.{1}),
+        deserializeTree(ssz.FixedProgressiveListType(ssz.BoolType(), .{}), &pool, &.{1}),
     );
 }
 

@@ -6,7 +6,6 @@ const proof = @import("persistent_merkle_tree").proof;
 const BoolType = @import("bool.zig").BoolType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedProgressiveListType = @import("progressive_list.zig").FixedProgressiveListType;
-const FixedProgressiveListTypeWithOptions = @import("progressive_list.zig").FixedProgressiveListTypeWithOptions;
 const FixedContainerType = @import("container.zig").FixedContainerType;
 const StructContainerType = @import("container.zig").StructContainerType;
 const UintType = @import("uint.zig").UintType;
@@ -182,7 +181,7 @@ test "memory_safety: progressive container tree.fromValue reclaims unpublished n
 }
 
 test "memory_safety: nested progressive tree.fromValue reclaims unpublished nodes on pool exhaustion" {
-    const Items = FixedProgressiveListType(UintType(8));
+    const Items = FixedProgressiveListType(UintType(8), .{});
     const Container = VariableProgressiveContainerType(struct {
         a: UintType(64),
         items: Items,
@@ -198,17 +197,17 @@ test "memory_safety: nested progressive tree.fromValue reclaims unpublished node
 test "progressive container composes chunked leaf and struct container list fields" {
     const allocator = std.testing.allocator;
     const record_fields = struct { a: UintType(64), b: UintType(64) };
-    const Records = FixedProgressiveListType(FixedContainerType(record_fields));
+    const Records = FixedProgressiveListType(FixedContainerType(record_fields), .{});
     const active_fields = [_]u1{ 1, 0, 1, 1 };
     const Plain = VariableProgressiveContainerType(struct {
         slot: UintType(64),
         records: Records,
-        balances: FixedProgressiveListType(UintType(64)),
+        balances: FixedProgressiveListType(UintType(64), .{}),
     }, &active_fields);
     const Optimized = VariableProgressiveContainerType(struct {
         slot: UintType(64),
-        records: FixedProgressiveListType(StructContainerType(record_fields)),
-        balances: FixedProgressiveListTypeWithOptions(UintType(64), .{ .chunked_leaf = true }),
+        records: FixedProgressiveListType(StructContainerType(record_fields), .{}),
+        balances: FixedProgressiveListType(UintType(64), .{ .chunked_leaf = true }),
     }, &active_fields);
 
     var value = Plain.default_value;
@@ -293,7 +292,7 @@ test "memory_safety: fixed progressive container byte deserialization preserves 
 }
 
 test "memory_safety: variable progressive container byte deserialization leaves default out on error" {
-    const Items = FixedProgressiveListType(BoolType());
+    const Items = FixedProgressiveListType(BoolType(), .{});
     const Container = VariableProgressiveContainerType(struct {
         a: UintType(8),
         items: Items,
@@ -468,8 +467,14 @@ test "proofs should materialize a struct progressive container" {
 test "progressive list should round-trip struct progressive container elements" {
     const allocator = std.testing.allocator;
     const fields = struct { a: UintType(64), b: UintType(8) };
-    const Plain = FixedProgressiveListType(FixedProgressiveContainerType(fields, &.{ 1, 0, 1 }));
-    const List = FixedProgressiveListType(StructProgressiveContainerType(fields, &.{ 1, 0, 1 }));
+    const Plain = FixedProgressiveListType(
+        FixedProgressiveContainerType(fields, &.{ 1, 0, 1 }),
+        .{},
+    );
+    const List = FixedProgressiveListType(
+        StructProgressiveContainerType(fields, &.{ 1, 0, 1 }),
+        .{},
+    );
 
     var value: List.Type = .empty;
     defer value.deinit(allocator);

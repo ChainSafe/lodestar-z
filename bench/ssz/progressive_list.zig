@@ -24,8 +24,8 @@ const ssz = @import("ssz");
 const number_count: usize = 1 << 20;
 const record_count: usize = 100_000;
 
-const Numbers = ssz.FixedProgressiveListType(ssz.UintType(64));
-const NumbersChunked = ssz.FixedProgressiveListTypeWithOptions(
+const Numbers = ssz.FixedProgressiveListType(ssz.UintType(64), .{});
+const NumbersChunked = ssz.FixedProgressiveListType(
     ssz.UintType(64),
     .{ .chunked_leaf = true },
 );
@@ -40,8 +40,8 @@ const record_fields = struct {
     exit_epoch: ssz.UintType(64),
     withdrawable_epoch: ssz.UintType(64),
 };
-const Records = ssz.FixedProgressiveListType(ssz.FixedContainerType(record_fields));
-const RecordsStruct = ssz.FixedProgressiveListType(ssz.StructContainerType(record_fields));
+const Records = ssz.FixedProgressiveListType(ssz.FixedContainerType(record_fields), .{});
+const RecordsStruct = ssz.FixedProgressiveListType(ssz.StructContainerType(record_fields), .{});
 
 fn FromValue(comptime List: type) type {
     return struct {

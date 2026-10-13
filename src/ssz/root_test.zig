@@ -33,7 +33,7 @@ test "redundant SSZ helper APIs are not exposed" {
 }
 
 test "memory_safety: progressive tree deserialization uses the standard pool API" {
-    const List = FixedProgressiveListType(UintType(64));
+    const List = FixedProgressiveListType(UintType(64), .{});
     const Bits = ProgressiveBitListType();
     const Container = FixedProgressiveContainerType(struct {
         a: UintType(64),
