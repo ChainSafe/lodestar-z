@@ -35,12 +35,10 @@ pub fn build(b: *std.Build) !void {
         manifest,
     );
 
-    configureEreVerifier(b, result);
+    try configureEreVerifier(b, result);
 }
 
-/// HACK:
-/// Manually make ere.zig link `libere_verifier_c` into the `ere_verifier` module. A Zig
-/// linker bug makes us have to workaround this way:
+/// Adapts the prebuilt verifier's platform-specific linkage.
 ///
 /// - Mach-O: Zig's stab parser assumes every function stab group is exactly
 ///   BNSYM, FUN, FUN, ENSYM and aborts on the `N_SOL` entries in ere's merged
@@ -54,8 +52,23 @@ pub fn build(b: *std.Build) !void {
 ///   Sources:
 ///   https://codeberg.org/ziglang/zig/src/commit/7647adab80dd088f4de3610fd245915a912eb6ad/src/link/MachO/Object.zig#L1001-L1019
 ///   https://codeberg.org/ziglang/zig/src/commit/7647adab80dd088f4de3610fd245915a912eb6ad/src/link/MachO/Symbol.zig#L46
-fn configureEreVerifier(b: *std.Build, result: zbuild.BuildResult) void {
+fn configureEreVerifier(b: *std.Build, result: zbuild.BuildResult) !void {
     const package = result.dependency("ere").?;
+    const bindings = result.library("bindings").?;
+    const target = bindings.root_module.resolved_target.?.result;
+    if (target.os.tag == .linux and target.abi == .gnu) {
+        // ere 0.19.2 retains two unused strong imports that override quiche's weak libc references.
+        // Remove only those symbols, preserving the local symbols used for profiling.
+        for (package.module("ere").link_objects.items) |*object| switch (object.*) {
+            .static_path => |archive| {
+                const objcopy = try b.findProgram(&.{ "llvm-objcopy", "objcopy" }, &.{});
+                const clean = b.addSystemCommand(&.{ objcopy, "--strip-symbol=posix_spawn_file_actions_addchdir", "--strip-symbol=pidfd_spawnp" });
+                clean.addFileArg(archive);
+                object.* = .{ .static_path = clean.addOutputFileArg("libere_verifier_c.a") };
+            },
+            else => {},
+        };
+    }
     if (package.builder.named_lazy_paths.get("libere_verifier_c.dylib")) |dylib| {
         const install = b.addInstallLibFile(dylib, "libere_verifier_c.dylib");
         b.top_level_steps.get("build-lib:bindings").?.step.dependOn(&install.step);
