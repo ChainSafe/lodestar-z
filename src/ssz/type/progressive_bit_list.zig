@@ -37,7 +37,11 @@ pub fn ProgressiveBitListType() type {
         }
 
         pub fn chunkCount(value: *const Type) usize {
-            return (value.bit_len + 255) / 256;
+            return chunkCountForLength(value.bit_len);
+        }
+
+        fn chunkCountForLength(bit_len: usize) usize {
+            return bit_len / 256 + @intFromBool(bit_len % 256 != 0);
         }
 
         pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
@@ -151,7 +155,7 @@ pub fn ProgressiveBitListType() type {
             pub fn hashTreeRoot(_: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 const bit_len = try length(data);
                 const byte_len = bit_len / 8 + @intFromBool(bit_len % 8 != 0);
-                var accumulator = try progressive.MerkleAccumulator.init(bit_len / 256 + @intFromBool(bit_len % 256 != 0));
+                var accumulator = try progressive.MerkleAccumulator.init(chunkCountForLength(bit_len));
                 var offset: usize = 0;
                 while (offset < byte_len) {
                     var chunk: [32]u8 = @splat(0);
@@ -227,7 +231,7 @@ pub fn ProgressiveBitListType() type {
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 const bit_len = try serialized.length(data);
                 const byte_len = bit_len / 8 + @intFromBool(bit_len % 8 != 0);
-                var builder = try progressive.TreeBuilder.init(pool, bit_len / 256 + @intFromBool(bit_len % 256 != 0));
+                var builder = try progressive.TreeBuilder.init(pool, chunkCountForLength(bit_len));
                 defer builder.deinit();
                 var offset: usize = 0;
                 while (offset < byte_len) {

@@ -63,7 +63,7 @@ const State = struct {
 
         const pool_size = try poolSizeFromEnvironment();
 
-        const rc = try PoolRc.init(allocator, .{ .env = js.env() });
+        const rc = try PoolRc.create(allocator, .{ .env = js.env() });
         errdefer allocator.destroy(rc);
         rc.instance.pool = try Node.Pool.init(.{
             .allocator = rc.instance.memory.allocator(),

@@ -138,6 +138,8 @@ export interface TransitionOpts {
   verifySignatures?: boolean;
   /** Default: false (cache is transferred). Set to true to opt out of cache transfer. */
   dontTransferCache?: boolean;
+  /** Source of block processing for the process-block timing metric. Default: "block". */
+  source?: "block" | "regen" | "get_historical_state";
 }
 
 interface ProposerRewards {
@@ -289,6 +291,8 @@ export declare class BeaconStateView {
   currentSyncCommittee: SyncCommittee;
   nextSyncCommittee: SyncCommittee;
   currentSyncCommitteeIndexed: SyncCommitteeCache;
+  /** Returns an owned copy in committee order, including repeated validators. */
+  readonly currentSyncCommitteeValidatorIndices: Uint32Array;
   syncProposerReward: number;
   getIndexedSyncCommitteeAtEpoch(epoch: number): SyncCommitteeCache;
   getIndexedSyncCommittee(slot: number): SyncCommitteeCache;
@@ -324,12 +328,11 @@ export declare class BeaconStateView {
     isBlinded: boolean,
     proposerRewards?: ProposerRewards
   ): BlockRewards;
-  // biome-ignore lint/suspicious/noExplicitAny: stub
-  // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
-  computeAttestationsRewards(validatorIds?: (number | string)[]): Promise<any>;
-  // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
-  // biome-ignore lint/suspicious/noExplicitAny: stub
-  computeSyncCommitteeRewards(block: any, validatorIds: (number | string)[]): Promise<any>;
+  computeAttestationsRewards(validatorIds?: (number | string)[]): AttestationsRewards;
+  computeSyncCommitteeRewards(
+    block: SyncCommitteeRewardsBlock,
+    validatorIds?: (number | string)[]
+  ): SyncCommitteeReward[];
   getLatestWeakSubjectivityCheckpointEpoch(): number;
 
   getVoluntaryExitValidity(signedVoluntaryExit: SignedVoluntaryExit, verifySignature: boolean): VoluntaryExitValidity;
@@ -427,3 +430,39 @@ declare const bindings: {
 };
 
 export default bindings;
+
+export interface SyncCommitteeRewardsBlock {
+  slot: number;
+  body: {
+    randaoReveal: Uint8Array;
+    syncAggregate?: {
+      syncCommitteeBits: {uint8Array: Uint8Array; bitLen: number};
+    };
+  };
+}
+
+export interface SyncCommitteeReward {
+  validatorIndex: number;
+  reward: number;
+}
+
+export interface AttestationReward {
+  head: number;
+  target: number;
+  source: number;
+  inclusionDelay: number;
+  inactivity: number;
+}
+
+export interface IdealAttestationsReward extends AttestationReward {
+  effectiveBalance: number;
+}
+
+export interface TotalAttestationsReward extends AttestationReward {
+  validatorIndex: number;
+}
+
+export interface AttestationsRewards {
+  idealRewards: IdealAttestationsReward[];
+  totalRewards: TotalAttestationsReward[];
+}

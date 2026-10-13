@@ -129,22 +129,22 @@ pub const EpochCache = struct {
         var effective_balance_increments = try effectiveBalanceIncrementsInit(allocator, validator_count);
         errdefer effective_balance_increments.deinit(allocator);
 
-        return try EffectiveBalanceIncrementsRc.init(allocator, effective_balance_increments);
+        return try EffectiveBalanceIncrementsRc.create(allocator, effective_balance_increments);
     }
 
-    /// Initializes a reference counted `EpochShuffling` in a `EpochShufflingRc`.
-    ///
-    /// The `EpochShuffling` takes ownership of the given `active_indices`.
+    /// Takes ownership of `active_indices` on success; the caller retains ownership on failure.
     fn initEpochShufflingRc(
         allocator: Allocator,
         state: *AnyBeaconState,
         active_indices: []ValidatorIndex,
         epoch: Epoch,
     ) !*EpochShufflingRc {
-        const epoch_shuffling = try computeEpochShuffling(allocator, state, active_indices, epoch);
-        errdefer epoch_shuffling.deinit();
+        const rc = try allocator.create(EpochShufflingRc);
+        errdefer allocator.destroy(rc);
 
-        return try EpochShufflingRc.init(allocator, epoch_shuffling);
+        const epoch_shuffling = try computeEpochShuffling(allocator, state, active_indices, epoch);
+        rc.init(allocator, epoch_shuffling);
+        return rc;
     }
 
     fn initCurrentSyncCommitteeCacheRc(
@@ -163,7 +163,7 @@ pub const EpochCache = struct {
         };
         errdefer sync_committee_cache.deinit();
 
-        return try SyncCommitteeCacheRc.init(allocator, sync_committee_cache);
+        return try SyncCommitteeCacheRc.create(allocator, sync_committee_cache);
     }
 
     fn initNextSyncCommitteeCacheRc(
@@ -182,7 +182,7 @@ pub const EpochCache = struct {
         };
         errdefer sync_committee_cache.deinit();
 
-        return try SyncCommitteeCacheRc.init(allocator, sync_committee_cache);
+        return try SyncCommitteeCacheRc.create(allocator, sync_committee_cache);
     }
 
     pub fn createFromState(
@@ -271,28 +271,28 @@ pub const EpochCache = struct {
             total_active_balance_increments = 1;
         }
 
-        const previous_shuffling_rc = try initEpochShufflingRc(
-            allocator,
-            state,
-            try previous_active_indices_array_list.toOwnedSlice(allocator),
-            previous_epoch,
-        );
+        const previous_shuffling_rc = blk: {
+            const active_indices = try previous_active_indices_array_list.toOwnedSlice(allocator);
+            errdefer allocator.free(active_indices);
+
+            break :blk try initEpochShufflingRc(allocator, state, active_indices, previous_epoch);
+        };
         errdefer previous_shuffling_rc.unref();
 
-        const current_shuffling_rc = try initEpochShufflingRc(
-            allocator,
-            state,
-            try current_active_indices_array_list.toOwnedSlice(allocator),
-            current_epoch,
-        );
+        const current_shuffling_rc = blk: {
+            const active_indices = try current_active_indices_array_list.toOwnedSlice(allocator);
+            errdefer allocator.free(active_indices);
+
+            break :blk try initEpochShufflingRc(allocator, state, active_indices, current_epoch);
+        };
         errdefer current_shuffling_rc.unref();
 
-        const next_shuffling_rc = try initEpochShufflingRc(
-            allocator,
-            state,
-            try next_active_indices_array_list.toOwnedSlice(allocator),
-            next_epoch,
-        );
+        const next_shuffling_rc = blk: {
+            const active_indices = try next_active_indices_array_list.toOwnedSlice(allocator);
+            errdefer allocator.free(active_indices);
+
+            break :blk try initEpochShufflingRc(allocator, state, active_indices, next_epoch);
+        };
         errdefer next_shuffling_rc.unref();
 
         const fork_seq = config.forkSeqAtEpoch(current_epoch);
@@ -563,6 +563,8 @@ pub const EpochCache = struct {
             break :blk next_shuffling.ref();
         } else blk: {
             const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
+            errdefer self.allocator.free(next_shuffling_active_indices);
+
             std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
 
             break :blk try initEpochShufflingRc(
@@ -672,7 +674,7 @@ pub const EpochCache = struct {
         var effective_balance_increments = try self.effective_balance_increments.get().clone(self.allocator);
         errdefer effective_balance_increments.deinit(self.allocator);
 
-        const new_rc = try EffectiveBalanceIncrementsRc.init(self.allocator, effective_balance_increments);
+        const new_rc = try EffectiveBalanceIncrementsRc.create(self.allocator, effective_balance_increments);
 
         self.effective_balance_increments.unref();
         self.effective_balance_increments = new_rc;
@@ -872,7 +874,7 @@ pub const EpochCache = struct {
         var next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
         errdefer next_sync_committee_indexed.deinit();
 
-        const next_sync_committee_indexed_rc = try SyncCommitteeCacheRc.init(self.allocator, next_sync_committee_indexed);
+        const next_sync_committee_indexed_rc = try SyncCommitteeCacheRc.create(self.allocator, next_sync_committee_indexed);
 
         // unref the old instance
         self.current_sync_committee_indexed.unref();
@@ -889,7 +891,7 @@ pub const EpochCache = struct {
             var next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
             errdefer next_sync_committee_indexed.deinit();
 
-            break :blk try SyncCommitteeCacheRc.init(self.allocator, next_sync_committee_indexed);
+            break :blk try SyncCommitteeCacheRc.create(self.allocator, next_sync_committee_indexed);
         };
         errdefer next_sync_committee_indexed_rc.unref();
 
@@ -897,7 +899,7 @@ pub const EpochCache = struct {
             var current_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
             errdefer current_sync_committee_indexed.deinit();
 
-            break :blk try SyncCommitteeCacheRc.init(self.allocator, current_sync_committee_indexed);
+            break :blk try SyncCommitteeCacheRc.create(self.allocator, current_sync_committee_indexed);
         };
 
         self.next_sync_committee_indexed.unref();
@@ -952,7 +954,7 @@ pub const EpochCache = struct {
             @memcpy(new_increments.items[0..old.items.len], old.items);
             @memset(new_increments.items[old.items.len..new_len], 0);
 
-            const new_rc = try EffectiveBalanceIncrementsRc.init(self.allocator, new_increments);
+            const new_rc = try EffectiveBalanceIncrementsRc.create(self.allocator, new_increments);
             self.effective_balance_increments.unref();
             self.effective_balance_increments = new_rc;
         }

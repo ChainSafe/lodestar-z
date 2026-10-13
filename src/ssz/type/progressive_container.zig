@@ -293,7 +293,8 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                var builder = try progressive.TreeBuilder.init(pool, chunk_count);
+                // Active fields are bounded to 256 chunks at comptime.
+                var builder = progressive.TreeBuilder.init(pool, chunk_count) catch unreachable;
                 defer builder.deinit();
                 var next_index: usize = 0;
                 inline for (fields, 0..) |field, i| {
@@ -304,7 +305,10 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                     try builder.append(try field.type.tree.fromValue(pool, &@field(value, field.name)));
                     next_index += 1;
                 }
-                const contents = try builder.finish();
+                const contents = builder.finish() catch |err| switch (err) {
+                    error.InvalidState => unreachable, // This local builder is finished exactly once.
+                    else => |pool_error| return pool_error,
+                };
                 errdefer pool.unref(contents);
                 const active_fields_packed = comptime packActiveFields(active_fields);
                 const active_fields_node = try pool.createLeaf(&active_fields_packed);
@@ -376,8 +380,98 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         pub fn getFieldGindex(comptime name: []const u8) Gindex {
             const field_i = getFieldIndex(name);
             const field_idx = comptime getActiveFieldIndex(active_fields, field_i);
-            return comptime progressive.chunkGindex(field_idx);
+            const chunk_gindex = comptime progressive.chunkGindex(field_idx);
+            return comptime Gindex.concat(&.{ @enumFromInt(2), chunk_gindex });
         }
+    };
+}
+
+/// A fixed progressive container whose tree is one `.container_struct` node holding the decoded
+/// value, instead of a progressive subtree. Whole-value reads skip the tree walk. The interior has
+/// no nodes, so proofs materialize it first.
+pub fn StructProgressiveContainerType(comptime ST: type, comptime active_fields: []const u1) type {
+    const FixedCT = FixedProgressiveContainerType(ST, active_fields);
+
+    return struct {
+        pub const kind = TypeKind.progressive_container;
+        pub const Fields: type = ST;
+        pub const fields: []const std.builtin.Type.StructField = FixedCT.fields;
+        pub const field_indices: [fields.len]usize = FixedCT.field_indices;
+        pub const Type: type = FixedCT.Type;
+        pub const fixed_size: usize = FixedCT.fixed_size;
+        pub const field_offsets: [fields.len]usize = FixedCT.field_offsets;
+        pub const chunk_count: usize = FixedCT.chunk_count;
+        pub const default_value: Type = FixedCT.default_value;
+
+        pub const equals = FixedCT.equals;
+        pub const clone = FixedCT.clone;
+        pub const serializedSize = FixedCT.serializedSize;
+        pub const hashTreeRoot = FixedCT.hashTreeRoot;
+        pub const serializeIntoBytes = FixedCT.serializeIntoBytes;
+        pub const deserializeFromBytes = FixedCT.deserializeFromBytes;
+        pub const serialized = FixedCT.serialized;
+        pub const serializeIntoJson = FixedCT.serializeIntoJson;
+        pub const deserializeFromJson = FixedCT.deserializeFromJson;
+        pub const getFieldIndex = FixedCT.getFieldIndex;
+        pub const getFieldType = FixedCT.getFieldType;
+        pub const getFieldGindex = FixedCT.getFieldGindex;
+
+        /// The node's payload. `Node.Pool.createContainerStruct` clones, hashes, and frees it
+        /// through these methods.
+        pub const WrappedT = struct {
+            value: Type,
+
+            pub fn getRoot(self: *const WrappedT, out: *[32]u8) void {
+                // Fixed fields hash without failing, and the chunk count is comptime-bounded.
+                FixedCT.hashTreeRoot(&self.value, out) catch unreachable;
+            }
+
+            /// Builds the progressive subtree this node stands for. The caller unrefs it.
+            pub fn toTree(self: *const WrappedT, pool: *Node.Pool) !Node.Id {
+                return FixedCT.tree.fromValue(pool, &self.value);
+            }
+
+            pub fn init(allocator: std.mem.Allocator, wrapped: *const WrappedT) !*const WrappedT {
+                const ptr = try allocator.create(WrappedT);
+                ptr.* = wrapped.*;
+                return ptr;
+            }
+
+            pub fn deinit(self: *WrappedT, allocator: std.mem.Allocator) void {
+                allocator.destroy(self);
+            }
+        };
+
+        pub const tree = struct {
+            pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
+                out.* = (try getValuePtr(node, pool)).*;
+            }
+
+            /// Borrows the stored value. Freeing the node invalidates the pointer.
+            pub fn getValuePtr(node: Node.Id, pool: *Node.Pool) !*const Type {
+                const wrapped = try pool.getStructPtr(node, WrappedT);
+                return &wrapped.value;
+            }
+
+            pub fn serializedSize(_: Node.Id, _: *Node.Pool) !usize {
+                return fixed_size;
+            }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                return FixedCT.serializeIntoBytes(try getValuePtr(node, pool), out);
+            }
+
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                var wrapped: WrappedT = .{ .value = default_value };
+                try FixedCT.deserializeFromBytes(data, &wrapped.value);
+                return pool.createContainerStruct(WrappedT, &wrapped);
+            }
+
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
+                const wrapped: WrappedT = .{ .value = value.* };
+                return pool.createContainerStruct(WrappedT, &wrapped);
+            }
+        };
     };
 }
 
@@ -565,6 +659,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             return variable_index;
         }
 
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
             if (data.len > max_size or data.len < min_size) {
                 return error.InvalidSize;
@@ -589,7 +684,6 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 }
             }
 
-            deinit(allocator, out);
             out.* = replacement;
         }
 
@@ -616,7 +710,8 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
         pub fn getFieldGindex(comptime name: []const u8) Gindex {
             const field_i = getFieldIndex(name);
             const field_idx = comptime getActiveFieldIndex(active_fields, field_i);
-            return comptime progressive.chunkGindex(field_idx);
+            const chunk_gindex = comptime progressive.chunkGindex(field_idx);
+            return comptime Gindex.concat(&.{ @enumFromInt(2), chunk_gindex });
         }
 
         // Returns the bytes ranges of all fields, both variable and fixed size.
@@ -713,6 +808,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
         };
 
         pub const tree = struct {
+            /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
@@ -743,7 +839,6 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                     }
                 }
 
-                deinit(allocator, out);
                 out.* = replacement;
             }
 
@@ -822,6 +917,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             try writer.endObject();
         }
 
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromJson(allocator: std.mem.Allocator, source: *std.json.Scanner, out: *Type) !void {
             // start object token "{"
             switch (try source.next()) {
@@ -860,7 +956,6 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 else => return error.InvalidJson,
             }
 
-            deinit(allocator, out);
             out.* = replacement;
         }
     };

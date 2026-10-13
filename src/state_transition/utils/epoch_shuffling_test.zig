@@ -4,7 +4,30 @@ const std = @import("std");
 const ct = @import("consensus_types");
 const preset = @import("preset").preset;
 const EpochShuffling = @import("epoch_shuffling.zig").EpochShuffling;
+const computeEpochShuffling = @import("epoch_shuffling.zig").computeEpochShuffling;
+const Node = @import("persistent_merkle_tree").Node;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const innerShuffleList = @import("swap_or_not_shuffle").innerShuffleList;
+
+test "memory_safety: computeEpochShuffling retains caller ownership on allocation failure" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const input = try allocator.dupe(u64, &.{ 1, 7, 42 });
+    defer allocator.free(input);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        computeEpochShuffling(failing.allocator(), test_state.cached_state.state, input, test_state.cached_state.epoch_cache.epoch),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 7, 42 }, input);
+}
 
 test "EpochShuffling matches u64 shuffling for wide validator indices" {
     const allocator = std.testing.allocator;
@@ -55,52 +78,15 @@ test "memory_safety: EpochShuffling.init frees output when positions allocation 
     try std.testing.expectEqualSlices(u64, &.{ 1, 7, std.math.maxInt(u64) }, active_indices);
 }
 
-test "memory_safety: EpochShuffling.init should free completed committees when a later slot allocation fails" {
-    const allocator = std.testing.allocator;
-    const active_indices = try allocator.alloc(ct.primitive.ValidatorIndex.Type, 256);
-    defer allocator.free(active_indices);
-    for (active_indices, 0..) |*index, i| {
-        index.* = @intCast(i);
-    }
+test "memory_safety: EpochShuffling.init should free partial allocations on OOM" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const active_indices = try allocator.alloc(ct.primitive.ValidatorIndex.Type, 256);
+            errdefer allocator.free(active_indices);
+            for (active_indices, 0..) |*index, i| index.* = @intCast(i);
 
-    // The shuffling, positions, and first slot allocations succeed; the second slot allocation fails.
-    var failing = std.testing.FailingAllocator.init(
-        allocator,
-        .{ .fail_index = 3 },
-    );
-    try std.testing.expectError(
-        error.OutOfMemory,
-        EpochShuffling.init(
-            failing.allocator(),
-            [_]u8{0} ** 32,
-            0,
-            active_indices,
-        ),
-    );
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-}
-
-test "memory_safety: EpochShuffling.init should free committees when the final allocation fails" {
-    const allocator = std.testing.allocator;
-    const active_indices = try allocator.alloc(ct.primitive.ValidatorIndex.Type, 256);
-    defer allocator.free(active_indices);
-    for (active_indices, 0..) |*index, i| {
-        index.* = @intCast(i);
-    }
-
-    // Shuffling, positions, and one allocation per slot precede the final struct allocation.
-    var failing = std.testing.FailingAllocator.init(
-        allocator,
-        .{ .fail_index = 2 + preset.SLOTS_PER_EPOCH },
-    );
-    try std.testing.expectError(
-        error.OutOfMemory,
-        EpochShuffling.init(
-            failing.allocator(),
-            [_]u8{0} ** 32,
-            0,
-            active_indices,
-        ),
-    );
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            const shuffling = try EpochShuffling.init(allocator, [_]u8{0} ** 32, 0, active_indices);
+            defer shuffling.deinit();
+        }
+    }.run, .{});
 }
