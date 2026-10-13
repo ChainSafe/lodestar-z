@@ -12,6 +12,9 @@ test "exports the expected metric names" {
 
     try state_transition.process_block_step.observe(.{ .step = .processBlockHeader }, 0.001);
     try state_transition.process_operations_step.observe(.{ .step = .processAttestations }, 0.001);
+    try state_transition.process_block.observe(.{ .source = .block }, 0.001);
+    try state_transition.process_block.observe(.{ .source = .regen }, 0.001);
+    try state_transition.process_block.observe(.{ .source = .get_historical_state }, 0.001);
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
@@ -63,15 +66,35 @@ test "exports the expected metric names" {
         try std.testing.expectEqualStrings(name, actual);
     }
 
-    try std.testing.expect(std.mem.indexOf(
+    try std.testing.expect(std.mem.find(
         u8,
         aw.written(),
         "lodestar_stfn_process_block_step_seconds_count{step=\"processBlockHeader\"} 1\n",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(
+    try std.testing.expect(std.mem.find(
         u8,
         aw.written(),
         "lodestar_stfn_process_operations_step_seconds_count{step=\"processAttestations\"} 1\n",
+    ) != null);
+    try std.testing.expect(std.mem.find(
+        u8,
+        aw.written(),
+        "lodestar_stfn_process_block_seconds_count{source=\"block\"} 1\n",
+    ) != null);
+    try std.testing.expect(std.mem.find(
+        u8,
+        aw.written(),
+        "lodestar_stfn_process_block_seconds_count{source=\"regen\"} 1\n",
+    ) != null);
+    try std.testing.expect(std.mem.find(
+        u8,
+        aw.written(),
+        "lodestar_stfn_process_block_seconds_count{source=\"get_historical_state\"} 1\n",
+    ) != null);
+    try std.testing.expect(std.mem.find(
+        u8,
+        aw.written(),
+        "lodestar_stfn_process_block_seconds_sum{source=\"block\"} 0.001\n",
     ) != null);
 }
 
