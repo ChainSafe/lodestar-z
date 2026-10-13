@@ -87,30 +87,33 @@ test "ProgressiveContainerType - variable" {
 
 test "progressive container field gindices should address the field nodes" {
     const allocator = std.testing.allocator;
-    const active_fields = [_]u1{ 1, 1, 0, 0, 1, 1 };
+    const active_fields = [_]u1{ 1, 1, 0, 0, 1, 1 } ++ [_]u1{0} ** 15 ++ [_]u1{1};
     const Fixed = FixedProgressiveContainerType(struct {
         a: UintType(64),
         b: UintType(64),
         c: UintType(64),
         d: UintType(64),
+        e: UintType(64),
     }, &active_fields);
     const Variable = VariableProgressiveContainerType(struct {
         a: UintType(64),
         b: UintType(64),
         c: UintType(64),
         d: FixedListType(UintType(8), 32, .{}),
+        e: UintType(64),
     }, &active_fields);
 
-    // Fields a, b, c, d are chunks 0, 1, 4, 5. Contents is gindex 2. Each spine node holds a
-    // subtree root on the left and the next spine node on the right, so the subtree roots are
-    // 4, 10 (under 5) and 22 (under 11). Chunk 0 is subtree 0, so 4. Chunks 1 and 4 are the first
-    // and last of the 4 leaves under 10, so 40 and 43. Chunk 5 is the first of the 16 leaves
-    // under 22, so 352.
+    // Fields a, b, c, d, e are chunks 0, 1, 4, 5, 21. Contents is gindex 2. Each spine node holds
+    // a subtree root on the left and the next spine node on the right, so the subtree roots are
+    // 4, 10 (under 5), 22 (under 11) and 46 (under 23). Chunk 0 is subtree 0, so 4. Chunks 1 and
+    // 4 are the first and last of the 4 leaves under 10, so 40 and 43. Chunk 5 is the first of
+    // the 16 leaves under 22, so 352. Chunk 21 is the first of the 64 leaves under 46, so 2944.
     inline for (.{ Fixed, Variable }) |ST| {
         try std.testing.expectEqual(4, @intFromEnum(comptime ST.getFieldGindex("a")));
         try std.testing.expectEqual(40, @intFromEnum(comptime ST.getFieldGindex("b")));
         try std.testing.expectEqual(43, @intFromEnum(comptime ST.getFieldGindex("c")));
         try std.testing.expectEqual(352, @intFromEnum(comptime ST.getFieldGindex("d")));
+        try std.testing.expectEqual(2944, @intFromEnum(comptime ST.getFieldGindex("e")));
     }
 
     var pool = try Node.Pool.init(.{
@@ -120,12 +123,12 @@ test "progressive container field gindices should address the field nodes" {
     });
     defer pool.deinit();
 
-    const value: Fixed.Type = .{ .a = 1, .b = 2, .c = 3, .d = 4 };
+    const value: Fixed.Type = .{ .a = 1, .b = 2, .c = 3, .d = 4, .e = 5 };
 
     const root = try Fixed.tree.fromValue(&pool, &value);
     defer pool.unref(root);
 
-    inline for (.{ "a", "b", "c", "d" }, .{ 1, 2, 3, 4 }) |name, field_value| {
+    inline for (.{ "a", "b", "c", "d", "e" }, .{ 1, 2, 3, 4, 5 }) |name, field_value| {
         const node = try root.getNode(&pool, comptime Fixed.getFieldGindex(name));
         var expected: [32]u8 = @splat(0);
         expected[0] = field_value;
