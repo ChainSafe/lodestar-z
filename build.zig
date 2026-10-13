@@ -61,7 +61,7 @@ fn configureEreVerifier(b: *std.Build, result: zbuild.BuildResult) !void {
         // Remove only those symbols, preserving the local symbols used for profiling.
         for (package.module("ere").link_objects.items) |*object| switch (object.*) {
             .static_path => |archive| {
-                const objcopy = try b.findProgram(&.{ "llvm-objcopy", "objcopy" }, &.{});
+                const objcopy = try b.findProgram(&.{"llvm-objcopy"}, &.{});
                 const clean = b.addSystemCommand(&.{ objcopy, "--strip-symbol=posix_spawn_file_actions_addchdir", "--strip-symbol=pidfd_spawnp" });
                 clean.addFileArg(archive);
                 object.* = .{ .static_path = clean.addOutputFileArg("libere_verifier_c.a") };
