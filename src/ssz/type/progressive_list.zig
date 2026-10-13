@@ -8,7 +8,6 @@ const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Depth = @import("hashing").Depth;
 const Node = @import("persistent_merkle_tree").Node;
-const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
 const progressive = @import("progressive.zig");
 const TypeOpts = @import("list.zig").TypeOpts;
 
@@ -401,8 +400,7 @@ pub fn FixedProgressiveListTypeWithOptions(comptime ST: type, comptime _opts: Ty
                 for (0..progressive.max_tree_subtrees) |subtree_index| {
                     if (item_index == len) break;
                     const depth: Depth = @intCast(2 * subtree_index);
-                    const leaf_offset: Depth =
-                        if (depth >= ChunkedLeaf.k_log2) ChunkedLeaf.k_log2 else 0;
+                    const leaf_offset = progressive.chunkedLeafOffset(subtree_index);
                     const capacity = @as(usize, 1) << @intCast(depth);
                     const chunks_done = item_index / items_per_chunk;
                     const subtree_chunks = @min(capacity, chunk_count - chunks_done);

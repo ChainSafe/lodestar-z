@@ -57,6 +57,12 @@ pub fn subtreeDepth(subtree_i: usize) Depth {
     return @intCast(subtree_i * std.math.log2_int(usize, scaling_factor));
 }
 
+/// Returns how many bottom levels of the subtree a chunked list stores in one chunked leaf:
+/// `ChunkedLeaf.k_log2` once the subtree can hold at least `ChunkedLeaf.K` chunks, else none.
+pub fn chunkedLeafOffset(subtree_i: usize) Depth {
+    return if (subtreeDepth(subtree_i) >= ChunkedLeaf.k_log2) ChunkedLeaf.k_log2 else 0;
+}
+
 pub fn merkleizeChunksComptime(comptime chunk_count: usize, chunks: *const [chunk_count][32]u8, out: *[32]u8) !void {
     return merkleizeChunksBounded(chunks, out);
 }
@@ -190,10 +196,7 @@ pub const NodeIterator = struct {
     fn enterSubtree(self: *NodeIterator) !void {
         const subtree_depth: Depth = @intCast(2 * self.subtree_index);
         const subtree_length = @as(usize, 1) << @intCast(subtree_depth);
-        self.leaf_offset = if (self.chunked_leaf and subtree_depth >= ChunkedLeaf.k_log2)
-            ChunkedLeaf.k_log2
-        else
-            0;
+        self.leaf_offset = if (self.chunked_leaf) chunkedLeafOffset(self.subtree_index) else 0;
         const subtree_root = if (@intFromEnum(self.spine) == 0)
             @as(Node.Id, @enumFromInt(subtree_depth))
         else blk: {
