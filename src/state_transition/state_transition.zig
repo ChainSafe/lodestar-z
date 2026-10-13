@@ -30,6 +30,7 @@ const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgra
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
 const upgradeStateToElectra = @import("slot/upgrade_state_to_electra.zig").upgradeStateToElectra;
 const upgradeStateToFulu = @import("slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
+const upgradeStateToGloas = @import("slot/upgrade_state_to_gloas.zig").upgradeStateToGloas;
 
 pub const ExecutionPayloadStatus = enum(u8) {
     invalid,
@@ -43,6 +44,8 @@ pub const DataAvailabilityStatus = enum(u8) {
     available,
     not_required,
 };
+
+pub const ProcessBlockSource = metrics.ProcessBlockSource;
 
 pub const BlockExternalData = struct {
     execution_payload_status: ExecutionPayloadStatus = .valid,
@@ -142,7 +145,7 @@ pub fn processSlots(
 
             if (state_epoch == config.chain.GLOAS_FORK_EPOCH) {
                 const fulu_state = try state.tryCastToFork(.fulu);
-                const upgraded = try @import("slot/upgrade_state_to_gloas.zig").upgradeStateToGloas(allocator, io, config, epoch_cache, fulu_state);
+                const upgraded = try upgradeStateToGloas(allocator, io, config, epoch_cache, fulu_state);
                 state.* = .{ .gloas = upgraded.inner };
             }
 
@@ -168,6 +171,7 @@ pub const TransitionOpts = struct {
     verify_signatures: bool = true,
     transfer_cache: bool = true,
     block_external_data: BlockExternalData = .{},
+    source: ProcessBlockSource = .block,
 };
 
 pub const StateTransitionResult = struct {
@@ -229,7 +233,7 @@ pub fn stateTransition(
         return error.InvalidBlockForkForState;
     }
     // Note: time only on success
-    var timer = time.start(io);
+    const process_block_timer = time.start(io);
     switch (post_state.forkSeq()) {
         inline else => |f| {
             switch (block.blockType()) {
@@ -263,20 +267,22 @@ pub fn stateTransition(
             }
         },
     }
-    metrics.state_transition.process_block.observe(time.durationSeconds(time.since(io, timer)));
+    const commit_timer = time.start(io);
+    try post_state.commit();
+    metrics.state_transition.process_block_commit.observe(time.durationSeconds(time.since(io, commit_timer)));
+    try metrics.state_transition.process_block.observe(
+        .{ .source = opts.source },
+        time.durationSeconds(time.since(io, process_block_timer)),
+    );
 
     const proposer_rewards = post_cached_state.proposer_rewards;
     try metrics.state_transition.proposer_rewards.set(.{ .type = .attestation }, proposer_rewards.attestations);
     try metrics.state_transition.proposer_rewards.set(.{ .type = .sync_aggregate }, proposer_rewards.sync_aggregate);
     try metrics.state_transition.proposer_rewards.set(.{ .type = .slashing }, proposer_rewards.slashing);
 
-    timer = time.start(io);
-    try post_state.commit();
-    metrics.state_transition.process_block_commit.observe(time.durationSeconds(time.since(io, timer)));
-
     // Verify state root
     if (opts.verify_state_root) {
-        timer = time.start(io);
+        const timer = time.start(io);
         const post_state_root = try post_state.hashTreeRoot();
         try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .state_transition }, time.durationSeconds(time.since(io, timer)));
 

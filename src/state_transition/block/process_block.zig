@@ -30,6 +30,10 @@ const processSyncAggregate = @import("./process_sync_committee.zig").processSync
 const processWithdrawals = @import("./process_withdrawals.zig").processWithdrawals;
 const getExpectedWithdrawals = @import("./process_withdrawals.zig").getExpectedWithdrawals;
 const isExecutionEnabled = @import("../utils/execution.zig").isExecutionEnabled;
+const processParentExecutionPayload = @import("process_parent_execution_payload.zig").processParentExecutionPayload;
+const isParentBlockFull = @import("../utils/gloas.zig").isParentBlockFull;
+const gloas_withdrawals = @import("process_withdrawals_gloas.zig");
+const processExecutionPayloadBid = @import("process_execution_payload_bid.zig").processExecutionPayloadBid;
 
 pub const ProcessBlockOpts = struct {
     diagnostics: ?*Diagnostics = null,
@@ -55,7 +59,7 @@ pub fn processBlock(
     var operation_opts = opts;
     if (comptime fork.gte(.gloas)) {
         operation_opts.parent_slot = try state.latestBlockHeaderSlot();
-        try @import("process_parent_execution_payload.zig").processParentExecutionPayload(allocator, io, config, epoch_cache, state, block);
+        try processParentExecutionPayload(fork, allocator, io, config, epoch_cache, state, block);
     }
 
     // Build slashings cache against the *current* latest_block_header slot (pre-header update).
@@ -135,13 +139,13 @@ pub fn processBlock(
     }
 
     if (comptime fork.gte(.gloas)) {
-        if (try @import("../utils/gloas.zig").isParentBlockFull(state)) {
+        if (try isParentBlockFull(fork, state)) {
             var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
             var result = WithdrawalsResult{ .withdrawals = Withdrawals.initBuffer(&withdrawals_buf) };
-            try @import("process_withdrawals_gloas.zig").getExpectedWithdrawals(epoch_cache, state, &result);
-            try @import("process_withdrawals_gloas.zig").processWithdrawals(state, &result);
+            try gloas_withdrawals.getExpectedWithdrawals(fork, epoch_cache, state, &result);
+            try gloas_withdrawals.processWithdrawals(fork, state, &result);
         }
-        try @import("process_execution_payload_bid.zig").processExecutionPayloadBid(allocator, config, epoch_cache, state, &body.inner.signed_execution_payload_bid);
+        try processExecutionPayloadBid(fork, allocator, config, epoch_cache, state, &body.inner.signed_execution_payload_bid);
     }
 
     timer = time.start(io);

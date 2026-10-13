@@ -18,6 +18,8 @@ const computeProposerIndex = ComputeIndexUtils.computeProposerIndex;
 const computeSyncCommitteeIndices = ComputeIndexUtils.computeSyncCommitteeIndices;
 const computeEpochAtSlot = @import("./epoch.zig").computeEpochAtSlot;
 const ByteCount = @import("./committee_indices.zig").ByteCount;
+const EpochShuffling = @import("./epoch_shuffling.zig").EpochShuffling;
+const computePtcIndicesU64Into = @import("swap_or_not_shuffle").computePtcIndicesU64Into;
 
 pub fn computeProposers(
     comptime fork_seq: ForkSeq,
@@ -97,7 +99,7 @@ pub fn computePayloadTimelinessCommitteesForEpoch(
     comptime fork: ForkSeq,
     state: *BeaconState(fork),
     epoch: Epoch,
-    shuffling: *const @import("./epoch_shuffling.zig").EpochShuffling,
+    shuffling: *const EpochShuffling,
     effective_balance_increments: []const u16,
 ) ![preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex {
     var epoch_seed: [32]u8 = undefined;
@@ -113,7 +115,7 @@ pub fn computePayloadTimelinessCommitteesForEpoch(
         // EpochShuffling partitions one contiguous array, so the slot slice needs no copy.
         const start = shuffling.shuffling.len * slot_offset / preset.SLOTS_PER_EPOCH;
         const end = shuffling.shuffling.len * (slot_offset + 1) / preset.SLOTS_PER_EPOCH;
-        try @import("swap_or_not_shuffle").computePtcIndicesU64Into(
+        try computePtcIndicesU64Into(
             &seed,
             shuffling.shuffling[start..end],
             effective_balance_increments,

@@ -21,7 +21,6 @@ pub const isBitVectorType = types.isBitVectorType;
 pub const ByteListType = types.ByteListType;
 pub const isByteListType = types.isByteListType;
 pub const ProgressiveByteListType = types.ProgressiveByteListType;
-pub const ProgressiveByteListTypeWithOptions = types.ProgressiveByteListTypeWithOptions;
 pub const isProgressiveByteListType = types.isProgressiveByteListType;
 
 pub const ByteVectorType = types.ByteVectorType;
@@ -43,13 +42,10 @@ pub const VariableProgressiveContainerType = types.VariableProgressiveContainerT
 
 // Progressive list types
 pub const FixedProgressiveListType = types.FixedProgressiveListType;
-pub const FixedProgressiveListTypeWithOptions = types.FixedProgressiveListTypeWithOptions;
 pub const VariableProgressiveListType = types.VariableProgressiveListType;
-pub const VariableProgressiveListTypeWithOptions = types.VariableProgressiveListTypeWithOptions;
 
 // Progressive bit list
 pub const ProgressiveBitListType = types.ProgressiveBitListType;
-pub const ProgressiveBitListTypeWithOptions = types.ProgressiveBitListTypeWithOptions;
 pub const isProgressiveBitListType = types.isProgressiveBitListType;
 
 // Compatible union

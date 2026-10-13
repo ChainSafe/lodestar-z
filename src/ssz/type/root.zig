@@ -15,7 +15,6 @@ pub const isBitVectorType = @import("bit_vector.zig").isBitVectorType;
 pub const ByteListType = @import("byte_list.zig").ByteListType;
 pub const isByteListType = @import("byte_list.zig").isByteListType;
 pub const ProgressiveByteListType = @import("progressive_byte_list.zig").ProgressiveByteListType;
-pub const ProgressiveByteListTypeWithOptions = @import("progressive_byte_list.zig").ProgressiveByteListTypeWithOptions;
 pub const isProgressiveByteListType = @import("progressive_byte_list.zig").isProgressiveByteListType;
 
 pub const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
@@ -42,14 +41,11 @@ pub const FixedProgressiveContainerType = @import("progressive_container.zig").F
 pub const VariableProgressiveContainerType = @import("progressive_container.zig").VariableProgressiveContainerType;
 
 pub const FixedProgressiveListType = @import("progressive_list.zig").FixedProgressiveListType;
-pub const FixedProgressiveListTypeWithOptions = @import("progressive_list.zig").FixedProgressiveListTypeWithOptions;
 pub const VariableProgressiveListType = @import("progressive_list.zig").VariableProgressiveListType;
-pub const VariableProgressiveListTypeWithOptions = @import("progressive_list.zig").VariableProgressiveListTypeWithOptions;
 
 pub const CompatibleUnionType = @import("compatible_union.zig").CompatibleUnionType;
 
 pub const ProgressiveBitListType = @import("progressive_bit_list.zig").ProgressiveBitListType;
-pub const ProgressiveBitListTypeWithOptions = @import("progressive_bit_list.zig").ProgressiveBitListTypeWithOptions;
 pub const isProgressiveBitListType = @import("progressive_bit_list.zig").isProgressiveBitListType;
 
 test {

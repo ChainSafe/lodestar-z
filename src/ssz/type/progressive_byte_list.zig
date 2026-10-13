@@ -7,43 +7,38 @@ pub fn isProgressiveByteListType(comptime ST: type) bool {
     return ST.kind == .progressive_list and @hasDecl(ST, "is_progressive_byte_list") and ST.is_progressive_byte_list;
 }
 
-pub fn ProgressiveByteListType() type {
-    return ProgressiveByteListTypeWithOptions(.{});
-}
-
 /// The byte-list JSON representation is hexadecimal; its SSZ encoding and roots
 /// are exactly those of a progressive uint8 list with the same storage options.
-pub fn ProgressiveByteListTypeWithOptions(comptime options: progressive_list.TypeOpts) type {
-    const Generic = progressive_list.FixedProgressiveListTypeWithOptions(UintType(8), options);
+pub fn ProgressiveByteListType(comptime options: progressive_list.TypeOpts) type {
+    const ProgressiveListFixed = progressive_list.FixedProgressiveListType(UintType(8), options);
     return struct {
         pub const is_progressive_byte_list = true;
         pub const kind = TypeKind.progressive_list;
-        pub const Element = Generic.Element;
-        pub const opts = Generic.opts;
-        pub const limit = Generic.limit;
-        pub const Type = Generic.Type;
+        pub const Element = ProgressiveListFixed.Element;
+        pub const opts = ProgressiveListFixed.opts;
+        pub const limit = ProgressiveListFixed.limit;
+        pub const Type = ProgressiveListFixed.Type;
         pub const TreeView = @import("../tree_view/progressive_list_basic.zig").ProgressiveListBasicTreeView(@This());
-        pub const min_size = Generic.min_size;
-        pub const max_size = Generic.max_size;
-        pub const default_value = Generic.default_value;
-        pub const default_root = Generic.default_root;
-        pub const equals = Generic.equals;
-        pub const deinit = Generic.deinit;
-        pub const chunkCount = Generic.chunkCount;
-        pub const hashTreeRoot = Generic.hashTreeRoot;
-        pub const serializedSize = Generic.serializedSize;
-        pub const serializeIntoBytes = Generic.serializeIntoBytes;
-        pub const deserializeFromBytes = Generic.deserializeFromBytes;
-        pub const serialized = Generic.serialized;
-        pub const tree = Generic.tree;
+        pub const min_size = ProgressiveListFixed.min_size;
+        pub const max_size = ProgressiveListFixed.max_size;
+        pub const default_value = ProgressiveListFixed.default_value;
+        pub const default_root = ProgressiveListFixed.default_root;
+        pub const equals = ProgressiveListFixed.equals;
+        pub const deinit = ProgressiveListFixed.deinit;
+        pub const chunkCount = ProgressiveListFixed.chunkCount;
+        pub const hashTreeRoot = ProgressiveListFixed.hashTreeRoot;
+        pub const serializedSize = ProgressiveListFixed.serializedSize;
+        pub const serializeIntoBytes = ProgressiveListFixed.serializeIntoBytes;
+        pub const deserializeFromBytes = ProgressiveListFixed.deserializeFromBytes;
+        pub const serialized = ProgressiveListFixed.serialized;
+        pub const tree = ProgressiveListFixed.tree;
 
         pub fn serializeIntoJson(_: std.mem.Allocator, writer: anytype, value: *const Type) !void {
             if (value.items.len > limit) return error.LengthOverLimit;
             try writer.print("\"0x{x}\"", .{value.items});
         }
 
-        /// The initialized output is replaced only after the entire hex string
-        /// validates and its allocation succeeds.
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromJson(allocator: std.mem.Allocator, source: *std.json.Scanner, out: *Type) !void {
             const text = switch (try source.next()) {
                 .string => |value| value,
@@ -59,7 +54,6 @@ pub fn ProgressiveByteListTypeWithOptions(comptime options: progressive_list.Typ
             errdefer replacement.deinit(allocator);
             try replacement.resize(allocator, length);
             _ = std.fmt.hexToBytes(replacement.items, digits) catch return error.InvalidJson;
-            out.deinit(allocator);
             out.* = replacement;
         }
     };

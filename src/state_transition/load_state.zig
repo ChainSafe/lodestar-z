@@ -38,29 +38,37 @@ pub fn loadState(
     seed_validators_bytes: ?[]const u8,
 ) !MigrateStateOutput {
     const fork = try ssz_bytes.getForkFromStateBytes(config, state_bytes);
-    const seed_fork = config.forkSeq(try seed_state.slot());
     const pool = seed_state.nodePool();
 
     return switch (fork) {
-        inline else => |f| try loadStateForFork(allocator, pool, f, seed_fork, seed_state, ForkTypes(f).BeaconState, state_bytes, seed_validators_bytes),
+        inline else => |f| try loadStateForFork(allocator, pool, f, seed_state, ForkTypes(f).BeaconState, state_bytes, seed_validators_bytes),
+    };
+}
+
+fn canReuseField(seed_state: *const AnyBeaconState, comptime State: type, comptime field: []const u8) bool {
+    if (!@hasField(State.Type, field)) return false;
+    return switch (seed_state.*) {
+        inline else => |state| blk: {
+            const Seed = @TypeOf(state.*).SszType;
+            if (comptime @hasField(Seed.Type, field)) {
+                break :blk State.getFieldType(field) == Seed.getFieldType(field);
+            }
+            break :blk false;
+        },
     };
 }
 
 fn deserializeBeaconStateTreeViewWithSeedOverrides(
     allocator: Allocator,
     pool: *Node.Pool,
-    comptime out_fork: ForkSeq,
-    seed_fork: ForkSeq,
     seed_state: *AnyBeaconState,
     comptime StateST: type,
     state_bytes: []const u8,
     ranges: *const [StateST.fields.len][2]usize,
     seed_validators_node: Node.Id,
 ) !*StateST.TreeView {
-    if (comptime out_fork.gte(.altair)) {
-        // If the seed fork is pre-altair, there are no scores to reuse, so the container
-        // deserializes inactivity_scores (diff optimization only applies when seed_fork >= altair).
-        if (seed_fork.gte(.altair)) {
+    if (comptime @hasField(StateST.Type, "inactivity_scores")) {
+        if (canReuseField(seed_state, StateST, "inactivity_scores")) {
             const scores_node = try inactivityScoresNodeId(seed_state);
             return try ssz_container.deserializeContainerOverrideFieldsWithRanges(
                 allocator,
@@ -87,7 +95,6 @@ fn loadStateForFork(
     allocator: Allocator,
     pool: *Node.Pool,
     comptime out_fork: ForkSeq,
-    seed_fork: ForkSeq,
     seed_state: *AnyBeaconState,
     comptime StateST: type,
     state_bytes: []const u8,
@@ -99,9 +106,8 @@ fn loadStateForFork(
     const validators_range = ranges[validators_field_index];
     const new_validators_bytes = state_bytes[validators_range[0]..validators_range[1]];
 
-    // List and ProgressiveList have different roots for identical bytes. Sharing across this
-    // boundary would silently insert the wrong tree shape; same-layout loads still share nodes.
-    if (out_fork.gte(.gloas) != seed_fork.gte(.gloas)) {
+    // Identical bytes need not have identical roots under a different list schema.
+    if (!canReuseField(seed_state, StateST, "validators")) {
         const migrated_view = try StateST.TreeView.deserialize(allocator, pool, state_bytes);
         errdefer migrated_view.deinit();
         const modified = try findModifiedAndAppendedValidators(allocator, seed_state, new_validators_bytes, seed_validators_bytes);
@@ -113,8 +119,6 @@ fn loadStateForFork(
     const migrated_view = try deserializeBeaconStateTreeViewWithSeedOverrides(
         allocator,
         pool,
-        out_fork,
-        seed_fork,
         seed_state,
         StateST,
         state_bytes,
@@ -126,8 +130,8 @@ fn loadStateForFork(
     const modified_validators = try loadValidators(allocator, StateST, migrated_view, pool, seed_validators_node, new_validators_bytes, seed_validators_bytes);
     errdefer allocator.free(modified_validators);
 
-    if (comptime out_fork.gte(.altair)) {
-        if (seed_fork.gte(.altair)) {
+    if (comptime @hasField(StateST.Type, "inactivity_scores")) {
+        if (canReuseField(seed_state, StateST, "inactivity_scores")) {
             const scores_field_index = comptime StateST.getFieldIndex("inactivity_scores");
             const scores_range = ranges[scores_field_index];
             const inactivity_scores_bytes = state_bytes[scores_range[0]..scores_range[1]];
@@ -163,7 +167,7 @@ fn loadInactivityScores(
     var migrated_scores = try seed_scores.clone(.{ .transfer_cache = false });
     errdefer migrated_scores.deinit();
 
-    const diff_ctx = try buildScoresDiffContext(allocator, migrated_scores, inactivity_scores_bytes);
+    const diff_ctx = try buildScoresDiffContext(allocator, Scores, migrated_scores, inactivity_scores_bytes);
     defer allocator.free(diff_ctx.old_bytes);
 
     var modified_validators: std.ArrayList(ValidatorIndex) = .empty;
@@ -185,8 +189,8 @@ fn loadInactivityScores(
         new_scores_slice,
         &modified_validators,
     );
-    try applyScoreDiffs(migrated_scores, inactivity_scores_bytes, modified_validators.items);
-    migrated_scores = try syncScoresLength(allocator, migrated_scores, inactivity_scores_bytes, diff_ctx.old_validator_count, diff_ctx.new_validator_count);
+    try applyScoreDiffs(Scores, migrated_scores, inactivity_scores_bytes, modified_validators.items);
+    migrated_scores = try syncScoresLength(allocator, pool, Scores, migrated_scores, inactivity_scores_bytes, diff_ctx.old_validator_count, diff_ctx.new_validator_count);
 
     try migrated_view.set("inactivity_scores", migrated_scores);
 }
@@ -253,6 +257,8 @@ fn loadValidators(
 
     try applyModifiedValidators(
         allocator,
+        pool,
+        Validators,
         migrated_validators,
         new_validators_bytes,
         modified_validators.items,
@@ -262,9 +268,9 @@ fn loadValidators(
         const extra_count = new_count - seed_count;
         try modified_validators.ensureUnusedCapacity(allocator, extra_count);
 
-        try appendNewValidators(allocator, migrated_validators, new_validators_bytes, seed_count, new_count, &modified_validators);
+        try appendNewValidators(allocator, pool, Validators, migrated_validators, new_validators_bytes, seed_count, new_count, &modified_validators);
     } else {
-        migrated_validators = try trimValidators(allocator, migrated_validators, new_count);
+        migrated_validators = try trimValidators(allocator, pool, Validators, migrated_validators, new_count);
     }
 
     const out_slice = try modified_validators.toOwnedSlice(allocator);
@@ -307,10 +313,6 @@ fn findModifiedAndAppendedValidators(
     return modified.toOwnedSlice(allocator);
 }
 
-fn listPool(view: anytype) *Node.Pool {
-    return if (comptime @hasField(@TypeOf(view.*), "chunks")) view.chunks.state.pool else view.state.pool;
-}
-
 const ScoresDiffContext = struct {
     old_bytes: []u8,
     has_more_validators: bool,
@@ -322,7 +324,8 @@ const ScoresDiffContext = struct {
 /// Snapshot the seed scores (serialized bytes plus counts) needed to diff against the new bytes.
 fn buildScoresDiffContext(
     allocator: Allocator,
-    migrated_scores: anytype,
+    comptime Scores: type,
+    migrated_scores: *Scores.TreeView,
     inactivity_scores_bytes: []const u8,
 ) !ScoresDiffContext {
     const old_validator_count = try migrated_scores.length();
@@ -347,7 +350,8 @@ fn buildScoresDiffContext(
 
 /// Write each modified inactivity score into `migrated_scores` from `inactivity_scores_bytes`.
 fn applyScoreDiffs(
-    migrated_scores: anytype,
+    comptime Scores: type,
+    migrated_scores: *Scores.TreeView,
     inactivity_scores_bytes: []const u8,
     modified_validators: []const ValidatorIndex,
 ) !void {
@@ -364,11 +368,13 @@ fn applyScoreDiffs(
 /// or return a trimmed (or empty) view when shrinking. Returns the resulting view.
 fn syncScoresLength(
     allocator: Allocator,
-    migrated_scores: anytype,
+    pool: *Node.Pool,
+    comptime Scores: type,
+    migrated_scores: *Scores.TreeView,
     inactivity_scores_bytes: []const u8,
     old_validator_count: usize,
     new_validator_count: usize,
-) !@TypeOf(migrated_scores) {
+) !*Scores.TreeView {
     if (new_validator_count >= old_validator_count) {
         var idx: usize = old_validator_count;
         while (idx < new_validator_count) : (idx += 1) {
@@ -381,8 +387,6 @@ fn syncScoresLength(
     }
 
     if (new_validator_count == 0) {
-        const Scores = @TypeOf(migrated_scores.*).SszType;
-        const pool = listPool(migrated_scores);
         const empty_root = try Scores.tree.fromValue(pool, &Scores.default_value);
         errdefer pool.unref(empty_root);
 
@@ -400,7 +404,9 @@ fn syncScoresLength(
 /// freshly deserialized from `new_validators_bytes`.
 fn applyModifiedValidators(
     allocator: Allocator,
-    migrated_validators: anytype,
+    pool: *Node.Pool,
+    comptime Validators: type,
+    migrated_validators: *Validators.TreeView,
     new_validators_bytes: []const u8,
     modified_validators: []const ValidatorIndex,
 ) !void {
@@ -411,7 +417,7 @@ fn applyModifiedValidators(
 
         const new_validator = try loadValidator(
             allocator,
-            migrated_validators.chunks.state.pool,
+            pool,
             new_bytes,
         );
         errdefer new_validator.deinit();
@@ -424,7 +430,9 @@ fn applyModifiedValidators(
 /// `new_validators_bytes`, recording each appended index in `modified_validators`.
 fn appendNewValidators(
     allocator: Allocator,
-    migrated_validators: anytype,
+    pool: *Node.Pool,
+    comptime Validators: type,
+    migrated_validators: *Validators.TreeView,
     new_validators_bytes: []const u8,
     start_index: usize,
     end_index: usize,
@@ -435,7 +443,6 @@ fn appendNewValidators(
         const start = idx * types.phase0.Validator.fixed_size;
         const new_bytes = new_validators_bytes[start .. start + types.phase0.Validator.fixed_size];
 
-        const pool = migrated_validators.chunks.state.pool;
         var v: ?*types.phase0.Validator.TreeView = blk: {
             const root = try types.phase0.Validator.tree.deserializeFromBytes(pool, new_bytes);
             errdefer pool.unref(root);
@@ -453,12 +460,12 @@ fn appendNewValidators(
 /// Shrink `migrated_validators` to `new_count`, returning a trimmed (or empty) view.
 fn trimValidators(
     allocator: Allocator,
-    migrated_validators: anytype,
+    pool: *Node.Pool,
+    comptime Validators: type,
+    migrated_validators: *Validators.TreeView,
     new_count: usize,
-) !@TypeOf(migrated_validators) {
+) !*Validators.TreeView {
     if (new_count == 0) {
-        const Validators = @TypeOf(migrated_validators.*).SszType;
-        const pool = listPool(migrated_validators);
         const empty_root = try Validators.tree.fromValue(pool, &Validators.default_value);
         errdefer pool.unref(empty_root);
 
@@ -634,8 +641,8 @@ test "loadState scenarios" {
                 },
                 .trim_struct => |m| {
                     var trimmed = types.electra.BeaconState.default_value;
-                    try types.electra.BeaconState.deserializeFromBytes(allocator, seed_bytes, &trimmed);
                     defer types.electra.BeaconState.deinit(allocator, &trimmed);
+                    try types.electra.BeaconState.deserializeFromBytes(allocator, seed_bytes, &trimmed);
 
                     trimmed.validators.shrinkRetainingCapacity(m.new_len);
                     trimmed.balances.shrinkRetainingCapacity(m.new_len);
@@ -960,9 +967,9 @@ test "memory_safety: loadState releases new inactivity scores on failure" {
     try std.testing.expectEqualSlices(u8, &seed_root, try seed.hashTreeRoot());
 }
 
-test "loadState shares Gloas subtrees and refuses sharing across the progressive fork" {
+test "loadState shares compatible field schemas across forks and refuses incompatible layouts" {
     const allocator = std.testing.allocator;
-    inline for (.{ .{ ForkSeq.gloas, ForkSeq.gloas }, .{ ForkSeq.fulu, ForkSeq.gloas }, .{ ForkSeq.gloas, ForkSeq.fulu } }) |forks| {
+    inline for (.{ .{ ForkSeq.electra, ForkSeq.fulu }, .{ ForkSeq.fulu, ForkSeq.electra }, .{ ForkSeq.gloas, ForkSeq.gloas }, .{ ForkSeq.fulu, ForkSeq.gloas }, .{ ForkSeq.gloas, ForkSeq.fulu } }) |forks| {
         const Seed = ForkTypes(forks[0]).BeaconState;
         const Target = ForkTypes(forks[1]).BeaconState;
         var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 750_000 });
@@ -993,7 +1000,7 @@ test "loadState shares Gloas subtrees and refuses sharing across the progressive
             _ = Target.serializeIntoBytes(&target_value, bytes);
             var expected_root: [32]u8 = undefined;
             try Target.hashTreeRoot(allocator, &target_value, &expected_root);
-            var result = try loadStateForFork(allocator, &pool, forks[1], forks[0], &seed, Target, bytes, null);
+            var result = try loadStateForFork(allocator, &pool, forks[1], &seed, Target, bytes, null);
             defer result.state.deinit();
             defer allocator.free(result.modified_validators);
             try std.testing.expectEqualSlices(ValidatorIndex, &.{ 1, 3 }, result.modified_validators);
@@ -1003,7 +1010,7 @@ test "loadState shares Gloas subtrees and refuses sharing across the progressive
             const loaded_validators = try result.state.validators();
             const source_first = (try source_validators.getReadonly(0)).getRoot();
             const loaded_first = (try loaded_validators.getReadonly(0)).getRoot();
-            if (forks[0] == forks[1]) {
+            if (Seed.getFieldType("validators") == Target.getFieldType("validators")) {
                 try std.testing.expectEqual(source_first, loaded_first);
             } else {
                 try std.testing.expect(source_first != loaded_first);

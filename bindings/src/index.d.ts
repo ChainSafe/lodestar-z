@@ -182,6 +182,8 @@ export interface TransitionOpts {
   executionPayloadStatus?: "valid" | "invalid" | "preMerge";
   /** Data availability result; Gloas beacon blocks use "NotRequired". Default: "Available". */
   dataAvailabilityStatus?: "Available" | "PreData" | "OutOfRange" | "NotRequired";
+  /** Source of block processing for the process-block timing metric. Default: "block". */
+  source?: "block" | "regen" | "get_historical_state";
 }
 
 interface ProposerRewards {
@@ -322,6 +324,8 @@ export declare class BeaconStateView {
   currentSyncCommittee: SyncCommittee;
   nextSyncCommittee: SyncCommittee;
   currentSyncCommitteeIndexed: SyncCommitteeCache;
+  /** Returns an owned copy in committee order, including repeated validators. */
+  readonly currentSyncCommitteeValidatorIndices: Uint32Array;
   syncProposerReward: number;
   getIndexedSyncCommitteeAtEpoch(epoch: number): SyncCommitteeCache;
   getIndexedSyncCommittee(slot: number): SyncCommitteeCache;

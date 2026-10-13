@@ -193,3 +193,111 @@ test "single proof: balances[0]" {
     std.mem.writeInt(u64, expected_leaf[0..8], 31_000_000_000, .little);
     try std.testing.expectEqualSlices(u8, &expected_leaf, &proof.leaf);
 }
+
+test "list views route all forks by schema and preserve borrowed mutations" {
+    const ForkSeq = @import("config").ForkSeq;
+    const ForkTypes = @import("fork_types.zig").ForkTypes;
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+
+    inline for (comptime std.meta.tags(ForkSeq)) |fork| {
+        const State = ForkTypes(fork).BeaconState;
+        {
+            var state = try AnyBeaconState.fromValue(allocator, &pool, fork, &State.default_value);
+            defer state.deinit();
+            const validators = try state.validators();
+            const balances = try state.balances();
+            try std.testing.expectEqual(try state.castToFork(fork).inner.get("validators"), try validators.unwrap(State.getFieldType("validators")));
+            try std.testing.expectEqual(try state.castToFork(fork).inner.get("balances"), try balances.unwrap(State.getFieldType("balances")));
+            try validators.pushValue(&ct.phase0.Validator.default_value);
+            try balances.push(123);
+            try std.testing.expectEqual(@as(usize, 1), try state.validatorsCount());
+            try std.testing.expectEqual(@as(u64, 123), try (try state.balances()).get(0));
+
+            if (comptime fork.gte(.altair)) {
+                const previous = try state.previousEpochParticipation();
+                const current = try state.currentEpochParticipation();
+                const scores = try state.inactivityScores();
+                try previous.push(1);
+                try current.push(2);
+                try scores.push(3);
+                try std.testing.expectEqual(@as(u8, 1), try (try state.previousEpochParticipation()).get(0));
+                try std.testing.expectEqual(@as(u8, 2), try (try state.currentEpochParticipation()).get(0));
+                try std.testing.expectEqual(@as(u64, 3), try (try state.inactivityScores()).get(0));
+            } else {
+                try std.testing.expectError(error.InvalidAtFork, state.previousEpochParticipation());
+                try std.testing.expectError(error.InvalidAtFork, state.currentEpochParticipation());
+                try std.testing.expectError(error.InvalidAtFork, state.inactivityScores());
+            }
+
+            if (comptime fork.gte(.electra)) {
+                {
+                    const copy = try (try state.pendingDeposits()).clone(.{ .transfer_cache = false });
+                    errdefer copy.deinit();
+                    try copy.pushValue(&ct.electra.PendingDeposit.default_value);
+                    try state.setPendingDeposits(copy);
+                }
+                {
+                    const copy = try (try state.pendingPartialWithdrawals()).clone(.{ .transfer_cache = false });
+                    errdefer copy.deinit();
+                    try copy.pushValue(&ct.electra.PendingPartialWithdrawal.default_value);
+                    try state.setPendingPartialWithdrawals(copy);
+                }
+                {
+                    const copy = try (try state.pendingConsolidations()).clone(.{ .transfer_cache = false });
+                    errdefer copy.deinit();
+                    try copy.pushValue(&ct.electra.PendingConsolidation.default_value);
+                    try state.setPendingConsolidations(copy);
+                }
+                try std.testing.expectEqual(@as(usize, 1), try (try state.pendingDeposits()).length());
+                try std.testing.expectEqual(@as(usize, 1), try (try state.pendingPartialWithdrawals()).length());
+                try std.testing.expectEqual(@as(usize, 1), try (try state.pendingConsolidations()).length());
+            } else {
+                try std.testing.expectError(error.InvalidAtFork, state.pendingDeposits());
+                try std.testing.expectError(error.InvalidAtFork, state.pendingPartialWithdrawals());
+                try std.testing.expectError(error.InvalidAtFork, state.pendingConsolidations());
+            }
+            try state.commit();
+        }
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    }
+}
+
+test "list views reject incompatible transfer without consuming either owner" {
+    const ListView = @import("list_view.zig").ListView;
+    const Deposits = ListView(ct.electra.PendingDeposits, ct.gloas.PendingDeposits);
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+    {
+        var state = try AnyBeaconState.fromValue(allocator, &pool, .fulu, &ct.fulu.BeaconState.default_value);
+        defer state.deinit();
+        const before = (try state.hashTreeRoot()).*;
+        const view = try ct.gloas.PendingDeposits.TreeView.fromValue(allocator, &pool, &ct.gloas.PendingDeposits.default_value);
+        const deposits = Deposits.fromView(ct.gloas.PendingDeposits, view);
+        defer deposits.deinit();
+        try deposits.pushValue(&ct.electra.PendingDeposit.default_value);
+        try std.testing.expectError(error.IncompatibleListType, deposits.unwrap(ct.electra.PendingDeposits));
+        try std.testing.expectError(error.InvalidAtFork, state.setPendingDeposits(deposits));
+        try std.testing.expectEqual(@as(usize, 1), try deposits.length());
+        try std.testing.expectEqualSlices(u8, &before, try state.hashTreeRoot());
+
+        var electra = try AnyBeaconState.fromValue(allocator, &pool, .electra, &ct.electra.BeaconState.default_value);
+        defer electra.deinit();
+        try (try electra.pendingDeposits()).pushValue(&ct.electra.PendingDeposit.default_value);
+        try electra.commit();
+        {
+            const copy = try (try electra.pendingDeposits()).sliceTo(0);
+            errdefer copy.deinit();
+            try state.setPendingDeposits(copy);
+        }
+        try std.testing.expectEqual(@as(usize, 1), try (try state.pendingDeposits()).length());
+        try (try state.pendingDeposits()).pushValue(&ct.electra.PendingDeposit.default_value);
+        try std.testing.expectEqual(@as(usize, 1), try (try electra.pendingDeposits()).length());
+        try std.testing.expectEqual(@as(usize, 2), try (try state.pendingDeposits()).length());
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}

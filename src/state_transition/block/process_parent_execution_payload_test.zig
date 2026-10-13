@@ -43,7 +43,7 @@ test "Gloas settles a delayed parent payment before processing its builder exit"
     var requests = ct.gloas.ExecutionRequests.default_value;
     defer ct.gloas.ExecutionRequests.deinit(allocator, &requests);
     try requests.builder_exits.append(allocator, .{ .pubkey = builder.pubkey, .source_address = builder.execution_address });
-    try applyParentExecutionPayload(allocator, std.testing.io, &config, cache, state, &requests);
+    try applyParentExecutionPayload(.gloas, allocator, std.testing.io, &config, cache, state, &requests);
     try builders.getValue(undefined, 0, &builder);
     try std.testing.expectEqual(c.FAR_FUTURE_EPOCH, builder.withdrawable_epoch);
     var pending = try state.inner.getReadonly("builder_pending_withdrawals");
@@ -67,8 +67,8 @@ test "Gloas request operation limits apply independently of SSZ decoding" {
         var values: [limit + 1]Element.Type = @splat(Element.default_value);
         var requests = ct.gloas.ExecutionRequests.default_value;
         @field(requests, field) = .{ .items = values[0..limit], .capacity = limit + 1 };
-        try validateExecutionRequests(&requests);
+        try validateExecutionRequests(.gloas, &requests);
         @field(requests, field).items = values[0..];
-        try std.testing.expectError(error.TooManyExecutionRequests, validateExecutionRequests(&requests));
+        try std.testing.expectError(error.TooManyExecutionRequests, validateExecutionRequests(.gloas, &requests));
     }
 }

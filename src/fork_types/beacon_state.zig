@@ -215,22 +215,22 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.inner.setValue("current_epoch_attestations", &ForkTypes(.phase0).EpochAttestations.default_value);
         }
 
-        pub fn previousEpochParticipation(self: *Self) !*ForkTypes(if (f.gte(.gloas)) .gloas else .altair).EpochParticipation.TreeView {
+        pub fn previousEpochParticipation(self: *Self) !*ForkTypes(if (f.gte(.altair)) f else .altair).BeaconState.getFieldType("previous_epoch_participation").TreeView {
             if (comptime f == .phase0) return error.InvalidAtFork;
             return try self.inner.get("previous_epoch_participation");
         }
 
-        pub fn setPreviousEpochParticipation(self: *Self, participations: *const ForkTypes(if (f.gte(.gloas)) .gloas else .altair).EpochParticipation.Type) !void {
+        pub fn setPreviousEpochParticipation(self: *Self, participations: *const ForkTypes(if (f.gte(.altair)) f else .altair).BeaconState.getFieldType("previous_epoch_participation").Type) !void {
             if (comptime f == .phase0) return error.InvalidAtFork;
             try self.inner.setValue("previous_epoch_participation", participations);
         }
 
-        pub fn currentEpochParticipation(self: *Self) !*ForkTypes(if (f.gte(.gloas)) .gloas else .altair).EpochParticipation.TreeView {
+        pub fn currentEpochParticipation(self: *Self) !*ForkTypes(if (f.gte(.altair)) f else .altair).BeaconState.getFieldType("current_epoch_participation").TreeView {
             if (comptime f == .phase0) return error.InvalidAtFork;
             return try self.inner.get("current_epoch_participation");
         }
 
-        pub fn setCurrentEpochParticipation(self: *Self, participations: *const ForkTypes(if (f.gte(.gloas)) .gloas else .altair).EpochParticipation.Type) !void {
+        pub fn setCurrentEpochParticipation(self: *Self, participations: *const ForkTypes(if (f.gte(.altair)) f else .altair).BeaconState.getFieldType("current_epoch_participation").Type) !void {
             if (comptime f == .phase0) return error.InvalidAtFork;
             try self.inner.setValue("current_epoch_participation", participations);
         }
@@ -248,7 +248,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
                 try self.inner.set("previous_epoch_participation", current_epoch_participation_copy);
             }
 
-            const new_current_root = try ForkTypes(if (f.gte(.gloas)) .gloas else .altair).EpochParticipation.tree.zeros(
+            const new_current_root = try ForkTypes(if (f.gte(.altair)) f else .altair).BeaconState.getFieldType("current_epoch_participation").tree.zeros(
                 self.inner.pool,
                 length,
             );
@@ -293,7 +293,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             return try checkpoint_view.get("epoch");
         }
 
-        pub fn inactivityScores(self: *Self) !*ForkTypes(if (f.gte(.gloas)) .gloas else .altair).InactivityScores.TreeView {
+        pub fn inactivityScores(self: *Self) !*ForkTypes(if (f.gte(.altair)) f else .altair).BeaconState.getFieldType("inactivity_scores").TreeView {
             if (comptime f == .phase0) return error.InvalidAtFork;
             return try self.inner.get("inactivity_scores");
         }
@@ -426,32 +426,32 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.inner.set("earliest_consolidation_epoch", epoch);
         }
 
-        pub fn pendingDeposits(self: *Self) !*ForkTypes(if (f.gte(.gloas)) .gloas else .electra).PendingDeposits.TreeView {
+        pub fn pendingDeposits(self: *Self) !*ForkTypes(if (f.gte(.electra)) f else .electra).BeaconState.getFieldType("pending_deposits").TreeView {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb)) return error.InvalidAtFork;
             return try self.inner.get("pending_deposits");
         }
 
-        pub fn setPendingDeposits(self: *Self, deposits: *ForkTypes(if (f.gte(.gloas)) .gloas else .electra).PendingDeposits.TreeView) !void {
+        pub fn setPendingDeposits(self: *Self, deposits: *ForkTypes(if (f.gte(.electra)) f else .electra).BeaconState.getFieldType("pending_deposits").TreeView) !void {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb)) return error.InvalidAtFork;
             try self.inner.set("pending_deposits", deposits);
         }
 
-        pub fn pendingPartialWithdrawals(self: *Self) !*ForkTypes(if (f.gte(.gloas)) .gloas else .electra).PendingPartialWithdrawals.TreeView {
+        pub fn pendingPartialWithdrawals(self: *Self) !*ForkTypes(if (f.gte(.electra)) f else .electra).BeaconState.getFieldType("pending_partial_withdrawals").TreeView {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb)) return error.InvalidAtFork;
             return try self.inner.get("pending_partial_withdrawals");
         }
 
-        pub fn setPendingPartialWithdrawals(self: *Self, pending_partial_withdrawals: *ForkTypes(if (f.gte(.gloas)) .gloas else .electra).PendingPartialWithdrawals.TreeView) !void {
+        pub fn setPendingPartialWithdrawals(self: *Self, pending_partial_withdrawals: *ForkTypes(if (f.gte(.electra)) f else .electra).BeaconState.getFieldType("pending_partial_withdrawals").TreeView) !void {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb)) return error.InvalidAtFork;
             try self.inner.set("pending_partial_withdrawals", pending_partial_withdrawals);
         }
 
-        pub fn pendingConsolidations(self: *Self) !*ForkTypes(if (f.gte(.gloas)) .gloas else .electra).PendingConsolidations.TreeView {
+        pub fn pendingConsolidations(self: *Self) !*ForkTypes(if (f.gte(.electra)) f else .electra).BeaconState.getFieldType("pending_consolidations").TreeView {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb)) return error.InvalidAtFork;
             return try self.inner.get("pending_consolidations");
         }
 
-        pub fn setPendingConsolidations(self: *Self, consolidations: *ForkTypes(if (f.gte(.gloas)) .gloas else .electra).PendingConsolidations.TreeView) !void {
+        pub fn setPendingConsolidations(self: *Self, consolidations: *ForkTypes(if (f.gte(.electra)) f else .electra).BeaconState.getFieldType("pending_consolidations").TreeView) !void {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb)) return error.InvalidAtFork;
             try self.inner.set("pending_consolidations", consolidations);
         }

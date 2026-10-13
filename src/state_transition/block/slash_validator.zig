@@ -5,6 +5,7 @@ const preset = @import("preset").preset;
 const c = @import("constants");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const BeaconState = @import("fork_types").BeaconState;
+const ForkTypes = @import("fork_types").ForkTypes;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
@@ -93,9 +94,9 @@ pub fn slashValidator(
     if (comptime fork.gte(.gloas)) {
         var payments = try state.inner.get("builder_pending_payments");
         for (0..2 * preset.SLOTS_PER_EPOCH) |i| {
-            var payment: types.gloas.BuilderPendingPayment.Type = undefined;
+            var payment: ForkTypes(fork).BuilderPendingPayment.Type = undefined;
             try payments.getValue(undefined, i, &payment);
-            if (payment.proposer_index == slashed_index) try payments.setValue(i, &types.gloas.BuilderPendingPayment.default_value);
+            if (payment.proposer_index == slashed_index) try payments.setValue(i, &ForkTypes(fork).BuilderPendingPayment.default_value);
         }
     }
 

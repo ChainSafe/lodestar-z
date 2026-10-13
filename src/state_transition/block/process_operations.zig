@@ -11,9 +11,11 @@ const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
 const ForkTypes = @import("fork_types").ForkTypes;
 const ct = @import("consensus_types");
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
+const preset = @import("preset").preset;
+const processAttestationsWithParent = @import("process_attestations.zig").processAttestationsWithParent;
+const processPayloadAttestation = @import("process_payload_attestation.zig").processPayloadAttestation;
 
 const getEth1DepositCount = @import("../utils/deposit.zig").getEth1DepositCount;
-const processAttestations = @import("./process_attestations.zig").processAttestations;
 const processAttesterSlashing = @import("./process_attester_slashing.zig").processAttesterSlashing;
 const processBlsToExecutionChange = @import("./process_bls_to_execution_change.zig").processBlsToExecutionChange;
 const processConsolidationRequest = @import("./process_consolidation_request.zig").processConsolidationRequest;
@@ -39,13 +41,12 @@ pub fn processOperations(
     opts: ProcessBlockOpts,
 ) !void {
     if (comptime fork.gte(.gloas)) {
-        const limits = @import("preset").preset;
-        if (body.inner.proposer_slashings.items.len > limits.MAX_PROPOSER_SLASHINGS or
-            body.inner.attester_slashings.items.len > limits.MAX_ATTESTER_SLASHINGS_ELECTRA or
-            body.inner.attestations.items.len > limits.MAX_ATTESTATIONS_ELECTRA or
-            body.inner.voluntary_exits.items.len > limits.MAX_VOLUNTARY_EXITS or
-            body.inner.bls_to_execution_changes.items.len > limits.MAX_BLS_TO_EXECUTION_CHANGES or
-            body.inner.payload_attestations.items.len > limits.MAX_PAYLOAD_ATTESTATIONS)
+        if (body.inner.proposer_slashings.items.len > preset.MAX_PROPOSER_SLASHINGS or
+            body.inner.attester_slashings.items.len > preset.MAX_ATTESTER_SLASHINGS_ELECTRA or
+            body.inner.attestations.items.len > preset.MAX_ATTESTATIONS_ELECTRA or
+            body.inner.voluntary_exits.items.len > preset.MAX_VOLUNTARY_EXITS or
+            body.inner.bls_to_execution_changes.items.len > preset.MAX_BLS_TO_EXECUTION_CHANGES or
+            body.inner.payload_attestations.items.len > preset.MAX_PAYLOAD_ATTESTATIONS)
         {
             return error.TooManyBlockOperations;
         }
@@ -96,7 +97,7 @@ pub fn processOperations(
 
     {
         const timer = time.start(io);
-        try @import("process_attestations.zig").processAttestationsWithParent(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, body.inner.attestations.items, opts.parent_slot, opts.verify_signature);
+        try processAttestationsWithParent(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, body.inner.attestations.items, opts.parent_slot, opts.verify_signature);
         try metrics.state_transition.process_operations_step.observe(
             .{ .step = .processAttestations },
             time.durationSeconds(time.since(io, timer)),
@@ -138,7 +139,7 @@ pub fn processOperations(
 
     if (comptime fork.gte(.gloas)) {
         for (body.inner.payload_attestations.items) |*attestation| {
-            try @import("process_payload_attestation.zig").processPayloadAttestation(allocator, io, config, epoch_cache, state, attestation, opts.verify_signature);
+            try processPayloadAttestation(fork, allocator, io, config, epoch_cache, state, attestation, opts.verify_signature);
         }
     }
 

@@ -742,11 +742,9 @@ describe("BeaconStateView", () => {
       for (const opts of invalidOpts) {
         expect(() => state.stateTransition(dummyBlockBytes, false, opts)).toThrow();
       }
-    });
-
-    // TODO: remove once Zig models DataAvailabilityStatus.NotRequired
-    it("rejects gloas-only NotRequired", () => {
-      expect(() => state.stateTransition(dummyBlockBytes, false, {dataAvailabilityStatus: "NotRequired"})).toThrow();
+      expect(() => state.stateTransition(dummyBlockBytes, false, {source: "unknown"})).toThrow(
+        "InvalidProcessBlockSource"
+      );
     });
   });
 

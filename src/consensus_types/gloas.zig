@@ -14,7 +14,7 @@ pub const Fork = phase0.Fork;
 pub const ForkData = phase0.ForkData;
 pub const Checkpoint = phase0.Checkpoint;
 pub const Validator = phase0.Validator;
-pub const Validators = ssz.FixedProgressiveListType(Validator);
+pub const Validators = ssz.FixedProgressiveListType(Validator, .{});
 pub const AttestationData = phase0.AttestationData;
 pub const PendingAttestation = phase0.PendingAttestation;
 pub const Eth1Data = phase0.Eth1Data;
@@ -31,13 +31,13 @@ pub const SignedVoluntaryExit = phase0.SignedVoluntaryExit;
 pub const Eth1Block = phase0.Eth1Block;
 pub const HistoricalBlockRoots = phase0.HistoricalBlockRoots;
 pub const HistoricalStateRoots = phase0.HistoricalStateRoots;
-pub const ProposerSlashings = ssz.FixedProgressiveListType(ProposerSlashing);
-pub const Deposits = ssz.FixedProgressiveListType(Deposit);
-pub const VoluntaryExits = ssz.FixedProgressiveListType(SignedVoluntaryExit);
+pub const ProposerSlashings = ssz.FixedProgressiveListType(ProposerSlashing, .{});
+pub const Deposits = ssz.FixedProgressiveListType(Deposit, .{});
+pub const VoluntaryExits = ssz.FixedProgressiveListType(SignedVoluntaryExit, .{});
 pub const Slashings = phase0.Slashings;
-pub const Balances = ssz.FixedProgressiveListTypeWithOptions(p.Uint64, .{ .chunked_leaf = true });
-pub const EpochParticipation = ssz.FixedProgressiveListTypeWithOptions(p.Uint8, .{ .chunked_leaf = true });
-pub const InactivityScores = ssz.FixedProgressiveListTypeWithOptions(p.Uint64, .{ .chunked_leaf = true });
+pub const Balances = ssz.FixedProgressiveListType(p.Uint64, .{ .chunked_leaf = true });
+pub const EpochParticipation = ssz.FixedProgressiveListType(p.Uint8, .{ .chunked_leaf = true });
+pub const InactivityScores = ssz.FixedProgressiveListType(p.Uint64, .{ .chunked_leaf = true });
 pub const RandaoMixes = phase0.RandaoMixes;
 
 pub const SyncAggregate = altair.SyncAggregate;
@@ -51,21 +51,21 @@ pub const SyncAggregatorSelectionData = altair.SyncAggregatorSelectionData;
 pub const PowBlock = bellatrix.PowBlock;
 
 pub const Withdrawal = capella.Withdrawal;
-pub const Withdrawals = ssz.FixedProgressiveListType(Withdrawal);
+pub const Withdrawals = ssz.FixedProgressiveListType(Withdrawal, .{});
 pub const BLSToExecutionChange = capella.BLSToExecutionChange;
 pub const SignedBLSToExecutionChange = capella.SignedBLSToExecutionChange;
-pub const SignedBLSToExecutionChanges = ssz.FixedProgressiveListType(SignedBLSToExecutionChange);
+pub const SignedBLSToExecutionChanges = ssz.FixedProgressiveListType(SignedBLSToExecutionChange, .{});
 pub const HistoricalSummary = capella.HistoricalSummary;
 
 pub const BlobIdentifier = deneb.BlobIdentifier;
-pub const BlobKzgCommitments = ssz.FixedProgressiveListType(p.KZGCommitment);
+pub const BlobKzgCommitments = ssz.FixedProgressiveListType(p.KZGCommitment, .{});
 
 pub const PendingDeposit = electra.PendingDeposit;
 pub const PendingPartialWithdrawal = electra.PendingPartialWithdrawal;
 pub const PendingConsolidation = electra.PendingConsolidation;
-pub const PendingDeposits = ssz.FixedProgressiveListType(PendingDeposit);
-pub const PendingPartialWithdrawals = ssz.FixedProgressiveListType(PendingPartialWithdrawal);
-pub const PendingConsolidations = ssz.FixedProgressiveListType(PendingConsolidation);
+pub const PendingDeposits = ssz.FixedProgressiveListType(PendingDeposit, .{});
+pub const PendingPartialWithdrawals = ssz.FixedProgressiveListType(PendingPartialWithdrawal, .{});
+pub const PendingConsolidations = ssz.FixedProgressiveListType(PendingConsolidation, .{});
 pub const DepositRequest = electra.DepositRequest;
 pub const WithdrawalRequest = electra.WithdrawalRequest;
 pub const ConsolidationRequest = electra.ConsolidationRequest;
@@ -79,11 +79,11 @@ pub const BuilderExitRequest = ssz.FixedContainerType(struct {
     source_address: p.ExecutionAddress,
     pubkey: p.BLSPubkey,
 });
-pub const DepositRequests = ssz.FixedProgressiveListType(DepositRequest);
-pub const WithdrawalRequests = ssz.FixedProgressiveListType(WithdrawalRequest);
-pub const ConsolidationRequests = ssz.FixedProgressiveListType(ConsolidationRequest);
-pub const BuilderDepositRequests = ssz.FixedProgressiveListType(BuilderDepositRequest);
-pub const BuilderExitRequests = ssz.FixedProgressiveListType(BuilderExitRequest);
+pub const DepositRequests = ssz.FixedProgressiveListType(DepositRequest, .{});
+pub const WithdrawalRequests = ssz.FixedProgressiveListType(WithdrawalRequest, .{});
+pub const ConsolidationRequests = ssz.FixedProgressiveListType(ConsolidationRequest, .{});
+pub const BuilderDepositRequests = ssz.FixedProgressiveListType(BuilderDepositRequest, .{});
+pub const BuilderExitRequests = ssz.FixedProgressiveListType(BuilderExitRequest, .{});
 pub const ExecutionRequests = ssz.VariableProgressiveContainerType(struct {
     deposits: DepositRequests,
     withdrawals: WithdrawalRequests,
@@ -92,15 +92,15 @@ pub const ExecutionRequests = ssz.VariableProgressiveContainerType(struct {
     builder_exits: BuilderExitRequests,
 }, &([_]u1{1} ** 5));
 pub const SingleAttestation = electra.SingleAttestation;
-pub const AggregationBits = ssz.ProgressiveBitListType();
-pub const AttestingIndices = ssz.FixedProgressiveListType(p.ValidatorIndex);
+pub const AggregationBits = ssz.ProgressiveBitListType(.{});
+pub const AttestingIndices = ssz.FixedProgressiveListType(p.ValidatorIndex, .{});
 pub const Attestation = ssz.VariableProgressiveContainerType(struct {
     aggregation_bits: AggregationBits,
     data: AttestationData,
     signature: p.BLSSignature,
     committee_bits: ssz.BitVectorType(preset.MAX_COMMITTEES_PER_SLOT),
 }, &([_]u1{1} ** 4));
-pub const Attestations = ssz.VariableProgressiveListType(Attestation);
+pub const Attestations = ssz.VariableProgressiveListType(Attestation, .{});
 pub const IndexedAttestation = ssz.VariableProgressiveContainerType(struct {
     attesting_indices: AttestingIndices,
     data: AttestationData,
@@ -110,7 +110,7 @@ pub const AttesterSlashing = ssz.VariableContainerType(struct {
     attestation_1: IndexedAttestation,
     attestation_2: IndexedAttestation,
 });
-pub const AttesterSlashings = ssz.VariableProgressiveListType(AttesterSlashing);
+pub const AttesterSlashings = ssz.VariableProgressiveListType(AttesterSlashing, .{});
 pub const AggregateAndProof = ssz.VariableContainerType(struct {
     aggregator_index: p.ValidatorIndex,
     aggregate: Attestation,
@@ -127,9 +127,9 @@ pub const ExecutionPayloadHeader = electra.ExecutionPayloadHeader;
 pub const VersionedHashes = electra.VersionedHashes;
 
 // RLP-encoded block access list (EIP-7928)
-pub const BlockAccessList = ssz.ProgressiveByteListType();
-pub const Transaction = ssz.ProgressiveByteListType();
-pub const Transactions = ssz.VariableProgressiveListType(Transaction);
+pub const BlockAccessList = ssz.ProgressiveByteListType(.{});
+pub const Transaction = ssz.ProgressiveByteListType(.{});
+pub const Transactions = ssz.VariableProgressiveListType(Transaction, .{});
 
 // Gloas ExecutionPayload adds block_access_list (EIP-7928) and slot_number (EIP-7843)
 pub const ExecutionPayload = ssz.VariableProgressiveContainerType(struct {
@@ -412,11 +412,11 @@ pub const BeaconState = ssz.VariableProgressiveContainerType(struct {
 
 pub const BlobSidecar = electra.BlobSidecar;
 
-pub const Builders = ssz.FixedProgressiveListType(Builder);
+pub const Builders = ssz.FixedProgressiveListType(Builder, .{});
 pub const BuilderPendingPayments = ssz.FixedVectorType(BuilderPendingPayment, 2 * preset.SLOTS_PER_EPOCH, .{});
-pub const BuilderPendingWithdrawals = ssz.FixedProgressiveListType(BuilderPendingWithdrawal);
-pub const PayloadAttestations = ssz.FixedProgressiveListType(PayloadAttestation);
-pub const DataColumn = ssz.FixedProgressiveListType(Cell);
-pub const KZGProofs = ssz.FixedProgressiveListType(p.KZGProof);
+pub const BuilderPendingWithdrawals = ssz.FixedProgressiveListType(BuilderPendingWithdrawal, .{});
+pub const PayloadAttestations = ssz.FixedProgressiveListType(PayloadAttestation, .{});
+pub const DataColumn = ssz.FixedProgressiveListType(Cell, .{});
+pub const KZGProofs = ssz.FixedProgressiveListType(p.KZGProof, .{});
 
 pub const PayloadTimelinessCommitteeWindow = PtcWindow;

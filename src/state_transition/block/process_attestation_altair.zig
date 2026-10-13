@@ -20,6 +20,7 @@ const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconP
 const Checkpoint = types.phase0.Checkpoint.Type;
 const isTimelyTarget = @import("./process_attestation_phase0.zig").isTimelyTarget;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
+const isAttestationSameSlotRootCache = @import("../utils/gloas.zig").isAttestationSameSlotRootCache;
 
 const PROPOSER_REWARD_DOMINATOR = ((c.WEIGHT_DENOMINATOR - c.PROPOSER_WEIGHT) * c.WEIGHT_DENOMINATOR) / c.PROPOSER_WEIGHT;
 
@@ -104,7 +105,7 @@ pub fn processAttestationsAltairWithParent(
         const in_current_epoch = data.target.epoch == current_epoch;
         var epoch_participation = if (in_current_epoch) try state.currentEpochParticipation() else try state.previousEpochParticipation();
         const flags_attestation = try getAttestationParticipationStatusWithParent(fork, data, state_slot - data.slot, current_epoch, root_cache, parent_slot);
-        const same_slot = if (comptime fork.gte(.gloas)) try @import("../utils/gloas.zig").isAttestationSameSlotRootCache(root_cache, data) else false;
+        const same_slot = if (comptime fork.gte(.gloas)) try isAttestationSameSlotRootCache(fork, root_cache, data) else false;
 
         // For each participant, update their participation
         // In epoch processing, this participation info is used to calculate balance updates
@@ -166,7 +167,7 @@ pub fn processAttestationsAltairWithParent(
         var payments = try state.inner.get("builder_pending_payments");
         for (payment_weight, 0..) |weight, i| {
             if (weight == 0) continue;
-            var payment: types.gloas.BuilderPendingPayment.Type = undefined;
+            var payment: ForkTypes(fork).BuilderPendingPayment.Type = undefined;
             try payments.getValue(undefined, i, &payment);
             if (payment.withdrawal.amount > 0) {
                 payment.weight += weight * preset.EFFECTIVE_BALANCE_INCREMENT;
@@ -215,7 +216,7 @@ fn getAttestationParticipationStatusWithParent(
         is_matching_target and std.mem.eql(u8, &data.beacon_block_root, try root_cache.getBlockRootAtSlot(data.slot));
 
     if (comptime fork.gte(.gloas)) {
-        const same_slot = try @import("../utils/gloas.zig").isAttestationSameSlotRootCache(root_cache, data);
+        const same_slot = try isAttestationSameSlotRootCache(fork, root_cache, data);
         if (same_slot) {
             if (data.index != 0) return error.SameSlotAttestationMustIndicateEmptyPayload;
         } else {

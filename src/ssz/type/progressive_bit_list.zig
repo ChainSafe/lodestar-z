@@ -18,11 +18,7 @@ pub fn isProgressiveBitListType(ST: type) bool {
 
 pub const TypeOpts = struct { limit: usize = std.math.maxInt(usize) };
 
-pub fn ProgressiveBitListType() type {
-    return ProgressiveBitListTypeWithOptions(.{});
-}
-
-pub fn ProgressiveBitListTypeWithOptions(comptime opts: TypeOpts) type {
+pub fn ProgressiveBitListType(comptime opts: TypeOpts) type {
     return struct {
         const Self = @This();
         pub const kind = TypeKind.progressive_bit_list;

@@ -4,20 +4,42 @@ const CloneOpts = @import("ssz").CloneOpts;
 const Node = @import("persistent_merkle_tree").Node;
 
 /// Borrows a list owned by its parent state. Clones and slices own their views until
-/// transferred into a state or released with deinit(). Both layouts share element types.
-pub fn ListView(comptime Before: type, comptime After: type) type {
+/// transferred into a state or released with deinit(). Variants describe SSZ layouts,
+/// not forks; multiple forks can share either schema.
+pub fn ListView(comptime Bounded: type, comptime Progressive: type) type {
     return union(enum) {
-        pre_gloas: *Before.TreeView,
-        gloas: *After.TreeView,
+        bounded: *Bounded.TreeView,
+        progressive: *Progressive.TreeView,
 
         const Self = @This();
-        pub const Element = Before.TreeView.Element;
-        pub const Value = Before.Type;
+        pub const Element = Bounded.TreeView.Element;
+        pub const Value = Bounded.Type;
 
         comptime {
-            if (Before.Element != After.Element or Before.Type != After.Type) {
-                @compileError("fork list views must have identical element and value types");
+            if (Bounded.kind != .list or Progressive.kind != .progressive_list) {
+                @compileError("list views require bounded and progressive list schemas");
             }
+            if (Bounded.Element != Progressive.Element or Bounded.Type != Progressive.Type) {
+                @compileError("list views must have identical element and value types");
+            }
+        }
+
+        pub fn fromView(comptime List: type, view: *List.TreeView) Self {
+            if (List == Bounded) return .{ .bounded = view };
+            if (List == Progressive) return .{ .progressive = view };
+            @compileError("unsupported list schema; extend ListView for the new representation");
+        }
+
+        pub fn unwrap(self: Self, comptime List: type) error{IncompatibleListType}!*List.TreeView {
+            if (List == Bounded) return switch (self) {
+                .bounded => |view| view,
+                .progressive => error.IncompatibleListType,
+            };
+            if (List == Progressive) return switch (self) {
+                .progressive => |view| view,
+                .bounded => error.IncompatibleListType,
+            };
+            @compileError("unsupported list schema; extend ListView for the new representation");
         }
 
         pub fn length(self: Self) !usize {
@@ -62,13 +84,13 @@ pub fn ListView(comptime Before: type, comptime After: type) type {
             };
         }
 
-        pub fn getValue(self: Self, allocator: Allocator, index: usize, out: *Before.Element.Type) !void {
+        pub fn getValue(self: Self, allocator: Allocator, index: usize, out: *Bounded.Element.Type) !void {
             return switch (self) {
                 inline else => |view| view.getValue(allocator, index, out),
             };
         }
 
-        pub fn setValue(self: Self, index: usize, value: *const Before.Element.Type) !void {
+        pub fn setValue(self: Self, index: usize, value: *const Bounded.Element.Type) !void {
             return switch (self) {
                 inline else => |view| view.setValue(index, value),
             };
@@ -92,7 +114,7 @@ pub fn ListView(comptime Before: type, comptime After: type) type {
             };
         }
 
-        pub fn getAllReadonlyValues(self: Self, allocator: Allocator) ![]Before.Element.Type {
+        pub fn getAllReadonlyValues(self: Self, allocator: Allocator) ![]Bounded.Element.Type {
             return switch (self) {
                 inline else => |view| view.getAllReadonlyValues(allocator),
             };
@@ -104,7 +126,7 @@ pub fn ListView(comptime Before: type, comptime After: type) type {
             };
         }
 
-        pub fn pushValue(self: Self, value: *const Before.Element.Type) !void {
+        pub fn pushValue(self: Self, value: *const Bounded.Element.Type) !void {
             return switch (self) {
                 inline else => |view| view.pushValue(value),
             };
@@ -118,22 +140,19 @@ pub fn ListView(comptime Before: type, comptime After: type) type {
 
         pub fn clone(self: Self, opts: CloneOpts) !Self {
             return switch (self) {
-                .pre_gloas => |view| .{ .pre_gloas = try view.clone(opts) },
-                .gloas => |view| .{ .gloas = try view.clone(opts) },
+                inline else => |view, tag| @unionInit(Self, @tagName(tag), try view.clone(opts)),
             };
         }
 
         pub fn sliceTo(self: Self, index: usize) !Self {
             return switch (self) {
-                .pre_gloas => |view| .{ .pre_gloas = try view.sliceTo(index) },
-                .gloas => |view| .{ .gloas = try view.sliceTo(index) },
+                inline else => |view, tag| @unionInit(Self, @tagName(tag), try view.sliceTo(index)),
             };
         }
 
         pub fn sliceFrom(self: Self, index: usize) !Self {
             return switch (self) {
-                .pre_gloas => |view| .{ .pre_gloas = try view.sliceFrom(index) },
-                .gloas => |view| .{ .gloas = try view.sliceFrom(index) },
+                inline else => |view, tag| @unionInit(Self, @tagName(tag), try view.sliceFrom(index)),
             };
         }
 
@@ -169,22 +188,21 @@ pub fn ListView(comptime Before: type, comptime After: type) type {
 
         pub fn iteratorReadonly(self: Self, start_index: usize) ReadonlyIterator {
             return switch (self) {
-                .pre_gloas => |view| .{ .pre_gloas = view.iteratorReadonly(start_index) },
-                .gloas => |view| .{ .gloas = view.iteratorReadonly(start_index) },
+                inline else => |view, tag| @unionInit(ReadonlyIterator, @tagName(tag), view.iteratorReadonly(start_index)),
             };
         }
 
         pub const ReadonlyIterator = union(enum) {
-            pre_gloas: Before.TreeView.ReadonlyIterator,
-            gloas: After.TreeView.ReadonlyIterator,
+            bounded: Bounded.TreeView.ReadonlyIterator,
+            progressive: Progressive.TreeView.ReadonlyIterator,
 
-            pub fn nextValue(self: *ReadonlyIterator) !Before.Element.Type {
+            pub fn nextValue(self: *ReadonlyIterator) !Bounded.Element.Type {
                 return switch (self.*) {
                     inline else => |*iterator| iterator.nextValue(),
                 };
             }
 
-            pub fn nextValuePtr(self: *ReadonlyIterator) !*const Before.Element.Type {
+            pub fn nextValuePtr(self: *ReadonlyIterator) !*const Bounded.Element.Type {
                 return switch (self.*) {
                     inline else => |*iterator| iterator.nextValuePtr(),
                 };
