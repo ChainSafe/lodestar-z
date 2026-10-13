@@ -8,6 +8,7 @@ const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Depth = @import("hashing").Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const progressive = @import("progressive.zig");
+const chunk_utils = @import("chunk.zig");
 
 pub fn FixedProgressiveListType(comptime ST: type) type {
     comptime {
@@ -49,19 +50,23 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             } else return len;
         }
 
+        fn packBasicChunk(elements: []const Element.Type) [32]u8 {
+            std.debug.assert(elements.len <= 32 / Element.fixed_size);
+            var chunk: [32]u8 = @splat(0);
+            for (elements, 0..) |*element, i| {
+                _ = Element.serializeIntoBytes(element, chunk[i * Element.fixed_size ..][0..Element.fixed_size]);
+            }
+            return chunk;
+        }
+
         pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
             var accumulator = try progressive.MerkleAccumulator.init(chunkCount(value));
             if (comptime isBasicType(Element)) {
                 const items_per_chunk = 32 / Element.fixed_size;
-                var index: usize = 0;
-                while (index < value.items.len) {
-                    var chunk: [32]u8 = @splat(0);
-                    const count = @min(items_per_chunk, value.items.len - index);
-                    for (value.items[index..][0..count], 0..) |*element, i| {
-                        _ = Element.serializeIntoBytes(element, chunk[i * Element.fixed_size ..][0..Element.fixed_size]);
-                    }
+                var chunks = std.mem.window(Element.Type, value.items, items_per_chunk, items_per_chunk);
+                while (chunks.next()) |elements| {
+                    const chunk = packBasicChunk(elements);
                     try accumulator.append(&chunk);
-                    index += count;
                 }
             } else {
                 for (value.items) |*element| {
@@ -156,13 +161,10 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 const len = try length(data);
                 var accumulator = try progressive.MerkleAccumulator.init(chunkCountForLength(len));
                 if (comptime isBasicType(Element)) {
-                    var offset: usize = 0;
-                    while (offset < data.len) {
-                        var chunk: [32]u8 = @splat(0);
-                        const count = @min(32, data.len - offset);
-                        @memcpy(chunk[0..count], data[offset..][0..count]);
+                    var chunks = std.mem.window(u8, data, 32, 32);
+                    while (chunks.next()) |bytes| {
+                        const chunk = chunk_utils.fromBytes(bytes);
                         try accumulator.append(&chunk);
-                        offset += count;
                     }
                 } else {
                     for (0..len) |i| {
@@ -264,17 +266,14 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 var builder = try progressive.TreeBuilder.init(pool, chunkCountForLength(len));
                 defer builder.deinit();
                 if (comptime isBasicType(Element)) {
-                    var offset: usize = 0;
-                    while (offset < data.len) {
-                        var chunk: [32]u8 = @splat(0);
-                        const count = @min(32, data.len - offset);
-                        @memcpy(chunk[0..count], data[offset..][0..count]);
-                        try builder.append(try pool.createLeaf(&chunk));
-                        offset += count;
+                    var chunks = std.mem.window(u8, data, 32, 32);
+                    while (chunks.next()) |bytes| {
+                        const chunk = chunk_utils.fromBytes(bytes);
+                        try builder.appendOwned(try pool.createLeaf(&chunk));
                     }
                 } else {
                     for (0..len) |i| {
-                        try builder.append(try Element.tree.deserializeFromBytes(pool, data[i * Element.fixed_size ..][0..Element.fixed_size]));
+                        try builder.appendOwned(try Element.tree.deserializeFromBytes(pool, data[i * Element.fixed_size ..][0..Element.fixed_size]));
                     }
                 }
                 const contents = try builder.finish();
@@ -289,19 +288,14 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 defer builder.deinit();
                 if (comptime isBasicType(Element)) {
                     const items_per_chunk = 32 / Element.fixed_size;
-                    var index: usize = 0;
-                    while (index < value.items.len) {
-                        var chunk: [32]u8 = @splat(0);
-                        const count = @min(items_per_chunk, value.items.len - index);
-                        for (value.items[index..][0..count], 0..) |*element, i| {
-                            _ = Element.serializeIntoBytes(element, chunk[i * Element.fixed_size ..][0..Element.fixed_size]);
-                        }
-                        try builder.append(try pool.createLeaf(&chunk));
-                        index += count;
+                    var chunks = std.mem.window(Element.Type, value.items, items_per_chunk, items_per_chunk);
+                    while (chunks.next()) |elements| {
+                        const chunk = packBasicChunk(elements);
+                        try builder.appendOwned(try pool.createLeaf(&chunk));
                     }
                 } else {
                     for (value.items) |*element| {
-                        try builder.append(try Element.tree.fromValue(pool, element));
+                        try builder.appendOwned(try Element.tree.fromValue(pool, element));
                     }
                 }
                 const contents = try builder.finish();
@@ -490,7 +484,7 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
                 var builder = try progressive.TreeBuilder.init(pool, elements.len);
                 defer builder.deinit();
                 while (try elements.next()) |element_bytes| {
-                    try builder.append(try Element.tree.deserializeFromBytes(pool, element_bytes));
+                    try builder.appendOwned(try Element.tree.deserializeFromBytes(pool, element_bytes));
                 }
                 const contents = try builder.finish();
                 errdefer pool.unref(contents);
@@ -503,7 +497,7 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
                 var builder = try progressive.TreeBuilder.init(pool, value.items.len);
                 defer builder.deinit();
                 for (value.items) |*element| {
-                    try builder.append(try Element.tree.fromValue(pool, element));
+                    try builder.appendOwned(try Element.tree.fromValue(pool, element));
                 }
                 const contents = try builder.finish();
                 errdefer pool.unref(contents);

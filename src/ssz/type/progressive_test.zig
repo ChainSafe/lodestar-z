@@ -87,7 +87,7 @@ fn buildProgressiveChunks(pool: *Node.Pool, count: usize) !Node.Id {
     defer builder.deinit();
     for (0..count) |i| {
         const chunk: [32]u8 = @splat(@truncate(i));
-        try builder.append(try pool.createLeaf(&chunk));
+        try builder.appendOwned(try pool.createLeaf(&chunk));
     }
     return builder.finish();
 }
@@ -100,11 +100,32 @@ test "progressive streaming builder rejects excess input and invalid finish" {
     var builder = try progressive.TreeBuilder.init(&pool, 1);
     defer builder.deinit();
     try std.testing.expectError(error.InvalidLength, builder.finish());
-    try builder.append(try pool.createLeafFromUint(7));
-    try std.testing.expectError(error.InvalidLength, builder.append(try pool.createLeafFromUint(9)));
+    try builder.appendOwned(try pool.createLeafFromUint(7));
+    try std.testing.expectError(error.InvalidLength, builder.appendOwned(try pool.createLeafFromUint(9)));
     const root = try builder.finish();
     pool.unref(root);
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
     try std.testing.expectError(error.InvalidState, builder.finish());
+    const rejected = try pool.createLeafFromUint(11);
+    try std.testing.expectError(error.InvalidLength, builder.appendOwned(rejected));
+    try std.testing.expect(rejected.getState(&pool).isFree());
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
     try std.testing.expectError(error.InputTooLong, progressive.TreeBuilder.init(&pool, std.math.maxInt(usize)));
+}
+
+test "memory_safety: progressive appendOwned consumes its input on pool exhaustion" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 3 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+    {
+        var builder = try progressive.TreeBuilder.init(&pool, 3);
+        defer builder.deinit();
+        try builder.appendOwned(try pool.createLeafFromUint(1));
+        try builder.appendOwned(try pool.createLeafFromUint(2));
+        const incoming = try pool.createLeafFromUint(3);
+        try std.testing.expectError(error.PoolExhausted, builder.appendOwned(incoming));
+        try std.testing.expect(incoming.getState(&pool).isFree());
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }

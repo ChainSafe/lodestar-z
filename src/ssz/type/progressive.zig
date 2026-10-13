@@ -223,8 +223,9 @@ pub const TreeBuilder = struct {
         for (self.roots) |root| if (root) |id| self.pool.unref(id);
     }
 
-    /// Consumes a fresh, unretained root or zero node, including on error.
-    pub fn append(self: *TreeBuilder, node: Node.Id) !void {
+    /// Takes ownership of a fresh, unretained root or zero node on entry, including on error.
+    pub fn appendOwned(self: *TreeBuilder, node: Node.Id) !void {
+        std.debug.assert(node.getState(self.pool).refCount() == 0);
         if (self.finished or self.remaining == 0) {
             self.pool.unref(node);
             return error.InvalidLength;
