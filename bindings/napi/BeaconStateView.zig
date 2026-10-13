@@ -1664,7 +1664,7 @@ pub fn canBuilderCoverBid(self: *BeaconStateView, builder_index: js.Number, bid_
     const index = builder_index.toU64Exact() catch return error.InvalidBuilderIndex;
     const amount = bid_amount.toU64Exact() catch return error.InvalidBidAmount;
     const state = try cached_state.state.tryCastToFork(.gloas);
-    return js.Boolean.from(try st.canBuilderCoverBid(state, index, amount));
+    return js.Boolean.from(try st.canBuilderCoverBid(.gloas, state, index, amount));
 }
 
 fn readPayloadTimelinessCommittee(cached_state: *CachedBeaconState, slot_value: u64, out: *[preset.PTC_SIZE]u64) !void {
@@ -1737,7 +1737,7 @@ pub fn withParentPayloadApplied(self: *BeaconStateView, execution_requests_bytes
         post_state.deinit();
         allocator.destroy(post_state);
     }
-    try st.applyParentExecutionPayload(allocator, js.io(), post_state.config, post_state.epoch_cache, post_state.state.castToFork(.gloas), &requests);
+    try st.applyParentExecutionPayload(.gloas, allocator, js.io(), post_state.config, post_state.epoch_cache, post_state.state.castToFork(.gloas), &requests);
     try post_state.state.commit();
     return .{
         .cached_state = post_state,
