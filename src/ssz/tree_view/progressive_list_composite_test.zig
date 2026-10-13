@@ -11,10 +11,10 @@ const UintType = @import("../type/uint.zig").UintType;
 const ByteVectorType = @import("../type/byte_vector.zig").ByteVectorType;
 const ByteListType = @import("../type/byte_list.zig").ByteListType;
 fn FixedListType(comptime Element: type, comptime limit: usize, comptime _: @import("../type/list.zig").TypeOpts) type {
-    return @import("../type/progressive_list.zig").FixedProgressiveListTypeWithOptions(Element, .{ .limit = limit });
+    return @import("../type/progressive_list.zig").FixedProgressiveListType(Element, .{ .limit = limit });
 }
 fn VariableListType(comptime Element: type, comptime limit: usize) type {
-    return @import("../type/progressive_list.zig").VariableProgressiveListTypeWithOptions(Element, .{ .limit = limit });
+    return @import("../type/progressive_list.zig").VariableProgressiveListType(Element, .{ .limit = limit });
 }
 const FixedVectorType = @import("../type/vector.zig").FixedVectorType;
 
@@ -1233,7 +1233,7 @@ test "progressive: migration borrows packed validators and preserves source on p
     const allocator = std.testing.allocator;
     const Entry = StructContainerType(struct { epoch: UintType(64), root: ByteVectorType(32) });
     const Before = @import("../type/list.zig").FixedListType(Entry, 128, .{});
-    const After = @import("../type/progressive_list.zig").FixedProgressiveListType(Entry);
+    const After = @import("../type/progressive_list.zig").FixedProgressiveListType(Entry, .{});
     var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const baseline = pool.getNodesInUse();

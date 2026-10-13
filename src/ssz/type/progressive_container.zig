@@ -599,6 +599,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             return variable_index;
         }
 
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
             if (data.len > max_size or data.len < min_size) {
                 return error.InvalidSize;
@@ -623,7 +624,6 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 }
             }
 
-            deinit(allocator, out);
             out.* = replacement;
         }
 
@@ -659,9 +659,6 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
         // Returns the bytes ranges of all fields, both variable and fixed size.
         // Fields may not be contiguous in the serialized bytes, so the returned ranges are [start, end].
         pub fn readFieldRanges(data: []const u8) ![fields.len][2]usize {
-            // Tree decoding calls this directly. Validate before reading any
-            // fixed section or storing the terminal length in the u32 offsets.
-            if (data.len < min_size or data.len > max_size or data.len > std.math.maxInt(u32)) return error.InvalidSize;
             var ranges: [fields.len][2]usize = undefined;
             var offsets: [var_count + 1]u32 = undefined;
             try readVariableOffsets(data, &offsets);
@@ -683,6 +680,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
         }
 
         fn readVariableOffsets(data: []const u8, offsets: []u32) !void {
+            if (data.len < min_size or data.len > max_size or data.len > std.math.maxInt(u32)) return error.InvalidSize;
             var variable_index: usize = 0;
             var fixed_index: usize = 0;
             inline for (fields) |field| {
@@ -772,6 +770,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 return pool.createBranch(contents, active_fields_node);
             }
 
+            /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
@@ -807,7 +806,6 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                     }
                 }
 
-                deinit(allocator, out);
                 out.* = replacement.*;
             }
 
@@ -902,6 +900,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             try writer.endObject();
         }
 
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromJson(allocator: std.mem.Allocator, source: *std.json.Scanner, out: *Type) !void {
             // start object token "{"
             switch (try source.next()) {
@@ -940,7 +939,6 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 else => return error.InvalidJson,
             }
 
-            deinit(allocator, out);
             out.* = replacement;
         }
     };

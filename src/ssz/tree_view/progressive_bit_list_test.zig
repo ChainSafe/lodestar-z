@@ -4,7 +4,7 @@ const ssz = @import("../type/root.zig");
 const allocator = std.testing.allocator;
 
 test "progressive bitlist mutation clone and serialization at subtree boundaries" {
-    const ST = ssz.ProgressiveBitListTypeWithOptions(.{ .limit = 6000 });
+    const ST = ssz.ProgressiveBitListType(.{ .limit = 6000 });
     var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const baseline = pool.getNodesInUse();
@@ -35,7 +35,7 @@ test "progressive bitlist mutation clone and serialization at subtree boundaries
         const decoded = try ST.TreeView.deserialize(allocator, &pool, bytes);
         defer decoded.deinit();
         try std.testing.expectEqualSlices(u8, &root, try decoded.hashTreeRoot());
-        try std.testing.expectError(error.LengthOverLimit, view.growTo(6001));
+        try std.testing.expectError(error.IndexOutOfBounds, view.set(5500, true));
     }
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
@@ -43,14 +43,16 @@ test "progressive bitlist mutation clone and serialization at subtree boundaries
 test "progressive bitlist allocation failures release cached values and preserve old root" {
     try std.testing.checkAllAllocationFailures(allocator, struct {
         fn run(alloc: std.mem.Allocator) !void {
-            const ST = ssz.ProgressiveBitListTypeWithOptions(.{ .limit = 512 });
+            const ST = ssz.ProgressiveBitListType(.{ .limit = 512 });
             var pool = try Node.Pool.init(.{ .allocator = alloc, .page_allocator = allocator, .pool_size = 128 });
             defer pool.deinit();
             const baseline = pool.getNodesInUse();
             defer std.debug.assert(pool.getNodesInUse() == baseline);
-            const view = try ST.TreeView.fromValue(alloc, &pool, &ST.default_value);
+            var value = ST.default_value;
+            defer ST.deinit(alloc, &value);
+            try value.resize(alloc, 300);
+            const view = try ST.TreeView.fromValue(alloc, &pool, &value);
             defer view.deinit();
-            try view.growTo(300);
             try view.set(299, true);
             const old_root = view.getRoot();
             view.commit() catch |err| {

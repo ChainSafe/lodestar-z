@@ -1,11 +1,11 @@
 const std = @import("std");
 const Node = @import("persistent_merkle_tree").Node;
 const ssz = @import("../type/root.zig");
-const List = ssz.FixedProgressiveListType(ssz.UintType(64));
+const List = ssz.FixedProgressiveListType(ssz.UintType(64), .{});
 const allocator = std.testing.allocator;
 const Allocator = std.mem.Allocator;
 const zero_nodes = @import("hashing").max_depth;
-const ChunkedList = ssz.FixedProgressiveListTypeWithOptions(ssz.UintType(64), .{ .chunked_leaf = true });
+const ChunkedList = ssz.FixedProgressiveListType(ssz.UintType(64), .{ .chunked_leaf = true });
 
 fn expectRoot(comptime ST: type, view: *ST.TreeView, value: *const ST.Type) !void {
     var expected: [32]u8 = undefined;
@@ -15,7 +15,7 @@ fn expectRoot(comptime ST: type, view: *ST.TreeView, value: *const ST.Type) !voi
 
 test "progressive chunked basic view matches plain at subtree and blob boundaries" {
     inline for (.{ ssz.BoolType(), ssz.UintType(8), ssz.UintType(16), ssz.UintType(32), ssz.UintType(64), ssz.UintType(128), ssz.UintType(256) }) |Element| {
-        const ST = ssz.FixedProgressiveListTypeWithOptions(Element, .{ .chunked_leaf = true });
+        const ST = ssz.FixedProgressiveListType(Element, .{ .chunked_leaf = true });
         const per_chunk = 32 / Element.fixed_size;
         const len = 342 * per_chunk + 1;
         var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 4096 });
@@ -263,7 +263,7 @@ test "progressive chunked basic bulk and warmed writes allocate no scratch" {
 
 test "progressive basic view packed types and subtree boundaries" {
     inline for (.{ ssz.BoolType(), ssz.UintType(8), ssz.UintType(16), ssz.UintType(32), ssz.UintType(64), ssz.UintType(128), ssz.UintType(256) }) |Element| {
-        const ST = ssz.FixedProgressiveListType(Element);
+        const ST = ssz.FixedProgressiveListType(Element, .{});
         var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 2048 });
         defer pool.deinit();
         {
@@ -508,7 +508,7 @@ test "memory_safety: progressive basic view allocation failure cleanup" {
 test "progressive basic deserialization propagates original errors" {
     var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 128 });
     defer pool.deinit();
-    const Booleans = ssz.FixedProgressiveListType(ssz.BoolType());
+    const Booleans = ssz.FixedProgressiveListType(ssz.BoolType(), .{});
     try std.testing.expectError(error.invalidBoolean, Booleans.TreeView.deserialize(allocator, &pool, &.{2}));
     try std.testing.expectError(error.InvalidSSZ, List.TreeView.deserialize(allocator, &pool, &.{0}));
     try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
