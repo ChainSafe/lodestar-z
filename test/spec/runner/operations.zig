@@ -212,8 +212,8 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     const config = cached_state.config;
                     try state_transition.processBlsToExecutionChange(fork, config, state, &self.op);
                 },
-                .builder_deposit_request => try state_transition.processBuilderDepositRequest(allocator, cached_state.config, state, &self.op),
-                .builder_exit_request => try state_transition.processBuilderExitRequest(allocator, cached_state.config, state, &self.op),
+                .builder_deposit_request => try state_transition.processBuilderDepositRequest(fork, allocator, cached_state.config, state, &self.op),
+                .builder_exit_request => try state_transition.processBuilderExitRequest(fork, allocator, cached_state.config, state, &self.op),
                 .consolidation_request => {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.epoch_cache;
@@ -246,14 +246,14 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                         },
                     );
                 },
-                .execution_payload_bid => try state_transition.processExecutionPayloadBid(allocator, cached_state.config, cached_state.epoch_cache, state, &self.op),
+                .execution_payload_bid => try state_transition.processExecutionPayloadBid(fork, allocator, cached_state.config, cached_state.epoch_cache, state, &self.op),
                 .parent_execution_payload => {
-                    const block = BeaconBlock(.full, .gloas){ .inner = self.op };
-                    try state_transition.processParentExecutionPayload(allocator, io, cached_state.config, cached_state.epoch_cache, state, &block);
+                    const block = BeaconBlock(.full, fork){ .inner = self.op };
+                    try state_transition.processParentExecutionPayload(fork, allocator, io, cached_state.config, cached_state.epoch_cache, state, &block);
                 },
                 // Standalone payload-attestation vectors include invalid signatures
                 // without bls_setting metadata, matching Lodestar's operation runner.
-                .payload_attestation => try state_transition.processPayloadAttestation(allocator, io, cached_state.config, cached_state.epoch_cache, state, &self.op, true),
+                .payload_attestation => try state_transition.processPayloadAttestation(fork, allocator, io, cached_state.config, cached_state.epoch_cache, state, &self.op, true),
                 .proposer_slashing => {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.epoch_cache;

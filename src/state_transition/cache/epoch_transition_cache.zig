@@ -324,10 +324,8 @@ pub const EpochTransitionCache = struct {
             validator_count,
         );
         const validator_flat_cache = &reused_cache.validator_flat_cache;
-        if (fork_seq.gte(.gloas)) {
-            try validator_flat_cache.syncProgressive(validators_view.getRoot(), validator_count);
-        } else {
-            try validator_flat_cache.sync(validators_view.getRoot(), validator_count);
+        switch (validators_view) {
+            inline else => |view| try validator_flat_cache.sync(@TypeOf(view.*).SszType, view.getRoot(), validator_count),
         }
 
         // Clone before being mutated in processEffectiveBalanceUpdates

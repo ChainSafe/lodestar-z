@@ -23,9 +23,13 @@ pub fn processSlot(state: *AnyBeaconState) !void {
     var block_roots = try state.blockRoots();
     try block_roots.setValue(try state.slot() % preset.SLOTS_PER_HISTORICAL_ROOT, previous_block_root[0..]);
 
-    if (state.forkSeq().gte(.gloas)) {
-        var availability = try state.castToFork(.gloas).inner.get("execution_payload_availability");
-        try availability.set((try state.slot() + 1) % preset.SLOTS_PER_HISTORICAL_ROOT, false);
+    switch (state.*) {
+        inline else => |inner, fork| {
+            if (comptime fork.gte(.gloas)) {
+                var availability = try inner.get("execution_payload_availability");
+                try availability.set((try state.slot() + 1) % preset.SLOTS_PER_HISTORICAL_ROOT, false);
+            }
+        },
     }
 }
 

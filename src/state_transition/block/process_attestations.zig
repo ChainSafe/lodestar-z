@@ -11,8 +11,9 @@ const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const buildSlashingsCacheIfNeeded = @import("../cache/slashings_cache.zig").buildFromStateIfNeeded;
 const processAttestationPhase0 = @import("./process_attestation_phase0.zig").processAttestationPhase0;
-const processAttestationsAltair = @import("./process_attestation_altair.zig").processAttestationsAltair;
 const Node = @import("persistent_merkle_tree").Node;
+const preset = @import("preset").preset;
+const processAttestationsAltairWithParent = @import("./process_attestation_altair.zig").processAttestationsAltairWithParent;
 
 pub fn processAttestations(
     comptime fork: ForkSeq,
@@ -43,7 +44,7 @@ pub fn processAttestationsWithParent(
     verify_signatures: bool,
 ) !void {
     if (comptime fork.gte(.gloas)) {
-        if (attestations.len > @import("preset").preset.MAX_ATTESTATIONS_ELECTRA) return error.TooManyBlockOperations;
+        if (attestations.len > preset.MAX_ATTESTATIONS_ELECTRA) return error.TooManyBlockOperations;
     }
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
     if (comptime fork == .phase0) {
@@ -59,7 +60,7 @@ pub fn processAttestationsWithParent(
             );
         }
     } else {
-        try @import("./process_attestation_altair.zig").processAttestationsAltairWithParent(
+        try processAttestationsAltairWithParent(
             fork,
             allocator,
             io,

@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconState = @import("fork_types").BeaconState;
+const ForkTypes = @import("fork_types").ForkTypes;
 const ct = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
@@ -14,6 +15,10 @@ const computeDomain = @import("./domain.zig").computeDomain;
 const computeSigningRoot = @import("./signing_root.zig").computeSigningRoot;
 const bls = @import("bls");
 const verify = @import("./bls.zig").verify;
+const EpochShuffling = @import("./epoch_shuffling.zig").EpochShuffling;
+const isActiveValidator = @import("./validator.zig").isActiveValidator;
+const computeEpochShufflingForFork = @import("./epoch_shuffling.zig").computeEpochShufflingForFork;
+const computePayloadTimelinessCommitteesForEpoch = @import("./seed.zig").computePayloadTimelinessCommitteesForEpoch;
 
 const BLSPubkey = ct.primitive.BLSPubkey.Type;
 const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
@@ -46,7 +51,7 @@ pub fn convertValidatorIndexToBuilderIndex(validator_index: u64) u64 {
     return if (hasBuilderIndexFlag(validator_index)) validator_index & ~c.BUILDER_INDEX_FLAG else validator_index;
 }
 
-pub fn isActiveBuilder(builder: *const ct.gloas.Builder.Type, finalized_epoch: u64) bool {
+pub fn isActiveBuilder(comptime fork: ForkSeq, builder: *const ForkTypes(fork).Builder.Type, finalized_epoch: u64) bool {
     return builder.deposit_epoch < finalized_epoch and builder.withdrawable_epoch == c.FAR_FUTURE_EPOCH;
 }
 
@@ -64,7 +69,7 @@ pub fn isGasLimitTargetCompatible(parent_gas_limit: u64, gas_limit: u64, target_
     return gas_limit == getExpectedGasLimit(parent_gas_limit, target_gas_limit);
 }
 
-pub fn getPendingBalanceToWithdrawForBuilder(state: *BeaconState(.gloas), builder_index: u64) !u64 {
+pub fn getPendingBalanceToWithdrawForBuilder(comptime fork: ForkSeq, state: *BeaconState(fork), builder_index: u64) !u64 {
     var pending_balance: u64 = 0;
 
     var withdrawals = try state.inner.getReadonly("builder_pending_withdrawals");
@@ -79,9 +84,9 @@ pub fn getPendingBalanceToWithdrawForBuilder(state: *BeaconState(.gloas), builde
     }
 
     var payments = try state.inner.getReadonly("builder_pending_payments");
-    const payments_len = ct.gloas.BeaconState.getFieldType("builder_pending_payments").length;
+    const payments_len = ForkTypes(fork).BeaconState.getFieldType("builder_pending_payments").length;
     for (0..payments_len) |i| {
-        var p: ct.gloas.BuilderPendingPayment.Type = undefined;
+        var p: ForkTypes(fork).BuilderPendingPayment.Type = undefined;
         try payments.getValue(undefined, i, &p);
         if (p.withdrawal.builder_index == builder_index) {
             pending_balance = try std.math.add(u64, pending_balance, p.withdrawal.amount);
@@ -91,21 +96,21 @@ pub fn getPendingBalanceToWithdrawForBuilder(state: *BeaconState(.gloas), builde
     return pending_balance;
 }
 
-pub fn canBuilderCoverBid(state: *BeaconState(.gloas), builder_index: u64, bid_amount: u64) !bool {
+pub fn canBuilderCoverBid(comptime fork: ForkSeq, state: *BeaconState(fork), builder_index: u64, bid_amount: u64) !bool {
     var builders = try state.inner.getReadonly("builders");
-    var builder: ct.gloas.Builder.Type = undefined;
+    var builder: ForkTypes(fork).Builder.Type = undefined;
     try builders.getValue(undefined, builder_index, &builder);
 
-    const pending_balance = try getPendingBalanceToWithdrawForBuilder(state, builder_index);
+    const pending_balance = try getPendingBalanceToWithdrawForBuilder(fork, state, builder_index);
     const min_balance = std.math.add(u64, preset.MIN_DEPOSIT_AMOUNT, pending_balance) catch return false;
 
     if (builder.balance < min_balance) return false;
     return builder.balance - min_balance >= bid_amount;
 }
 
-pub fn initiateBuilderExit(config: *const BeaconConfig, state: *BeaconState(.gloas), builder_index: u64) !void {
+pub fn initiateBuilderExit(comptime fork: ForkSeq, config: *const BeaconConfig, state: *BeaconState(fork), builder_index: u64) !void {
     var builders = try state.inner.get("builders");
-    var builder: ct.gloas.Builder.Type = undefined;
+    var builder: ForkTypes(fork).Builder.Type = undefined;
     try builders.getValue(undefined, builder_index, &builder);
 
     if (builder.withdrawable_epoch != c.FAR_FUTURE_EPOCH) return;
@@ -115,11 +120,11 @@ pub fn initiateBuilderExit(config: *const BeaconConfig, state: *BeaconState(.glo
     try builders.setValue(builder_index, &builder);
 }
 
-pub fn findBuilderIndexByPubkey(allocator: Allocator, state: *BeaconState(.gloas), pubkey: *const BLSPubkey) !?usize {
+pub fn findBuilderIndexByPubkey(comptime fork: ForkSeq, allocator: Allocator, state: *BeaconState(fork), pubkey: *const BLSPubkey) !?usize {
     var builders = try state.inner.getReadonly("builders");
     const len = try builders.length();
     for (0..len) |i| {
-        var b: ct.gloas.Builder.Type = undefined;
+        var b: ForkTypes(fork).Builder.Type = undefined;
         try builders.getValue(allocator, i, &b);
         if (std.mem.eql(u8, &b.pubkey, pubkey)) return i;
     }
@@ -127,8 +132,9 @@ pub fn findBuilderIndexByPubkey(allocator: Allocator, state: *BeaconState(.gloas
 }
 
 pub fn addBuilderToRegistry(
+    comptime fork: ForkSeq,
     allocator: Allocator,
-    state: *BeaconState(.gloas),
+    state: *BeaconState(fork),
     pubkey: *const BLSPubkey,
     version: u8,
     execution_address: *const ExecutionAddress,
@@ -141,7 +147,7 @@ pub fn addBuilderToRegistry(
 
     var builder_index: ?usize = null;
     for (0..len) |i| {
-        var builder: ct.gloas.Builder.Type = undefined;
+        var builder: ForkTypes(fork).Builder.Type = undefined;
         try builders.getValue(allocator, i, &builder);
         if (builder.withdrawable_epoch <= current_epoch and builder.balance == 0) {
             builder_index = i;
@@ -149,7 +155,7 @@ pub fn addBuilderToRegistry(
         }
     }
 
-    const new_builder = ct.gloas.Builder.Type{
+    const new_builder = ForkTypes(fork).Builder.Type{
         .pubkey = pubkey.*,
         .version = version,
         .execution_address = execution_address.*,
@@ -193,19 +199,19 @@ pub fn isValidBuilderDepositSignature(
     return true;
 }
 
-pub fn isAttestationSameSlot(state: *BeaconState(.gloas), data: *const ct.phase0.AttestationData.Type) !bool {
+pub fn isAttestationSameSlot(comptime fork: ForkSeq, state: *BeaconState(fork), data: *const ct.phase0.AttestationData.Type) !bool {
     if (data.slot == 0) return true;
 
-    const block_root = try getBlockRootAtSlot(.gloas, state, data.slot);
+    const block_root = try getBlockRootAtSlot(fork, state, data.slot);
     const is_matching = std.mem.eql(u8, &data.beacon_block_root, block_root);
 
-    const prev_block_root = try getBlockRootAtSlot(.gloas, state, data.slot - 1);
+    const prev_block_root = try getBlockRootAtSlot(fork, state, data.slot - 1);
     const is_current = !std.mem.eql(u8, &data.beacon_block_root, prev_block_root);
 
     return is_matching and is_current;
 }
 
-pub fn isAttestationSameSlotRootCache(root_cache: *RootCache(.gloas), data: *const ct.phase0.AttestationData.Type) !bool {
+pub fn isAttestationSameSlotRootCache(comptime fork: ForkSeq, root_cache: *RootCache(fork), data: *const ct.phase0.AttestationData.Type) !bool {
     if (data.slot == 0) return true;
 
     const block_root = try root_cache.getBlockRootAtSlot(data.slot);
@@ -217,7 +223,7 @@ pub fn isAttestationSameSlotRootCache(root_cache: *RootCache(.gloas), data: *con
     return is_matching and is_current;
 }
 
-pub fn isParentBlockFull(state: *BeaconState(.gloas)) !bool {
+pub fn isParentBlockFull(comptime fork: ForkSeq, state: *BeaconState(fork)) !bool {
     var bid = try state.inner.getReadonly("latest_execution_payload_bid");
     const bid_block_hash = try bid.getFieldRoot("block_hash");
     const latest_block_hash = try state.inner.getFieldRoot("latest_block_hash");
@@ -234,7 +240,7 @@ pub fn initializePtcWindow(
     const current_epoch = computeEpochAtSlot(try state.slot());
     for (0..1 + preset.MIN_SEED_LOOKAHEAD) |epoch_offset| {
         const epoch = current_epoch + epoch_offset;
-        var owned_shuffling: ?*@import("./epoch_shuffling.zig").EpochShuffling = null;
+        var owned_shuffling: ?*EpochShuffling = null;
         defer if (owned_shuffling) |shuffling| shuffling.deinit();
         const shuffling = epoch_cache.getShufflingAtEpochOrNull(epoch) orelse blk: {
             var validators = try state.validators();
@@ -245,14 +251,14 @@ pub fn initializePtcWindow(
             var it = validators.iteratorReadonly(0);
             for (0..count) |i| {
                 const validator = try it.nextValuePtr();
-                if (@import("./validator.zig").isActiveValidator(validator, epoch)) active.appendAssumeCapacity(i);
+                if (isActiveValidator(validator, epoch)) active.appendAssumeCapacity(i);
             }
             const indices = try active.toOwnedSlice(allocator);
             errdefer allocator.free(indices);
-            owned_shuffling = try @import("./epoch_shuffling.zig").computeEpochShufflingForFork(fork, allocator, state, indices, epoch);
+            owned_shuffling = try computeEpochShufflingForFork(fork, allocator, state, indices, epoch);
             break :blk owned_shuffling.?;
         };
-        const committees = try @import("./seed.zig").computePayloadTimelinessCommitteesForEpoch(
+        const committees = try computePayloadTimelinessCommitteesForEpoch(
             fork,
             state,
             epoch,
@@ -264,7 +270,7 @@ pub fn initializePtcWindow(
     return window;
 }
 
-pub fn getPayloadTimelinessCommittee(config: *const BeaconConfig, state: *BeaconState(.gloas), slot: u64, out: *ct.gloas.PayloadTimelinessCommittee.Type) !void {
+pub fn getPayloadTimelinessCommittee(comptime fork: ForkSeq, config: *const BeaconConfig, state: *BeaconState(fork), slot: u64, out: *ForkTypes(fork).PayloadTimelinessCommittee.Type) !void {
     const current_epoch = computeEpochAtSlot(try state.slot());
     const epoch = computeEpochAtSlot(slot);
     if (epoch < config.chain.GLOAS_FORK_EPOCH) return error.PayloadTimelinessCommitteeBeforeGloas;

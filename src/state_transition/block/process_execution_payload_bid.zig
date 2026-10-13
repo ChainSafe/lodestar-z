@@ -1,10 +1,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
+const ForkSeq = @import("config").ForkSeq;
 const BeaconState = @import("fork_types").BeaconState;
+const ForkTypes = @import("fork_types").ForkTypes;
 
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
 const bls = @import("bls");
@@ -18,11 +19,12 @@ const getExecutionPayloadBidSigningRoot = @import("../signature_sets/execution_p
 const getBlockRootAtSlot = @import("../utils/block_root.zig").getBlockRootAtSlot;
 
 pub fn processExecutionPayloadBid(
+    comptime fork: ForkSeq,
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    state: *BeaconState(.gloas),
-    signed_bid: *const types.gloas.SignedExecutionPayloadBid.Type,
+    state: *BeaconState(fork),
+    signed_bid: *const ForkTypes(fork).SignedExecutionPayloadBid.Type,
 ) !void {
     const bid = &signed_bid.message;
     const builder_index = bid.builder_index;
@@ -36,16 +38,16 @@ pub fn processExecutionPayloadBid(
         if (!std.mem.eql(u8, &signed_bid.signature, &c.G2_POINT_AT_INFINITY)) return error.SelfBuildNonZeroSignature;
     } else {
         var builders = try state.inner.getReadonly("builders");
-        var builder: types.gloas.Builder.Type = undefined;
+        var builder: ForkTypes(fork).Builder.Type = undefined;
         try builders.getValue(allocator, builder_index, &builder);
 
         const finalized_epoch = try state.finalizedEpoch();
-        if (!isActiveBuilder(&builder, finalized_epoch)) return error.BuilderNotActive;
+        if (!isActiveBuilder(fork, &builder, finalized_epoch)) return error.BuilderNotActive;
         if (builder.version != c.PAYLOAD_BUILDER_VERSION) return error.InvalidBuilderVersion;
 
-        if (!(try canBuilderCoverBid(state, builder_index, amount))) return error.BuilderInsufficientBalance;
+        if (!(try canBuilderCoverBid(fork, state, builder_index, amount))) return error.BuilderInsufficientBalance;
 
-        if (!(try verifyExecutionPayloadBidSignature(allocator, config, state_slot, &builder.pubkey, signed_bid))) return error.InvalidBidSignature;
+        if (!(try verifyExecutionPayloadBidSignature(fork, allocator, config, state_slot, &builder.pubkey, signed_bid))) return error.InvalidBidSignature;
     }
 
     if (bid.slot != state_slot) return error.BidSlotMismatch;
@@ -56,14 +58,14 @@ pub fn processExecutionPayloadBid(
 
     if (std.mem.eql(u8, &bid.block_hash, &bid.parent_block_hash)) return error.BidBlockHashEqualsParent;
 
-    const parent_block_root = try getBlockRootAtSlot(.gloas, state, state_slot - 1);
+    const parent_block_root = try getBlockRootAtSlot(fork, state, state_slot - 1);
     if (!std.mem.eql(u8, &bid.parent_block_root, parent_block_root)) return error.BidParentBlockRootMismatch;
 
-    const state_randao = try getRandaoMix(.gloas, state, current_epoch);
+    const state_randao = try getRandaoMix(fork, state, current_epoch);
     if (!std.mem.eql(u8, &bid.prev_randao, state_randao)) return error.BidPrevRandaoMismatch;
 
     if (amount > 0) {
-        const pending_payment = types.gloas.BuilderPendingPayment.Type{
+        const pending_payment = ForkTypes(fork).BuilderPendingPayment.Type{
             .weight = 0,
             .withdrawal = .{
                 .fee_recipient = bid.fee_recipient,
@@ -81,13 +83,14 @@ pub fn processExecutionPayloadBid(
 }
 
 fn verifyExecutionPayloadBidSignature(
+    comptime fork: ForkSeq,
     allocator: Allocator,
     config: *const BeaconConfig,
     state_slot: u64,
     pubkey: *const [48]u8,
-    signed_bid: *const types.gloas.SignedExecutionPayloadBid.Type,
+    signed_bid: *const ForkTypes(fork).SignedExecutionPayloadBid.Type,
 ) !bool {
-    const signing_root = try getExecutionPayloadBidSigningRoot(allocator, config, state_slot, &signed_bid.message);
+    const signing_root = try getExecutionPayloadBidSigningRoot(fork, allocator, config, state_slot, &signed_bid.message);
 
     const public_key = bls.PublicKey.uncompress(pubkey) catch return false;
     const signature = bls.Signature.uncompress(&signed_bid.signature) catch return false;

@@ -26,12 +26,12 @@ test "Gloas PTC lookup enforces the fork boundary and previous current next epoc
         const committee: ct.gloas.PayloadTimelinessCommittee.Type = @splat(epoch_offset + 1);
         try window.setValue(epoch_offset * preset.SLOTS_PER_EPOCH, &committee);
         var result: ct.gloas.PayloadTimelinessCommittee.Type = undefined;
-        try getPayloadTimelinessCommittee(&config, state, (epoch_offset + 2) * preset.SLOTS_PER_EPOCH, &result);
+        try getPayloadTimelinessCommittee(.gloas, &config, state, (epoch_offset + 2) * preset.SLOTS_PER_EPOCH, &result);
         try std.testing.expectEqualSlices(u64, &committee, &result);
     }
     var result: ct.gloas.PayloadTimelinessCommittee.Type = undefined;
-    try std.testing.expectError(error.PayloadTimelinessCommitteeBeforeGloas, getPayloadTimelinessCommittee(&config, state, preset.SLOTS_PER_EPOCH, &result));
-    try std.testing.expectError(error.PayloadTimelinessCommitteeOutOfRange, getPayloadTimelinessCommittee(&config, state, (4 + preset.MIN_SEED_LOOKAHEAD) * preset.SLOTS_PER_EPOCH, &result));
+    try std.testing.expectError(error.PayloadTimelinessCommitteeBeforeGloas, getPayloadTimelinessCommittee(.gloas, &config, state, preset.SLOTS_PER_EPOCH, &result));
+    try std.testing.expectError(error.PayloadTimelinessCommitteeOutOfRange, getPayloadTimelinessCommittee(.gloas, &config, state, (4 + preset.MIN_SEED_LOOKAHEAD) * preset.SLOTS_PER_EPOCH, &result));
     try state.setSlot(2 * preset.SLOTS_PER_EPOCH);
     var pubkeys = PubkeyCache.init(allocator, std.testing.io);
     defer pubkeys.deinit();
@@ -39,5 +39,5 @@ test "Gloas PTC lookup enforces the fork boundary and previous current next epoc
     defer epoch_cache.deinit();
     var attestation = ct.gloas.PayloadAttestation.default_value;
     attestation.data.slot = 2 * preset.SLOTS_PER_EPOCH - 1;
-    try std.testing.expectError(error.PayloadTimelinessCommitteeBeforeGloas, processPayloadAttestation(allocator, std.testing.io, &config, epoch_cache, state, &attestation, false));
+    try std.testing.expectError(error.PayloadTimelinessCommitteeBeforeGloas, processPayloadAttestation(.gloas, allocator, std.testing.io, &config, epoch_cache, state, &attestation, false));
 }

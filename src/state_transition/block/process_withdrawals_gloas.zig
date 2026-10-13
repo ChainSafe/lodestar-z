@@ -1,8 +1,10 @@
 const std = @import("std");
+const ForkSeq = @import("config").ForkSeq;
 const ct = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
 const BeaconState = @import("fork_types").BeaconState;
+const ForkTypes = @import("fork_types").ForkTypes;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const WithdrawalsResult = @import("process_withdrawals.zig").WithdrawalsResult;
 const gloas = @import("../utils/gloas.zig");
@@ -37,7 +39,7 @@ const WithdrawnBalances = struct {
     }
 };
 
-pub fn getExpectedWithdrawals(epoch_cache: *const EpochCache, state: *BeaconState(.gloas), out: *WithdrawalsResult) !void {
+pub fn getExpectedWithdrawals(comptime fork: ForkSeq, epoch_cache: *const EpochCache, state: *BeaconState(fork), out: *WithdrawalsResult) !void {
     std.debug.assert(out.withdrawals.capacity == preset.MAX_WITHDRAWALS_PER_PAYLOAD);
     std.debug.assert(out.withdrawals.items.len == 0);
     const epoch = epoch_cache.epoch;
@@ -96,7 +98,7 @@ pub fn getExpectedWithdrawals(epoch_cache: *const EpochCache, state: *BeaconStat
         if (out.withdrawals.items.len >= preset.MAX_WITHDRAWALS_PER_PAYLOAD - 1) break;
         if (next_builder >= builder_count) return error.InvalidNextWithdrawalBuilderIndex;
         const index = (next_builder + n) % builder_count;
-        var builder: ct.gloas.Builder.Type = undefined;
+        var builder: ForkTypes(fork).Builder.Type = undefined;
         try builders.getValue(undefined, index, &builder);
         const balance = builder.balance -| builder_withdrawn.get(index);
         if (builder.withdrawable_epoch <= epoch and balance > 0) {
@@ -139,17 +141,17 @@ pub fn getExpectedWithdrawals(epoch_cache: *const EpochCache, state: *BeaconStat
     }
 }
 
-pub fn processWithdrawals(state: *BeaconState(.gloas), result: *const WithdrawalsResult) !void {
-    if (!try gloas.isParentBlockFull(state)) return;
+pub fn processWithdrawals(comptime fork: ForkSeq, state: *BeaconState(fork), result: *const WithdrawalsResult) !void {
+    if (!try gloas.isParentBlockFull(fork, state)) return;
     for (result.withdrawals.items) |withdrawal| {
         if (gloas.isBuilderIndex(withdrawal.validator_index)) {
             var builders = try state.inner.get("builders");
             const index = gloas.convertValidatorIndexToBuilderIndex(withdrawal.validator_index);
-            var builder: ct.gloas.Builder.Type = undefined;
+            var builder: ForkTypes(fork).Builder.Type = undefined;
             try builders.getValue(undefined, index, &builder);
             builder.balance -|= withdrawal.amount;
             try builders.setValue(index, &builder);
-        } else try decreaseBalance(.gloas, state, withdrawal.validator_index, withdrawal.amount);
+        } else try decreaseBalance(fork, state, withdrawal.validator_index, withdrawal.amount);
     }
     if (result.processed_partial_withdrawals_count > 0) {
         var partials = try state.pendingPartialWithdrawals();

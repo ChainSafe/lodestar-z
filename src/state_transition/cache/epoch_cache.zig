@@ -789,7 +789,7 @@ pub const EpochCache = struct {
         return self.getAttestingIndicesPostElectra(.electra, allocator, attestation);
     }
 
-    pub fn getAttestingIndicesPostElectra(self: *const EpochCache, comptime fork: ForkSeq, allocator: Allocator, attestation: *const @import("fork_types").ForkTypes(fork).Attestation.Type) !std.ArrayList(ValidatorIndex) {
+    pub fn getAttestingIndicesPostElectra(self: *const EpochCache, comptime fork: ForkSeq, allocator: Allocator, attestation: *const ForkTypes(fork).Attestation.Type) !std.ArrayList(ValidatorIndex) {
         const aggregation_bits = attestation.aggregation_bits;
         const committee_bits = attestation.committee_bits;
         const data = attestation.data;

@@ -393,11 +393,33 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn validators(self: *AnyBeaconState) !ListView(ct.phase0.Validators, ct.gloas.Validators) {
+    fn getListField(self: *AnyBeaconState, comptime field: []const u8, comptime View: type) !View {
         return switch (self.*) {
-            .gloas => |state| .{ .gloas = try state.get("validators") },
-            inline else => |state| .{ .pre_gloas = try state.get("validators") },
+            inline else => |state| {
+                const State = @TypeOf(state.*).SszType;
+                if (comptime @hasField(State.Type, field)) {
+                    return View.fromView(State.getFieldType(field), try state.get(field));
+                }
+                return error.InvalidAtFork;
+            },
         };
+    }
+
+    fn setListField(self: *AnyBeaconState, comptime field: []const u8, comptime View: type, value: View) !void {
+        return switch (self.*) {
+            inline else => |state| {
+                const State = @TypeOf(state.*).SszType;
+                if (comptime @hasField(State.Type, field)) {
+                    const view = value.unwrap(State.getFieldType(field)) catch return error.InvalidAtFork;
+                    return state.set(field, view);
+                }
+                return error.InvalidAtFork;
+            },
+        };
+    }
+
+    pub fn validators(self: *AnyBeaconState) !ListView(ct.phase0.Validators, ct.gloas.Validators) {
+        return self.getListField("validators", ListView(ct.phase0.Validators, ct.gloas.Validators));
     }
 
     pub fn validatorsCount(self: *AnyBeaconState) !usize {
@@ -444,10 +466,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     }
 
     pub fn balances(self: *AnyBeaconState) !ListView(ct.phase0.Balances, ct.gloas.Balances) {
-        return switch (self.*) {
-            .gloas => |state| .{ .gloas = try state.get("balances") },
-            inline else => |state| .{ .pre_gloas = try state.get("balances") },
-        };
+        return self.getListField("balances", ListView(ct.phase0.Balances, ct.gloas.Balances));
     }
 
     /// Returns a read-only slice of balances.
@@ -512,11 +531,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     }
 
     pub fn previousEpochParticipation(self: *AnyBeaconState) !ListView(ct.altair.EpochParticipation, ct.gloas.EpochParticipation) {
-        return switch (self.*) {
-            .phase0 => error.InvalidAtFork,
-            .gloas => |state| .{ .gloas = try state.get("previous_epoch_participation") },
-            inline else => |state| .{ .pre_gloas = try state.get("previous_epoch_participation") },
-        };
+        return self.getListField("previous_epoch_participation", ListView(ct.altair.EpochParticipation, ct.gloas.EpochParticipation));
     }
 
     pub fn setPreviousEpochParticipation(self: *AnyBeaconState, participations: *const ct.altair.EpochParticipation.Type) !void {
@@ -527,11 +542,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     }
 
     pub fn currentEpochParticipation(self: *AnyBeaconState) !ListView(ct.altair.EpochParticipation, ct.gloas.EpochParticipation) {
-        return switch (self.*) {
-            .phase0 => error.InvalidAtFork,
-            .gloas => |state| .{ .gloas = try state.get("current_epoch_participation") },
-            inline else => |state| .{ .pre_gloas = try state.get("current_epoch_participation") },
-        };
+        return self.getListField("current_epoch_participation", ListView(ct.altair.EpochParticipation, ct.gloas.EpochParticipation));
     }
 
     pub fn setCurrentEpochParticipation(self: *AnyBeaconState, participations: *const ct.altair.EpochParticipation.Type) !void {
@@ -625,11 +636,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     }
 
     pub fn inactivityScores(self: *AnyBeaconState) !ListView(ct.altair.InactivityScores, ct.gloas.InactivityScores) {
-        return switch (self.*) {
-            .phase0 => error.InvalidAtFork,
-            .gloas => |state| .{ .gloas = try state.get("inactivity_scores") },
-            inline else => |state| .{ .pre_gloas = try state.get("inactivity_scores") },
-        };
+        return self.getListField("inactivity_scores", ListView(ct.altair.InactivityScores, ct.gloas.InactivityScores));
     }
 
     pub fn currentSyncCommittee(self: *AnyBeaconState) !*ct.altair.SyncCommittee.TreeView {
@@ -848,69 +855,27 @@ pub const AnyBeaconState = union(ForkSeq) {
     }
 
     pub fn pendingDeposits(self: *AnyBeaconState) !ListView(ct.electra.PendingDeposits, ct.gloas.PendingDeposits) {
-        return switch (self.*) {
-            .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            .gloas => |state| .{ .gloas = try state.get("pending_deposits") },
-            inline else => |state| .{ .pre_gloas = try state.get("pending_deposits") },
-        };
+        return self.getListField("pending_deposits", ListView(ct.electra.PendingDeposits, ct.gloas.PendingDeposits));
     }
 
     pub fn setPendingDeposits(self: *AnyBeaconState, deposits: ListView(ct.electra.PendingDeposits, ct.gloas.PendingDeposits)) !void {
-        return switch (self.*) {
-            .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            .gloas => |state| try state.set("pending_deposits", switch (deposits) {
-                .gloas => |view| view,
-                else => return error.InvalidAtFork,
-            }),
-            inline else => |state| try state.set("pending_deposits", switch (deposits) {
-                .pre_gloas => |view| view,
-                else => return error.InvalidAtFork,
-            }),
-        };
+        return self.setListField("pending_deposits", ListView(ct.electra.PendingDeposits, ct.gloas.PendingDeposits), deposits);
     }
 
     pub fn pendingPartialWithdrawals(self: *AnyBeaconState) !ListView(ct.electra.PendingPartialWithdrawals, ct.gloas.PendingPartialWithdrawals) {
-        return switch (self.*) {
-            .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            .gloas => |state| .{ .gloas = try state.get("pending_partial_withdrawals") },
-            inline else => |state| .{ .pre_gloas = try state.get("pending_partial_withdrawals") },
-        };
+        return self.getListField("pending_partial_withdrawals", ListView(ct.electra.PendingPartialWithdrawals, ct.gloas.PendingPartialWithdrawals));
     }
 
     pub fn setPendingPartialWithdrawals(self: *AnyBeaconState, pending_partial_withdrawals: ListView(ct.electra.PendingPartialWithdrawals, ct.gloas.PendingPartialWithdrawals)) !void {
-        return switch (self.*) {
-            .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            .gloas => |state| try state.set("pending_partial_withdrawals", switch (pending_partial_withdrawals) {
-                .gloas => |view| view,
-                else => return error.InvalidAtFork,
-            }),
-            inline else => |state| try state.set("pending_partial_withdrawals", switch (pending_partial_withdrawals) {
-                .pre_gloas => |view| view,
-                else => return error.InvalidAtFork,
-            }),
-        };
+        return self.setListField("pending_partial_withdrawals", ListView(ct.electra.PendingPartialWithdrawals, ct.gloas.PendingPartialWithdrawals), pending_partial_withdrawals);
     }
 
     pub fn pendingConsolidations(self: *AnyBeaconState) !ListView(ct.electra.PendingConsolidations, ct.gloas.PendingConsolidations) {
-        return switch (self.*) {
-            .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            .gloas => |state| .{ .gloas = try state.get("pending_consolidations") },
-            inline else => |state| .{ .pre_gloas = try state.get("pending_consolidations") },
-        };
+        return self.getListField("pending_consolidations", ListView(ct.electra.PendingConsolidations, ct.gloas.PendingConsolidations));
     }
 
     pub fn setPendingConsolidations(self: *AnyBeaconState, consolidations: ListView(ct.electra.PendingConsolidations, ct.gloas.PendingConsolidations)) !void {
-        return switch (self.*) {
-            .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            .gloas => |state| try state.set("pending_consolidations", switch (consolidations) {
-                .gloas => |view| view,
-                else => return error.InvalidAtFork,
-            }),
-            inline else => |state| try state.set("pending_consolidations", switch (consolidations) {
-                .pre_gloas => |view| view,
-                else => return error.InvalidAtFork,
-            }),
-        };
+        return self.setListField("pending_consolidations", ListView(ct.electra.PendingConsolidations, ct.gloas.PendingConsolidations), consolidations);
     }
 
     /// Get proposer_lookahead
@@ -956,7 +921,7 @@ pub const AnyBeaconState = union(ForkSeq) {
         errdefer upgraded.deinit();
 
         inline for (F.fields) |f| {
-            if (comptime T.hasField(f.name)) {
+            if (comptime @hasField(T.Type, f.name)) {
                 if (T.getFieldType(f.name) != f.type) {
                     // AnyBeaconState of prev_fork and cur_fork has the same field name but different types
                     // for example latest_execution_payload_header changed from Bellatrix to Capella
