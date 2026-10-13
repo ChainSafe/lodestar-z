@@ -10,7 +10,7 @@ test "memory_safety: active gossip frames survive history expiry and store reuse
         const bytes = try std.testing.allocator.alloc(u8, len);
         defer std.testing.allocator.free(bytes);
         @memset(bytes, 17);
-        const message = store.put(@splat(1), "topic", bytes).?;
+        const message = store.put(.beacon_block, @splat(1), "topic", bytes).?;
         store.retainHistory(message);
         store.seal(message);
         var buffer: [send.small_frame_bytes]u8 = undefined;
@@ -29,7 +29,7 @@ test "memory_safety: active gossip frames survive history expiry and store reuse
         }
         try std.testing.expect(!active.frame.advance(1));
         store.releaseHistory(message);
-        const replacement = store.put(@splat(2), "topic", "replacement").?;
+        const replacement = store.put(.beacon_block, @splat(2), "topic", "replacement").?;
         store.retainHistory(replacement);
         store.seal(replacement);
         var sent: usize = 1;
@@ -53,7 +53,7 @@ test "gossip shared sends charge once and cannot renew or start outside history"
     store.send_limits[0] = .{ .items = 1, .bytes = 20 * storage.page_bytes };
     store.limits = @splat(.{ .items = 1, .bytes = 20 * storage.page_bytes });
     const data: [70_000]u8 = @splat(7);
-    const first = store.put(@splat(1), "topic", &data).?;
+    const first = store.put(.beacon_block, @splat(1), "topic", &data).?;
     store.retainHistory(first);
     store.seal(first);
     try std.testing.expectEqual(@as(?u64, 6010), store.retainSend(first, 10, 6000));
@@ -66,7 +66,7 @@ test "gossip shared sends charge once and cannot renew or start outside history"
     store.releaseSend(first);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
     try std.testing.expectEqual(@as(usize, 0), store.sending_by_kind[0]);
-    const third = store.put(@splat(3), "topic", &data).?;
+    const third = store.put(.beacon_block, @splat(3), "topic", &data).?;
     store.retainHistory(third);
     store.seal(third);
     _ = store.retainSend(third, 40, 6000).?;
@@ -82,9 +82,9 @@ test "gossip shared sends enforce per-kind bytes independently of items" {
     defer store.deinit(std.testing.allocator);
     store.send_limits = @splat(.{ .items = 2, .bytes = 18 * storage.page_bytes });
     const bytes: [70_000]u8 = @splat(9);
-    const first = store.put(@splat(1), "/eth2/01020304/beacon_block/ssz_snappy", &bytes).?;
-    const second = store.put(@splat(2), "/eth2/01020304/beacon_block/ssz_snappy", &bytes).?;
-    const column = store.put(@splat(3), "/eth2/01020304/data_column_sidecar_0/ssz_snappy", &bytes).?;
+    const first = store.put(.beacon_block, @splat(1), "/eth2/01020304/beacon_block/ssz_snappy", &bytes).?;
+    const second = store.put(.beacon_block, @splat(2), "/eth2/01020304/beacon_block/ssz_snappy", &bytes).?;
+    const column = store.put(.data_column_sidecar, @splat(3), "/eth2/01020304/data_column_sidecar_0/ssz_snappy", &bytes).?;
     for ([_]storage.Handle{ first, second, column }) |message| {
         store.retainHistory(message);
         store.seal(message);
@@ -111,11 +111,11 @@ test "gossip large sends bound distinct payloads separately from recipient count
     const bytes: [70_000]u8 = @splat(9);
     var messages: [9]storage.Handle = undefined;
     for (&messages, 0..) |*message, i| {
-        message.* = store.put(@splat(@intCast(i)), "topic", &bytes).?;
+        message.* = store.put(.beacon_block, @splat(@intCast(i)), "topic", &bytes).?;
         store.retainHistory(message.*);
         store.seal(message.*);
     }
-    try std.testing.expect(store.put(@splat(10), "topic", &bytes) == null);
+    try std.testing.expect(store.put(.beacon_block, @splat(10), "topic", &bytes) == null);
     for (messages[0..8]) |message| _ = store.retainSend(message, 1, 6000).?;
     try std.testing.expect(store.retainSend(messages[8], 2, 6000) == null);
     _ = store.retainSend(messages[0], 2, 6000).?;
@@ -124,7 +124,7 @@ test "gossip large sends bound distinct payloads separately from recipient count
     for (messages) |message| store.releaseHistory(message);
     var pending: [9]storage.Handle = undefined;
     for (&pending, 0..) |*message, i| {
-        message.* = store.put(@splat(@intCast(i + 10)), "topic", &bytes).?;
+        message.* = store.put(.beacon_block, @splat(@intCast(i + 10)), "topic", &bytes).?;
         store.retainValidation(message.*);
         store.seal(message.*);
     }

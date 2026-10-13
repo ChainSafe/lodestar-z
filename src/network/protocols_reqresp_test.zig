@@ -176,10 +176,10 @@ test "protocol stack control wakeup includes negotiation after application quies
     var sink: [8]u8 = undefined;
     const handle = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .timeouts = .{ .response = .fromMilliseconds(60_000) } }, setup.shared.pair.now);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis() + 5_000), schedule_test_support.wakeupMilliseconds(setup.shared.client.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis() + 5_000), schedule_test_support.wakeupMilliseconds(schedule_test_support.protocolsSchedule(&setup.shared.client, .{ .control = 0 }), setup.shared.pair.now.millis()));
     try std.testing.expect(setup.shared.client.reqresp.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
-    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.shared.client.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(schedule_test_support.protocolsSchedule(&setup.shared.client, .{ .control = 0 }), setup.shared.pair.now.millis()));
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expect(events[0].failed.reason == .cancelled);
@@ -216,7 +216,7 @@ test "protocol stack preserves drained native stream events across a partial req
     var received = first_count == 1;
     for (0..10) |_| {
         if (received) break;
-        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.client.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
+        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(schedule_test_support.protocolsSchedule(&setup.shared.client, .{ .control = 1 }), setup.shared.pair.now.millis()));
         const count = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &events }).control;
         if (count == 1) {
             try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);

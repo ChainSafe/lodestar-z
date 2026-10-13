@@ -40,7 +40,8 @@ test "signatures are DER, low-S, and verify" {
 
     const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
     const parsed = try Ecdsa.Signature.fromDer(signature);
-    try std.testing.expect(std.mem.order(u8, &parsed.s, &keys.half_order) != .gt);
+    const order: u256 = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
+    try std.testing.expect(std.mem.readInt(u256, &parsed.s, .big) <= order / 2);
 
     const high_s = Ecdsa.Signature{ .r = parsed.r, .s = try std.crypto.ecc.Secp256k1.scalar.neg(parsed.s, .big) };
     var high_buffer: [keys.signature_der_length_max]u8 = undefined;

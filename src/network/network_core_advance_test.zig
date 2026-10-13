@@ -116,7 +116,7 @@ test "core shutdown discards an undelivered request result on deinit" {
     try std.testing.expect(core.protocols.reqresp.pendingCounts().outbound > 0);
     core.deinit(setup.pair.io());
     try std.testing.expect(!core.initialized);
-    try std.testing.expectEqual(@as(usize, 0), core.reservations.bytes);
+    try std.testing.expectEqual(@as(usize, 0), core.allocations.bytes);
 }
 
 test "core shutdown discards retained host serving work without a release" {
@@ -149,7 +149,7 @@ test "core shutdown discards retained host serving work without a release" {
     try std.testing.expect(core.protocols.reqresp.serving.entries[serving.?.index].retained);
     core.deinit(setup.pair.io());
     try std.testing.expect(!core.initialized);
-    try std.testing.expectEqual(@as(usize, 0), core.reservations.bytes);
+    try std.testing.expectEqual(@as(usize, 0), core.allocations.bytes);
 }
 
 test "core clock failure preserves dial intent without starting a connection" {

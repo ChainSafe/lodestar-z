@@ -266,22 +266,20 @@ pub const History = struct {
         return false;
     }
 
-    pub fn admitPayload(self: *History, store: *storage.Store, id: MessageId, name: []const u8, bytes: []const u8) ?storage.Handle {
-        const kind = if (topic_mod.parseCanonical(name)) |canonical| canonical.name.kind else .beacon_block;
+    pub fn admitPayload(self: *History, store: *storage.Store, kind: topic_mod.Kind, id: MessageId, name: []const u8, bytes: []const u8) ?storage.Handle {
         if (!store.pendingRoom(kind, bytes.len) or
             !self.canAdmitPayload(store, bytes.len, store.room())) return null;
         self.reclaimPayload(store, bytes.len);
-        return store.put(id, name, bytes).?;
+        return store.put(kind, id, name, bytes).?;
     }
 
-    pub fn admitPublication(self: *History, store: *storage.Store, id: MessageId, name: []const u8, bytes: []const u8, topic: u16, epoch: u64) error{ Capacity, Retention }!storage.Handle {
-        const kind = if (topic_mod.parseCanonical(name)) |canonical| canonical.name.kind else .beacon_block;
+    pub fn admitPublication(self: *History, store: *storage.Store, kind: topic_mod.Kind, id: MessageId, name: []const u8, bytes: []const u8, topic: u16, epoch: u64) error{ Capacity, Retention }!storage.Handle {
         var victims: [reclaim_scan]u32 = undefined;
         const count = self.retentionVictims(store, kind, bytes.len, &victims) orelse return error.Retention;
         if (!self.canAdmitPayload(store, bytes.len, store.room())) return error.Capacity;
         for (victims[0..count]) |victim| self.remove(store, victim);
         self.reclaimPayload(store, bytes.len);
-        const handle = store.putPublication(id, name, bytes);
+        const handle = store.putPublication(kind, id, name, bytes);
         self.put(store, handle, topic, epoch);
         return handle;
     }

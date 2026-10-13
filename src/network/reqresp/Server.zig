@@ -49,11 +49,7 @@ pub fn fail(self: *Server, owner: *ReqResp, engine: *Engine, router: *Router, in
 }
 
 fn failIo(self: *Server, owner: *ReqResp, engine: *Engine, router: *Router, index: u16, err: (Engine.StreamError || codec.Error), now: Now) void {
-    self.request.failure_detail = @errorName(err);
-    self.fail(owner, engine, router, index, switch (err) {
-        error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
-        else => .transport,
-    }, now);
+    self.fail(owner, engine, router, index, self.request.ioFailure(err), now);
 }
 
 /// A finishing slot resumes its FIN once the host has taken its last event.

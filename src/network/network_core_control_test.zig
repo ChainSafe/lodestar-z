@@ -450,7 +450,7 @@ test "core native stalled fork transition only wakes for eligible work" {
         active += 1;
     };
     try std.testing.expect(active > 0);
-    const service_due = schedule_test_support.wakeupMilliseconds(setup.client.protocols.schedule(.{ .application = 0, .control = 32 }), setup.pair.now.millis()).?;
+    const service_due = schedule_test_support.wakeupMilliseconds(schedule_test_support.protocolsSchedule(&setup.client.protocols, .{ .application = 0, .control = 32 }), setup.pair.now.millis()).?;
     try std.testing.expect(service_due > setup.pair.now.millis());
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now), setup.pair.now.millis()) == null);
     const core_due = schedule_test_support.wakeupMilliseconds(setup.client.wakeups(setup.pair.now, .{}).schedule(), setup.pair.now.millis()).?;

@@ -76,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         const result = try discv5.driver.step(&driver, io, &expired, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, deadline_ms) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
-        served += result.progress.standard_responses;
+        served += result.standard_responses;
         var call_expired = false;
         for (expired[0..result.calls_expired]) |entry| {
             if (pending) |handle| if (std.meta.eql(handle, entry.handle)) {

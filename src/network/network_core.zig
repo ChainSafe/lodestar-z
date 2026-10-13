@@ -11,12 +11,12 @@ const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
 const wake_sources = @import("wake_sources.zig");
-const control_values = @import("control_values.zig");
+const local_state = @import("local_state.zig");
 const ControlProtocol = @import("control_protocol.zig").ControlProtocol;
 const advertisement = @import("advertisement.zig");
 const KeyPair = @import("wire/keys.zig").KeyPair;
 const Sockets = @import("udp").Sockets;
-const Reservations = @import("reservations.zig").Reservations;
+const CountingAllocator = @import("counting_allocator.zig").CountingAllocator;
 const timing = @import("metrics/timing.zig");
 const TurnTiming = @import("turn_timing.zig").TurnTiming;
 const identify_mod = @import("identify/root.zig");
@@ -37,7 +37,7 @@ pub const NetworkCore = struct {
     pub const identify_per_turn = 8;
     pub const dials_per_turn = 4;
     pub const LocalIntent = struct {
-        update: control_values.LocalUpdate,
+        update: local_state.LocalUpdate,
         demand: peers.Demand,
         subscriptions: []const gossip.local_intent.Boundary,
         slot: u64 = 0,
@@ -47,7 +47,7 @@ pub const NetworkCore = struct {
         host: *const KeyPair,
         bind: Sockets.Bindings,
         local: t.LocalState,
-        schedule: control_values.ForkSchedule = .{},
+        schedule: local_state.ForkSchedule = .{},
         discovery: ?DiscoveryOptions = null,
         /// The host's wall-clock slot until its first intent.
         slot: u64 = 0,
@@ -111,7 +111,7 @@ pub const NetworkCore = struct {
         readiness_failures: u64 = 0,
     };
 
-    reservations: Reservations,
+    allocations: CountingAllocator,
     allocator: std.mem.Allocator,
     transport: Transport,
     peer_manager: manager.PeerManager,
@@ -120,7 +120,7 @@ pub const NetworkCore = struct {
     discovery: ?*peers.Discovery,
     native_events: []Engine.Event,
     local_intent_workspace: *gossip.local_intent.Workspace,
-    schedule: control_values.ForkSchedule,
+    schedule: local_state.ForkSchedule,
     counters: Counters = .{},
     step_duration: timing.Duration = .{},
     turn_timing: TurnTiming = .{},
@@ -145,13 +145,13 @@ pub const NetworkCore = struct {
         if (!wait.supported) return error.UnsupportedWait;
         if (startup.remembered.len > peers.remembered.capacity) return error.InvalidOptions;
         var local: t.LocalState = undefined;
-        try control_values.copyServingLocal(&local, &startup.local, router.Router.initialCapabilities(resolved.core.protocols.router).receive);
+        try local_state.copyServingLocal(&local, &startup.local, router.Router.initialCapabilities(resolved.core.protocols.router).receive);
         try validateSchedule(&local, startup.schedule);
         try validateForkTable(resolved.core.protocols.reqresp.forks, &local.fork);
         self.initialized = false;
-        self.reservations = .{ .backing = backing, .byte_limit = resolved.byte_limit };
-        errdefer std.debug.assert(self.reservations.bytes == 0);
-        const allocator = self.reservations.allocator();
+        self.allocations = .{ .backing = backing, .byte_limit = resolved.byte_limit };
+        errdefer std.debug.assert(self.allocations.bytes == 0);
+        const allocator = self.allocations.allocator();
         self.allocator = allocator;
         self.schedule = startup.schedule;
         self.counters = .{};
@@ -211,7 +211,7 @@ pub const NetworkCore = struct {
         self.peer_manager.deinit();
         self.allocator.free(self.native_events);
         self.transport.deinit(io);
-        std.debug.assert(self.reservations.bytes == 0);
+        std.debug.assert(self.allocations.bytes == 0);
         self.initialized = false;
     }
     /// Cancels the network between turns, invalidating borrowed events and releasing the host wake
@@ -375,7 +375,7 @@ pub const NetworkCore = struct {
         self.protocols.router.setCapabilities(active);
     }
 
-    fn updateLocalWithEndpoints(self: *NetworkCore, desired: *const t.LocalState, schedule: control_values.ForkSchedule, endpoints: ?advertisement.Endpoints, now: Now) !bool {
+    fn updateLocalWithEndpoints(self: *NetworkCore, desired: *const t.LocalState, schedule: local_state.ForkSchedule, endpoints: ?advertisement.Endpoints, now: Now) !bool {
         return self.applyLocal(&.{
             .local = desired.*,
             .schedule = schedule,
@@ -406,7 +406,7 @@ pub const NetworkCore = struct {
 
     const PreparedLocal = struct {
         local: t.LocalState,
-        schedule: control_values.ForkSchedule,
+        schedule: local_state.ForkSchedule,
         endpoints: ?advertisement.Endpoints,
         capabilities: capabilities_mod.Directional,
         identify: identify_mod.Local,
@@ -414,7 +414,7 @@ pub const NetworkCore = struct {
         changed: bool,
     };
 
-    fn prepareLocal(self: *const NetworkCore, update: *const control_values.LocalUpdate) !PreparedLocal {
+    fn prepareLocal(self: *const NetworkCore, update: *const local_state.LocalUpdate) !PreparedLocal {
         if (self.peer_manager.phase != .running) return error.Stopped;
         const schedule = update.schedule;
         const endpoints = update.endpoints;
@@ -426,7 +426,7 @@ pub const NetworkCore = struct {
         }
         var local = update.local;
         local.metadata.seq_number = self.peer_manager.local.metadata.seq_number;
-        try control_values.copyServingLocal(&local, &local, capabilities.receive);
+        try local_state.copyServingLocal(&local, &local, capabilities.receive);
         try validateSchedule(&local, schedule);
         const request = &self.protocols.reqresp;
         try validateForkTable(request.forks[0..request.fork_count], &local.fork);
@@ -476,7 +476,7 @@ pub const NetworkCore = struct {
     }
 
     /// Prepares every owner before ENR publication; caller sequence input is ignored.
-    fn applyLocal(self: *NetworkCore, update: *const control_values.LocalUpdate, now: Now) !bool {
+    fn applyLocal(self: *NetworkCore, update: *const local_state.LocalUpdate, now: Now) !bool {
         const prepared = try self.prepareLocal(update);
         if (!prepared.changed) return false;
         try self.publishLocal(&prepared);
@@ -864,7 +864,7 @@ fn validateForkTable(table: []const ForkEntry, context: *const t.ForkContext) !v
     }
     if (!found) return error.UnknownFork;
 }
-fn validateSchedule(local: *const t.LocalState, schedule: control_values.ForkSchedule) !void {
+fn validateSchedule(local: *const t.LocalState, schedule: local_state.ForkSchedule) !void {
     if (schedule.next_epoch == std.math.maxInt(u64) and !std.mem.allEqual(u8, &schedule.next_digest, 0)) return error.InvalidSchedule;
     if ((schedule.fulu_scheduled or local.fork.fork.gte(.fulu)) and local.metadata.custody_group_count == null) return error.MissingCustodyAdvertisement;
 }

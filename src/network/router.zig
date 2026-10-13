@@ -4,7 +4,8 @@ const Engine = @import("quic/Engine.zig");
 const types = @import("types.zig");
 const reqresp = @import("reqresp/protocol.zig");
 const capability = @import("capabilities.zig");
-const Version = @import("gossipsub/protocol.zig").Version;
+const meshsub = @import("gossipsub/protocol.zig");
+const Version = meshsub.Version;
 
 pub const Router = struct {
     negotiator: Negotiator,
@@ -43,7 +44,7 @@ pub const Router = struct {
         outbound_reserved: ?u16 = null,
         inbound_per_connection_max: u16 = 16,
         inbound_connections: u16 = 0,
-        meshsub_versions: []const Version = &.{ .v1_2, .v1_1, .v1_0 },
+        meshsub_versions: []const Version = &meshsub.versions,
 
         fn negotiation(options: Options) Negotiator.Options {
             return .{

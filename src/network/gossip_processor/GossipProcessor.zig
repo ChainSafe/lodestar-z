@@ -286,7 +286,7 @@ pub fn capture(self: *GossipProcessor, message: *const native.Gossipsub.MessageE
         return error.NetworkBridgeFull;
     }
     const order = try std.math.add(u64, self.order, 1);
-    const payload = self.store.put(message.id, message.topic, message.bytes).?;
+    const payload = self.store.put(kind, message.id, message.topic, message.bytes).?;
     self.store.retainValidation(payload);
     self.store.seal(payload);
     const cell = &self.cells[index];

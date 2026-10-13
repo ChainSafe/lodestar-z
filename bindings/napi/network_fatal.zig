@@ -11,7 +11,7 @@
 //!   through the runtime's `fail`, when an exchange throws.
 //! - `completion_contract`: every completion names the current generation of a record the completion owner installed,
 //!   of the kind it expects, and the close result leaves no promised completion missing. The completion owner
-//!   (network-tickets.js), through the runtime's `fail`; a completion for an older generation is obsolete and ignored.
+//!   (network-completions.js), through the runtime's `fail`; a completion for an older generation is obsolete and ignored.
 const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 

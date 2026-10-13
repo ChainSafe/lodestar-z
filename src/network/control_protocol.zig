@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const t = @import("types.zig");
-const values = @import("control_values.zig");
+const values = @import("local_state.zig");
 const wire = @import("control_wire.zig");
 const rr = @import("reqresp/root.zig");
 const Router = @import("router.zig").Router;

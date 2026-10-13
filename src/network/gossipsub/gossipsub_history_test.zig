@@ -13,7 +13,7 @@ const testMessage = support.message;
 const storage = @import("message_store.zig");
 const gossip_limits = @import("../gossip_limits.zig");
 const topic_policy = @import("topic_policy.zig");
-const Reservations = @import("../reservations.zig").Reservations;
+const CountingAllocator = @import("../counting_allocator.zig").CountingAllocator;
 const IwantOutcome = @import("metrics.zig").IwantOutcome;
 const protobuf = @import("protobuf.zig");
 const QueueResult = @import("outbox.zig").QueueResult;
@@ -47,7 +47,7 @@ test "gossip history covers the processor retention allowance and the memory pla
     var boundary: topic_policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
     boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 1024 };
     for ([_]usize{ 16, total + 1 }, [_]usize{ total, total + 1 }) |floor, expected| {
-        var ledger: Reservations = .{ .backing = std.testing.allocator };
+        var ledger: CountingAllocator = .{ .backing = std.testing.allocator };
         var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .topic_policy = &.{boundary}, .mcache_capacity = floor, .validation_capacity = total, .payload_limits = limits });
         try std.testing.expectEqual(expected, g.messages.history.entries.len);
         try std.testing.expectEqual(expected + total, g.messages.store.entries.len);

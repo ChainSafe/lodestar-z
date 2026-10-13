@@ -14,7 +14,7 @@ const turn = @import("turn.zig");
 const snappy = @import("snappy");
 const session_io = @import("session_io.zig");
 const topic_mod = @import("topic.zig");
-const Reservations = @import("../reservations.zig").Reservations;
+const CountingAllocator = @import("../counting_allocator.zig").CountingAllocator;
 const topic_fixture = @import("topic_fixture.zig");
 
 fn boundary() p.Boundary {
@@ -264,7 +264,7 @@ test "topic policy all 784 resident names keep the live subscription limit at 51
 
 test "topic policy copied startup allocation prefixes and whole owner memory reconcile" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, startup, .{});
-    var ledger: Reservations = .{ .backing = std.testing.allocator };
+    var ledger: CountingAllocator = .{ .backing = std.testing.allocator };
     var boundaries = topic_fixture.hoodi();
     var g = try support.init(ledger.allocator(), options(&boundaries));
     defer g.deinit();

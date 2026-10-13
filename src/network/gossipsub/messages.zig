@@ -203,10 +203,9 @@ pub const Messages = struct {
         return .{ .known = if (queued) .queued else .pressured };
     }
 
-    pub fn publish(self: *Messages, id: MessageId, topic: u16, name: []const u8, compressed: []const u8, now: u64, epoch: u64) ?storage.Handle {
-        const handle = self.history.admitPublication(&self.store, id, name, compressed, topic, epoch) catch |err| {
+    pub fn publish(self: *Messages, id: MessageId, topic: u16, kind: topic_mod.Kind, name: []const u8, compressed: []const u8, now: u64, epoch: u64) ?storage.Handle {
+        const handle = self.history.admitPublication(&self.store, kind, id, name, compressed, topic, epoch) catch |err| {
             if (err == error.Retention) {
-                const kind = topic_mod.parseCanonical(name).?.name.kind;
                 self.retention_refusals[@intFromEnum(kind)] +|= 1;
             }
             return null;

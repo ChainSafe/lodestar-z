@@ -32,7 +32,7 @@ test "identify protocol integration completes both directions with zero applicat
         try pair.pump();
     }
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(client.identify.schedule(0), pair.now.millis()) == null);
-    if (schedule_test_support.wakeupMilliseconds(client.schedule(.{}), pair.now.millis())) |due| try std.testing.expect(due > pair.now.millis());
+    if (schedule_test_support.wakeupMilliseconds(schedule_test_support.protocolsSchedule(&client, .{}), pair.now.millis())) |due| try std.testing.expect(due > pair.now.millis());
     try std.testing.expectEqual(pair.now.millis(), schedule_test_support.wakeupMilliseconds(client.identify.schedule(1), pair.now.millis()).?);
     var results: [1]identify.Handler.Result = undefined;
     var counts = client.process(&pair.client, &.{}, pair.now, .{ .identify = &results });

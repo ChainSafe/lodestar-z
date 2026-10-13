@@ -32,19 +32,12 @@ pub const DatagramResult = union(enum) {
     rejected: types.RejectReason,
 };
 
-/// These counters exist for observability. Nothing in `advance` depends on them.
-pub const Progress = struct {
-    challenges_expired: usize = 0,
-    sessions_expired: usize = 0,
-    standard_responses: u8 = 0,
-};
-
 pub const AdvanceResult = struct {
     now_ms: u64 = 0,
     event: Engine.Event = .none,
     datagram: DatagramResult = .timeout,
     calls_expired: usize = 0,
-    progress: Progress = .{},
+    standard_responses: u8 = 0,
     cancelled: bool = false,
     failure: ?Failure = null,
 };
@@ -179,8 +172,6 @@ pub fn advance(self: *Transport, io: std.Io, now_ms: u64, expired_calls: []CallT
     var result: AdvanceResult = .{ .now_ms = now_ms };
     const expired = self.engine.expire(now_ms, expired_calls);
     result.calls_expired = expired.calls;
-    result.progress.challenges_expired = expired.challenges;
-    result.progress.sessions_expired = expired.sessions;
     const datagram = input catch |err| switch (err) {
         error.Timeout => null,
         error.InvalidSourceAddress => blk: {
@@ -277,7 +268,7 @@ fn handleEvent(
         ) orelse break;
         // The destination refuses the remaining fragments too.
         if (!try self.reply(io, request.peer.address, self.output[0..packet_length])) return .none;
-        result.progress.standard_responses += 1;
+        result.standard_responses += 1;
     }
     std.debug.assert(self.response.complete());
     return .none;

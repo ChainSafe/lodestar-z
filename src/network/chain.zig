@@ -6,10 +6,11 @@ const constants = @import("constants");
 const topics = @import("gossipsub/topic_policy.zig");
 const policy = @import("reqresp/request_policy.zig");
 const advertisement = @import("advertisement.zig");
-const values = @import("control_values.zig");
+const values = @import("local_state.zig");
 const capabilities = @import("capabilities.zig");
 const ForkEntry = @import("types.zig").ForkEntry;
 const gossipsub_constants = @import("gossipsub/constants.zig");
+const meshsub = @import("gossipsub/protocol.zig");
 
 pub const boundary_max = topics.boundary_max;
 pub const Boundary = struct { epoch: u64, fork: config.ForkSeq, digest: [4]u8, version: [4]u8 };
@@ -138,7 +139,7 @@ pub const Config = struct {
             .local = local,
             .endpoints = endpoints,
             .schedule = .{ .fulu_scheduled = self.fulu_scheduled, .next_version = current.version },
-            .capabilities = capabilities.withIdentify(try capabilities.forFork(current.fork, self.serve_light_clients, &.{ .v1_2, .v1_1, .v1_0 })),
+            .capabilities = capabilities.withIdentify(try capabilities.forFork(current.fork, self.serve_light_clients, &meshsub.versions)),
         };
         result.local.fork = .{
             .fork = current.fork,

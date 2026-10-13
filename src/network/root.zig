@@ -50,7 +50,7 @@ pub const driver = @import("driver.zig");
 pub const Schedule = types.Schedule;
 pub const peers = @import("peers/root.zig");
 pub const advertisement = @import("advertisement.zig");
-pub const control_values = @import("control_values.zig");
+pub const local_state = @import("local_state.zig");
 pub const control_wire = @import("control_wire.zig");
 pub const constants = @import("constants.zig");
 pub const types = @import("types.zig");
@@ -85,7 +85,7 @@ test {
     _ = @import("chain.zig");
     _ = gossip_processor;
     _ = peers;
-    _ = control_values;
+    _ = local_state;
     _ = control_wire;
     _ = constants;
     _ = types;
@@ -104,7 +104,7 @@ test {
     _ = @import("network_core.zig");
     _ = driver;
     _ = transport_driver;
-    _ = @import("reservations.zig");
+    _ = @import("counting_allocator.zig");
     _ = @import("deadline_heap.zig");
     _ = index_list;
     _ = configuration;

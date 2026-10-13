@@ -1,17 +1,12 @@
 const std = @import("std");
+const crypto = @import("discv5").identity.crypto;
 
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
-const scalar = std.crypto.ecc.Secp256k1.scalar;
 
 pub const secret_key_length = 32;
 pub const public_key_length = 33;
 pub const protobuf_length = 37;
 pub const signature_der_length_max = Ecdsa.Signature.der_encoded_length_max;
-
-pub const half_order = [_]u8{
-    0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
-};
 
 const protobuf_prefix = [_]u8{ 0x08, 0x02, 0x12, 0x21 };
 
@@ -59,8 +54,7 @@ pub const KeyPair = struct {
     inner: Ecdsa.KeyPair,
 
     pub fn fromSecretKey(secret: *const [secret_key_length]u8) Error!KeyPair {
-        const secret_key = Ecdsa.SecretKey.fromBytes(secret.*) catch return error.InvalidSecretKey;
-        const inner = Ecdsa.KeyPair.fromSecretKey(secret_key) catch return error.InvalidSecretKey;
+        const inner = crypto.keyPairFromSecret(secret) catch return error.InvalidSecretKey;
         return .{ .inner = inner };
     }
 
@@ -78,15 +72,10 @@ pub const KeyPair = struct {
         out: *[signature_der_length_max]u8,
     ) Error![]u8 {
         const signature = self.inner.sign(message, null) catch return error.InvalidSecretKey;
-        return normalizeLowS(signature).toDer(out);
+        const normalized = Ecdsa.Signature{ .r = signature.r, .s = crypto.canonicalLowS(signature.s) };
+        return normalized.toDer(out);
     }
 };
-
-fn normalizeLowS(signature: Ecdsa.Signature) Ecdsa.Signature {
-    if (std.mem.order(u8, &signature.s, &half_order) != .gt) return signature;
-    const negated = scalar.neg(signature.s, .big) catch unreachable;
-    return .{ .r = signature.r, .s = negated };
-}
 
 test {
     _ = @import("keys_test.zig");

@@ -264,9 +264,7 @@ pub const Job = struct {
             break :blk null;
         };
         self.retire_work.?.queue() catch {
-            const thread = std.Thread.spawn(.{}, retireExecute, .{ env, self }) catch
-                env.fatalError("LevelDb cursor", "Cannot retire an unpublished cursor");
-            thread.join();
+            retireExecute(env, self);
             self.owner.syncCursor(self);
             try self.rejectPublication(env);
             return true;
@@ -281,9 +279,7 @@ pub const Job = struct {
     fn retireComplete(env: napi.Env, status: napi.status.Status, self: *Job) void {
         const owner = self.owner;
         if (status != .ok) {
-            const thread = std.Thread.spawn(.{}, retireExecute, .{ env, self }) catch
-                env.fatalError("LevelDb cursor", "Cannot finish cursor retirement");
-            thread.join();
+            retireExecute(env, self);
         }
         owner.syncCursor(self);
         if (owner.env_alive) self.rejectPublication(env) catch |err| owner.deliveryFailure(err);

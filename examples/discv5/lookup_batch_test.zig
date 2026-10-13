@@ -391,7 +391,7 @@ test "transport completes a caller-owned lookup across multiple peers" {
     try std.testing.expectEqual(@as(usize, 0), first.transport.calls_expired);
 
     const from_b = try discv5.driver.step(&network.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(25) });
-    try std.testing.expectEqual(@as(u8, 1), from_b.progress.standard_responses);
+    try std.testing.expectEqual(@as(u8, 1), from_b.standard_responses);
     const second = try lookup_batch.step(
         &network.transport_a,
         std.testing.io,
@@ -404,7 +404,7 @@ test "transport completes a caller-owned lookup across multiple peers" {
     try std.testing.expectEqual(@as(?u16, 0), second.consumed);
 
     const from_c = try discv5.driver.step(&network.transport_c, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(25) });
-    try std.testing.expectEqual(@as(u8, 1), from_c.progress.standard_responses);
+    try std.testing.expectEqual(@as(u8, 1), from_c.standard_responses);
     const completed = try lookup_batch.step(
         &network.transport_a,
         std.testing.io,
@@ -506,7 +506,7 @@ test "lookup step preserves an unrelated response event" {
     var cursor: lookup_batch.Cursor = .{};
     var expired: [4]CallTable.Expired = undefined;
     const answered = try discv5.driver.step(&network.transport_c, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(25) });
-    try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
+    try std.testing.expectEqual(@as(u8, 1), answered.standard_responses);
 
     var seed_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
     const seeds = network.transport_a.engine.closestNodes(&network.record_c.node_id, &seed_buffer);

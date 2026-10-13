@@ -1,6 +1,6 @@
 const topic_fixture = @import("gossipsub/topic_fixture.zig");
 const advertisement = @import("advertisement.zig");
-const control_values = @import("control_values.zig");
+const local_state = @import("local_state.zig");
 const schedule_test_support = @import("schedule_test_support.zig");
 const driver = @import("driver.zig");
 const core_test = @import("network_core_test_support.zig");
@@ -26,23 +26,23 @@ const consensus_types = @import("consensus_types");
 const policy_fixture = @import("reqresp/policy_fixture.zig");
 const admission_fixture = @import("reqresp/admission_fixture.zig");
 const configuration = @import("configuration.zig");
-const Reservations = @import("reservations.zig").Reservations;
+const CountingAllocator = @import("counting_allocator.zig").CountingAllocator;
 const discovery = @import("peers/discovery.zig");
 const PeerId = @import("wire/peer_id.zig").PeerId;
 
 /// Applies a local update through the host intent path with the current subscriptions and demand.
-fn applyLocal(node: *NetworkCore, update: *const control_values.LocalUpdate, now: Now) !bool {
+fn applyLocal(node: *NetworkCore, update: *const local_state.LocalUpdate, now: Now) !bool {
     var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
     var desired = core_test.intent(node, try test_support.subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
     desired.update = update.*;
     return node.applyIntent(&desired, now);
 }
 
-fn updateLocalWithEndpoints(node: *NetworkCore, local: *const t.LocalState, schedule: control_values.ForkSchedule, endpoints: ?advertisement.Endpoints, now: Now) !bool {
+fn updateLocalWithEndpoints(node: *NetworkCore, local: *const t.LocalState, schedule: local_state.ForkSchedule, endpoints: ?advertisement.Endpoints, now: Now) !bool {
     return applyLocal(node, &.{ .local = local.*, .schedule = schedule, .endpoints = endpoints, .capabilities = node.protocols.router.capabilities() }, now);
 }
 
-fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: control_values.ForkSchedule, now: Now) !bool {
+fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: local_state.ForkSchedule, now: Now) !bool {
     return updateLocalWithEndpoints(node, local, schedule, node.advertisementEndpoints(), now);
 }
 
@@ -421,7 +421,7 @@ test "core every allocation prefix cleans up and reservations count owned storag
     var allocation = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var node: NetworkCore = undefined;
     try node.init(allocation.allocator(), std.testing.io, &opts.resolved, opts.startup);
-    const allocated = node.reservations.bytes;
+    const allocated = node.allocations.bytes;
     std.debug.print("local intent memory: allocated={} inline={} workspace={} prefixes={}\n", .{ allocated, @sizeOf(NetworkCore), @sizeOf(local_intent.Workspace), allocation.alloc_index });
     try std.testing.expectEqual(allocation.allocated_bytes, allocated);
     const allocations = allocation.alloc_index;
@@ -641,7 +641,7 @@ fn failureAndReplacement(a: *NetworkCore, b: *NetworkCore) !void {
 test "core receive capacities measure reservations and unwind byte exhaustion" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{21}));
     for ([_]usize{ 32 * 1024 * 1024, 128 * 1024 * 1024 }) |receive_bytes| {
-        var ledger: Reservations = .{ .backing = std.testing.allocator };
+        var ledger: CountingAllocator = .{ .backing = std.testing.allocator };
         var request: configuration.Options = .{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.blocks(.{ 1, 2, 3, 4 })}, .receive_arena_bytes = receive_bytes }, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = policy_fixture.config() };
         const startup: NetworkCore.Startup = .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = core_test.localState(.{}) };
         var resolved = try configuration.resolve(request);
@@ -653,7 +653,7 @@ test "core receive capacities measure reservations and unwind byte exhaustion" {
         const mib = 1024 * 1024;
         std.debug.print("core receive memory {d}: total={d} reqresp={d} negotiations={d}\n", .{ receive_bytes, measured, node.protocols.reqresp.memoryPlan().total_bytes, node.protocols.router.negotiator.entries.len });
         try std.testing.expectEqual(@as(u64, 512 * mib), node.transport.engine.memoryPlan().receive_window_bytes);
-        try std.testing.expect(measured <= node.reservations.byte_limit.?);
+        try std.testing.expect(measured <= node.allocations.byte_limit.?);
         node.deinit(std.testing.io);
         initialized = false;
         try std.testing.expectEqual(@as(usize, 0), ledger.bytes);

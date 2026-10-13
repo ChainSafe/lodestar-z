@@ -155,7 +155,7 @@ fn scalarFromDigest(bytes: [32]u8) Scalar {
     return Scalar.fromBytes(reduced, .big) catch unreachable;
 }
 
-fn canonicalLowS(encoded: [32]u8) [32]u8 {
+pub fn canonicalLowS(encoded: [32]u8) [32]u8 {
     const value = std.mem.readInt(u256, &encoded, .big);
     std.debug.assert(value > 0 and value < scalar_order);
     if (value <= half_scalar_order) return encoded;

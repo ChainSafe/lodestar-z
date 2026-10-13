@@ -11,7 +11,7 @@ pub const Kind = topic.Kind;
 pub const kind_count = @typeInfo(Kind).@"enum".fields.len;
 pub const Rule = struct { count: u16 = 0, ssz_min: u32 = 0, ssz_max: u32 = 0 };
 pub const Boundary = struct { digest: [4]u8, fork: ?ForkSeq = null, epoch: u64 = 0, rules: [kind_count]Rule = @splat(.{}) };
-pub const Match = struct { ordinal: u16, rule: Rule };
+pub const Match = struct { ordinal: u16, kind: Kind, rule: Rule };
 pub const Error = error{InvalidTopicPolicy};
 
 pub const Subnets = struct {
@@ -92,7 +92,7 @@ pub const Namespace = struct {
             if (!std.mem.eql(u8, &boundary.digest, &parsed.digest)) continue;
             const rule = boundary.rules[k];
             if (parsed.name.subnet >= rule.count) return null;
-            return .{ .ordinal = starts[k] + parsed.name.subnet, .rule = rule };
+            return .{ .kind = parsed.name.kind, .ordinal = starts[k] + parsed.name.subnet, .rule = rule };
         }
         return null;
     }

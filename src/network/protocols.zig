@@ -103,12 +103,6 @@ pub const Protocols = struct {
         );
     }
 
-    pub fn schedule(self: *const Protocols, capacities: Capacities) types.Schedule {
-        var wakeups: wake_sources.Wakeups = .{};
-        self.collectWakeups(capacities, &wakeups);
-        return wakeups.schedule();
-    }
-
     pub fn collectWakeups(self: *const Protocols, capacities: Capacities, wakeups: *wake_sources.Wakeups) void {
         std.debug.assert(!self.stopped);
         wakeups.note(.reqresp, self.reqresp.schedule(.{ .application = capacities.application, .control = capacities.control }));

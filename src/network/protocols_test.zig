@@ -115,10 +115,10 @@ test "protocol stack handles native stream events past empty request capacity" {
         for (requests[0..count]) |event| if (event == .request) {
             incoming = event.request.request;
         };
-        if (incoming != null and schedule_test_support.wakeupMilliseconds(client.schedule(.{ .control = 1 }), pair.now.millis()) != pair.now.millis()) break;
+        if (incoming != null and schedule_test_support.wakeupMilliseconds(schedule_test_support.protocolsSchedule(&client, .{ .control = 1 }), pair.now.millis()) != pair.now.millis()) break;
     }
     try std.testing.expect(incoming != null);
-    try std.testing.expect(schedule_test_support.wakeupMilliseconds(client.schedule(.{ .control = 1 }), pair.now.millis()).? > pair.now.millis());
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(schedule_test_support.protocolsSchedule(&client, .{ .control = 1 }), pair.now.millis()).? > pair.now.millis());
     var wire: [rr.codec.frame_scratch_max]u8 = undefined;
     const encoded = try rr.codec.encodeChunk(0, null, &ping, &wire);
     const stream = server.reqresp.inbound[incoming.?.index].request.stream;

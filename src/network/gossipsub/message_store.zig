@@ -209,15 +209,13 @@ pub const Store = struct {
             .entries = (self.retained_entries_by_kind[k] + 1) -| limits[k].items,
         };
     }
-    pub fn put(self: *Store, id: topic.MessageId, name: []const u8, data: []const u8) ?Handle {
-        const kind = if (topic.parseCanonical(name)) |canonical| canonical.name.kind else .beacon_block;
+    pub fn put(self: *Store, kind: topic.Kind, id: topic.MessageId, name: []const u8, data: []const u8) ?Handle {
         if (!self.canReserve(data.len) or !self.pendingRoom(kind, data.len)) return null;
         return self.allocate(id, name, data, kind);
     }
 
     /// Insert into history in this owner call, before another admission observes the provisional entry.
-    pub fn putPublication(self: *Store, id: topic.MessageId, name: []const u8, data: []const u8) Handle {
-        const kind = if (topic.parseCanonical(name)) |canonical| canonical.name.kind else .beacon_block;
+    pub fn putPublication(self: *Store, kind: topic.Kind, id: topic.MessageId, name: []const u8, data: []const u8) Handle {
         const needed = self.retentionNeeded(kind, data.len);
         assert(needed.pages == 0 and needed.entries == 0 and self.canReserve(data.len));
         return self.allocate(id, name, data, kind);

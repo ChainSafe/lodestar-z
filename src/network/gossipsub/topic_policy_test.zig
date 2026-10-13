@@ -1,7 +1,7 @@
 const std = @import("std");
 const root = @import("root.zig");
 const constants = @import("constants.zig");
-const Reservations = @import("../reservations.zig").Reservations;
+const CountingAllocator = @import("../counting_allocator.zig").CountingAllocator;
 
 test "topic namespace implements immutable canonical lookup" {
     try canonical();
@@ -86,7 +86,7 @@ const hoodi = @import("topic_fixture.zig").hoodi;
 
 test "topic namespace storage matches its plan and frees every allocation prefix" {
     const boundaries = hoodi();
-    var ledger: Reservations = .{ .backing = std.testing.allocator };
+    var ledger: CountingAllocator = .{ .backing = std.testing.allocator };
     var ns = try root.topic_policy.Namespace.init(ledger.allocator(), &boundaries);
     try std.testing.expectEqual(@as(u16, 784), ns.topic_count);
     try std.testing.expectEqual(root.topic_policy.Namespace.backingBytes(&boundaries), ledger.bytes);

@@ -339,7 +339,7 @@ pub fn publishWithOptions(self: *Gossipsub, topic_str: []const u8, ssz: []const 
     const recipients = self.overlay.publicationRecipients(&context, topic, options.flood);
     if (recipients.count() == 0 and !options.allow_zero_peers) return error.NoPeersSubscribedToTopic;
     const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return error.CompressFailed;
-    const h = self.messages.publish(id, topic, topic_str, self.msg_scratch[0..clen], now_ms, self.cycle.epoch) orelse return error.ResourceExhausted;
+    const h = self.messages.publish(id, topic, match.kind, topic_str, self.msg_scratch[0..clen], now_ms, self.cycle.epoch) orelse return error.ResourceExhausted;
     self.topic_metrics.get(topic_str).published +|= 1;
     _ = self.recovery.resolve(&self.peers, id);
     const result = self.deliver(&recipients, h, null, now_ms);

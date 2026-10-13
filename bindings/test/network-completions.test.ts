@@ -1,7 +1,7 @@
 import {describe, expect, it, vi} from "vitest";
+import {CompletionOwner} from "../src/network-completions.js";
 import {IncomingRecord} from "../src/network-incoming.js";
 import {RequestRecord} from "../src/network-request.js";
-import {CompletionOwner} from "../src/network-tickets.js";
 
 class Breached extends Error {}
 

@@ -17,7 +17,7 @@ const snappy = @import("snappy");
 const receive_pool = @import("receive_pool.zig");
 const IwantOutcome = @import("metrics.zig").IwantOutcome;
 const topic_fixture = @import("topic_fixture.zig");
-const Reservations = @import("../reservations.zig").Reservations;
+const CountingAllocator = @import("../counting_allocator.zig").CountingAllocator;
 const frame = @import("frame.zig");
 const session_io = @import("session_io.zig");
 const turn_mod = @import("turn.zig");
@@ -322,7 +322,7 @@ test "gossip independent RPC enumerates every receive split through admission" {
 
 test "gossip paged RPC cursors survive shared workspace reuse without runtime allocation" {
     var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var ledger: Reservations = .{ .backing = backing.allocator() };
+    var ledger: CountingAllocator = .{ .backing = backing.allocator() };
     var g = try support.init(ledger.allocator(), .{
         .random_seed = 1,
         .connected_capacity = 4,

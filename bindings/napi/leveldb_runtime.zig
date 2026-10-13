@@ -237,10 +237,7 @@ pub const Runtime = struct {
         std.debug.assert(self.queue_length == 0 and self.reads_head == null);
         self.cleanup_started = true;
         self.cleanup_work.queue() catch {
-            // If Node refuses further work during shutdown, retain ownership until a fallback worker joins.
-            const thread = std.Thread.spawn(.{}, cleanupExecute, .{ self.env, self }) catch
-                self.env.fatalError("LevelDb.close", "Cannot schedule database cleanup");
-            thread.join();
+            cleanupExecute(self.env, self);
             cleanupComplete(self.env, .ok, self);
         };
     }
@@ -258,9 +255,7 @@ pub const Runtime = struct {
 
     fn cleanupComplete(_: napi.Env, status: napi.status.Status, self: *Runtime) void {
         if (status != .ok) {
-            const thread = std.Thread.spawn(.{}, cleanupExecute, .{ self.env, self }) catch
-                self.env.fatalError("LevelDb.close", "Cannot finish cancelled database cleanup");
-            thread.join();
+            cleanupExecute(self.env, self);
         }
         self.cleanup_finished = true;
         // Settling callbacks can collect the wrapper; keep the runtime through reference and hook cleanup.

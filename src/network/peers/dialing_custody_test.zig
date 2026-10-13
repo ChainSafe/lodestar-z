@@ -4,7 +4,7 @@ const catalog_mod = @import("catalog.zig");
 const t = @import("types.zig");
 const a = std.testing.allocator;
 const custody_mod = @import("custody.zig");
-const Reservations = @import("../reservations.zig").Reservations;
+const CountingAllocator = @import("../counting_allocator.zig").CountingAllocator;
 const policy = @import("policy.zig");
 
 const support = @import("dialing_test_support.zig");
@@ -45,7 +45,7 @@ test "peer discovery uses the configured custody minimum only for an absent ENR 
 test "peer dial custody diagnostics count unfinished derivations without mutating retained coverage" {
     const custody = @import("custody.zig");
     var backing = std.testing.FailingAllocator.init(a, .{});
-    var ledger: Reservations = .{ .backing = backing.allocator() };
+    var ledger: CountingAllocator = .{ .backing = backing.allocator() };
     var q = try mod.Dialing.init(.{ .capacity = 4, .seed = 4 });
     var catalog = try initCatalog(ledger.allocator(), q.options);
     defer catalog.deinit(ledger.allocator());

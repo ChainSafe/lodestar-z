@@ -5,7 +5,7 @@ const std = @import("std");
 const d = @import("discv5");
 const adapter = @import("enr.zig");
 const types = @import("types.zig");
-const control_values = @import("../control_values.zig");
+const local_state = @import("../local_state.zig");
 const advertisement = @import("../advertisement.zig");
 const Sockets = @import("udp").Sockets;
 const KeyPair = @import("../wire/keys.zig").KeyPair;
@@ -76,13 +76,6 @@ pub const Discovery = struct {
     pub const Result = struct {
         learned: [2]?d.types.Address = .{ null, null },
         candidates: usize = 0,
-        started: u8 = 0,
-        expired: u16 = 0,
-        rejected: u16 = 0,
-        dropped: u16 = 0,
-        unowned: u16 = 0,
-        /// Datagrams dequeued from the sockets, admitted or not. One step dequeues at most one.
-        datagrams: u16 = 0,
         cancelled: bool = false,
         failure: ?Failure = null,
     };
@@ -112,7 +105,7 @@ pub const Discovery = struct {
     lookup_published: u64 = 0,
     empty_lookups: u3 = 0,
 
-    pub fn init(self: *Discovery, allocator: std.mem.Allocator, io: std.Io, options: Config, buffers: Sockets.Buffers, host: *const KeyPair, local: *const types.LocalState, fork_schedule: control_values.ForkSchedule, quic: [2]?types.Address, now_ms: u64) !void {
+    pub fn init(self: *Discovery, allocator: std.mem.Allocator, io: std.Io, options: Config, buffers: Sockets.Buffers, host: *const KeyPair, local: *const types.LocalState, fork_schedule: local_state.ForkSchedule, quic: [2]?types.Address, now_ms: u64) !void {
         var sockets = try Sockets.bind(io, options.bind);
         errdefer sockets.close(io);
         sockets.requestBuffersLogged(buffers, .network_discovery);
@@ -249,7 +242,7 @@ pub const Discovery = struct {
     pub fn advance(self: *Discovery, io: std.Io, now_ms: u64, ready: *[2]bool, out: []adapter.Candidate) Error!Result {
         if (self.stopped) return error.Stopped;
         var result = Result{};
-        self.refill(io, now_ms, &result) catch |err| {
+        self.refill(io, now_ms) catch |err| {
             result.cancelled = err == error.Canceled;
             result.failure = .{ .cause = err, .stage = .coordinator };
             self.resource_retry_ms = now_ms +| self.options.local_retry_ms;
@@ -270,7 +263,9 @@ pub const Discovery = struct {
                 }
             };
         }
-        return .{ .learned = consumed.learned, .candidates = consumed.candidates, .started = result.started, .expired = consumed.expired, .rejected = consumed.rejected, .dropped = consumed.dropped, .unowned = consumed.unowned, .datagrams = consumed.datagrams, .cancelled = result.cancelled or consumed.cancelled, .failure = result.failure orelse consumed.failure };
+        consumed.cancelled = result.cancelled or consumed.cancelled;
+        consumed.failure = result.failure orelse consumed.failure;
+        return consumed;
     }
 
     /// Supports hosts that drive this owner's Transport themselves. Consume every result exactly
@@ -278,7 +273,7 @@ pub const Discovery = struct {
     /// TALK requests itself; advance supplies the unsupported-protocol response. No slice escapes.
     pub fn consume(self: *Discovery, progress: *const d.Transport.AdvanceResult, expiries: []const d.CallTable.Expired, out: []adapter.Candidate) Result {
         std.debug.assert(expiries.len == progress.calls_expired and expiries.len <= d.CallTable.capacity_max);
-        var result = Result{ .datagrams = @intFromBool(progress.datagram != .timeout), .cancelled = progress.cancelled, .failure = if (progress.failure) |failure| .{ .cause = failure.cause, .stage = failure.stage } else null };
+        var result = Result{ .cancelled = progress.cancelled, .failure = if (progress.failure) |failure| .{ .cause = failure.cause, .stage = failure.stage } else null };
         if (self.stopped) return result;
         switch (progress.datagram) {
             .timeout, .accepted => {},
@@ -286,9 +281,7 @@ pub const Discovery = struct {
         }
         for (expiries) |expired| {
             const lookup_expired = if (self.lookup) |*lookup| lookup.onFailure(&self.transport.engine, expired.handle) else false;
-            if (lookup_expired or self.maintenance.onFailure(&self.transport.engine, expired.handle, progress.now_ms, .expired)) {
-                result.expired += 1;
-            } else result.unowned += 1;
+            if (!lookup_expired) _ = self.maintenance.onFailure(&self.transport.engine, expired.handle, progress.now_ms, .expired);
         }
         if (progress.event == .response) {
             const response = &progress.event.response;
@@ -319,7 +312,7 @@ pub const Discovery = struct {
         self.stopped = true;
     }
 
-    fn refill(self: *Discovery, io: std.Io, now_ms: u64, result: *Result) Error!void {
+    fn refill(self: *Discovery, io: std.Io, now_ms: u64) Error!void {
         self.expireForeground(now_ms);
         if (now_ms < self.resource_retry_ms) return;
         if (self.lookup == null and self.demand.active(now_ms) and now_ms >= self.query_due_ms) {
@@ -339,12 +332,12 @@ pub const Discovery = struct {
             std.log.scoped(.network_discovery).debug("lookup_started target={x} seeds={d}", .{ target, closest.len });
         }
         if (self.maintenance.nextDeadlineMs(&self.transport.engine)) |deadline| if (now_ms >= deadline) {
-            _ = try self.start(io, now_ms, true, result);
+            _ = try self.start(io, now_ms, true);
         };
         if (self.lookup == null or now_ms < self.refill_due_ms) return;
         self.refill_due_ms = now_ms +| self.options.local_retry_ms;
         for (0..d.Lookup.parallelism) |_| {
-            if (!try self.start(io, now_ms, false, result)) break;
+            if (!try self.start(io, now_ms, false)) break;
         }
     }
 
@@ -357,12 +350,11 @@ pub const Discovery = struct {
         self.lookup = null;
     }
 
-    fn start(self: *Discovery, io: std.Io, now_ms: u64, background: bool, result: *Result) Error!bool {
+    fn start(self: *Discovery, io: std.Io, now_ms: u64, background: bool) Error!bool {
         const started = (if (background) self.transport.startMaintenance(io, &self.maintenance, now_ms) else self.transport.startLookup(io, &self.lookup.?, now_ms)) catch |err| switch (err) {
             error.TableFull, error.PeerBusy => return false,
             else => return err,
         };
-        if (started.started) result.started += 1;
         // Transport released the refused call and reported a local failure to its owner, so the
         // refusal fails only its destination and the step goes on.
         if (started.failure) |err| if (err != error.DestinationUnreachable) return err;
@@ -383,10 +375,7 @@ pub const Discovery = struct {
             if (consumption.consumed) self.refill_due_ms = progress.now_ms;
         }
         if (!consumption.consumed) consumption = self.maintenance.onEvent(&self.transport.engine, &progress.event, progress.now_ms);
-        if (!consumption.consumed) {
-            result.unowned += 1;
-            return;
-        }
+        if (!consumption.consumed) return;
         if (progress.event == .response) {
             const response = &progress.event.response;
             if (consumption.responder) |*record| self.publishResponse(response, record, progress.now_ms, out, result);
@@ -417,9 +406,8 @@ pub const Discovery = struct {
         self.publish(&record, response.peer.address, now_ms, out, result);
     }
 
-    fn rejected(self: *Discovery, reason: Rejection, result: *Result) void {
+    fn rejected(self: *Discovery, reason: Rejection) void {
         self.rejections[@intFromEnum(reason)] +|= 1;
-        result.rejected +|= 1;
     }
 
     fn publish(self: *Discovery, record: *const d.identity.enr.Record, source: d.types.Address, now_ms: u64, out: []adapter.Candidate, result: *Result) void {
@@ -429,11 +417,11 @@ pub const Discovery = struct {
                 error.MissingEth2 => .missing_eth2,
                 error.IncompatibleFork => .incompatible_fork,
                 else => .invalid_enr,
-            }, result);
+            });
             return;
         };
         if (candidate.address_count == 0) {
-            self.rejected(.no_quic, result);
+            self.rejected(.no_quic);
             return;
         }
         var count: u8 = 0;
@@ -448,15 +436,14 @@ pub const Discovery = struct {
         candidate.address_count = count;
         @memset(candidate.addresses[count..], .unspecified);
         if (count == 0) {
-            self.rejected(if (supported == 0) .endpoint_family else .endpoint_scope, result);
+            self.rejected(if (supported == 0) .endpoint_family else .endpoint_scope);
             return;
         }
         if (!self.demand.matches(&candidate, &self.context)) {
-            self.rejected(.demand, result);
+            self.rejected(.demand);
             return;
         }
         if (result.candidates == out.len) {
-            result.dropped += 1;
             self.rejections[@intFromEnum(Rejection.output_capacity)] +|= 1;
             return;
         }
@@ -466,7 +453,7 @@ pub const Discovery = struct {
     }
 };
 
-pub fn advertisementFor(local: *const types.LocalState, schedule: control_values.ForkSchedule, endpoints: advertisement.Endpoints) adapter.LocalAdvertisement {
+pub fn advertisementFor(local: *const types.LocalState, schedule: local_state.ForkSchedule, endpoints: advertisement.Endpoints) adapter.LocalAdvertisement {
     return .{
         .fork = .{ .digest = local.fork.digest, .next_version = schedule.next_version, .next_epoch = schedule.next_epoch },
         .next_fork_digest = if (schedule.fulu_scheduled or local.fork.fork.gte(.fulu)) schedule.next_digest else null,
@@ -495,14 +482,8 @@ fn matchesNetwork(context_opaque: *const anyopaque, record: *const d.identity.en
 
 pub fn relayAllowed(source: d.types.Address, candidate: types.Address) bool {
     if (candidate.port() < d.Lookup.discovered_port_min) return false;
-    const address: d.types.Address = switch (candidate) {
-        .ip4 => |value| .{ .ip4 = .{ .octets = value.octets, .port = value.port } },
-        .ip6 => |value| blk: {
-            if (value.octets[0] == 0xfe and value.octets[1] & 0xc0 == 0x80) return false;
-            break :blk .{ .ip6 = .{ .octets = value.octets, .port = value.port } };
-        },
-    };
-    return d.address_policy.relayAllowed(source, address);
+    if (candidate == .ip6 and candidate.ip6.octets[0] == 0xfe and candidate.ip6.octets[1] & 0xc0 == 0x80) return false;
+    return d.address_policy.relayAllowed(source, candidate);
 }
 
 test {

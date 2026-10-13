@@ -88,6 +88,14 @@ pub fn consume(self: *RequestState) bool {
     return true;
 }
 
+pub fn ioFailure(self: *RequestState, err: (Engine.StreamError || codec.Error)) events.Failure {
+    self.failure_detail = @errorName(err);
+    return switch (err) {
+        error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
+        else => .transport,
+    };
+}
+
 /// A pending notification or an undelivered terminal event.
 pub fn deliverable(self: *const RequestState) bool {
     return self.notification == .pending or self.completion == .terminal;

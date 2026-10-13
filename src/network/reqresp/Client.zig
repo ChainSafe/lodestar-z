@@ -42,11 +42,7 @@ pub fn fail(self: *Client, owner: *ReqResp, engine: *Engine, router: *Router, in
 }
 
 fn failStream(self: *Client, owner: *ReqResp, engine: *Engine, router: *Router, index: u16, err: Engine.StreamError, now: Now) void {
-    self.request.failure_detail = @errorName(err);
-    self.fail(owner, engine, router, index, switch (err) {
-        error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
-        else => .transport,
-    }, now);
+    self.fail(owner, engine, router, index, self.request.ioFailure(err), now);
 }
 
 pub fn deadline(self: *const Client) ?u64 {
@@ -86,11 +82,7 @@ fn sendRequest(owner: *ReqResp, engine: *Engine, router: *Router, slot: *Client,
             std.log.scoped(.network_reqresp).debug("request_write_stopped request={d}:{d} connection={d}:{d} method={s} detail={s} response_fin={any} awaiting_response=true", .{ index, request.generation, request.conn.index, request.conn.generation, @tagName(request.protocol), @errorName(err), request.io.fin_seen });
             break :stopped .done;
         }
-        request.failure_detail = @errorName(err);
-        slot.fail(owner, engine, router, index, switch (err) {
-            error.StaleHandle, error.UnknownStream => .stream_closed,
-            else => .transport,
-        }, now);
+        slot.fail(owner, engine, router, index, request.ioFailure(err), now);
         return;
     };
     if (flushed != .done) {

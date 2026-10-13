@@ -11,7 +11,7 @@ const block = "/eth2/01020304/beacon_block/ssz_snappy";
 const attestation = "/eth2/01020304/beacon_attestation_0/ssz_snappy";
 const topic_fixture = @import("../gossipsub/topic_fixture.zig");
 const test_pair = @import("../gossipsub/test_pair.zig");
-const Reservations = @import("../reservations.zig").Reservations;
+const CountingAllocator = @import("../counting_allocator.zig").CountingAllocator;
 const session_io = @import("../gossipsub/session_io.zig");
 const topic_policy = @import("../gossipsub/topic_policy.zig");
 const recovery = @import("../gossipsub/recovery.zig");
@@ -117,7 +117,7 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
 
 test "gossip full processor preserves duplicate attribution without runtime allocations" {
     var backing = std.testing.FailingAllocator.init(t.allocator, .{});
-    var ledger: Reservations = .{ .backing = backing.allocator() };
+    var ledger: CountingAllocator = .{ .backing = backing.allocator() };
     var g = try support.init(ledger.allocator(), options);
     defer g.deinit();
     const limits: processor.limits.Limits = @splat(.{ .items = 2, .bytes = 4096 });

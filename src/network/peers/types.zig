@@ -8,10 +8,10 @@ pub const Address = @import("../types.zig").Address;
 pub const CloseReason = @import("../types.zig").CloseReason;
 pub const ForkSeq = @import("config").ForkSeq;
 pub const PeerRef = @import("../types.zig").PeerRef;
-pub const Status = @import("../control_values.zig").Status;
-pub const Metadata = @import("../control_values.zig").Metadata;
-pub const ForkContext = @import("../control_values.zig").ForkContext;
-pub const LocalState = @import("../control_values.zig").LocalState;
+pub const Status = @import("../local_state.zig").Status;
+pub const Metadata = @import("../local_state.zig").Metadata;
+pub const ForkContext = @import("../local_state.zig").ForkContext;
+pub const LocalState = @import("../local_state.zig").LocalState;
 pub const PeerAction = enum { fatal, low_tolerance, mid_tolerance, high_tolerance };
 pub const PeerReport = struct {
     identity: PeerId,

@@ -10,7 +10,7 @@ const next = "/eth2/01020304/voluntary_exit/ssz_snappy";
 const boundaries = [_]topic_policy.Boundary{ full(.{ 1, 2, 3, 4 }), full(.{ 5, 6, 7, 8 }), full(.{ 9, 10, 11, 12 }) };
 const topic_policy = @import("topic_policy.zig");
 const topic_fixture = @import("topic_fixture.zig");
-const Reservations = @import("../reservations.zig").Reservations;
+const CountingAllocator = @import("../counting_allocator.zig").CountingAllocator;
 const snappy = @import("snappy");
 const constants = @import("constants.zig");
 const message_store = @import("message_store.zig");
@@ -29,7 +29,7 @@ fn apply(g: *Gossipsub, w: *local.Workspace, desired: []const []const u8) !bool 
 
 test "local intent exact capacity excess and namespace refusal" {
     var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var ledger: Reservations = .{ .backing = backing.allocator() };
+    var ledger: CountingAllocator = .{ .backing = backing.allocator() };
     var g = try Gossipsub.init(ledger.allocator(), options());
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
@@ -184,7 +184,7 @@ test "resident topics above the live limit preserve pins scores diagnostics and 
     try std.testing.expectEqual(@as(?u16, high), tx.nextSubscription());
     try std.testing.expect(tx.announce(high, high_name, true, &g.sessions.control_scratch, 1));
     try std.testing.expectEqual(@as(?u16, null), tx.nextSubscription());
-    const message = g.messages.store.put(@splat(99), high_name, "payload").?;
+    const message = g.messages.store.put(g.overlay.namespace.topicAt(high).name.kind, @splat(99), high_name, "payload").?;
     var reservation = g.messages.validation.reserve(@splat(99)).?;
     const handle = reservation.commit(&g.messages.store, &g.peers, message, logical, high, 1);
     g.messages.store.seal(message);
@@ -297,7 +297,7 @@ test "topic expiry preserves attribution announcements and backoff independently
     const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const peer = g.sessions.rows[session.index].logical;
     const tx = &g.sessions.rows[session.index].io.tx;
-    const message = g.messages.store.put(@splat(1), name, "payload").?;
+    const message = g.messages.store.put(.beacon_block, @splat(1), name, "payload").?;
     var reservation = g.messages.validation.reserve(@splat(1)).?;
     const handle = reservation.commit(&g.messages.store, &g.peers, message, peer, index, 0);
     g.messages.store.seal(message);

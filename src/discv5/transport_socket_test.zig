@@ -29,7 +29,7 @@ test "maintenance retains a routing incumbent that answers through Transport" {
     try pair.transport_a.transmit(std.testing.io, started.peer.address, out[0..started.call.packet_length]);
     var expired: [4]CallTable.Expired = undefined;
     const answered = try driver.step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
-    try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
+    try std.testing.expectEqual(@as(u8, 1), answered.standard_responses);
     const completed = try driver.step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(completed.event == .response);
     try std.testing.expect(controller.onEvent(&pair.transport_a.engine, &completed.event, completed.now_ms).consumed);
@@ -53,7 +53,7 @@ test "transport completes a cold call through challenge and handshake" {
     try std.testing.expect((try driver.step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) })).event == .none);
     try std.testing.expect((try driver.step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) })).event == .none);
     const request_step = try driver.step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
-    try std.testing.expectEqual(@as(u8, 1), request_step.progress.standard_responses);
+    try std.testing.expectEqual(@as(u8, 1), request_step.standard_responses);
     const response_step = try driver.step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(response_step.event == .response);
     try std.testing.expectEqual(handle, response_step.event.response.matched.handle);
@@ -77,7 +77,7 @@ test "transport leaves TALK response policy with the application" {
     const received = try driver.step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(received.event == .request);
     try std.testing.expect(received.event.request.message == .talk_request);
-    try std.testing.expectEqual(@as(u8, 0), received.progress.standard_responses);
+    try std.testing.expectEqual(@as(u8, 0), received.standard_responses);
 
     const response = message.Message{ .talk_response = .{
         .request_id = request_id,
@@ -115,7 +115,7 @@ test "transport releases a malformed datagram before the next step" {
     } };
     const handle = try pair.transport_b.startCall(std.testing.io, endpoint(&pair.record_a), &pair.record_a, &request, try Transport.monotonicMilliseconds(std.testing.io));
     const answered = try driver.step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
-    try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
+    try std.testing.expectEqual(@as(u8, 1), answered.standard_responses);
     const completed = try driver.step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(completed.event == .response);
     try std.testing.expectEqual(handle, completed.event.response.matched.handle);
@@ -147,7 +147,7 @@ test "transport drops replies its destination refuses and keeps the step's expir
         try std.testing.expectEqual(@as(?Transport.Failure, null), result.failure);
         try std.testing.expect(result.datagram == .accepted);
         try std.testing.expect(result.event == .none);
-        try std.testing.expectEqual(@as(u8, 0), result.progress.standard_responses);
+        try std.testing.expectEqual(@as(u8, 0), result.standard_responses);
         try std.testing.expectEqual(@as(usize, 1), host.send_calls);
         try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
         try std.testing.expectEqual(expiring.handle, expired[0].handle);

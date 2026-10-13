@@ -39,10 +39,10 @@ test "gossip full pending kind refuses admission without evicting history" {
     for (names, 0..) |name, i| {
         try std.testing.expectEqual(@as(topic.Kind, @enumFromInt(i)), topic.parseCanonical(name).?.name.kind);
         for (0..2) |j| {
-            const cached = store.put(@splat(@intCast(4 * i + 2 * j)), name, &payload).?;
+            const cached = store.put(topic.parseCanonical(name).?.name.kind, @splat(@intCast(4 * i + 2 * j)), name, &payload).?;
             history.put(&store, cached, @intCast(i), 0);
             store.seal(cached);
-            pending[2 * i + j] = store.put(@splat(@intCast(4 * i + 2 * j + 1)), name, &payload).?;
+            pending[2 * i + j] = store.put(topic.parseCanonical(name).?.name.kind, @splat(@intCast(4 * i + 2 * j + 1)), name, &payload).?;
             store.retainValidation(pending[2 * i + j]);
             store.seal(pending[2 * i + j]);
         }
@@ -50,7 +50,7 @@ test "gossip full pending kind refuses admission without evicting history" {
     try std.testing.expectEqual(store.entries.len, store.used_entries);
     const free_pages = store.free_pages;
     try std.testing.expectEqual(@as(usize, 26), history.count);
-    try std.testing.expect(history.admitPayload(&store, @splat(255), names[0], &payload) == null);
+    try std.testing.expect(history.admitPayload(&store, .beacon_block, @splat(255), names[0], &payload) == null);
     try std.testing.expectEqual(@as(usize, 26), history.count);
     try std.testing.expectEqual(free_pages, store.free_pages);
     for (pending) |handle| store.releaseValidation(handle);
@@ -66,7 +66,7 @@ test "gossip history visits only matching topics through eviction and replacemen
     var lengths: [32]usize = undefined;
     for (&names, &lengths, 0..) |*name, *len, i| len.* = (try std.fmt.bufPrint(name, "topic-{d}", .{i})).len;
     for (0..64) |i| {
-        const h = store.put(@splat(@intCast(i)), names[i % 32][0..lengths[i % 32]], "payload").?;
+        const h = store.put(.beacon_block, @splat(@intCast(i)), names[i % 32][0..lengths[i % 32]], "payload").?;
         history.put(&store, h, @intCast(i % 32), 0);
         store.seal(h);
     }
@@ -75,7 +75,7 @@ test "gossip history visits only matching topics through eviction and replacemen
     try std.testing.expectEqual(@as(u64, 64), history.gossip_entries_visited);
     try std.testing.expectEqual(@as(usize, 0), history.gossip(34, &ids, 1));
     try std.testing.expectEqual(@as(u64, 64), history.gossip_entries_visited);
-    const replacement = store.put(@splat(0), "replacement", "new").?;
+    const replacement = store.put(.beacon_block, @splat(0), "replacement", "new").?;
     history.put(&store, replacement, 32, 1);
     store.seal(replacement);
     try std.testing.expectEqual(@as(usize, 1), history.gossip(0, &ids, 2));
@@ -87,7 +87,7 @@ test "gossip history visits only matching topics through eviction and replacemen
     history.age(&store, constants.mcache_len + 1);
     try std.testing.expectEqual(@as(usize, 0), history.count);
     for (0..64) |i| {
-        const h = store.put(@splat(@intCast(i)), "reused", "payload").?;
+        const h = store.put(.beacon_block, @splat(@intCast(i)), "reused", "payload").?;
         history.put(&store, h, 33, 10);
         store.seal(h);
     }
@@ -113,16 +113,16 @@ test "gossip history covers the full namespace independently of message capacity
     var history = try History.init(a, 2, 1, topic_policy.topic_max);
     defer history.deinit(a);
     const last = topic_policy.topic_max - 1;
-    const high = store.put(@splat(1), "high", "payload").?;
+    const high = store.put(.beacon_block, @splat(1), "high", "payload").?;
     history.put(&store, high, last, 0);
     store.seal(high);
-    const low = store.put(@splat(2), "low", "payload").?;
+    const low = store.put(.beacon_block, @splat(2), "low", "payload").?;
     history.put(&store, low, 0, 0);
     store.seal(low);
     var ids: [2]MessageId = undefined;
     try std.testing.expectEqual(@as(usize, 1), history.gossip(last, &ids, 1));
     try std.testing.expectEqual(@as(MessageId, @splat(1)), ids[0]);
-    const replacement = store.put(@splat(3), "low", "replacement").?;
+    const replacement = store.put(.beacon_block, @splat(3), "low", "replacement").?;
     history.put(&store, replacement, 0, 1);
     store.seal(replacement);
     try std.testing.expect(store.get(high) == null);
@@ -172,14 +172,14 @@ test "gossip history indexed replacement keeps FIFO age and invalidates old hand
     defer history.deinit(std.testing.allocator);
     const a = [_]u8{1} ** 20;
     const b = [_]u8{2} ** 20;
-    const first = store.put(a, "a", "old").?;
+    const first = store.put(.beacon_block, a, "a", "old").?;
     history.put(&store, first, 0, 0);
     store.seal(first);
-    const second = store.put(b, "b", "other").?;
+    const second = store.put(.beacon_block, b, "b", "other").?;
     history.put(&store, second, 1, 0);
     store.seal(second);
     history.age(&store, 1);
-    const replacement = store.put(a, "a", "new").?;
+    const replacement = store.put(.beacon_block, a, "a", "new").?;
     history.put(&store, replacement, 0, 1);
     store.seal(replacement);
     try std.testing.expectEqual(@as(usize, 2), history.count);
@@ -266,13 +266,13 @@ test "gossip history replacement resets message retransmission counts" {
     var history = try History.init(std.testing.allocator, 1, constants.retained_peers_cap, 1);
     defer history.deinit(std.testing.allocator);
     const id: MessageId = @splat(1);
-    const first = store.put(id, "t", "first").?;
+    const first = store.put(.beacon_block, id, "t", "first").?;
     history.put(&store, first, 0, 0);
     store.seal(first);
     const peer: PeerRef = .{ .index = 0, .generation = 1 };
     history.bindPeer(peer);
     for (0..3) |_| history.sent(history.get(&store, id).?, peer);
-    const replacement = store.put(id, "t", "replacement").?;
+    const replacement = store.put(.beacon_block, id, "t", "replacement").?;
     history.put(&store, replacement, 0, 0);
     store.seal(replacement);
     try std.testing.expect(history.iwantAllowed(history.get(&store, id).?, peer, 3));
@@ -328,14 +328,14 @@ test "gossip failed admission preserves history borrowed by validation" {
     var handles: [2]storage.Handle = undefined;
     for (&handles, 0..) |*handle, i| {
         const id: MessageId = @splat(@intCast(i));
-        handle.* = history.admitPayload(&store, id, "topic", &([_]u8{1} ** (storage.inline_bytes + 1))).?;
+        handle.* = history.admitPayload(&store, .beacon_block, id, "topic", &([_]u8{1} ** (storage.inline_bytes + 1))).?;
         history.put(&store, handle.*, 0, 0);
         store.seal(handle.*);
         store.retainValidation(handle.*);
     }
     defer for (handles) |handle| store.releaseValidation(handle);
     try std.testing.expectEqual(@as(usize, 2), history.count);
-    try std.testing.expect(history.admitPayload(&store, @splat(9), "topic", &([_]u8{1} ** (storage.inline_bytes + 1))) == null);
+    try std.testing.expect(history.admitPayload(&store, .beacon_block, @splat(9), "topic", &([_]u8{1} ** (storage.inline_bytes + 1))) == null);
     try std.testing.expectEqual(@as(usize, 2), history.count);
     try std.testing.expectEqual(@as(usize, 0), store.free_pages);
 }
@@ -346,11 +346,11 @@ test "gossip history emits three windows and defers arrivals during a cycle" {
     defer store.deinit(a);
     var history = try History.init(a, 3, 2, 1);
     defer history.deinit(a);
-    const first = store.put(@splat(1), "topic", "first").?;
+    const first = store.put(.beacon_block, @splat(1), "topic", "first").?;
     history.put(&store, first, 0, 0);
     store.seal(first);
     var epoch: u64 = 1;
-    const second = store.put(@splat(2), "topic", "second").?;
+    const second = store.put(.beacon_block, @splat(2), "topic", "second").?;
     history.put(&store, second, 0, epoch);
     store.seal(second);
     var ids: [3]MessageId = undefined;
@@ -373,7 +373,7 @@ test "gossip history emits three windows and defers arrivals during a cycle" {
 fn retainNext(history: *History, store: *storage.Store, index: u32, ordinal: u16, name: []const u8) bool {
     var id: MessageId = @splat(0);
     std.mem.writeInt(u32, id[0..4], index, .little);
-    const h = store.put(id, name, "x").?;
+    const h = store.put(topic.parseCanonical(name).?.name.kind, id, name, "x").?;
     defer store.seal(h);
     if (!history.makeRoom(store, h)) return false;
     history.put(store, h, ordinal, 0);

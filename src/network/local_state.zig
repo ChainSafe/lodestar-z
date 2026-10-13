@@ -97,5 +97,5 @@ pub fn copyServingLocal(out: *LocalState, source: *const LocalState, receive: ca
 }
 
 test {
-    _ = @import("control_values_test.zig");
+    _ = @import("local_state_test.zig");
 }

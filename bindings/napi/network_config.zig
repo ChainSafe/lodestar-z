@@ -13,7 +13,7 @@ pub const Config = struct {
     secret: [32]u8,
     bind: n.udp.Sockets.Bindings,
     local: t.LocalState,
-    schedule: n.control_values.ForkSchedule,
+    schedule: n.local_state.ForkSchedule,
     chain: n.chain.Config,
     discovery_bind: ?n.udp.Sockets.Bindings,
     discovery_sequence: u64,

@@ -152,7 +152,9 @@ test "an owner completion notifies once while armed and leaves settlement to the
 
 test "the first terminal failure is the close result's, also after a requested stop" {
     var runtime: Runtime = .{ .env = undefined };
+    try std.testing.expectEqual(r.State.running, runtime.stateLocked());
     runtime.requestStop();
+    try std.testing.expectEqual(r.State.stopping, runtime.stateLocked());
     try std.testing.expectEqual(r.Reason.requested, runtime.bridge.reason);
     // A notification the host cannot receive fails the stopping owner; a later failure keeps the first.
     support.status = 9;
@@ -166,7 +168,21 @@ test "the first terminal failure is the close result's, also after a requested s
     try std.testing.expectEqual(r.Reason.failed, runtime.bridge.reason);
     try std.testing.expect(first != error.NetworkWakeFailed);
     try std.testing.expectEqual(first, runtime.bridge.terminal_error.?);
-    try std.testing.expect(runtime.bridge.state == .failed);
+    try std.testing.expect(runtime.stateLocked() == .failed);
+    runtime.bridge.quiescent = true;
+    try std.testing.expectEqual(r.State.failed, runtime.stateLocked());
+}
+
+test "runtime state follows owner quiescence and a closed notification channel" {
+    var runtime: Runtime = .{ .env = undefined };
+    support.status = 16;
+    defer support.status = 0;
+    runtime.lock();
+    defer runtime.unlock();
+    runtime.notifyHostLocked();
+    try std.testing.expectEqual(r.State.stopping, runtime.stateLocked());
+    runtime.bridge.quiescent = true;
+    try std.testing.expectEqual(r.State.closed, runtime.stateLocked());
 }
 
 /// An exchange host that builds only the peer count.

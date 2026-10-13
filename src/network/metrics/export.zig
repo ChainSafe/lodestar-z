@@ -22,6 +22,5 @@ pub fn textCapacity(boundaries: []const policy.Boundary) usize {
 }
 
 pub fn write(context: *const Context, writer: *std.Io.Writer) prom.Error!void {
-    var encoder: prom.Encoder = .{ .writer = writer };
-    try collectors.registry.collect(context, &encoder);
+    try collectors.registry.write(context, writer);
 }

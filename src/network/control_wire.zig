@@ -1,6 +1,6 @@
 const std = @import("std");
 const ct = @import("consensus_types");
-const t = @import("control_values.zig");
+const t = @import("local_state.zig");
 const types = @import("types.zig");
 const RequestHandle = @import("reqresp/events.zig").RequestHandle;
 pub const Protocol = @import("reqresp/protocol.zig").Protocol;

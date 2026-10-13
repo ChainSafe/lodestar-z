@@ -12,7 +12,7 @@ const std = @import("std");
 test "gossip store independent retains pages and stale handles" {
     var store = try Store.init(std.testing.allocator, 1, 3 * page_bytes);
     defer store.deinit(std.testing.allocator);
-    const h = store.put([_]u8{1} ** 20, "topic", &([_]u8{9} ** (page_bytes + 1))).?;
+    const h = store.put(.beacon_block, [_]u8{1} ** 20, "topic", &([_]u8{9} ** (page_bytes + 1))).?;
     store.retainValidation(h);
     store.retainHistory(h);
     store.seal(h);
@@ -24,7 +24,7 @@ test "gossip store independent retains pages and stale handles" {
     try std.testing.expectEqualSlices(u8, &.{9}, store.segment(h, c));
     store.releaseValidation(h);
     try std.testing.expectEqual(@as(usize, 3), store.free_pages);
-    const replacement = store.put([_]u8{2} ** 20, "next", "x").?;
+    const replacement = store.put(.beacon_block, [_]u8{2} ** 20, "next", "x").?;
     try std.testing.expect(store.get(h) == null);
     try std.testing.expect(replacement.generation != h.generation);
     store.seal(replacement);
@@ -38,7 +38,7 @@ test "gossip store small messages use startup inline storage and roll back alloc
     for (0..2048) |i| {
         var id = [_]u8{0} ** 20;
         std.mem.writeInt(u64, id[0..8], i, .little);
-        const h = store.put(id, "t", &([_]u8{1} ** 200)).?;
+        const h = store.put(.beacon_block, id, "t", &([_]u8{1} ** 200)).?;
         store.retainValidation(h);
         store.seal(h);
     }
@@ -56,19 +56,19 @@ test "gossip retained pages and inline descriptors preserve fresh capacity by ki
     const name = "/eth2/01020304/beacon_attestation_0/ssz_snappy";
     var retained: [4]Handle = undefined;
     for (&retained) |*handle| {
-        handle.* = store.put(@splat(1), name, "small").?;
+        handle.* = store.put(topic.parseCanonical(name).?.name.kind, @splat(1), name, "small").?;
         store.retainHistory(handle.*);
         store.seal(handle.*);
     }
     var pending: [4]Handle = undefined;
     for (&pending) |*handle| {
-        handle.* = store.put(@splat(2), name, "fresh").?;
+        handle.* = store.put(topic.parseCanonical(name).?.name.kind, @splat(2), name, "fresh").?;
         store.retainValidation(handle.*);
         store.seal(handle.*);
         try std.testing.expect(!store.canRetain(handle.*));
     }
-    try std.testing.expect(store.put(@splat(3), name, "over") == null);
-    const block = store.put(@splat(4), "/eth2/01020304/beacon_block/ssz_snappy", "block").?;
+    try std.testing.expect(store.put(topic.parseCanonical(name).?.name.kind, @splat(3), name, "over") == null);
+    const block = store.put(.beacon_block, @splat(4), "/eth2/01020304/beacon_block/ssz_snappy", "block").?;
     store.seal(block);
     for (retained) |handle| store.releaseHistory(handle);
     for (pending) |handle| store.releaseValidation(handle);
@@ -84,15 +84,15 @@ test "gossip retained page allowance cannot consume pending or other kind pages"
     store.limits = limits;
     const name = "/eth2/01020304/beacon_attestation_0/ssz_snappy";
     const payload: [inline_bytes + 1]u8 = @splat(9);
-    const retained = store.put(@splat(1), name, &payload).?;
+    const retained = store.put(topic.parseCanonical(name).?.name.kind, @splat(1), name, &payload).?;
     store.retainHistory(retained);
     store.seal(retained);
-    const pending = store.put(@splat(2), name, &payload).?;
+    const pending = store.put(topic.parseCanonical(name).?.name.kind, @splat(2), name, &payload).?;
     store.retainValidation(pending);
     store.seal(pending);
     try std.testing.expect(!store.canRetain(pending));
-    try std.testing.expect(store.put(@splat(3), name, &payload) == null);
-    const block = store.put(@splat(4), "/eth2/01020304/beacon_block/ssz_snappy", &payload).?;
+    try std.testing.expect(store.put(topic.parseCanonical(name).?.name.kind, @splat(3), name, &payload) == null);
+    const block = store.put(.beacon_block, @splat(4), "/eth2/01020304/beacon_block/ssz_snappy", &payload).?;
     store.seal(block);
     store.releaseHistory(retained);
     try std.testing.expect(store.canRetain(pending));
@@ -129,7 +129,7 @@ test "gossip store keeps a whole inline frame contiguous and resumes it after a 
     const name = "/eth2/01020304/sync_committee_contribution_and_proof/ssz_snappy";
     try std.testing.expectEqual(topic.topic_max_len, name.len);
     const payload: [inline_bytes]u8 = @splat(7);
-    const h = store.put(@splat(1), name, &payload).?;
+    const h = store.put(topic.parseCanonical(name).?.name.kind, @splat(1), name, &payload).?;
     store.retainHistory(h);
     store.seal(h);
     var buffer: [1024]u8 = undefined;
@@ -156,7 +156,7 @@ test "gossip store sends a paged payload as prefix pages and trailer across shor
     var expected_buffer: [3 * page_bytes]u8 = undefined;
     var sent_buffer: [3 * page_bytes]u8 = undefined;
     for ([_]usize{ inline_bytes + 1, payload.len }, [_]usize{ 3, 5 }) |len, segments| {
-        const h = store.put(@splat(@truncate(len)), name, payload[0..len]).?;
+        const h = store.put(topic.parseCanonical(name).?.name.kind, @splat(@truncate(len)), name, payload[0..len]).?;
         store.retainHistory(h);
         store.seal(h);
         try std.testing.expectEqual(Store.pagesFor(len), store.next.len - store.free_pages);

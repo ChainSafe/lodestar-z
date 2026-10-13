@@ -1,5 +1,5 @@
 const std = @import("std");
-const t = @import("control_values.zig");
+const t = @import("local_state.zig");
 const w = @import("control_wire.zig");
 const status: t.Status = .{
     .fork_digest = .{ 1, 2, 3, 4 },

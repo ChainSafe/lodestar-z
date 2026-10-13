@@ -471,7 +471,7 @@ test "gossip transmit never interleaves control into partial data" {
     var deliveries = try delivery.Pool.init(std.testing.allocator, 1, data_capacity);
     defer deliveries.deinit(std.testing.allocator);
     var io: Outbox = .{ .data = .{ .pool = &deliveries }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
-    const h = store.put([_]u8{1} ** 20, "topic", "payload").?;
+    const h = store.put(.beacon_block, [_]u8{1} ** 20, "topic", "payload").?;
     store.retainHistory(h);
     store.seal(h);
     try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, .forward, .{ .bytes = 8192 }, 0));
@@ -510,7 +510,7 @@ test "gossip critical capacity and data queue pressure are independent and relea
     var deliveries = try delivery.Pool.init(std.testing.allocator, 1, data_capacity);
     defer deliveries.deinit(std.testing.allocator);
     var io: Outbox = .{ .data = .{ .pool = &deliveries }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
-    const h = store.put([_]u8{1} ** 20, "t", "x").?;
+    const h = store.put(.beacon_block, [_]u8{1} ** 20, "t", "x").?;
     store.retainHistory(h);
     store.seal(h);
     for (0..data_capacity) |_| try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, .forward, .{ .bytes = 8192 }, 0));
@@ -541,7 +541,7 @@ test "gossip queues a full validation burst in order and preserves byte bounds" 
     var writer = protobuf.Writer.init(&expected);
     for (0..burst) |i| {
         const payload = [_]u8{@intCast(i)};
-        const h = store.put([_]u8{@intCast(i)} ** 20, "topic", &payload).?;
+        const h = store.put(.beacon_block, [_]u8{@intCast(i)} ** 20, "topic", &payload).?;
         store.retainHistory(h);
         store.seal(h);
         try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, .forward, .{ .bytes = burst }, 0));
@@ -693,7 +693,7 @@ test "gossip full stale delivery queue yields to waiting control and returns eve
     var critical: [32]u8 = undefined;
     var outbox: Outbox = .{ .data = .{ .pool = &pool }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
     defer outbox.cancelStream();
-    const message = store.put(@splat(1), "topic", "payload").?;
+    const message = store.put(.beacon_block, @splat(1), "topic", "payload").?;
     store.retainHistory(message);
     store.seal(message);
     for (0..data_capacity) |i| try outbox.data.append(&store, message, if (i % 2 == 0) .publication else .iwant, .{ .bytes = 1 << 20 }, 1);
@@ -721,7 +721,7 @@ test "gossip active capacity refusal drops pending data and immediately serves c
     var critical: [32]u8 = undefined;
     var tx: Outbox = .{ .data = .{ .pool = &pool }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
     defer tx.cancelStream();
-    const message = store.put(@splat(1), "topic", &([_]u8{9} ** 70_000)).?;
+    const message = store.put(.beacon_block, @splat(1), "topic", &([_]u8{9} ** 70_000)).?;
     store.retainHistory(message);
     store.seal(message);
     try tx.data.append(&store, message, .publication, .{ .bytes = 100_000 }, 1);

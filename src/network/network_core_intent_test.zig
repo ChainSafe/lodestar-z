@@ -1,5 +1,5 @@
 const advertisement = @import("advertisement.zig");
-const control_values = @import("control_values.zig");
+const local_state = @import("local_state.zig");
 const gossip_test = @import("gossipsub/test_support.zig");
 const driver = @import("driver.zig");
 const core_test = @import("network_core_test_support.zig");
@@ -30,18 +30,18 @@ const Multiaddr = @import("wire/multiaddr.zig").Multiaddr;
 const admission_fixture = @import("reqresp/admission_fixture.zig");
 
 /// Applies a local update through the host intent path with the current subscriptions and demand.
-fn applyLocal(node: *NetworkCore, update: *const control_values.LocalUpdate, now: Now) !bool {
+fn applyLocal(node: *NetworkCore, update: *const local_state.LocalUpdate, now: Now) !bool {
     var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
     var desired = core_test.intent(node, try gossip_test.subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
     desired.update = update.*;
     return node.applyIntent(&desired, now);
 }
 
-fn updateLocalWithEndpoints(node: *NetworkCore, local: *const t.LocalState, schedule: control_values.ForkSchedule, endpoints: ?advertisement.Endpoints, now: Now) !bool {
+fn updateLocalWithEndpoints(node: *NetworkCore, local: *const t.LocalState, schedule: local_state.ForkSchedule, endpoints: ?advertisement.Endpoints, now: Now) !bool {
     return applyLocal(node, &.{ .local = local.*, .schedule = schedule, .endpoints = endpoints, .capabilities = node.protocols.router.capabilities() }, now);
 }
 
-fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: control_values.ForkSchedule, now: Now) !bool {
+fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: local_state.ForkSchedule, now: Now) !bool {
     return updateLocalWithEndpoints(node, local, schedule, node.advertisementEndpoints(), now);
 }
 
@@ -91,7 +91,7 @@ const IntentPair = struct {
 
 const ActivationSnapshot = struct {
     local: t.LocalState,
-    schedule: control_values.ForkSchedule,
+    schedule: local_state.ForkSchedule,
     endpoints: ?advertisement.Endpoints,
     capabilities: capabilities_mod.Directional,
     request_fork: t.ForkSeq,
@@ -185,7 +185,7 @@ test "core local transaction sequences no-op schedule and rollback" {
     try std.testing.expectEqual(@as(u64, 1), node.localState().metadata.seq_number);
     try std.testing.expectEqual(initial.sequence + 1, node.localRecord().?.sequence);
     const before = node.localRecord().?.*;
-    const scheduled: control_values.ForkSchedule = .{ .fulu_scheduled = true };
+    const scheduled: local_state.ForkSchedule = .{ .fulu_scheduled = true };
     local.metadata.custody_group_count = null;
     try std.testing.expectError(error.MissingCustodyAdvertisement, updateLocal(&node, &local, scheduled, now));
     try std.testing.expectEqualSlices(u8, before.slice(), node.localRecord().?.slice());
@@ -194,7 +194,7 @@ test "core local transaction sequences no-op schedule and rollback" {
     const candidate = try enr.decode(node.localRecord().?, &local.fork);
     try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, candidate.hints.next_fork_digest.?);
     try std.testing.expectEqual(@as(u64, 1), candidate.hints.custody_group_count.?);
-    const invalid: control_values.ForkSchedule = .{ .fulu_scheduled = true, .next_digest = .{ 1, 2, 3, 4 } };
+    const invalid: local_state.ForkSchedule = .{ .fulu_scheduled = true, .next_digest = .{ 1, 2, 3, 4 } };
     try std.testing.expectError(error.InvalidSchedule, updateLocal(&node, &local, invalid, now));
 }
 
@@ -214,7 +214,7 @@ test "core sequence exhaustion rolls back and future fork hints stay advisory" {
     try std.testing.expectError(error.SequenceExhausted, updateLocal(&node, &desired, .{}, now));
     try std.testing.expectEqualDeep(before, node.localState());
     try std.testing.expectEqual(before.fork.fork, node.protocols.reqresp.request_fork);
-    const schedule: control_values.ForkSchedule = .{ .next_epoch = 100, .next_version = .{ 1, 2, 3, 4 } };
+    const schedule: local_state.ForkSchedule = .{ .next_epoch = 100, .next_version = .{ 1, 2, 3, 4 } };
     try std.testing.expectError(error.SequenceExhausted, updateLocal(&node, &before, schedule, now));
     try std.testing.expectEqualSlices(u8, record.slice(), node.localRecord().?.slice());
     desired = before;
@@ -379,7 +379,7 @@ test "core capabilities activation rolls back all owners on rejected candidates"
     defer node.deinit(std.testing.io);
     const before = ActivationSnapshot.capture(&node);
     const now = node.last_now;
-    var update: control_values.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
+    var update: local_state.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
     update.local.metadata.custody_group_count = 0;
     try std.testing.expectError(error.InvalidCustodyCount, applyLocal(&node, &update, now));
     try before.expectUnchanged(&node);
@@ -435,7 +435,7 @@ test "core capabilities activation commits fork BPO and copied directional value
     const admitted_row = admission.rows[0];
     const allocations = backing_node.allocations;
     const before = ActivationSnapshot.capture(&node);
-    var update: control_values.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
+    var update: local_state.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
     update.capabilities.request = .initEmpty();
     try std.testing.expect(try applyLocal(&node, &update, node.last_now));
     try std.testing.expectEqualDeep(before.local, node.localState());
@@ -509,7 +509,7 @@ test "core complete local intent rejects invalid last topic atomically" {
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const block_topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    const update: control_values.LocalUpdate = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() };
+    const update: local_state.LocalUpdate = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() };
     var desired: NetworkCore.LocalIntent = .{ .update = update, .demand = .{}, .subscriptions = topic_fixture.subscriptions(&.{block_topic}) };
     const now = node.last_now;
     try std.testing.expect(try node.applyIntent(&desired, now));

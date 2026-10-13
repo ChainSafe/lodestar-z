@@ -41,7 +41,7 @@ test "peer discovery seeds the configured list without claiming reachability or 
     }
     const idle = try support.advance(controller, io, now, &.{});
     if (idle.failure) |failure| return failure.cause;
-    try std.testing.expectEqual(@as(u8, 0), idle.started);
+    try std.testing.expectEqual(@as(usize, 0), owner.transport.engine.calls.count());
     try std.testing.expectEqual(@as(u64, 0), controller.counters.lookups_started);
     var output: [1280]u8 = undefined;
     var entropy: d.Engine.StartEntropy = undefined;
@@ -122,7 +122,7 @@ test "peer discovery refused TALK reply fails only its destination and preserves
     const result = try support.advance(controller, host.io(), now, &.{});
     if (result.failure) |failure| return failure.cause;
     try std.testing.expectEqual(@as(usize, 1), host.sends);
-    try std.testing.expectEqual(@as(u16, 1), result.unowned);
+    try std.testing.expectEqual(@as(usize, 0), result.candidates);
     try std.testing.expect(responder.transport.engine.calls.endpoint(expired) == null);
 }
 
@@ -307,8 +307,7 @@ test "peer discovery reserves output for the responder alongside a full referral
             const responders: usize = @intFromBool(terminal);
             const published = @min(capacity, records.len + responders);
             try std.testing.expectEqual(published, result.candidates);
-            try std.testing.expectEqual(records.len + responders - published, result.dropped);
-            try std.testing.expectEqual(@as(u16, 0), result.unowned);
+            try std.testing.expectEqual(records.len + responders - published, controller.rejections[@intFromEnum(discovery.Discovery.Rejection.output_capacity)]);
             if (capacity > 0 and terminal) try adapter.requireIdentity(b.transport.engine.localRecord(), &output[0].peer);
             if (capacity == output.len) {
                 for (records, output[responders..published]) |record, candidate| {
@@ -459,7 +458,8 @@ test "peer discovery consumes actual response and expiry alongside failure befor
     var stale = controller.storage.candidates[0].state.waiting;
     stale.generation += 1;
     const stale_result = controller.consume(&.{ .now_ms = now, .event = .{ .failed = .{ .handle = stale, .peer = .{ .node_id = b.transport.engine.localRecord().node_id, .address = b.transport.localAddress() }, .reason = error.InvalidRecord } } }, &.{}, &output);
-    try std.testing.expectEqual(@as(u16, 1), stale_result.unowned);
+    try std.testing.expectEqual(@as(usize, 0), stale_result.candidates);
+    try std.testing.expectEqual(@as(usize, 1), controller.lookup.?.waitingCount());
     try std.testing.expectEqual(active, a.transport.engine.calls.count());
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
     var candidate: ?adapter.Candidate = null;
@@ -496,7 +496,8 @@ test "peer discovery consumes actual response and expiry alongside failure befor
     try std.testing.expect(progress.calls_expired > 0);
     progress.failure = .{ .cause = error.DestinationUnreachable, .stage = .process };
     const consumed = controller.consume(&progress, expiries[0..progress.calls_expired], &.{});
-    try std.testing.expectEqual(progress.calls_expired, consumed.expired);
+    try std.testing.expect(controller.lookup == null or controller.lookup.?.waitingCount() == 0);
+    try std.testing.expect(controller.maintenance.pending == null);
     try std.testing.expectEqual(error.DestinationUnreachable, consumed.failure.?.cause);
     try std.testing.expect(a.transport.engine.peerRecord(&b.transport.engine.localRecord().node_id) != null);
     controller.shutdown();
@@ -522,7 +523,7 @@ test "peer discovery no QUIC nodes remain confirmed but produce no dial candidat
         const tick = try d.Transport.monotonicMilliseconds(io);
         const result = try support.advance(controller, io, tick, &output);
         if (result.failure) |failure| return failure.cause;
-        rejected += result.rejected;
+        rejected = @intCast(rejectionCount(controller));
         try std.testing.expectEqual(@as(usize, 0), result.candidates);
         const remote = try d.driver.step(b.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
         if (remote.failure) |failure| return failure.cause;
@@ -600,7 +601,7 @@ test "peer discovery refused lookup send releases its call and continues with ot
     var output: [1]adapter.Candidate = undefined;
     const result = try support.advance(controller, host.io(), now, &output);
     if (result.failure) |failure| return failure.cause;
-    try std.testing.expectEqual(@as(u8, 2), result.started);
+    try std.testing.expectEqual(@as(u16, 2), controller.lookup.?.queries_started);
     try std.testing.expectEqual(@as(usize, 1), host.sends);
     try std.testing.expectEqual(@as(u64, 0), controller.resource_retry_ms);
     const lookup = &controller.lookup.?;
@@ -651,7 +652,7 @@ test "peer discovery refused maintenance probe stays a local failure and the ste
     const result = try support.advance(controller, host.io(), tick, &.{});
     if (result.failure) |failure| return failure.cause;
     // The stale probe to the verified peer and both lookup seeds start; both sends to it are refused.
-    try std.testing.expectEqual(@as(u8, 3), result.started);
+    try std.testing.expectEqual(@as(u16, 2), controller.lookup.?.queries_started);
     try std.testing.expectEqual(@as(usize, 2), host.sends);
     try std.testing.expectEqual(@as(usize, 1), a.transport.engine.calls.count());
     try std.testing.expectEqual(@as(u64, 0), controller.resource_retry_ms);
@@ -693,7 +694,7 @@ test "peer discovery fork and subnet filtering plus output pressure preserve con
             const tick = try d.Transport.monotonicMilliseconds(io);
             const result = try support.advance(controller, io, tick, output[0..if (mode == 2) @as(usize, 0) else 1]);
             if (result.failure) |failure| return failure.cause;
-            filtered += if (mode == 2) result.dropped else result.rejected;
+            filtered = @intCast(rejectionCount(controller));
             try std.testing.expectEqual(@as(usize, 0), result.candidates);
             const remote = try d.driver.step(b.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
             if (remote.failure) |failure| return failure.cause;
@@ -773,7 +774,7 @@ test "peer discovery foreground retains authenticated IPv6 source over alternate
             const result = try support.advance(controller, io, tick, &output);
             if (result.failure) |failure| return failure.cause;
             try std.testing.expectEqual(@as(usize, 0), result.candidates);
-            if (result.rejected > 0) {
+            if (rejectionCount(controller) > 0) {
                 completed = true;
                 break;
             }
@@ -804,7 +805,6 @@ test "peer discovery ready step refills demand without reading an ineligible soc
     var candidates: [16]adapter.Candidate = undefined;
     const result = try controller.advance(faults.io(), now, &ready, &candidates);
     try std.testing.expect(result.failure == null);
-    try std.testing.expect(result.started > 0);
     try std.testing.expect(a.transport.engine.calls.count() > 0);
     try std.testing.expectEqual(@as(usize, 0), faults.receive_calls);
 }
@@ -884,5 +884,10 @@ test "discovery keeps the refill failure when receive then cancels" {
     try std.testing.expectEqual(.coordinator, result.failure.?.stage);
     try std.testing.expectEqual(@as(usize, 1), faults.receive_calls);
     try std.testing.expectEqual(@as(usize, 0), faults.send_calls);
-    try std.testing.expectEqual(@as(u16, 0), result.datagrams);
+}
+
+fn rejectionCount(owner: *const discovery.Discovery) u64 {
+    var count: u64 = 0;
+    for (owner.rejections) |value| count += value;
+    return count;
 }

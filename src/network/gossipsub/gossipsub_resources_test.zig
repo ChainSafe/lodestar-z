@@ -14,7 +14,7 @@ const ValidationHandle = Gossipsub.ValidationHandle;
 const storage = @import("message_store.zig");
 const delivery = @import("delivery.zig");
 const StorageRefusal = @import("messages.zig").StorageRefusal;
-const Reservations = @import("../reservations.zig").Reservations;
+const CountingAllocator = @import("../counting_allocator.zig").CountingAllocator;
 const QueueResult = @import("outbox.zig").QueueResult;
 const snappy = @import("snappy");
 const metrics = @import("metrics.zig");
@@ -88,7 +88,7 @@ test "gossipsub resource snapshot starts empty" {
 }
 
 test "gossip resolved capacities allocate owner rows and reject stale ceiling handles" {
-    var ledger: Reservations = .{ .backing = std.testing.allocator };
+    var ledger: CountingAllocator = .{ .backing = std.testing.allocator };
     var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
     try std.testing.expectEqual(@as(usize, 2), g.sessions.rows.len);
     try std.testing.expectEqual(@as(usize, 4), g.peers.rows.len);
@@ -101,7 +101,7 @@ test "gossip resolved capacities allocate owner rows and reject stale ceiling ha
 }
 
 test "gossip default owner memory reconciles requested allocations" {
-    var ledger: Reservations = .{ .backing = std.testing.allocator };
+    var ledger: CountingAllocator = .{ .backing = std.testing.allocator };
     {
         var g = try support.init(ledger.allocator(), .{ .random_seed = 1 });
         defer g.deinit();
@@ -113,7 +113,7 @@ test "gossip default owner memory reconciles requested allocations" {
 
 test "gossip resource snapshot releases queued bytes and descriptors with the owner" {
     var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var ledger: Reservations = .{ .backing = backing.allocator() };
+    var ledger: CountingAllocator = .{ .backing = backing.allocator() };
     var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
     defer g.deinit();
     const calls = backing.allocations;
@@ -121,7 +121,7 @@ test "gossip resource snapshot releases queued bytes and descriptors with the ow
     const peer = support.addPeer(&g, conn, .v1_2).?;
     const io = &g.sessions.rows[peer.index].io;
     io.tx.cancelStream();
-    const message = g.messages.store.put([_]u8{1} ** 20, "t", "abc").?;
+    const message = g.messages.store.put(.beacon_block, [_]u8{1} ** 20, "t", "abc").?;
     g.messages.store.retainHistory(message);
     g.messages.store.seal(message);
     try std.testing.expectEqual(QueueResult.queued, io.tx.queueData(&g.messages.store, message, .forward, .{ .bytes = 10 }, 7));
@@ -237,7 +237,7 @@ test "gossip validation finishes without allocation while shared deliveries are 
     defer g.deinit();
     try support.subscribe(&g, test_topic);
     const topic = g.overlay.findTopic(test_topic).?;
-    const message = g.messages.publish(@splat(1), topic, test_topic, "retained", 0, 0).?;
+    const message = g.messages.publish(@splat(1), topic, .beacon_block, test_topic, "retained", 0, 0).?;
     for (0..3) |i| {
         const conn: Handle = .{ .index = @intCast(i), .generation = 1 };
         const session = support.addPeer(&g, conn, .v1_2).?;

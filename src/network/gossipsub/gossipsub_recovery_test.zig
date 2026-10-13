@@ -291,7 +291,7 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
     g.sessions.setOutbound(first.index, .{ .live = .{ .stream = .{ .conn = g.sessions.rows[first.index].conn, .id = 2, .slot = 0 }, .version = .v1_2 } });
     const logical_peer = g.sessions.rows[first.index].logical;
     const id: MessageId = @splat(9);
-    const message = g.messages.store.put(id, g.overlay.topicString(0), "payload").?;
+    const message = g.messages.store.put(g.overlay.namespace.topicAt(0).name.kind, id, g.overlay.topicString(0), "payload").?;
     g.messages.history.put(&g.messages.store, message, 0, g.cycle.epoch);
     g.messages.store.seal(message);
     var bytes: [64]u8 = undefined;
@@ -525,7 +525,7 @@ test "gossip bounded advertisements vary the first active topic across heartbeat
         for (names, 0..) |name, index| {
             var id: MessageId = @splat(@intCast(index));
             std.mem.writeInt(u32, id[0..4], @intCast(heartbeat), .little);
-            try std.testing.expect(g.messages.publish(id, support.activate(&g, name).?, name, "payload", now.millis(), g.cycle.epoch) != null);
+            try std.testing.expect(g.messages.publish(id, support.activate(&g, name).?, topic_mod.parseCanonical(name).?.name.kind, name, "payload", now.millis(), g.cycle.epoch) != null);
         }
         support.heartbeat(&g, now);
         for (0..g.overlay.rows.len) |_| {

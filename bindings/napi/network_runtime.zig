@@ -77,7 +77,6 @@ const Bridge = struct {
     reason: Reason = .requested,
     quiescent: bool = false,
     terminal_error: ?anyerror = null,
-    state: State = .running,
 };
 
 pub const Runtime = struct {
@@ -205,13 +204,18 @@ pub const Runtime = struct {
             std.debug.assert(claimed);
         }
     }
+    pub fn stateLocked(self: *const Runtime) State {
+        if (self.bridge.reason == .failed) return .failed;
+        if (self.bridge.quiescent) return .closed;
+        return if (self.bridge.stop) .stopping else .running;
+    }
+
     pub fn requestStop(self: *Runtime) void {
         self.lock();
         defer self.unlock();
         if (self.bridge.stop or self.bridge.quiescent) return;
         self.bridge.stop = true;
         self.bridge.reason = .requested;
-        self.bridge.state = .stopping;
         self.wakeOwnerLocked();
         self.notifyIfReadyLocked();
     }
@@ -225,7 +229,6 @@ pub const Runtime = struct {
         if (self.bridge.reason == .failed) return;
         self.bridge.reason = .failed;
         self.bridge.terminal_error = err;
-        self.bridge.state = .failed;
     }
     /// Must hold the bridge mutex. Delivery readiness ignores one exchange's temporary allowance.
     pub fn deliverableLocked(self: *Runtime, kind: DeliveryKind) bool {
@@ -387,7 +390,6 @@ pub const Runtime = struct {
         self.bridge.quiescent = true;
         self.retireStoresLocked();
         self.retireRequestStorageLocked();
-        self.bridge.state = if (self.bridge.reason == .failed) .failed else .closed;
         std.log.scoped(.network_runtime).info("owner_stopped reason={s} turns={d} operational_failures={d}", .{ @tagName(self.bridge.reason), self.owner_turns, self.operational_failures });
         // Every host sees quiescence, also one whose waiting payload left it disarmed.
         self.bridge.notification_armed = false;

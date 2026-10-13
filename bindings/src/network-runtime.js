@@ -1,7 +1,7 @@
 import bindings from "./bindings.js";
+import {CompletionOwner} from "./network-completions.js";
 import {IncomingRecord, NativeIncoming} from "./network-incoming.js";
 import {NativeRequest, RequestRecord} from "./network-request.js";
-import {CompletionOwner} from "./network-tickets.js";
 
 export class NativeRuntime {
   #native;

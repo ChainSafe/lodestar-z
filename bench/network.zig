@@ -151,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
     var backing_a = std.testing.FailingAllocator.init(allocator, .{});
     try initialize(a, backing_a.allocator(), io, &key_a, &network_config);
     defer a.deinit(io);
-    std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.reservations.bytes, @sizeOf(network.NetworkCore), a.protocols.gossipsub.memoryPlan().total_bytes, backing_a.allocations });
+    std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.allocations.bytes, @sizeOf(network.NetworkCore), a.protocols.gossipsub.memoryPlan().total_bytes, backing_a.allocations });
     std.debug.print("gossip_metadata_bytes={}\n", .{a.protocols.gossipsub.memoryPlan().metadata_bytes});
     for (0..warmup_turns) |_| _ = try turn(a, io, .{});
     const idle_allocations = backing_a.allocations;

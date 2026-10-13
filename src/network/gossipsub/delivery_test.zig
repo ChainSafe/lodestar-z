@@ -17,7 +17,7 @@ test "gossip global descriptor pressure preserves every peer local reservation" 
     pool.local_descriptors = 8;
     var store = try storage.Store.init(a, 1, storage.page_bytes);
     defer store.deinit(a);
-    const message = store.put(@splat(1), "topic", "payload").?;
+    const message = store.put(.beacon_block, @splat(1), "topic", "payload").?;
     store.retainHistory(message);
     store.seal(message);
     var queues: [2]Queue = @splat(.{ .pool = &pool });
@@ -44,7 +44,7 @@ test "gossip default byte reserve admits a maximal local frame after ordinary sa
     const payload = try a.alloc(u8, maximum);
     defer a.free(payload);
     @memset(payload, 1);
-    const message = store.put(@splat(1), "topic", payload).?;
+    const message = store.put(.beacon_block, @splat(1), "topic", payload).?;
     store.retainHistory(message);
     store.seal(message);
     var queue: Queue = .{ .pool = &pool };
@@ -62,7 +62,7 @@ test "gossip shared deliveries preserve every peer reserve under global pressure
     defer pool.deinit(a);
     var store = try storage.Store.init(a, 1, storage.page_bytes);
     defer store.deinit(a);
-    const message = store.put(@splat(1), "topic", "payload").?;
+    const message = store.put(.beacon_block, @splat(1), "topic", "payload").?;
     store.retainHistory(message);
     store.seal(message);
     var queues: [3]Queue = @splat(.{ .pool = &pool });
@@ -91,7 +91,7 @@ test "gossip delivery byte refusal acquires no descriptor" {
     defer pool.deinit(a);
     var store = try storage.Store.init(a, 1, storage.page_bytes);
     defer store.deinit(a);
-    const message = store.put(@splat(1), "topic", "payload").?;
+    const message = store.put(.beacon_block, @splat(1), "topic", "payload").?;
     store.retainHistory(message);
     store.seal(message);
     var queue: Queue = .{ .pool = &pool };
@@ -106,7 +106,7 @@ test "gossip delivery keeps the local reserve from ordinary frames and pressures
     defer pool.deinit(a);
     var store = try storage.Store.init(a, 1, storage.page_bytes);
     defer store.deinit(a);
-    const message = store.put(@splat(1), "topic", "payload").?;
+    const message = store.put(.beacon_block, @splat(1), "topic", "payload").?;
     store.retainHistory(message);
     store.seal(message);
     var queue: Queue = .{ .pool = &pool };
@@ -151,10 +151,10 @@ test "gossip delivery bounds local preference by frames and bytes" {
     defer pool.deinit(a);
     var store = try storage.Store.init(a, 3, 64 * storage.page_bytes);
     defer store.deinit(a);
-    const small = store.put(@splat(1), "topic", "local").?;
-    const other = store.put(@splat(2), "topic", "ordinary").?;
+    const small = store.put(.beacon_block, @splat(1), "topic", "local").?;
+    const other = store.put(.beacon_block, @splat(2), "topic", "ordinary").?;
     // Larger than the 64 KiB byte run.
-    const large = store.put(@splat(3), "topic", &([_]u8{9} ** (70 * 1024))).?;
+    const large = store.put(.beacon_block, @splat(3), "topic", &([_]u8{9} ** (70 * 1024))).?;
     for ([_]storage.Handle{ small, other, large }) |h| {
         store.retainHistory(h);
         store.seal(h);
@@ -188,7 +188,7 @@ test "gossip pool protects each peer's first descriptors by the combined count o
     defer pool.deinit(a);
     var store = try storage.Store.init(a, 1, storage.page_bytes);
     defer store.deinit(a);
-    const message = store.put(@splat(1), "topic", "payload").?;
+    const message = store.put(.beacon_block, @splat(1), "topic", "payload").?;
     store.retainHistory(message);
     store.seal(message);
     var queues: [2]Queue = @splat(.{ .pool = &pool });
@@ -227,7 +227,7 @@ test "memory_safety: gossip queued handles survive payload and page reuse withou
     defer store.deinit(a);
     var queue: Queue = .{ .pool = &pool };
     defer queue.reset();
-    const old = store.put(@splat(1), "topic", &([_]u8{7} ** 600)).?;
+    const old = store.put(.beacon_block, @splat(1), "topic", &([_]u8{7} ** 600)).?;
     store.retainHistory(old);
     store.seal(old);
     try queue.append(&store, old, .publication, .{ .bytes = 8192 }, 1);
@@ -236,7 +236,7 @@ test "memory_safety: gossip queued handles survive payload and page reuse withou
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
     try std.testing.expectEqual(store.next.len, store.free_pages);
 
-    const fresh = store.put(@splat(2), "topic", &([_]u8{9} ** 700)).?;
+    const fresh = store.put(.beacon_block, @splat(2), "topic", &([_]u8{9} ** 700)).?;
     store.retainHistory(fresh);
     store.seal(fresh);
     try std.testing.expectEqual(old.index, fresh.index);

@@ -10,13 +10,10 @@ import type {
   NativeDirectSnapshot,
   NativeForkEntry,
   NativeGossipDiagnosticsPage,
-  NativeGossipPublishOptions,
   NativeGossipPublishResult,
   NativeIdentity,
   NativeIdentitySnapshot,
   NativeIntentResult,
-  NativeLocalIntent,
-  NativeLogLevel,
   NativeLogRecord,
   NativeNetwork,
   NativePeerAction,
@@ -25,11 +22,8 @@ import type {
   NativePeerSnapshot,
   NativeRequestProtocolId,
   NativeRememberedPeersSnapshot,
-  NativeRequestOptions,
-  NativeResolvedLimits,
   NativeResponseChunk,
   NativeTopicKind,
-  NetworkStatusUpdate,
   PeerIdStr,
 } from "./network.js";
 
@@ -153,47 +147,34 @@ export type NativeCommandCompletion = {
  */
 export type NativeEscalation = "generated_batch" | "completion_contract";
 
-export interface NativeNetworkApplicationRuntime {
+export interface NativeNetworkApplicationRuntime
+  extends Pick<
+    NativeNetwork,
+    | "limits"
+    | "setLogLevel"
+    | "request"
+    | "applyIntent"
+    | "updateStatus"
+    | "getIdentity"
+    | "getGossipDiagnostics"
+    | "getPeers"
+    | "disconnect"
+    | "getDirectPeers"
+    | "getRememberedPeers"
+  > {
   drainLogs(maxRecords?: number): NativeLogBatch;
-  setLogLevel(level: NativeLogLevel): void;
   /** Prometheus text rendered by the network owner once per second. Counters survive close. */
-  getMetrics(): string;
+  getMetrics: NativeNetwork["metrics"];
+  publishGossip: NativeNetwork["publish"];
   /** A failed runtime cannot restart. The host must shut down the beacon node on terminal failure. */
   readonly closed: Promise<NativeRuntimeCloseResult>;
-  /** Copies admitted input. Admission pressure rejects with admission_full before any publication. */
-  publishGossip(
-    topic: string,
-    data: Uint8Array,
-    options?: NativeGossipPublishOptions
-  ): Promise<NativeGossipPublishResult>;
-  request(
-    peerId: PeerIdStr,
-    protocol: NativeRequestProtocolId,
-    data: Uint8Array,
-    options?: NativeRequestOptions
-  ): AsyncIterableIterator<NativeResponseChunk>;
   readonly identity: NativeIdentity;
-  readonly limits: NativeResolvedLimits;
   readonly state: NativeRuntimeState;
-  applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;
-  /** Updates Status for the active fork; preserves clock, subscriptions, Metadata, ENR and demand. */
-  updateStatus(status: NetworkStatusUpdate): Promise<void>;
-  getIdentity(): Promise<NativeIdentitySnapshot>;
-  getGossipDiagnostics(cursor?: number): Promise<NativeGossipDiagnosticsPage>;
-  getPeers(): Promise<NativePeerSnapshot>;
   /** One-shot connection attempt, retired on success or timeout. Use addDirectPeer for persistent membership. */
   connect(peerId: PeerIdStr, addresses: readonly IpEndpoint[], timeoutMs: bigint): Promise<void>;
-  /** Closes the connection and rejects pending connects with NetworkConnectCancelled. Direct membership remains. */
-  disconnect(peerId: PeerIdStr): Promise<void>;
-  reStatusPeers(peerIds: readonly PeerIdStr[]): Promise<void>;
+  reStatusPeers: NativeNetwork["reStatus"];
   addDirectPeer(peerId: PeerIdStr, addresses: readonly IpEndpoint[]): Promise<void>;
   removeDirectPeer(peerId: PeerIdStr): Promise<boolean>;
-  getDirectPeers(): Promise<NativeDirectSnapshot>;
-  /**
-   * Remembered peers for the host to persist: every unexpired record, refreshed for connections that qualify now.
-   * Take the final snapshot before close, which refuses it.
-   */
-  getRememberedPeers(): Promise<NativeRememberedPeersSnapshot>;
   /**
    * One host turn: applies up to 256 `actions`, delivers up to 32 publication, command, request and
    * incoming completions per family in `completions`, then the close result once nothing else awaits delivery, and

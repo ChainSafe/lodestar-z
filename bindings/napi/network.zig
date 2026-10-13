@@ -188,7 +188,7 @@ fn owner(self: *@This()) !*Runtime {
 pub fn getState(self: *@This()) !js.Value {
     const runtime = try self.owner();
     runtime.lock();
-    const state = runtime.bridge.state;
+    const state = runtime.stateLocked();
     runtime.unlock();
     return .{ .val = try js.env().createStringUtf8(@tagName(state)) };
 }
