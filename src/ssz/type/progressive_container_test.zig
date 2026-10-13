@@ -103,8 +103,9 @@ test "progressive container field gindices should address the field nodes" {
 
     // Fields a, b, c, d are chunks 0, 1, 4, 5. Contents is gindex 2. Each spine node holds a
     // subtree root on the left and the next spine node on the right, so the subtree roots are
-    // 4, 10 (under 5) and 22 (under 11). Chunk 0 is subtree 0. Chunks 1 and 4 are the first and
-    // last of the 4 leaves under 10. Chunk 5 is the first of the 16 leaves under 22.
+    // 4, 10 (under 5) and 22 (under 11). Chunk 0 is subtree 0, so 4. Chunks 1 and 4 are the first
+    // and last of the 4 leaves under 10, so 40 and 43. Chunk 5 is the first of the 16 leaves
+    // under 22, so 352.
     inline for (.{ Fixed, Variable }) |ST| {
         try std.testing.expectEqual(4, @intFromEnum(comptime ST.getFieldGindex("a")));
         try std.testing.expectEqual(40, @intFromEnum(comptime ST.getFieldGindex("b")));
@@ -307,6 +308,7 @@ test "struct progressive container should store the value in one node" {
 
     inline for (.{ false, true }) |from_bytes| {
         const nodes_before = pool.getNodesInUse();
+
         const node = try if (from_bytes)
             Struct.tree.deserializeFromBytes(&pool, &bytes)
         else
