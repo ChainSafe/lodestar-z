@@ -23,7 +23,11 @@ pub fn chunkGindex(chunk_i: usize) Gindex {
 }
 
 pub fn subtreeIndex(chunk_i: usize) usize {
-    var left: usize = chunk_i;
+    return subtreeCount(chunk_i + 1) - 1;
+}
+
+pub fn subtreeCount(chunk_count: usize) usize {
+    var left: usize = chunk_count;
     var subtree_length: usize = base_count;
     var subtree_i: usize = 0;
     while (left > 0) {
@@ -157,45 +161,8 @@ pub const NodeIterator = struct {
     }
 };
 
-pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
-    const subtree_count = subtreeIndex(out.len);
-    var n = root;
-    var l: usize = 0;
-    for (0..subtree_count) |subtree_i| {
-        const subtree_length = @min(subtreeLength(subtree_i), out.len - l);
-        const subtree_depth = subtreeDepth(subtree_i);
-        const subtree_root = n.getLeft(pool) catch |err| {
-            if (@intFromEnum(n) == 0) {
-                for (l..l + subtree_length) |pos| {
-                    if (pos < out.len) {
-                        out[pos] = @enumFromInt(0);
-                    }
-                }
-                l += subtree_length;
-                n = @enumFromInt(0);
-                continue;
-            }
-            return err;
-        };
-        if (subtree_depth == 0) {
-            if (subtree_length != 1) {
-                return error.InvalidSubtreeLength;
-            }
-            out[l] = subtree_root;
-        } else {
-            try subtree_root.getNodesAtDepth(pool, subtree_depth, 0, out[l .. l + subtree_length]);
-        }
-        l += subtree_length;
-        n = try n.getRight(pool);
-    }
-
-    if (!std.mem.eql(u8, &n.getRoot(pool).*, &[_]u8{0} ** 32)) {
-        return error.InvalidTerminatorNode;
-    }
-}
-
 pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, nodes: *[node_count]Node.Id) !Node.Id {
-    const subtree_count = comptime subtreeIndex(node_count);
+    const subtree_count = comptime subtreeCount(node_count);
     var n: Node.Id = @enumFromInt(0);
     errdefer pool.unref(n);
 

@@ -86,6 +86,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             return i;
         }
 
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
             if (data.len % Element.fixed_size != 0) {
                 return error.InvalidSSZ;
@@ -104,7 +105,6 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 );
             }
 
-            deinit(allocator, out);
             out.* = replacement;
         }
 
@@ -116,6 +116,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             try writer.endArray();
         }
 
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromJson(allocator: std.mem.Allocator, source: *std.json.Scanner, out: *Type) !void {
             switch (try source.next()) {
                 .array_begin => {},
@@ -130,7 +131,6 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             }
             _ = try source.next();
 
-            deinit(allocator, out);
             out.* = replacement;
         }
 
@@ -187,8 +187,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 return len;
             }
 
-            /// Initializes `out` only on success, without reading or freeing its previous contents.
-            /// The caller owns the result and must separately release any previous value.
+            /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const len = try length(node, pool);
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunkCountForLength(len));
@@ -368,6 +367,7 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
             return variable_index;
         }
 
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
             var elements = try VariableElementIterator(Self).init(data);
             const len = elements.len;
@@ -387,7 +387,6 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
             }
             std.debug.assert(i == len);
 
-            deinit(allocator, out);
             out.* = replacement;
         }
 
@@ -428,8 +427,7 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
                 return len;
             }
 
-            /// Initializes `out` only on success, without reading or freeing its previous contents.
-            /// The caller owns the result and must separately release any previous value.
+            /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const len = try length(node, pool);
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), len);
@@ -524,6 +522,7 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
             try writer.endArray();
         }
 
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromJson(allocator: std.mem.Allocator, source: *std.json.Scanner, out: *Type) !void {
             switch (try source.next()) {
                 .array_begin => {},
@@ -542,7 +541,6 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
             }
             _ = try source.next();
 
-            deinit(allocator, out);
             out.* = replacement;
         }
     };

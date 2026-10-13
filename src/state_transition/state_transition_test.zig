@@ -170,7 +170,7 @@ test "state transition - records per-block and per-epoch metrics" {
         std.testing.io,
         test_state.cached_state,
         signed_beacon_block,
-        .{ .verify_signatures = false, .verify_proposer = false, .verify_state_root = false },
+        .{ .verify_signatures = false, .verify_proposer = false, .verify_state_root = false, .source = .regen },
         null,
     );
     defer {
@@ -204,6 +204,10 @@ test "state transition - records per-block and per-epoch metrics" {
     try testing.expectEqual(
         @as(?u64, 1),
         metricValue(out, "lodestar_stfn_process_block_step_seconds_count{step=\"processBlockHeader\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_process_block_seconds_count{source=\"regen\"}"),
     );
     try testing.expectEqual(
         @as(?u64, 1),
@@ -438,6 +442,31 @@ test "state transition should preserve withdrawal diagnostics after failure" {
     const mismatch = &diagnostics.detail.?.state_transition.withdrawals_root_mismatch;
     try testing.expectEqualSlices(u8, &expected_root, &mismatch.expected);
     try testing.expectEqualSlices(u8, &actual_root, &mismatch.actual);
+    try testing.expectEqualSlices(u8, &before_root, try state.hashTreeRoot());
+    try testing.expectEqual(slot, try state.slot());
+
+    var full_block = types.electra.SignedBeaconBlock.default_value;
+    defer types.electra.SignedBeaconBlock.deinit(allocator, &full_block);
+    full_block.message.slot = slot;
+    full_block.message.proposer_index = test_state.cached_state.epoch_cache.proposers[slot % preset.SLOTS_PER_EPOCH];
+    full_block.message.parent_root = (try latest_header.hashTreeRoot()).*;
+    try full_block.message.body.execution_payload.withdrawals.append(
+        allocator,
+        types.capella.Withdrawal.default_value,
+    );
+    diagnostics = .{};
+
+    try testing.expectError(error.WithdrawalsLengthMismatch, stateTransition(
+        allocator,
+        std.testing.io,
+        test_state.cached_state,
+        .{ .full_electra = &full_block },
+        .{ .diagnostics = &diagnostics, .verify_proposer = false },
+        null,
+    ));
+    const length_mismatch = &diagnostics.detail.?.state_transition.withdrawals_length_mismatch;
+    try testing.expectEqual(@as(usize, 0), length_mismatch.expected);
+    try testing.expectEqual(@as(usize, 1), length_mismatch.actual);
     try testing.expectEqualSlices(u8, &before_root, try state.hashTreeRoot());
     try testing.expectEqual(slot, try state.slot());
 

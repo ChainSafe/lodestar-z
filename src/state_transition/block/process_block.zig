@@ -1,5 +1,6 @@
 const std = @import("std");
-const Diagnostics = @import("diagnostics").Diagnostics;
+const diagnostics = @import("diagnostics");
+const Diagnostics = diagnostics.Diagnostics;
 const Allocator = std.mem.Allocator;
 const metrics = @import("../metrics.zig");
 const time = @import("time");
@@ -89,11 +90,11 @@ pub fn processBlock(
                     .full => blk: {
                         const actual_withdrawals = block.body().executionPayload().inner.withdrawals;
                         if (withdrawals_result.withdrawals.items.len != actual_withdrawals.items.len) {
-                            std.log.err("withdrawal count mismatch: expected {d}, actual {d}", .{
+                            return diagnostics.state_transition.withdrawalsLengthMismatch(
+                                opts.diagnostics,
                                 withdrawals_result.withdrawals.items.len,
                                 actual_withdrawals.items.len,
-                            });
-                            return error.WithdrawalsLengthMismatch;
+                            );
                         }
                         var root: Root = undefined;
                         try types.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root);

@@ -94,16 +94,10 @@ test "memory_safety: AnySignedBeaconBlock deserialize should deinit partial bloc
     defer allocator.free(bytes);
     _ = SignedBeaconBlock.serializeIntoBytes(&block, bytes);
 
-    const voluntary_exits_fail_index = 2;
-    var failing = std.testing.FailingAllocator.init(
-        allocator,
-        .{ .fail_index = voluntary_exits_fail_index },
-    );
-    try std.testing.expectError(
-        error.OutOfMemory,
-        AnySignedBeaconBlock.deserialize(failing.allocator(), .full, .phase0, bytes),
-    );
-
-    // The decoded proposer slashings list must not leak when voluntary exits allocation fails.
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try std.testing.checkAllAllocationFailures(allocator, struct {
+        fn run(failing_allocator: std.mem.Allocator, serialized: []const u8) !void {
+            var decoded = try AnySignedBeaconBlock.deserialize(failing_allocator, .full, .phase0, serialized);
+            defer decoded.deinit(failing_allocator);
+        }
+    }.run, .{bytes});
 }

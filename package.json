@@ -1,6 +1,6 @@
 {
   "name": "@chainsafe/lodestar-z",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Lodestar-z NAPI bindings",
   "files": [
     "bindings/src/",
@@ -35,6 +35,10 @@
     "./shuffle": {
       "import": "./bindings/src/shuffle.js",
       "types": "./bindings/src/shuffle.d.ts"
+    },
+    "./execution-proof-verifier": {
+      "import": "./bindings/src/execution-proof-verifier.js",
+      "types": "./bindings/src/execution-proof-verifier.d.ts"
     }
   },
   "scripts": {
@@ -47,7 +51,7 @@
   },
   "keywords": [],
   "author": "ChainSafe Systems",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ChainSafe/lodestar-z.git"

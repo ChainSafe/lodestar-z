@@ -16,10 +16,12 @@ test "ProgressiveBitListType - sanity" {
     defer allocator.free(b_buf);
 
     _ = Bits.serializeIntoBytes(&b, b_buf);
-    try Bits.deserializeFromBytes(allocator, b_buf, &b);
+    var decoded = Bits.default_value;
+    defer Bits.deinit(allocator, &decoded);
+    try Bits.deserializeFromBytes(allocator, b_buf, &decoded);
 
-    try std.testing.expect(try b.get(0) == false);
-    try std.testing.expect(try b.get(2) == true);
+    try std.testing.expect(try decoded.get(0) == false);
+    try std.testing.expect(try decoded.get(2) == true);
 }
 
 test "ProgressiveBitListType - shrinking clears truncated bits" {
@@ -122,9 +124,9 @@ test "progressive bitlist tree reads stream data and delimiters" {
         defer pool.unref(root);
         failing.fail_index = failing.alloc_index;
         var output_allocator = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
-        var actual: Bits.Type = undefined;
-        try Bits.tree.toValue(output_allocator.allocator(), root, &pool, &actual);
+        var actual = Bits.default_value;
         defer actual.deinit(output_allocator.allocator());
+        try Bits.tree.toValue(output_allocator.allocator(), root, &pool, &actual);
         try std.testing.expect(Bits.equals(&value, &actual));
         try std.testing.expect(!output_allocator.has_induced_failure);
         const size = Bits.serializedSize(&value);
@@ -155,41 +157,39 @@ test "memory_safety: progressive bitlist tree reads preserve output on malformed
         const terminator: @import("persistent_merkle_tree").Gindex = @enumFromInt(@as(u64, if (len == 0) 2 else if (len <= 256) 5 else 11));
         const bad = try good.setNode(&pool, terminator, bad_leaf);
         defer pool.unref(bad);
-        var out = try Bits.Type.fromBitLen(allocator, 5);
+        var out = Bits.default_value;
         defer out.deinit(allocator);
-        out.setAssumeCapacity(4, true);
         try std.testing.expectError(error.InvalidTerminatorNode, Bits.tree.toValue(allocator, bad, &pool, &out));
-        try std.testing.expectEqual(@as(usize, 5), out.bit_len);
-        try std.testing.expect(try out.get(4));
+        try std.testing.expectEqual(@as(usize, 0), out.bit_len);
+        try std.testing.expectEqual(@as(usize, 0), out.data.capacity);
         var bytes: [33]u8 = undefined;
         try std.testing.expectError(error.InvalidTerminatorNode, Bits.tree.serializeIntoBytes(bad, &pool, &bytes));
     }
 }
 
-test "memory_safety: progressive bitlist tree.toValue leaves previous storage caller-owned" {
+test "memory_safety: progressive bitlist tree.toValue leaves default out on OOM" {
     const allocator = std.testing.allocator;
     const Bits = ProgressiveBitListType();
     var source = try Bits.Type.fromBitLen(allocator, 257);
     defer source.deinit(allocator);
     source.setAssumeCapacity(256, true);
-    var previous = try Bits.Type.fromBitLen(allocator, 5);
-    defer previous.deinit(allocator);
-    previous.setAssumeCapacity(4, true);
 
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
     const root = try Bits.tree.fromValue(&pool, &source);
     defer pool.unref(root);
 
-    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    var out: Bits.Type = undefined;
-    try std.testing.expectError(error.OutOfMemory, Bits.tree.toValue(failing.allocator(), root, &pool, &out));
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-
-    out = previous;
-    try Bits.tree.toValue(allocator, root, &pool, &out);
-    defer out.deinit(allocator);
-    try std.testing.expect(Bits.equals(&source, &out));
-    try std.testing.expectEqual(@as(usize, 5), previous.bit_len);
-    try std.testing.expect(try previous.get(4));
+    try std.testing.checkAllAllocationFailures(allocator, struct {
+        fn run(output_allocator: std.mem.Allocator, input_pool: *Node.Pool, input_root: Node.Id, expected: *const Bits.Type) !void {
+            var out = Bits.default_value;
+            defer out.deinit(output_allocator);
+            Bits.tree.toValue(output_allocator, input_root, input_pool, &out) catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expectEqual(@as(usize, 0), out.bit_len);
+                try std.testing.expectEqual(@as(usize, 0), out.data.capacity);
+                return err;
+            };
+            try std.testing.expect(Bits.equals(expected, &out));
+        }
+    }.run, .{ &pool, root, &source });
 }

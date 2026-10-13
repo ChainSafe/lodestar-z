@@ -66,6 +66,34 @@ pub const ProposerRewards = js.Object(struct {
     slashing: js.Number,
 });
 
+pub const SyncCommitteeReward = js.Object(struct {
+    validatorIndex: js.Number,
+    reward: js.Number,
+});
+
+pub const IdealAttestationsReward = js.Object(struct {
+    effectiveBalance: js.Number,
+    head: js.Number,
+    target: js.Number,
+    source: js.Number,
+    inclusionDelay: js.Number,
+    inactivity: js.Number,
+});
+
+pub const TotalAttestationsReward = js.Object(struct {
+    validatorIndex: js.Number,
+    head: js.Number,
+    target: js.Number,
+    source: js.Number,
+    inclusionDelay: js.Number,
+    inactivity: js.Number,
+});
+
+pub const AttestationsRewards = js.Object(struct {
+    idealRewards: js.Array,
+    totalRewards: js.Array,
+});
+
 pub const MultiProof = js.Object(struct {
     type: js.String,
     leaves: js.Array,

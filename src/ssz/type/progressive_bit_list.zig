@@ -175,8 +175,7 @@ pub fn ProgressiveBitListType() type {
                 return std.mem.readInt(usize, hash[0..8], .little);
             }
 
-            /// Initializes `out` only on success, without reading or freeing its previous contents.
-            /// The caller owns the result and must separately release any previous value.
+            /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const bit_len = try length(node, pool);
                 const chunk_count = bit_len / 256 + @intFromBool(bit_len % 256 != 0);
