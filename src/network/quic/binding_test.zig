@@ -23,6 +23,20 @@ test "quiche error codes map to tagged errors" {
     try std.testing.expectEqual(@as(usize, 7), try binding.check(@as(isize, 7)));
 }
 
+test "quiche peer transport parameters follow the C field layout" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    binding.c.quiche_config_set_active_connection_id_limit(pair.server.config.ptr, 7);
+    const handles = try support.connectPair(&pair);
+    const conn = pair.client.registry.slots[handles.client.index].conn.?;
+    var params = std.mem.zeroes(binding.c.quiche_transport_params);
+    try std.testing.expect(binding.c.quiche_conn_peer_transport_params(conn, &params));
+    try std.testing.expectEqual(@as(u64, 7), params.peer_active_conn_id_limit);
+    try std.testing.expect(params.peer_disable_active_migration);
+    try std.testing.expectEqual(@as(isize, binding.c.QUICHE_ERR_DONE), params.peer_max_datagram_frame_size);
+}
+
 test "quiche capacity query leaves the error code untouched on success and unknown streams" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
