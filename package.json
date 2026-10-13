@@ -1,6 +1,6 @@
 {
   "name": "@chainsafe/lodestar-z",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Lodestar-z NAPI bindings",
   "files": [
     "bindings/src/",
@@ -45,6 +45,10 @@
     "./leveldb": {
       "types": "./bindings/src/leveldb.d.ts",
       "import": "./bindings/src/leveldb.js"
+    },
+    "./execution-proof-verifier": {
+      "import": "./bindings/src/execution-proof-verifier.js",
+      "types": "./bindings/src/execution-proof-verifier.d.ts"
     }
   },
   "scripts": {

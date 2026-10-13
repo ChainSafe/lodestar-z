@@ -122,7 +122,7 @@ pub const ForkChoiceStore = struct {
 
         try balances_list.appendSlice(allocator, justified_balances);
 
-        const balances_rc = try JustifiedBalancesRc.init(allocator, balances_list);
+        const balances_rc = try JustifiedBalancesRc.create(allocator, balances_list);
         errdefer balances_rc.unref();
 
         const total = computeTotalBalance(justified_balances);
@@ -159,7 +159,7 @@ pub const ForkChoiceStore = struct {
 
         try balances_list.appendSlice(allocator, balances);
 
-        const balances_rc = try JustifiedBalancesRc.init(allocator, balances_list);
+        const balances_rc = try JustifiedBalancesRc.create(allocator, balances_list);
 
         self.justified.balances.unref();
         self.justified = .{

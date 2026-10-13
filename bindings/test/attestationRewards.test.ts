@@ -14,11 +14,11 @@ describe("attestation rewards", () => {
     views.length = 0;
   });
 
-  function fixture(fork: "altair" | "bellatrix" | "electra" = "altair", leak = false) {
+  function fixture(fork: "altair" | "bellatrix" | "electra" = "altair", leak = false, finalizes = false) {
     const stateType = ssz[fork].BeaconState;
     const value = ssz.electra.BeaconState.defaultValue();
     const validatorCount = 64;
-    value.slot = 32 * (leak ? 8 : 2);
+    value.slot = 32 * (leak ? 8 : 2) + (finalizes ? 31 : 0);
     value.validators = Array.from({length: validatorCount}, (_, index) => {
       const secret = new Uint8Array(32);
       secret[31] = index + 1;
@@ -38,6 +38,14 @@ describe("attestation rewards", () => {
     value.currentEpochParticipation = Array.from({length: validatorCount}, () => 0);
     value.inactivityScores = Array.from({length: validatorCount}, () => 1000);
     value.finalizedCheckpoint.epoch = leak ? 0 : 1;
+    if (finalizes) {
+      value.previousEpochParticipation.fill(7);
+      value.previousEpochParticipation[3] = 0;
+      value.currentEpochParticipation.fill(7);
+      value.previousJustifiedCheckpoint.epoch = Math.floor(value.slot / 32) - 2;
+      value.currentJustifiedCheckpoint.epoch = Math.floor(value.slot / 32) - 1;
+      value.justificationBits.set(0, true);
+    }
     value.currentSyncCommittee.pubkeys = Array.from(
       {length: value.currentSyncCommittee.pubkeys.length},
       (_, index) => value.validators[index % validatorCount].pubkey
@@ -99,7 +107,13 @@ describe("attestation rewards", () => {
               head: participates ? expectedIdeal[32].head : 0,
               inactivity: participates
                 ? 0
-                : -Number((32_000_000_000n * 1000n) / (BigInt(config.INACTIVITY_SCORE_BIAS) * quotient)),
+                : -Number(
+                    (32_000_000_000n *
+                      BigInt(
+                        1000 + config.INACTIVITY_SCORE_BIAS - (leak ? 0 : config.INACTIVITY_SCORE_RECOVERY_RATE)
+                      )) /
+                      (BigInt(config.INACTIVITY_SCORE_BIAS) * quotient)
+                  ),
               inclusionDelay: 0,
               source: participates ? expectedIdeal[32].source : -Number((32n * base * 14n) / 64n),
               target: participates ? expectedIdeal[32].target : -Number((32n * base * 26n) / 64n),
@@ -110,6 +124,21 @@ describe("attestation rewards", () => {
       );
       expect(native.hashTreeRoot()).toEqual(root);
     }
+  });
+
+  it("ends a leak before computing attestation rewards", () => {
+    const {config, native} = fixture("altair", true, true);
+    const root = native.hashTreeRoot();
+    const rewards = native.computeAttestationsRewards([0, 3]);
+    const quotient = 3n * 2n ** 24n;
+    const updatedScore = 1000 + config.INACTIVITY_SCORE_BIAS - config.INACTIVITY_SCORE_RECOVERY_RATE;
+    expect(rewards.idealRewards[32].source).toBeGreaterThan(0);
+    expect(rewards.totalRewards[0].source).toBeGreaterThan(0);
+    expect(rewards.totalRewards[1].inactivity).toBe(
+      -Number((32_000_000_000n * BigInt(updatedScore)) / (BigInt(config.INACTIVITY_SCORE_BIAS) * quotient))
+    );
+    expect(native.hashTreeRoot()).toEqual(root);
+    expect(native.computeAttestationsRewards([0, 3])).toEqual(rewards);
   });
 
   it("includes the Electra ideal balance range", () => {

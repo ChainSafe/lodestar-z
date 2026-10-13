@@ -20,7 +20,7 @@ test "computeSyncCommitteeRewards - signed deltas, duplicate positions, ordering
     var indices = [_]u64{2} ** preset.SYNC_COMMITTEE_SIZE;
     @memcpy(indices[0..4], &[_]u64{ 9, 3, 9, 1 });
     var committee = try SyncCommitteeCache.initValidatorIndices(allocator, &indices);
-    const committee_rc = SyncCommitteeCacheRc.init(allocator, committee) catch |err| {
+    const committee_rc = SyncCommitteeCacheRc.create(allocator, committee) catch |err| {
         committee.deinit();
         return err;
     };
