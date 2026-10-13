@@ -11,7 +11,6 @@ const Node = @import("persistent_merkle_tree").Node;
 const progressive = @import("progressive.zig");
 const TypeOpts = @import("list.zig").TypeOpts;
 
-/// Chunked storage applies within subtrees of at least ChunkedLeaf.K chunks, preserving SSZ roots.
 pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) type {
     comptime {
         if (!isFixedType(ST)) {
