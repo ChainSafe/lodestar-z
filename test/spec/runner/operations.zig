@@ -164,7 +164,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.epoch_cache;
                     var attestations = [_]ForkTypes.Attestation.Type{self.op};
-                    try state_transition.processAttestationsWithParent(
+                    try state_transition.processAttestations(
                         fork,
                         allocator,
                         io,

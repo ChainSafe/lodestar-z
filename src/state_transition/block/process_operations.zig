@@ -12,7 +12,7 @@ const ForkTypes = @import("fork_types").ForkTypes;
 const ct = @import("consensus_types");
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const preset = @import("preset").preset;
-const processAttestationsWithParent = @import("process_attestations.zig").processAttestationsWithParent;
+const processAttestations = @import("process_attestations.zig").processAttestations;
 const processPayloadAttestation = @import("process_payload_attestation.zig").processPayloadAttestation;
 
 const getEth1DepositCount = @import("../utils/deposit.zig").getEth1DepositCount;
@@ -97,7 +97,7 @@ pub fn processOperations(
 
     {
         const timer = time.start(io);
-        try processAttestationsWithParent(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, body.inner.attestations.items, opts.parent_slot, opts.verify_signature);
+        try processAttestations(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, body.inner.attestations.items, opts.parent_slot, opts.verify_signature);
         try metrics.state_transition.process_operations_step.observe(
             .{ .step = .processAttestations },
             time.durationSeconds(time.since(io, timer)),
