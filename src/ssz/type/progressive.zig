@@ -8,16 +8,17 @@ const Gindex = @import("persistent_merkle_tree").Gindex;
 const base_count = 1;
 const scaling_factor = 4;
 
-/// Subtree `i` holds `4^i` chunks at depth `2i` below its root and hangs `i + 1` spine levels below
-/// the contents root, so its chunks sit at depth `3i + 1`, which must stay addressable by a gindex.
-/// The chunk count `4^i` must also fit in a `usize`.
-pub const max_tree_subtrees = @min(
+/// Limits of a progressive tree stored as nodes. Subtree `i` holds `4^i` chunks at depth `2i`
+/// below its root and hangs `i + 1` spine levels below the contents root, so its chunks sit at
+/// depth `3i + 1`, which must stay addressable by a gindex. The chunk count `4^i` must also fit
+/// in a `usize`.
+pub const max_node_subtrees = @min(
     (@import("hashing").max_depth - 1) / 3,
     (@bitSizeOf(usize) - 1) / 2,
 ) + 1;
-pub const max_tree_chunks = blk: {
+pub const max_node_chunks = blk: {
     var total: usize = 0;
-    for (0..max_tree_subtrees) |i| total += @as(usize, 1) << @intCast(2 * i);
+    for (0..max_node_subtrees) |i| total += @as(usize, 1) << @intCast(2 * i);
     break :blk total;
 };
 const zero_leaf_bytes: [ChunkedLeaf.K * 32]u8 = @splat(0);
@@ -146,7 +147,7 @@ pub const NodeIterator = struct {
     iterator: Node.DepthIterator = undefined,
 
     pub fn init(pool: *Node.Pool, root: Node.Id, count: usize) !NodeIterator {
-        if (count > max_tree_chunks) return error.InvalidSubtreeLength;
+        if (count > max_node_chunks) return error.InvalidSubtreeLength;
         return .{ .pool = pool, .spine = root, .remaining = count };
     }
 
@@ -287,10 +288,10 @@ pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, no
 }
 
 pub fn fillWithContents(_: std.mem.Allocator, pool: *Node.Pool, nodes: []Node.Id) !Node.Id {
-    var subtree_starts: [max_tree_subtrees]usize = undefined;
+    var subtree_starts: [max_node_subtrees]usize = undefined;
     var subtree_count: usize = 0;
     var pos: usize = 0;
-    for (0..max_tree_subtrees) |i| {
+    for (0..max_node_subtrees) |i| {
         if (pos == nodes.len) break;
         subtree_starts[i] = pos;
         pos += @min(@as(usize, 1) << @intCast(2 * i), nodes.len - pos);

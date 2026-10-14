@@ -385,14 +385,14 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
                 const stride = if (from_bytes) Element.fixed_size else 1;
                 const len = input.len / stride;
                 const chunk_count = chunkCountForLength(len);
-                if (chunk_count > progressive.max_tree_chunks) return error.InputTooLong;
+                if (chunk_count > progressive.max_node_chunks) return error.InputTooLong;
 
-                var roots: [progressive.max_tree_subtrees]Node.Id = undefined;
+                var roots: [progressive.max_node_subtrees]Node.Id = undefined;
                 var root_count: usize = 0;
                 errdefer for (roots[0..root_count]) |root| pool.unref(root);
 
                 var item_index: usize = 0;
-                for (0..progressive.max_tree_subtrees) |subtree_index| {
+                for (0..progressive.max_node_subtrees) |subtree_index| {
                     if (item_index == len) break;
                     const depth: Depth = @intCast(2 * subtree_index);
                     const leaf_offset = progressive.chunkedLeafOffset(subtree_index);
