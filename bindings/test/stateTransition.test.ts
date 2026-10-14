@@ -58,6 +58,48 @@ describe("serialized state transition", () => {
     expect(native.getExpectedWithdrawals().expectedWithdrawals[0].amount).toBe(1_000_000_000n);
   });
 
+  describe("block external data statuses", () => {
+    function transitionNextBlock(options: Record<string, unknown>) {
+      const value = createStfState();
+      value.latestExecutionPayloadHeader.blockHash.fill(1);
+      const native = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(value), config);
+      const slot = native.slot + 1;
+      const advanced = native.processSlots(slot);
+      const block = ssz.fulu.SignedBeaconBlock.defaultValue();
+      block.message.slot = slot;
+      block.message.proposerIndex = advanced.getBeaconProposer(slot);
+      block.message.parentRoot = ssz.phase0.BeaconBlockHeader.hashTreeRoot(advanced.latestBlockHeader);
+      block.message.body.executionPayload.parentHash.fill(1);
+      block.message.body.executionPayload.blockHash.fill(2);
+      block.message.body.executionPayload.timestamp = advanced.genesisTime + slot * 12;
+      return native.stateTransition(ssz.fulu.SignedBeaconBlock.serialize(block), false, {
+        verifyProposer: false,
+        verifySignatures: false,
+        verifyStateRoot: false,
+        ...options,
+      });
+    }
+
+    it.each([
+      {},
+      {dataAvailabilityStatus: "Available", executionPayloadStatus: "valid"},
+      {dataAvailabilityStatus: "OutOfRange"},
+    ])("accepts %j", (options) => {
+      expect(transitionNextBlock(options).latestExecutionPayloadHeader.blockHash).toEqual(new Uint8Array(32).fill(2));
+    });
+
+    it.each([
+      [{executionPayloadStatus: "invalid"}, "InvalidExecutionPayload"],
+      [{executionPayloadStatus: "preMerge"}, "ExecutionPayloadStatusPreMerge"],
+      [{executionPayloadStatus: "optimistic"}, "InvalidExecutionPayloadStatus"],
+      [{dataAvailabilityStatus: "PreData"}, "DataAvailabilityPreData"],
+      [{dataAvailabilityStatus: "NotRequired"}, "DataAvailabilityStatusNotRequired"],
+      [{dataAvailabilityStatus: "available"}, "InvalidDataAvailabilityStatus"],
+    ])("rejects %j", (options, error) => {
+      expect(() => transitionNextBlock(options)).toThrow(new RegExp(`^${error}$`));
+    });
+  });
+
   describe.each([
     {SECONDS_PER_SLOT: undefined, SLOT_DURATION_MS: 6000, name: "milliseconds only"},
     {SECONDS_PER_SLOT: 12, SLOT_DURATION_MS: 6000, name: "milliseconds with stale legacy seconds"},

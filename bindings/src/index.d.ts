@@ -128,7 +128,7 @@ interface CompactMultiProof {
  */
 export interface TransitionOpts {
   /** Execution payload verification status. Default: "valid". */
-  executionPayloadStatus?: "valid" | "invalid";
+  executionPayloadStatus?: "valid" | "invalid" | "preMerge";
   /** Data availability status. Default: "Available". */
   dataAvailabilityStatus?: "Available" | "PreData" | "OutOfRange";
   /** Verify the post-state root matches the block's state root. Default: true. */
