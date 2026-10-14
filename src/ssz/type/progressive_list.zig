@@ -262,6 +262,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 const len = try serialized.length(data);
+                // Packed leaves bypass element decoding, so reject noncanonical boolean bytes here.
                 if (comptime Element.kind == .bool) try serialized.validate(data);
                 var builder = try progressive.TreeBuilder.init(pool, chunkCountForLength(len));
                 defer builder.deinit();
