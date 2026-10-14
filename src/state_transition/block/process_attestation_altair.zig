@@ -65,7 +65,7 @@ pub fn processAttestationsAltair(
         try validateAttestation(fork, epoch_cache, state, attestation);
 
         // Retrieve the validator indices from the attestation participation bitfield
-        var attesting_indices = try if (comptime fork.lt(.electra)) epoch_cache.getAttestingIndicesPhase0(allocator, attestation) else epoch_cache.getAttestingIndicesPostElectra(fork, allocator, attestation);
+        var attesting_indices = try epoch_cache.getAttestingIndices(fork, allocator, attestation);
         defer attesting_indices.deinit(allocator);
 
         // this check is done last because its the most expensive (if signature verification is toggled on)

@@ -139,7 +139,7 @@ pub fn processOperations(
 
     if (comptime fork.gte(.gloas)) {
         for (body.inner.payload_attestations.items) |*attestation| {
-            try processPayloadAttestation(fork, allocator, io, config, epoch_cache, state, attestation, opts.verify_signature);
+            try processPayloadAttestation(fork, io, config, epoch_cache, state, attestation, opts.verify_signature);
         }
     }
 

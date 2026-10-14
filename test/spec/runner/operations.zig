@@ -253,7 +253,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 },
                 // Standalone payload-attestation vectors include invalid signatures
                 // without bls_setting metadata, matching Lodestar's operation runner.
-                .payload_attestation => try state_transition.processPayloadAttestation(fork, allocator, io, cached_state.config, cached_state.epoch_cache, state, &self.op, true),
+                .payload_attestation => try state_transition.processPayloadAttestation(fork, io, cached_state.config, cached_state.epoch_cache, state, &self.op, true),
                 .proposer_slashing => {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.epoch_cache;

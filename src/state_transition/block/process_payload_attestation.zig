@@ -1,5 +1,4 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const BeaconState = @import("fork_types").BeaconState;
 const ForkTypes = @import("fork_types").ForkTypes;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
@@ -11,7 +10,6 @@ const preset = @import("preset").preset;
 
 pub fn processPayloadAttestation(
     comptime fork: ForkSeq,
-    allocator: Allocator,
     io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
@@ -43,5 +41,5 @@ pub fn processPayloadAttestation(
         if (try payload_attestation.aggregation_bits.get(i)) indexed.attesting_indices.appendAssumeCapacity(index);
     }
     std.mem.sort(u64, indexed.attesting_indices.items, {}, std.sort.asc(u64));
-    if (!(try isValidIndexedPayloadAttestation(fork, allocator, io, config, epoch_cache, &indexed, verify_signature))) return error.InvalidPayloadAttestation;
+    if (!(try isValidIndexedPayloadAttestation(fork, io, config, epoch_cache, &indexed, verify_signature))) return error.InvalidPayloadAttestation;
 }

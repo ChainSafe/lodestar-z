@@ -39,5 +39,5 @@ test "Gloas PTC lookup enforces the fork boundary and previous current next epoc
     defer epoch_cache.deinit();
     var attestation = ct.gloas.PayloadAttestation.default_value;
     attestation.data.slot = 2 * preset.SLOTS_PER_EPOCH - 1;
-    try std.testing.expectError(error.PayloadTimelinessCommitteeBeforeGloas, processPayloadAttestation(.gloas, allocator, std.testing.io, &config, epoch_cache, state, &attestation, false));
+    try std.testing.expectError(error.PayloadTimelinessCommitteeBeforeGloas, processPayloadAttestation(.gloas, std.testing.io, &config, epoch_cache, state, &attestation, false));
 }
