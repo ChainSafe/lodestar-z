@@ -16,6 +16,7 @@ const std = @import("std");
 
 const ForkSeq = @import("config").ForkSeq;
 const Node = @import("persistent_merkle_tree").Node;
+const createSingleProofInto = @import("persistent_merkle_tree").proof.createSingleProofInto;
 const constants = @import("constants");
 
 const current_gindex_gloas = constants.CURRENT_SYNC_COMMITTEE_GINDEX_GLOAS;
@@ -60,8 +61,8 @@ pub fn getSyncCommitteesWitness(
     var next: Node.Id = undefined;
     if (fork.gte(.gloas)) {
         out.gloas_branches = .{ .current = undefined, .next = undefined };
-        out.current_sync_committee_root = try getCommitteeBranch(current_gindex_gloas, root_node, pool, &out.gloas_branches.?.current);
-        out.next_sync_committee_root = try getCommitteeBranch(next_gindex_gloas, root_node, pool, &out.gloas_branches.?.next);
+        out.current_sync_committee_root = try createSingleProofInto(pool.allocator, pool, root_node, @enumFromInt(current_gindex_gloas), &out.gloas_branches.?.current);
+        out.next_sync_committee_root = try createSingleProofInto(pool.allocator, pool, root_node, @enumFromInt(next_gindex_gloas), &out.gloas_branches.?.next);
         out.witness_len = 0;
         return;
     } else if (fork.gte(.electra)) {
@@ -117,28 +118,6 @@ pub fn getSyncCommitteesWitness(
 
     out.current_sync_committee_root = current.getRoot(pool).*;
     out.next_sync_committee_root = next.getRoot(pool).*;
-}
-
-/// Committee fields are ordinary branch nodes even in the progressive state.
-/// Walk once from the state root and store each sibling in leaf-to-root order.
-fn getCommitteeBranch(
-    comptime gindex: u64,
-    root_node: Node.Id,
-    pool: *Node.Pool,
-    branch: *[std.math.log2_int(u64, gindex)][32]u8,
-) ![32]u8 {
-    const depth = std.math.log2_int(u64, gindex);
-    var node = root_node;
-    for (0..depth) |i| {
-        const branch_index = depth - 1 - i;
-        const is_right = (gindex >> @intCast(branch_index)) & 1 != 0;
-        const left = try node.getLeft(pool);
-        const right = try node.getRight(pool);
-        const sibling = if (is_right) left else right;
-        branch[branch_index] = sibling.getRoot(pool).*;
-        node = if (is_right) right else left;
-    }
-    return node.getRoot(pool).*;
 }
 
 test {
