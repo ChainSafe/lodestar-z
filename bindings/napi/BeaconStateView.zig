@@ -19,6 +19,7 @@ const pubkey = @import("./pubkeys.zig");
 const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
+const snakeToCamel = @import("./to_napi_value.zig").snakeToCamel;
 const validator_monitor = @import("./validator_monitor.zig");
 
 pub const js_meta = js.class(.{ .properties = .{
@@ -1624,7 +1625,9 @@ pub fn getShufflingAtEpoch(self: *BeaconStateView, epoch_arg: js.Number) !js.Val
 fn gloasFieldValue(self: *BeaconStateView, comptime field: []const u8) !napi.Value {
     const cached_state = try self.acquireState();
     defer self.finishState();
-    const state = try cached_state.state.tryCastToFork(.gloas);
+    const state = cached_state.state.tryCastToFork(.gloas) catch {
+        return (try throwNull("INVALID_FORK", comptime snakeToCamel(field) ++ " is not available before Gloas")).val;
+    };
     const ST = ct.gloas.BeaconState.getFieldType(field);
     var value = ST.default_value;
     defer if (comptime @hasDecl(ST, "deinit")) ST.deinit(cached_state.allocator, &value);

@@ -181,7 +181,7 @@ pub fn numberSliceToNapiValue(
     }
 }
 
-fn snakeToCamel(comptime str: []const u8) [:0]const u8 {
+pub fn snakeToCamel(comptime str: []const u8) [:0]const u8 {
     const count = comptime count: {
         var n: usize = 0;
         for (str) |c| {
