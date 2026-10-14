@@ -43,21 +43,6 @@ pub fn processAttestationsAltair(
     proposer_rewards: *ProposerRewards,
     slashings_cache: *const SlashingsCache,
     attestations: []const ForkTypes(fork).Attestation.Type,
-    verify_signature: bool,
-) !void {
-    return processAttestationsAltairWithParent(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, attestations, null, verify_signature);
-}
-
-pub fn processAttestationsAltairWithParent(
-    comptime fork: ForkSeq,
-    allocator: Allocator,
-    io: std.Io,
-    config: *const BeaconConfig,
-    epoch_cache: *EpochCache,
-    state: *BeaconState(fork),
-    proposer_rewards: *ProposerRewards,
-    slashings_cache: *const SlashingsCache,
-    attestations: []const ForkTypes(fork).Attestation.Type,
     parent_slot: ?u64,
     verify_signature: bool,
 ) !void {
@@ -104,7 +89,7 @@ pub fn processAttestationsAltairWithParent(
 
         const in_current_epoch = data.target.epoch == current_epoch;
         var epoch_participation = if (in_current_epoch) try state.currentEpochParticipation() else try state.previousEpochParticipation();
-        const flags_attestation = try getAttestationParticipationStatusWithParent(fork, data, state_slot - data.slot, current_epoch, root_cache, parent_slot);
+        const flags_attestation = try getAttestationParticipationStatus(fork, data, state_slot - data.slot, current_epoch, root_cache, parent_slot);
         const same_slot = if (comptime fork.gte(.gloas)) try isAttestationSameSlotRootCache(fork, root_cache, data) else false;
 
         // For each participant, update their participation
@@ -185,16 +170,6 @@ pub fn processAttestationsAltairWithParent(
 }
 
 pub fn getAttestationParticipationStatus(
-    comptime fork: ForkSeq,
-    data: *const types.phase0.AttestationData.Type,
-    inclusion_delay: u64,
-    current_epoch: Epoch,
-    root_cache: *RootCache(fork),
-) !u8 {
-    return getAttestationParticipationStatusWithParent(fork, data, inclusion_delay, current_epoch, root_cache, null);
-}
-
-fn getAttestationParticipationStatusWithParent(
     comptime fork: ForkSeq,
     data: *const types.phase0.AttestationData.Type,
     inclusion_delay: u64,

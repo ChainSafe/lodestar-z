@@ -28,7 +28,9 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
         state: TreeViewState,
         _orig_len: usize,
         _len: usize,
-        cached_chunk: ?struct { position: Position, node: Node.Id, dirty: bool },
+        // Point get/set pairs and sequential inactivity-score writes often reuse the same leaf.
+        // Ownership still comes from the node's current reference count when writing.
+        cached_leaf: ?struct { position: Position, node: Node.Id },
 
         pub const SszType = ST;
         pub const Element = ST.Element.Type;
@@ -50,7 +52,7 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             self.allocator = allocator;
             self._orig_len = len;
             self._len = len;
-            self.cached_chunk = null;
+            self.cached_leaf = null;
             return self;
         }
 
@@ -68,10 +70,10 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             copy.allocator = self.allocator;
             copy._orig_len = self._orig_len;
             copy._len = self._orig_len;
-            copy.cached_chunk = null;
+            copy.cached_leaf = null;
             if (opts.transfer_cache) {
                 self._len = self._orig_len;
-                self.cached_chunk = null;
+                self.cached_leaf = null;
             }
             return copy;
         }
@@ -80,7 +82,7 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
         pub fn clearCache(self: *Self) void {
             self.state.clearCache();
             self._len = self._orig_len;
-            self.cached_chunk = null;
+            self.cached_leaf = null;
         }
 
         pub fn fromValue(allocator: Allocator, pool: *Node.Pool, value: *const ST.Type) !*Self {
@@ -115,13 +117,13 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             if (index >= self._len) return error.IndexOutOfBounds;
             const chunk_index = index / items_per_chunk;
             const position = self.positionForChunk(chunk_index);
-            const node = try self.getChunk(position);
+            const node = try self.getLeaf(position);
             var value: Element = undefined;
-            if (position.leaf_offset != 0) {
+            if (position.folded_depth != 0) {
                 if (node.getState(self.state.pool).isZero()) return std.mem.zeroes(Element);
                 const chunks = try node.getChunkedLeafChunks(self.state.pool);
                 ST.Element.tree.toValuePackedFromBytes(
-                    &chunks[chunk_index - position.start],
+                    &chunks[chunk_index - position.first_chunk],
                     index % items_per_chunk,
                     &value,
                 );
@@ -141,16 +143,17 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             const chunk_index = index / items_per_chunk;
             const position = self.positionForChunk(chunk_index);
             const gindex = position.gindex;
-            const node = try self.getChunk(position);
-            if (position.leaf_offset != 0) {
+            const node = try self.getLeaf(position);
+            const state = node.getState(self.state.pool);
+            if (position.folded_depth != 0) {
                 const valid_chunks: u16 = @intCast(@min(
                     ChunkedLeaf.K,
-                    chunkCount(self._len) - position.start,
+                    chunkCount(self._len) - position.first_chunk,
                 ));
-                if (self.cached_chunk.?.dirty) {
+                if (state.kind() == .chunked_leaf and state.refCount() == 0) {
                     try node.editChunkedLeaf(
                         self.state.pool,
-                        @intCast(chunk_index - position.start),
+                        @intCast(chunk_index - position.first_chunk),
                         valid_chunks,
                         Element,
                         index % items_per_chunk,
@@ -162,24 +165,21 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
                     try self.state.children_nodes.put(self.allocator, gindex, node);
                     try self.state.editChunkedLeaf(
                         gindex,
-                        @intCast(chunk_index - position.start),
+                        @intCast(chunk_index - position.first_chunk),
                         valid_chunks,
                         Element,
                         index % items_per_chunk,
                         &value,
                         ST.Element.tree.fromValuePackedIntoChunk,
                     );
-                    self.cached_chunk = .{
+                    self.cached_leaf = .{
                         .position = position,
                         .node = self.state.children_nodes.get(gindex).?,
-                        .dirty = true,
                     };
                 }
                 return;
             }
-            if (self.cached_chunk.?.dirty) {
-                std.debug.assert(node.getState(self.state.pool).isLeaf());
-                std.debug.assert(node.getState(self.state.pool).refCount() == 0);
+            if (state.isLeaf() and state.refCount() == 0) {
                 ST.Element.tree.fromValuePackedIntoChunk(
                     &self.state.pool.nodes.items(.root)[@intFromEnum(node)],
                     index % items_per_chunk,
@@ -197,7 +197,7 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             errdefer self.state.pool.unref(replacement);
 
             try self.state.setChildNode(gindex, replacement);
-            self.cached_chunk = .{ .position = position, .node = replacement, .dirty = true };
+            self.cached_leaf = .{ .position = position, .node = replacement };
         }
 
         pub fn push(self: *Self, value: Element) !void {
@@ -245,7 +245,7 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
                 pool.unref(original);
             }
             self._orig_len = self._len;
-            self.cached_chunk = null;
+            self.cached_leaf = null;
         }
 
         pub fn getAll(self: *Self, allocator: ?Allocator) ![]Element {
@@ -257,16 +257,16 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
 
         pub fn getAllInto(self: *Self, values: []Element) ![]Element {
             if (values.len != self._len) return error.InvalidSize;
-            var chunks = ChunkIterator.init(self, 0);
+            var blocks = BlockIterator.init(self, 0);
             var index: usize = 0;
             while (index < values.len) {
-                const block = try chunks.next();
-                const count = @min(block.count * items_per_chunk, values.len - index);
+                const block = try blocks.next();
+                const count = @min(block.chunk_count * items_per_chunk, values.len - index);
                 const pool = self.state.pool;
                 if (block.node.getState(pool).isZero()) {
                     @memset(values[index..][0..count], std.mem.zeroes(Element));
                 } else {
-                    const bytes: []const u8 = if (block.leaf_offset != 0)
+                    const bytes: []const u8 = if (block.folded_depth != 0)
                         std.mem.asBytes(try block.node.getChunkedLeafChunks(pool))
                     else
                         block.node.getRoot(pool);
@@ -283,25 +283,25 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             std.debug.assert(self.state.changed.count() == 0);
             std.debug.assert(self._len == self._orig_len);
             return .{
-                .chunks = ChunkIterator.init(self, start_index / items_per_chunk),
+                .blocks = BlockIterator.init(self, start_index / items_per_chunk),
                 .index = start_index,
             };
         }
 
         pub const ReadonlyIterator = struct {
-            chunks: ChunkIterator,
+            blocks: BlockIterator,
             index: usize,
             block: ?Block = null,
             bytes: []const u8 = undefined,
 
             pub fn next(self: *ReadonlyIterator) !Element {
-                if (self.index >= self.chunks.view._orig_len) return error.InvalidLength;
-                const pool = self.chunks.view.state.pool;
+                if (self.index >= self.blocks.view._orig_len) return error.InvalidLength;
+                const pool = self.blocks.view.state.pool;
                 const block = self.block orelse blk: {
-                    const next_block = try self.chunks.next();
+                    const next_block = try self.blocks.next();
                     self.bytes = if (next_block.node.getState(pool).isZero())
                         &progressive.zero_leaf_bytes
-                    else if (next_block.leaf_offset != 0)
+                    else if (next_block.folded_depth != 0)
                         std.mem.asBytes(try next_block.node.getChunkedLeafChunks(pool))
                     else
                         next_block.node.getRoot(pool);
@@ -309,58 +309,58 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
                     break :blk next_block;
                 };
                 var value: Element = undefined;
-                const offset = (self.index / items_per_chunk - block.start) * 32;
+                const offset = (self.index / items_per_chunk - block.first_chunk) * 32;
                 ST.Element.tree.toValuePackedFromBytes(
                     self.bytes[offset..][0..32],
                     self.index % items_per_chunk,
                     &value,
                 );
                 self.index += 1;
-                if (self.index / items_per_chunk >= block.start + block.count) self.block = null;
+                if (self.index / items_per_chunk >= block.first_chunk + block.chunk_count) self.block = null;
                 return value;
             }
         };
 
         const Block = struct {
             node: Node.Id,
-            start: usize,
-            count: usize,
-            leaf_offset: Depth,
+            first_chunk: usize,
+            chunk_count: usize,
+            folded_depth: Depth,
         };
 
-        const ChunkIterator = struct {
+        const BlockIterator = struct {
             view: *const Self,
             index: usize,
             subtree_end: usize = 0,
             gindex: Gindex = @enumFromInt(0),
-            leaf_offset: Depth = 0,
+            folded_depth: Depth = 0,
             iterator: Node.DepthIterator = undefined,
 
-            fn init(view: *const Self, start_index: usize) ChunkIterator {
+            fn init(view: *const Self, start_index: usize) BlockIterator {
                 return .{ .view = view, .index = start_index };
             }
 
-            fn next(self: *ChunkIterator) !Block {
+            fn next(self: *BlockIterator) !Block {
                 const pool = self.view.state.pool;
                 if (self.index >= self.subtree_end) {
-                    const subtree = subtreeIndex(self.index);
-                    const start = subtreeStart(subtree);
-                    const depth: Depth = @intCast(2 * subtree);
-                    self.leaf_offset = leafOffset(subtree);
+                    const subtree_index = subtreeIndex(self.index);
+                    const start = subtreeStartChunk(subtree_index);
+                    const depth: Depth = @intCast(2 * subtree_index);
+                    self.folded_depth = foldedDepth(subtree_index);
                     const position = Position.init(self.index);
-                    const root = if (subtree < subtreeCount(chunkCount(self.view._orig_len)))
-                        try self.view.state.root.getNode(pool, subtreeGindex(subtree))
+                    const root = if (subtree_index < subtreeCount(chunkCount(self.view._orig_len)))
+                        try self.view.state.root.getNode(pool, subtreeGindex(subtree_index))
                     else
                         @as(Node.Id, @enumFromInt(depth));
                     self.iterator = Node.DepthIterator.init(
                         pool,
                         root,
-                        depth - self.leaf_offset,
-                        (self.index - start) >> self.leaf_offset,
+                        depth - self.folded_depth,
+                        (self.index - start) >> self.folded_depth,
                     );
                     self.subtree_end = start + (@as(usize, 1) << depth);
                     self.gindex = position.gindex;
-                    self.index = position.start;
+                    self.index = position.first_chunk;
                 }
                 const committed = try self.iterator.next();
                 const node = if (self.view.state.changed.count() == 0)
@@ -369,11 +369,11 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
                     self.view.state.children_nodes.get(self.gindex) orelse committed;
                 const block: Block = .{
                     .node = node,
-                    .start = self.index,
-                    .count = @as(usize, 1) << self.leaf_offset,
-                    .leaf_offset = self.leaf_offset,
+                    .first_chunk = self.index,
+                    .chunk_count = @as(usize, 1) << self.folded_depth,
+                    .folded_depth = self.folded_depth,
                 };
-                self.index += block.count;
+                self.index += block.chunk_count;
                 self.gindex = @enumFromInt(@intFromEnum(self.gindex) + 1);
                 return block;
             }
@@ -387,25 +387,25 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             }
             const pool = self.state.pool;
             const chunk_index = index / items_per_chunk;
-            const subtree = subtreeIndex(chunk_index);
-            const leaf_offset = leafOffset(subtree);
-            const depth: Depth = @intCast(2 * subtree - leaf_offset);
-            const offset = (chunk_index - subtreeStart(subtree)) >> leaf_offset;
+            const subtree_index = subtreeIndex(chunk_index);
+            const folded_depth = foldedDepth(subtree_index);
+            const depth: Depth = @intCast(2 * subtree_index - folded_depth);
+            const offset = (chunk_index - subtreeStartChunk(subtree_index)) >> folded_depth;
             var prefixes: [progressive.max_tree_subtrees]Node.Id = undefined;
             var spine = try self.state.root.getLeft(pool);
-            for (0..subtree) |i| {
+            for (0..subtree_index) |i| {
                 prefixes[i] = try spine.getLeft(pool);
                 spine = try spine.getRight(pool);
             }
             const root = try spine.getLeft(pool);
             const boundary = try root.getNodeAtDepth(pool, depth, offset);
             const keep_bytes = (index % items_per_chunk + 1) * ST.Element.fixed_size;
-            const leaf = if (leaf_offset == 0) blk: {
+            const leaf = if (folded_depth == 0) blk: {
                 var bytes = boundary.getRoot(pool).*;
                 @memset(bytes[keep_bytes..], 0);
                 break :blk try pool.createLeaf(&bytes);
             } else if (boundary.getState(pool).isZero()) boundary else blk: {
-                const intra_chunk = (chunk_index - subtreeStart(subtree)) % ChunkedLeaf.K;
+                const intra_chunk = (chunk_index - subtreeStartChunk(subtree_index)) % ChunkedLeaf.K;
                 const trimmed_leaf = try pool.createChunkedLeafEmpty(@intCast(intra_chunk + 1));
                 errdefer pool.unref(trimmed_leaf);
                 const old_chunks = try boundary.getChunkedLeafChunks(pool);
@@ -425,7 +425,7 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
                 pool,
                 depth,
                 offset,
-                leaf_offset,
+                folded_depth,
             );
             try pool.ref(trimmed);
             defer pool.unref(trimmed);
@@ -434,7 +434,7 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
                 var contents = try pool.createBranch(trimmed, @enumFromInt(0));
                 errdefer pool.unref(contents);
 
-                var i = subtree;
+                var i = subtree_index;
                 while (i > 0) {
                     i -= 1;
                     contents = try pool.createBranch(prefixes[i], contents);
@@ -476,34 +476,30 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             return ST.tree.serializeIntoBytes(self.state.root, self.state.pool, out);
         }
 
-        inline fn getChunk(self: *Self, position: Position) !Node.Id {
-            if (self.cached_chunk) |cached| {
-                if (cached.position.start == position.start) return cached.node;
+        inline fn getLeaf(self: *Self, position: Position) !Node.Id {
+            if (self.cached_leaf) |cached| {
+                if (cached.position.first_chunk == position.first_chunk) return cached.node;
             }
             const gindex = position.gindex;
             const node = self.state.children_nodes.get(gindex) orelse
-                if (position.start >= chunkCount(self._orig_len))
-                    @as(Node.Id, @enumFromInt(position.leaf_offset))
+                if (position.first_chunk >= chunkCount(self._orig_len))
+                    @as(Node.Id, @enumFromInt(position.folded_depth))
                 else
                     try self.state.getChildNode(gindex);
-            self.cached_chunk = .{
-                .position = position,
-                .node = node,
-                .dirty = self.state.changed.contains(gindex),
-            };
+            self.cached_leaf = .{ .position = position, .node = node };
             return node;
         }
 
-        inline fn positionForChunk(self: *const Self, index: usize) Position {
-            if (self.cached_chunk) |cached| {
+        inline fn positionForChunk(self: *const Self, chunk_index: usize) Position {
+            if (self.cached_leaf) |cached| {
                 const position = cached.position;
-                if (index >= position.start and
-                    index - position.start < (@as(usize, 1) << position.leaf_offset))
+                if (chunk_index >= position.first_chunk and
+                    chunk_index - position.first_chunk < (@as(usize, 1) << position.folded_depth))
                 {
                     return position;
                 }
             }
-            return Position.init(index);
+            return Position.init(chunk_index);
         }
 
         fn chunkCount(len: usize) usize {
@@ -514,44 +510,48 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             return std.math.log2_int(usize, 3 * chunk_index + 1) / 2;
         }
 
-        fn subtreeStart(index: usize) usize {
-            return ((@as(usize, 1) << @intCast(2 * index)) - 1) / 3;
+        fn subtreeStartChunk(subtree_index: usize) usize {
+            return ((@as(usize, 1) << @intCast(2 * subtree_index)) - 1) / 3;
         }
 
         fn subtreeCount(count: usize) usize {
             return if (count == 0) 0 else subtreeIndex(count - 1) + 1;
         }
 
-        fn spineGindex(index: usize) Gindex {
-            return @enumFromInt((@as(Gindex.Uint, 3) << @intCast(index)) - 1);
+        fn spineGindex(subtree_index: usize) Gindex {
+            return @enumFromInt((@as(Gindex.Uint, 3) << @intCast(subtree_index)) - 1);
         }
 
-        fn subtreeGindex(index: usize) Gindex {
-            return @enumFromInt(@intFromEnum(spineGindex(index)) * 2);
+        fn subtreeGindex(subtree_index: usize) Gindex {
+            return @enumFromInt(@intFromEnum(spineGindex(subtree_index)) * 2);
         }
 
-        fn leafOffset(subtree: usize) Depth {
-            return if (use_chunked_leaf and 2 * subtree >= ChunkedLeaf.k_log2)
+        fn foldedDepth(subtree_index: usize) Depth {
+            return if (use_chunked_leaf and 2 * subtree_index >= ChunkedLeaf.k_log2)
                 ChunkedLeaf.k_log2
             else
                 0;
         }
 
+        /// Subtree i covers 4^i SSZ chunks at logical depth 2*i. With chunked leaves enabled,
+        /// sufficiently deep subtrees fold their bottom k_log2 levels into K-chunk nodes.
+        /// Position identifies one such node (or an ordinary leaf) by its gindex and absolute
+        /// first_chunk. Node boundaries align relative to the subtree's first chunk.
         const Position = struct {
-            start: usize,
-            leaf_offset: Depth,
+            first_chunk: usize,
+            folded_depth: Depth,
             gindex: Gindex,
 
-            inline fn init(index: usize) Position {
-                const subtree = subtreeIndex(index);
-                const start = subtreeStart(subtree);
-                const leaf_offset = leafOffset(subtree);
-                const leaf_index = (index - start) >> leaf_offset;
-                const prefix = @intFromEnum(subtreeGindex(subtree)) <<
-                    @intCast(2 * subtree - leaf_offset);
+            inline fn init(chunk_index: usize) Position {
+                const subtree_index = subtreeIndex(chunk_index);
+                const start = subtreeStartChunk(subtree_index);
+                const folded_depth = foldedDepth(subtree_index);
+                const leaf_index = (chunk_index - start) >> folded_depth;
+                const prefix = @intFromEnum(subtreeGindex(subtree_index)) <<
+                    @intCast(2 * subtree_index - folded_depth);
                 return .{
-                    .start = start + (leaf_index << leaf_offset),
-                    .leaf_offset = leaf_offset,
+                    .first_chunk = start + (leaf_index << folded_depth),
+                    .folded_depth = folded_depth,
                     .gindex = @enumFromInt(prefix + leaf_index),
                 };
             }

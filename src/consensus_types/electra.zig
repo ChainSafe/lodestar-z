@@ -39,6 +39,8 @@ pub const RandaoMixes = phase0.RandaoMixes;
 pub const Deposits = phase0.Deposits;
 pub const VoluntaryExits = phase0.VoluntaryExits;
 
+pub const EpochParticipation = altair.EpochParticipation;
+pub const InactivityScores = altair.InactivityScores;
 pub const SyncAggregate = altair.SyncAggregate;
 pub const SyncCommittee = altair.SyncCommittee;
 pub const SyncCommitteeMessage = altair.SyncCommitteeMessage;

@@ -13,24 +13,9 @@ const buildSlashingsCacheIfNeeded = @import("../cache/slashings_cache.zig").buil
 const processAttestationPhase0 = @import("./process_attestation_phase0.zig").processAttestationPhase0;
 const Node = @import("persistent_merkle_tree").Node;
 const preset = @import("preset").preset;
-const processAttestationsAltairWithParent = @import("./process_attestation_altair.zig").processAttestationsAltairWithParent;
+const processAttestationsAltair = @import("./process_attestation_altair.zig").processAttestationsAltair;
 
 pub fn processAttestations(
-    comptime fork: ForkSeq,
-    allocator: Allocator,
-    io: std.Io,
-    config: *const BeaconConfig,
-    epoch_cache: *EpochCache,
-    state: *BeaconState(fork),
-    proposer_rewards: *ProposerRewards,
-    slashings_cache: *SlashingsCache,
-    attestations: []const ForkTypes(fork).Attestation.Type,
-    verify_signatures: bool,
-) !void {
-    return processAttestationsWithParent(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, attestations, null, verify_signatures);
-}
-
-pub fn processAttestationsWithParent(
     comptime fork: ForkSeq,
     allocator: Allocator,
     io: std.Io,
@@ -60,7 +45,7 @@ pub fn processAttestationsWithParent(
             );
         }
     } else {
-        try processAttestationsAltairWithParent(
+        try processAttestationsAltair(
             fork,
             allocator,
             io,
@@ -100,6 +85,7 @@ test "process attestations - sanity" {
             &test_state.cached_state.proposer_rewards,
             &test_state.cached_state.slashings_cache,
             electra.items,
+            null,
             true,
         ),
     );

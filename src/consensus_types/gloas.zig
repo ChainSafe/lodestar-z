@@ -90,7 +90,7 @@ pub const ExecutionRequests = ssz.VariableProgressiveContainerType(struct {
     consolidations: ConsolidationRequests,
     builder_deposits: BuilderDepositRequests,
     builder_exits: BuilderExitRequests,
-}, &([_]u1{1} ** 5));
+}, &@as([5]u1, @splat(1)));
 pub const SingleAttestation = electra.SingleAttestation;
 pub const AggregationBits = ssz.ProgressiveBitListType(.{});
 pub const AttestingIndices = ssz.FixedProgressiveListType(p.ValidatorIndex, .{});
@@ -99,13 +99,13 @@ pub const Attestation = ssz.VariableProgressiveContainerType(struct {
     data: AttestationData,
     signature: p.BLSSignature,
     committee_bits: ssz.BitVectorType(preset.MAX_COMMITTEES_PER_SLOT),
-}, &([_]u1{1} ** 4));
+}, &@as([4]u1, @splat(1)));
 pub const Attestations = ssz.VariableProgressiveListType(Attestation, .{});
 pub const IndexedAttestation = ssz.VariableProgressiveContainerType(struct {
     attesting_indices: AttestingIndices,
     data: AttestationData,
     signature: p.BLSSignature,
-}, &([_]u1{1} ** 3));
+}, &@as([3]u1, @splat(1)));
 pub const AttesterSlashing = ssz.VariableContainerType(struct {
     attestation_1: IndexedAttestation,
     attestation_2: IndexedAttestation,
@@ -152,14 +152,14 @@ pub const ExecutionPayload = ssz.VariableProgressiveContainerType(struct {
     excess_blob_gas: p.Uint64,
     block_access_list: BlockAccessList,
     slot_number: p.Uint64,
-}, &([_]u1{1} ** 19));
+}, &@as([19]u1, @splat(1)));
 
 pub const NewPayloadRequest = ssz.VariableProgressiveContainerType(struct {
     execution_payload: ExecutionPayload,
     versioned_hashes: VersionedHashes,
     parent_beacon_block_root: p.Root,
     execution_requests: ExecutionRequests,
-}, &([_]u1{1} ** 4));
+}, &@as([4]u1, @splat(1)));
 
 // Reuse Fulu DAS types
 pub const RowIndex = fulu.RowIndex;
@@ -254,7 +254,7 @@ pub const PayloadAttestation = ssz.FixedProgressiveContainerType(struct {
     aggregation_bits: PayloadTimelinessCommitteeBits,
     data: PayloadAttestationData,
     signature: p.BLSSignature,
-}, &([_]u1{1} ** 3));
+}, &@as([3]u1, @splat(1)));
 
 pub const PayloadAttestationMessage = ssz.FixedContainerType(struct {
     validator_index: p.ValidatorIndex,
@@ -266,7 +266,7 @@ pub const IndexedPayloadAttestation = ssz.VariableProgressiveContainerType(struc
     attesting_indices: PayloadTimelinessCommitteeIndices,
     data: PayloadAttestationData,
     signature: p.BLSSignature,
-}, &([_]u1{1} ** 3));
+}, &@as([3]u1, @splat(1)));
 
 pub const ProposerPreferences = ssz.FixedContainerType(struct {
     dependent_root: p.Root,
@@ -294,7 +294,7 @@ pub const ExecutionPayloadBid = ssz.VariableProgressiveContainerType(struct {
     execution_payment: p.Uint64,
     blob_kzg_commitments: BlobKzgCommitments,
     execution_requests_root: p.Root,
-}, &([_]u1{1} ** 12));
+}, &@as([12]u1, @splat(1)));
 
 pub const SignedExecutionPayloadBid = ssz.VariableContainerType(struct {
     message: ExecutionPayloadBid,
@@ -307,7 +307,7 @@ pub const ExecutionPayloadEnvelope = ssz.VariableProgressiveContainerType(struct
     builder_index: BuilderIndex,
     beacon_block_root: p.Root,
     parent_beacon_block_root: p.Root,
-}, &([_]u1{1} ** 5));
+}, &@as([5]u1, @splat(1)));
 
 pub const SignedExecutionPayloadEnvelope = ssz.VariableContainerType(struct {
     message: ExecutionPayloadEnvelope,
@@ -333,7 +333,7 @@ pub const BeaconBlockBody = ssz.VariableProgressiveContainerType(struct {
     signed_execution_payload_bid: SignedExecutionPayloadBid,
     payload_attestations: PayloadAttestations,
     parent_execution_requests: ExecutionRequests,
-}, &([_]u1{1} ** 13));
+}, &@as([13]u1, @splat(1)));
 
 pub const BeaconBlock = ssz.VariableContainerType(struct {
     slot: p.Slot,
@@ -408,7 +408,7 @@ pub const BeaconState = ssz.VariableProgressiveContainerType(struct {
     latest_execution_payload_bid: ExecutionPayloadBid,
     payload_expected_withdrawals: Withdrawals,
     ptc_window: PtcWindow,
-}, &([_]u1{1} ** 46));
+}, &@as([46]u1, @splat(1)));
 
 pub const BlobSidecar = electra.BlobSidecar;
 

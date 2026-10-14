@@ -125,6 +125,7 @@ fn computeAttestationsReward(
         &scratch.proposer_rewards,
         &scratch.slashings_cache,
         body.inner.attestations.items,
+        null,
         false,
     );
 
