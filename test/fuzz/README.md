@@ -206,28 +206,29 @@ target a container runs.
 
 | Event | Result |
 |---|---|
-| Push to `main` touching `src/`, `pkg/`, `test/fuzz/`, `build.zig*` or the Dockerfile | build, test, **publish** |
-| Pull request touching the same | build and test only |
-| Manual run from the Actions tab | build, test, publish if run on `main` |
+| Manual run on `main` (Actions → Fuzz image → Run workflow) | build, test, **publish** |
+| Manual run on any other branch | build and test only |
+| Pull request touching `src/`, `pkg/`, `test/fuzz/`, `build.zig*` or the Dockerfile | build and test only |
 
-Fuzz campaigns run for days and restart when their image changes, so images are
-published on relevant changes rather than every commit, and **publishing never
-changes what the fuzz server runs**. A campaign moves to a new image only when
-its digest is pinned on the platform.
+Publishing is manual on purpose. The fuzz platform follows the `main` tag and
+restarts every lodestar-z campaign on the new image, so publish once a useful
+batch of changes has landed rather than on every commit. Pull requests still
+build and test, so a broken `Dockerfile.fuzz` is caught before the next publish.
 
-Each publish is tagged `main` (always the latest) and `sha-<short commit>`; the
-full commit is also in the `org.opencontainers.image.revision` label. Only the
-newest 20 versions are kept.
+Each publish is tagged `main` and `sha-<short commit>`; the full commit is also
+in the `org.opencontainers.image.revision` label. Only the newest 20 versions are
+kept.
 
 ### Running it on the fuzz platform
 
-The publish job's summary prints the digest to pin. Add one entry per target to
-`fuzz_jobs` in lodestar-ansible-development's `group_vars/fuzzer/vars.yml`:
+One entry per target in `fuzz_jobs` (lodestar-ansible-development,
+`group_vars/fuzzer/vars.yml`), referencing the `main` tag. It never needs editing
+when a new image is published:
 
 ```yaml
 - project: lodestar-z
   target: ssz_basic                       # becomes FUZZ_TARGET
-  image: ghcr.io/chainsafe/lodestar-z-fuzz@sha256:<digest>  # lodestar-z <commit>
+  image: ghcr.io/chainsafe/lodestar-z-fuzz:main
   cores: 1
   memory_mb: 2048
   duration: 0
@@ -235,13 +236,14 @@ The publish job's summary prints the digest to pin. Add one entry per target to
   gid: 61001
 ```
 
-Pin the **digest**, not a tag: `main` moves, and a digest guarantees the server
-runs the image that was reviewed. To trace a crash back to source, read the
-commit from the pinned image:
+When `main` moves, the platform stops each campaign (`SIGTERM`, so AFL++ saves
+its state) and starts it on the new image, resuming from the same corpus. To
+freeze a target on one build, for example while investigating a crash, use
+`image: ghcr.io/chainsafe/lodestar-z-fuzz@sha256:<digest>` instead; a pinned
+target is never switched. To find the commit a campaign is running:
 
 ```sh
-docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-  ghcr.io/chainsafe/lodestar-z-fuzz@sha256:<digest>
+docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' <image>
 ```
 
 ### What a campaign produces
