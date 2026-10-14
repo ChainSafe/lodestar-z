@@ -14,7 +14,7 @@ const config = @import("config");
 // CPUs: 32
 // Memory: 62Gi
 
-// zbuild run bench_state -Doptimize=ReleaseFast
+// zig build run:bench_ssz_state -Doptimize=ReleaseSafe
 //
 // benchmark              runs     total time     time/run (avg ± σ)     (min ... max)                p75        p99        p995
 // -----------------------------------------------------------------------------------------------------------------------------
