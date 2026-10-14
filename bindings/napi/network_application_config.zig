@@ -64,25 +64,17 @@ pub const Resources = struct {
     bridgeBudgetBytes: usize,
 };
 
-const resource_maxima: Resources = .{
-    .peerCapacity = n.gossipsub.constants.retained_peers_cap,
-    .targetPeers = 256,
-    .maxPeers = 256,
-    .minOutbound = 256,
-    .outboundReserve = n.gossipsub.constants.retained_peers_cap,
-    .connectionCapacity = 256,
-    .handshakingCapacity = 256,
-    .dialingCapacity = n.peers.Dialing.attempts_max,
+const resource_maxima = .{
     .receiveBudgetBytes = 9007199254740991,
     .nativeBudgetBytes = 2 * 1024 * 1024 * 1024,
     .bridgeBudgetBytes = 1024 * 1024 * 1024,
 };
 
-const required = .{ "beaconConfig", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "gossipPolicy", "resources", "identify", "serveLightClients", "logLevel" };
+const required = .{ "beaconConfig", "activeValidatorCount", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "resources", "identify", "serveLightClients", "logLevel" };
 
 pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out: *Config) !void {
     const remembered = try value.hasNamedProperty("rememberedPeers");
-    try decode.object(value, &(required ++ .{ "rememberedPeers", "transport", "traceGossip", "traceTurns", "xray" }));
+    try decode.object(value, &(required ++ .{ "gossipPolicy", "rememberedPeers", "transport", "traceGossip", "traceTurns", "xray" }));
     inline for (required) |name| _ = try decode.get(value, name);
     out.trace_gossip = if (try value.hasNamedProperty("traceGossip")) try decode.boolean(try decode.get(value, "traceGossip")) else false;
     out.trace_turns = if (try value.hasNamedProperty("traceTurns")) try decode.boolean(try decode.get(value, "traceTurns")) else false;
@@ -107,10 +99,24 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out
     try cfg.parse(value, beacon, common);
     errdefer common.wipe();
     const resources = try decode.get(value, "resources");
-    try decode.completeObject(resources, &.{ "peerCapacity", "targetPeers", "maxPeers", "minOutbound", "outboundReserve", "connectionCapacity", "handshakingCapacity", "dialingCapacity", "receiveBudgetBytes", "nativeBudgetBytes", "bridgeBudgetBytes" });
-    inline for (@typeInfo(Resources).@"struct".fields) |field| {
-        const max: u64 = @field(resource_maxima, field.name);
-        @field(out.resources, field.name) = @intCast(try decode.integer(try decode.get(resources, field.name), max));
+    try decode.object(resources, &.{ "targetPeers", "maxPeers", "receiveBudgetBytes", "nativeBudgetBytes", "bridgeBudgetBytes" });
+    const target: u16 = @intCast(try decode.integer(try decode.get(resources, "targetPeers"), 256));
+    const max: u16 = @intCast(try decode.integer(try decode.get(resources, "maxPeers"), 256));
+    out.resources = .{
+        .targetPeers = target,
+        .maxPeers = max,
+        .peerCapacity = @max(64, 2 * max),
+        .minOutbound = @max(1, target / 4),
+        .outboundReserve = @min(32, target),
+        .connectionCapacity = @min(256, max + 32),
+        .handshakingCapacity = 32,
+        .dialingCapacity = 32,
+        .receiveBudgetBytes = 512 * 1024 * 1024,
+        .nativeBudgetBytes = 2 * 1024 * 1024 * 1024,
+        .bridgeBudgetBytes = 512 * 1024 * 1024,
+    };
+    inline for (.{ "receiveBudgetBytes", "nativeBudgetBytes", "bridgeBudgetBytes" }) |field| {
+        if (try resources.hasNamedProperty(field)) @field(out.resources, field) = @intCast(try decode.integer(try decode.get(resources, field), @field(resource_maxima, field)));
     }
     if (out.resources.nativeBudgetBytes == 0 or out.resources.bridgeBudgetBytes == 0) return error.InvalidNetworkInteger;
     const identify = try decode.get(value, "identify");

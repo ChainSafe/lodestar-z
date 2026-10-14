@@ -21,7 +21,10 @@ async function until(read) {
 const config = applicationConfig();
 config.identitySecretKey[31] = isMainThread ? 61 : 62;
 config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-if (!isMainThread) config.xray = {address: "/nonexistent-lodestar-xray-test/collector.sock", waitForAttach: false};
+if (!isMainThread) {
+  config.xray = {address: "/nonexistent-lodestar-xray-test/collector.sock", waitForAttach: false};
+  config.resources.nativeBudgetBytes = 2 * 1024 ** 3;
+}
 const runtime = isMainThread ? await startPeer(config) : startRuntime(config);
 const identity = await runtime.identity;
 const intent = localIntent(config);

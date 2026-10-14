@@ -292,14 +292,8 @@ test("actual 200/210 resources resolve and publish complete capacity", async () 
   const config = applicationConfig();
   config.resources = {
     bridgeBudgetBytes: 512 * 1024 * 1024,
-    connectionCapacity: 256,
-    dialingCapacity: 16,
-    handshakingCapacity: 32,
     maxPeers: 210,
-    minOutbound: 16,
     nativeBudgetBytes: 768 * 1024 * 1024,
-    outboundReserve: 32,
-    peerCapacity: 512,
     receiveBudgetBytes: 512 * 1024 * 1024,
     targetPeers: 200,
   };
@@ -307,9 +301,9 @@ test("actual 200/210 resources resolve and publish complete capacity", async () 
   try {
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), 100n);
-    expect((await runtime.getPeers()).capacity).toBe(512);
+    expect((await runtime.getPeers()).capacity).toBe(420);
 
-    expect(runtime.limits.peerCapacity).toBe(config.resources.peerCapacity);
+    expect(runtime.limits.peerCapacity).toBe(Math.max(64, 2 * config.resources.maxPeers));
   } finally {
     await runtime.close();
   }

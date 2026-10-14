@@ -1,7 +1,7 @@
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {expect, test} from "vitest";
-import type {NativeRememberedPeer} from "../src/network.js";
+import type {NativeApplicationConfig, NativeRememberedPeer} from "../src/network.js";
 import {applicationConfig, startRuntime, testChain} from "./utils/network.js";
 
 test.each(["resources", "identify", "serveLightClients", "logLevel"])("rejects missing %s", (field) => {
@@ -11,14 +11,8 @@ test.each(["resources", "identify", "serveLightClients", "logLevel"])("rejects m
 });
 
 test.each([
-  ["peerCapacity", 512],
   ["targetPeers", 256],
   ["maxPeers", 256],
-  ["minOutbound", 256],
-  ["outboundReserve", 512],
-  ["connectionCapacity", 256],
-  ["handshakingCapacity", 256],
-  ["dialingCapacity", 64],
   ["receiveBudgetBytes", Number.MAX_SAFE_INTEGER],
   ["nativeBudgetBytes", 2 * 1024 ** 3],
   ["bridgeBudgetBytes", 1024 ** 3],
@@ -71,7 +65,7 @@ test.each([
     c.resources.targetPeers = 13;
   },
   (c: ReturnType<typeof applicationConfig>) => {
-    c.resources.connectionCapacity = 1;
+    Reflect.set(c.resources, "connectionCapacity", 1);
   },
   (c: ReturnType<typeof applicationConfig>) => {
     Reflect.set(c.local.metadata, "custodyGroupCount", null);
@@ -91,10 +85,12 @@ test.each(["native", "bridge"])("rejects insufficient %s reservation before owne
   );
 });
 
-test.each([512, 513])("retained peer capacity %s respects the native gossip ceiling", async (capacity) => {
+test.each([256, 257])("derives retained peer capacity from maxPeers %s", async (capacity) => {
   const config = applicationConfig();
-  config.resources.peerCapacity = capacity;
-  if (capacity === 513) {
+  config.resources.maxPeers = capacity;
+  config.resources.nativeBudgetBytes = 2 * 1024 ** 3;
+  config.resources.receiveBudgetBytes = 512 * 1024 ** 2;
+  if (capacity === 257) {
     expect(() => startRuntime(config)).toThrow("InvalidNetworkInteger");
     return;
   }
@@ -241,4 +237,58 @@ test("accepts transport overrides and exposes their effective values", async () 
   } finally {
     await runtime.close();
   }
+});
+
+test.each([
+  0,
+  -1,
+  1.5,
+  Number.NaN,
+  Number.POSITIVE_INFINITY,
+  Number.MAX_SAFE_INTEGER + 1,
+])("rejects invalid active validator count %s before starting the owner", (count) => {
+  const config = applicationConfig();
+  config.activeValidatorCount = count;
+  expect(() => startRuntime(config)).toThrow(count === 0 ? "InvalidNetworkConfig" : "InvalidNetworkInteger");
+});
+
+test("derives startup policy from beacon configuration and host budgets", async () => {
+  const config: NativeApplicationConfig = applicationConfig();
+  config.resources.nativeBudgetBytes = 2 * 1024 ** 3;
+  config.gossipPolicy = {hostBytes: 64 * 1024 * 1024, hostItems: 1024, topicConcurrency: 2};
+  const runtime = startRuntime(config);
+  try {
+    const metrics = await runtime.getMetrics();
+    expect(metrics).toContain('lodestar_gossip_validation_concurrency_limit{topic="beacon_attestation"} 2\n');
+    expect(metrics).toContain('lodestar_gossip_validation_concurrency_limit{topic="beacon_block"} 2\n');
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("rejects a host budget that cannot hold a maximum-sized message", () => {
+  const config: NativeApplicationConfig = applicationConfig();
+  config.gossipPolicy = {hostBytes: 1024};
+  expect(() => startRuntime(config)).toThrow("InvalidGossipExecutionLimits");
+});
+
+test.each(["absent", "undefined", "empty"] as const)("derives default gossip policy when %s", async (policy) => {
+  const config: NativeApplicationConfig = applicationConfig();
+  config.resources.nativeBudgetBytes = 2 * 1024 ** 3;
+  if (policy === "absent") Reflect.deleteProperty(config, "gossipPolicy");
+  else config.gossipPolicy = policy === "undefined" ? undefined : {};
+  const runtime = startRuntime(config);
+  try {
+    const metrics = await runtime.getMetrics();
+    expect(metrics).toContain('lodestar_gossip_validation_concurrency_limit{topic="beacon_block"} 8\n');
+    expect(metrics).toContain('lodestar_gossip_validation_concurrency_limit{topic="beacon_attestation"} 128\n');
+  } finally {
+    await runtime.close();
+  }
+});
+
+test.each(["processor", "execution"])("rejects removed per-kind %s overrides", (key) => {
+  const config = applicationConfig();
+  Object.assign(config.gossipPolicy, {[key]: {}});
+  expect(() => startRuntime(config)).toThrow("InvalidNetworkConfig");
 });

@@ -146,11 +146,11 @@ it.each([
     "InvalidNetworkInteger",
   ],
   [
-    "infinite score",
+    "infinite validator count",
     (c: ReturnType<typeof applicationConfig>) => {
-      c.gossipPolicy.score.behaviourWeight = Number.NEGATIVE_INFINITY;
+      c.activeValidatorCount = Number.POSITIVE_INFINITY;
     },
-    "InvalidNetworkConfig",
+    "InvalidNetworkInteger",
   ],
   [
     "unknown timer",
@@ -160,9 +160,9 @@ it.each([
     "InvalidNetworkConfig",
   ],
   [
-    "missing timer",
+    "missing validator count",
     (c: ReturnType<typeof applicationConfig>) => {
-      Reflect.deleteProperty(c.gossipPolicy, "txTimeoutMs");
+      Reflect.deleteProperty(c, "activeValidatorCount");
     },
     "InvalidNetworkInteger",
   ],

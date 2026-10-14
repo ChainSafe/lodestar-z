@@ -315,6 +315,17 @@ fn processorLimits(chain: *const Chain, options: *const Options) network.gossip_
 /// The feat4 sas owner: 210 peers and Lodestar's gossip policy and processor limits.
 fn hubResolved(chain: *const Chain, options: *const Options) !network.configuration.Resolved {
     const limits = processorLimits(chain, options);
+    var gossip_options: gossip.Gossipsub.Options = .{
+        .topic_policy = chain.network_config.topics[0..chain.network_config.boundary_count],
+        .message_id_policy = .{ .phase0_digest = chain.network_config.phase0_digest },
+        .iwant_followup_ms = 12_000,
+        .large_frame_timeout_ms = 30_000,
+        .opportunistic_graft_interval_ms = 42_000,
+        .calls_per_pump = if (options.calls_per_pump == 0) (gossip.Gossipsub.Options{}).calls_per_pump else options.calls_per_pump,
+        .calls_per_peer = if (options.calls_per_peer == 0) (gossip.Gossipsub.Options{}).calls_per_peer else options.calls_per_peer,
+        .topic_params = if (options.validators == 0) null else lodestarTopics(options.validators),
+    };
+    try gossip_options.setPayloadLimits(&limits);
     return network.configuration.resolve(.{
         .seed = 7,
         .work_limits = .{ .receive_per_turn_max = options.receive_per_turn },
@@ -324,64 +335,18 @@ fn hubResolved(chain: *const Chain, options: *const Options) !network.configurat
         .peers = .{ .capacity = 420, .outbound_reserve = 32, .target_peers = 200, .max_peers = 210, .min_outbound = 50 },
         .byte_limit = 2048 * mib,
         .router = .{ .capabilities = chain.update.capabilities },
-        .gossip = .{
-            .topic_policy = chain.network_config.topics[0..chain.network_config.boundary_count],
-            .message_id_policy = .{ .phase0_digest = chain.network_config.phase0_digest },
-            .payload_limits = limits,
-            .iwant_followup_ms = 12_000,
-            .large_frame_timeout_ms = 30_000,
-            .opportunistic_graft_interval_ms = 42_000,
-            .calls_per_pump = if (options.calls_per_pump == 0) null else options.calls_per_pump,
-            .calls_per_peer = if (options.calls_per_peer == 0) null else options.calls_per_peer,
-            .topic_params = if (options.validators == 0) null else lodestarTopics(options.validators),
-        },
+        .gossip = gossip_options,
     });
 }
 
 /// Lodestar's `getTopicScoreParams` for attestation subnets at `validators` active validators, with
 /// every other kind unscored.
 fn lodestarTopics(validators: u32) [gossip.topic_policy.kind_count]gossip.score.TopicPolicy {
-    const p = preset.preset;
-    const slot_ms: f64 = @floatFromInt(chain_config.chain.SLOT_DURATION_MS);
-    const slots: f64 = @floatFromInt(p.SLOTS_PER_EPOCH);
-    const subnets: f64 = @floatFromInt(Kind.beacon_attestation.countMax());
-    // Ten in-mesh and forty first-delivery points over Lodestar's scored topic weights.
-    const max_positive: f64 = 50 * 2.85;
-    const committees: u64 = @max(1, @min(p.MAX_COMMITTEES_PER_SLOT, validators / p.SLOTS_PER_EPOCH / p.TARGET_COMMITTEE_SIZE));
-    const bursts = committees * p.SLOTS_PER_EPOCH >= 2 * @as(u64, Kind.beacon_attestation.countMax());
-    const rate = @as(f64, @floatFromInt(validators)) / subnets / slots;
-    const weight = 1 / subnets;
-    const first_decay = decayOver(if (bursts) slots * slot_ms else 4 * slots * slot_ms, slot_ms);
-    const mesh_slots: u64 = if (bursts) 4 * p.SLOTS_PER_EPOCH else 16 * p.SLOTS_PER_EPOCH;
-    const mesh_decay = decayOver(@as(f64, @floatFromInt(mesh_slots)) * slot_ms, slot_ms);
-    const threshold = rate / 50 / (1 - mesh_decay) * mesh_decay;
-    const first_cap = 2 * rate / 8 / (1 - first_decay);
-    var topics: [gossip.topic_policy.kind_count]gossip.score.TopicPolicy = @splat(.{ .params = .{ .weight = 0 } });
-    topics[@intFromEnum(Kind.beacon_attestation)] = .{ .mesh_delivery_start_slot = mesh_slots + 1, .params = .{
-        .weight = weight,
-        .time_in_mesh_weight = 10 / (3600 / (slot_ms / 1000)),
-        .time_in_mesh_cap = 3600 / (slot_ms / 1000),
-        .time_in_mesh_quantum_ms = chain_config.chain.SLOT_DURATION_MS,
-        .first_delivery_weight = 40 / first_cap,
-        .first_delivery_cap = first_cap,
-        .first_delivery_decay = first_decay,
-        .mesh_delivery_weight = -max_positive / (weight * threshold * threshold),
-        .mesh_delivery_threshold = threshold,
-        .mesh_delivery_cap = @max(16 * threshold, 2),
-        .mesh_delivery_decay = mesh_decay,
-        .mesh_delivery_activation_ms = if (bursts) chain_config.chain.SLOT_DURATION_MS * (p.SLOTS_PER_EPOCH / 2 + 1) else chain_config.chain.SLOT_DURATION_MS * p.SLOTS_PER_EPOCH,
-        .mesh_delivery_window_ms = 12_000,
-        .mesh_failure_weight = -max_positive / (weight * threshold * threshold),
-        .mesh_failure_decay = mesh_decay,
-        .invalid_weight = -max_positive / weight,
-        .invalid_decay = decayOver(50 * slots * slot_ms, slot_ms),
-    } };
-    return topics;
-}
-
-/// The per-slot decay that brings a counter to 1% after `ms`.
-fn decayOver(ms: f64, slot_ms: f64) f64 {
-    return std.math.pow(f64, 0.01, slot_ms / ms);
+    var result = (network.application_policy.gossip(chain_config.chain.SLOT_DURATION_MS, validators) catch unreachable).topic_params.?;
+    for (&result, 0..) |*policy, i| if (i != @intFromEnum(Kind.beacon_attestation)) {
+        policy.params.weight = 0;
+    };
+    return result;
 }
 
 const slow_tick_ms = 10;
@@ -409,8 +374,8 @@ fn spokeResolved(chain: *const Chain, options: *const Options, index: u16, slow:
             .validation_capacity = 64,
             .mcache_arena_bytes = 16 * mib,
             .mcache_capacity = 4096,
-            .input_per_peer = if (slow) input else null,
-            .input_per_pump = if (slow) input else null,
+            .input_per_peer = if (slow) input else (gossip.Gossipsub.Options{}).input_per_peer,
+            .input_per_pump = if (slow) input else (gossip.Gossipsub.Options{}).input_per_pump,
         },
     });
 }

@@ -152,6 +152,19 @@ zig build test:spec_tests -Dspec_tests.filters="pattern" -Dpreset=minimal
 Use the minimal preset for faster iteration, but run mainnet when behavior depends on preset values.
 Do not assume minimal and mainnet constants are interchangeable.
 
+### Network score fixtures
+
+Regenerate `src/network/testdata/application_scores_{mainnet,minimal}.json` from the adjacent
+Lodestar checkout; do not edit these fixtures manually. From that checkout's root:
+
+```bash
+LODESTAR_PRESET=mainnet node --import tsx packages/beacon-node/test/utils/nativePolicyFixtures.ts ../lodestar-z-network-all/src/network/testdata
+LODESTAR_PRESET=minimal node --import tsx packages/beacon-node/test/utils/nativePolicyFixtures.ts ../lodestar-z-network-all/src/network/testdata
+```
+
+Adjust the destination for your checkout layout. `application_limits_mainnet.json` is a captured
+compatibility baseline from Lodestar's former configuration snapshots, not generator output.
+
 ### ere verifier fixtures
 
 The execution-proof-verifier binding test verifies ere's own fixture proofs when the fixtures are present;

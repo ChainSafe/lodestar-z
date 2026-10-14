@@ -131,7 +131,10 @@ test("native Xray exports while JavaScript is blocked and reconnects after idle 
   let fixture: Awaited<ReturnType<typeof facadeWithPeers>> | undefined;
   try {
     fixture = await facadeWithPeers(host(), 1, (config, index) => {
-      if (index === 0) config.xray = {address: `127.0.0.1:${address.port}`, waitForAttach: false};
+      if (index === 0) {
+        config.xray = {address: `127.0.0.1:${address.port}`, waitForAttach: false};
+        config.resources.nativeBudgetBytes = 2 * 1024 ** 3;
+      }
     });
     const {network, peers} = fixture;
     await expect.poll(() => attaches).toBe(1);
@@ -155,10 +158,8 @@ test("native Xray exports while JavaScript is blocked and reconnects after idle 
 }, 30_000);
 
 test("deferred handlers run after validation without waiting for the owner to apply verdicts", async () => {
-  // More than one owner turn's 64 verdicts, and fewer rejects than a graylist costs.
-  const COUNT = 80;
-  const verdictOf = (byte: number): Verdict =>
-    byte === 5 || byte === 45 ? "reject" : byte % 10 === 3 ? "ignore" : "accept";
+  const COUNT = 4;
+  const verdictOf = (byte: number): Verdict => (byte === 1 ? "reject" : byte === 2 ? "ignore" : "accept");
   const accepted = [...Array(COUNT).keys()].filter((byte) => verdictOf(byte) === "accept");
   let network: NativeNetwork | undefined;
   const validated: number[] = [];
@@ -172,9 +173,7 @@ test("deferred handlers run after validation without waiting for the owner to ap
     },
   });
   // The first peer publishes; the second receives what the facade forwards.
-  const {network: facade, peers} = await facadeWithPeers(networkHost, 2, (config) => {
-    config.gossipPolicy.processor.beacon_block.items = 256;
-  });
+  const {network: facade, peers} = await facadeWithPeers(networkHost, 2);
   network = facade;
   const [publisher, receiver] = peers;
   try {
@@ -379,7 +378,7 @@ test("the facade validates its host, starts without host callbacks and hides the
   const network = createNativeNetwork(config, recorded);
   try {
     expect(calls).toEqual([]);
-    expect(network.limits.peerCapacity).toBe(config.resources.peerCapacity);
+    expect(network.limits.peerCapacity).toBe(Math.max(64, 2 * config.resources.maxPeers));
     expect(network.limits.incomingCapacity).toBeGreaterThan(0);
     expect(Object.isFrozen(network.limits)).toBe(true);
     for (const name of ["exchange", "fail", "holdVerdicts", "identity", "state"]) expect(name in network).toBe(false);

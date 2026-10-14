@@ -343,6 +343,27 @@ test "gossip batch bounds, rollback and expiry keep pins until full completion" 
     table.close();
 }
 
+test "gossip processor retains reported verdicts across bounded drains" {
+    const count = p.GossipProcessor.batch_max + 16;
+    var table = try p.GossipProcessor.init(t.allocator, blockOptions(.{ .items = count, .bytes = count * 4096 }));
+    defer table.deinit();
+    defer table.close();
+    for (0..count) |_| _ = try capture(&table, .beacon_block, "x", .{}, 0, 100);
+    for (0..2) |_| {
+        const batch = table.claim(1);
+        table.finish(&batch);
+        for (batch.tokens[0..batch.len]) |token| try t.expect(table.report(token, .accept, 2));
+    }
+    try t.expectEqual(count, table.diag.pendingVerdicts);
+    for (0..p.GossipProcessor.batch_max) |_| table.retire(table.nextVerdict().?);
+    try t.expect(table.pending(true));
+    try t.expectEqual(16, table.diag.pendingVerdicts);
+    for (0..16) |_| table.retire(table.nextVerdict().?);
+    try t.expectEqual(0, table.diag.occupied);
+    try t.expect(!table.pending(true));
+    try t.expectEqual(null, table.nextVerdict());
+}
+
 test "gossip processor retires expired verdicts and rejects stale generations" {
     var table = try p.GossipProcessor.init(std.testing.allocator, blockOptions(.{ .items = 64, .bytes = 64 * 4096 }));
     defer table.deinit();

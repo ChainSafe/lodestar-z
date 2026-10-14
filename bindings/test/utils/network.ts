@@ -15,7 +15,7 @@ import type {
   IpEndpoint,
   NativeApplicationConfig,
   NativeDiscoveryConfig,
-  NativeGossipProcessorLimit,
+  NativeGossipStartupPolicy,
   NativeLocalIntent,
   NativeNetwork,
   NativePeerAction,
@@ -23,7 +23,6 @@ import type {
   NativeRuntimeConfig,
   NativeSubscriptionSet,
   NativeTopicKind,
-  NativeTopicScoreParams,
 } from "../../src/network.js";
 import type {
   NativeExchange,
@@ -100,55 +99,20 @@ export function nextIncoming(runtime: ExchangeRuntime): NativeIncomingRequest | 
   return result.serving[0] ?? null;
 }
 
-/**
- * Lodestar's processor plan for a small validator set, in topicKinds order. Each kind's byte weight exceeds its
- * largest compressed message on the test chain, so the weight sets the bytes.
- */
-function gossipProcessor(): Record<NativeTopicKind, NativeGossipProcessorLimit> {
-  const items = [8, 2048, 128, 32, 32, 128, 128, 1024, 8, 8, 128, 256, 256];
-  const byteWeights = [24, 8, 8, 1, 4, 1, 2, 2, 2, 2, 1, 8, 16];
-  return Object.fromEntries(
-    topicKinds.map((kind, i) => [kind, {bytes: byteWeights[i] * MIB, items: items[i]}])
-  ) as Record<NativeTopicKind, NativeGossipProcessorLimit>;
-}
-
-/** Lodestar's default host execution limits, capped by the processor items. */
-function gossipExecution(
-  processor: Record<NativeTopicKind, NativeGossipProcessorLimit>
-): Record<NativeTopicKind, NativeGossipProcessorLimit> {
-  const byteWeights = [32, 4, 8, 1, 4, 1, 2, 2, 2, 2, 1, 8, 24];
-  const itemWeights = [1, 8, 32, 1, 1, 1, 2, 4, 1, 1, 1, 4, 8];
-  const byteTotal = byteWeights.reduce((sum, weight) => sum + weight, 0);
-  const itemTotal = itemWeights.reduce((sum, weight) => sum + weight, 0);
-  const itemBudget = 4096;
-  const byteBudget = 64 * MIB;
-  return Object.fromEntries(
-    topicKinds.map((kind, i) => [
-      kind,
-      {
-        bytes: Math.floor((byteBudget * byteWeights[i]) / byteTotal),
-        items: Math.min(Math.floor((itemBudget * itemWeights[i]) / itemTotal), processor[kind].items),
-      },
-    ])
-  ) as Record<NativeTopicKind, NativeGossipProcessorLimit>;
-}
-
-export function networkConfig(): NativeRuntimeConfig {
+export function networkConfig(): NativeRuntimeConfig & {
+  gossipPolicy: NativeGossipStartupPolicy & {activeSendItems: Record<NativeTopicKind, number>};
+} {
   const key = new Uint8Array(32);
   key[31] = 1;
-  const processor = gossipProcessor();
   return {
+    activeValidatorCount: 16,
     bind: {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0},
     discovery: null,
     gossipPolicy: {
       activeSendItems: Object.fromEntries(
-        Object.keys(processor).map((kind) => [
-          kind,
-          kind === "data_column_sidecar" ? 256 : kind === "blob_sidecar" ? 32 : 8,
-        ])
+        topicKinds.map((kind) => [kind, kind === "data_column_sidecar" ? 256 : kind === "blob_sidecar" ? 32 : 8])
       ) as Record<NativeTopicKind, number>,
       activeSendTimeoutMs: 6000n,
-      execution: gossipExecution(processor),
       gossipFactor: 0.25,
       heartbeatIntervalMs: 1000n,
       idontwantMinDataSize: 16829,
@@ -157,43 +121,8 @@ export function networkConfig(): NativeRuntimeConfig {
       largeFrameTimeoutMs: 6000n,
       opportunisticGraftIntervalMs: 60000n,
       pressureTimeoutMs: 30000n,
-      processor,
       receiveBufferBytes: 16 * 1024 * 1024,
       retainedScoreMs: 38400000n,
-      score: {
-        behaviourDecay: 0.9,
-        behaviourThreshold: 6,
-        behaviourWeight: -10,
-        decayIntervalMs: 12000n,
-        decayToZero: 0.01,
-        gossipThreshold: -4000,
-        graylistThreshold: -16000,
-        ipColocationThreshold: 3,
-        ipColocationWeight: 0,
-        opportunisticGraftThreshold: 5,
-        publishThreshold: -8000,
-        topicCap: 3200,
-        topics: topicScores({
-          firstDeliveryCap: 100,
-          firstDeliveryDecay: 0.9,
-          firstDeliveryWeight: 1,
-          invalidDecay: 0.9,
-          invalidWeight: -100,
-          meshDeliveryActivationMs: 30000n,
-          meshDeliveryCap: 50,
-          meshDeliveryDecay: 0.9,
-          meshDeliveryStartSlot: 0n,
-          meshDeliveryThreshold: 5,
-          meshDeliveryWeight: -1,
-          meshDeliveryWindowMs: 10n,
-          meshFailureDecay: 0.9,
-          meshFailureWeight: -1,
-          timeInMeshCap: 300,
-          timeInMeshQuantumMs: 1000n,
-          timeInMeshWeight: 0.03,
-          weight: 1,
-        }),
-      },
       seenTtlMs: 384000n,
       txTimeoutMs: 30000n,
       validationTimeoutMs: 30000n,
@@ -255,22 +184,16 @@ export function topicName(kind = "beacon_block", boundary = 0): string {
   return `/eth2/${Buffer.from(requestForks[boundary].digest).toString("hex")}/${kind}/ssz_snappy`;
 }
 
-export function applicationConfig(): NativeApplicationConfig {
-  const config: NativeApplicationConfig = {
+export function applicationConfig(): NativeApplicationConfig & ReturnType<typeof networkConfig> {
+  const config: NativeApplicationConfig & ReturnType<typeof networkConfig> = {
     ...networkConfig(),
     beaconConfig: new bindings.BeaconConfig(testChain, testChain.genesisValidatorsRoot),
     identify: {agentVersion: "lodestar-z/application-test", protocolVersion: "eth2/1.0.0"},
     logLevel: "info",
     resources: {
       bridgeBudgetBytes: 512 * MIB,
-      connectionCapacity: 16,
-      dialingCapacity: 4,
-      handshakingCapacity: 8,
       maxPeers: 12,
-      minOutbound: 2,
       nativeBudgetBytes: 512 * MIB,
-      outboundReserve: 4,
-      peerCapacity: 64,
       receiveBudgetBytes: 64 * 1024 * 1024,
       targetPeers: 8,
     },
@@ -381,13 +304,6 @@ export const topicKinds: readonly NativeTopicKind[] = [
   "blob_sidecar",
   "data_column_sidecar",
 ];
-
-export function topicScores(params: NativeTopicScoreParams): Record<NativeTopicKind, NativeTopicScoreParams> {
-  return Object.fromEntries(topicKinds.map((kind) => [kind, {...params}])) as Record<
-    NativeTopicKind,
-    NativeTopicScoreParams
-  >;
-}
 
 export function subscriptions(...names: string[]): NativeSubscriptionSet[] {
   const sets = new Map<string, NativeSubscriptionSet>();

@@ -25,55 +25,6 @@ pub const ReqRespOverrides = struct {
     quota_timeout_ms: ?u64 = null,
     work_per_pump_max: ?u16 = null,
 };
-pub const GossipOverrides = struct {
-    topic_policy: ?@FieldType(gossip.Options, "topic_policy") = null,
-    message_id_policy: ?@FieldType(gossip.Options, "message_id_policy") = null,
-    iwant_followup_ms: ?u64 = null,
-    idontwant_min_data_size: ?usize = null,
-    heartbeat_interval_ms: ?u64 = null,
-    seen_capacity: ?usize = null,
-    mcache_capacity: ?usize = null,
-    mcache_arena_bytes: ?usize = null,
-    /// Derives validation capacity and payload storage before explicit capacity overrides.
-    payload_limits: ?@FieldType(gossip.Options, "payload_limits") = null,
-    validation_capacity: ?usize = null,
-    validation_timeout_ms: ?u64 = null,
-    validation_tombstone_ms: ?u64 = null,
-    pressure_timeout_ms: ?u64 = null,
-    tx_timeout_ms: ?u64 = null,
-    active_send_timeout_ms: ?u64 = null,
-    active_send_items: ?@FieldType(gossip.Options, "active_send_items") = null,
-    control_bytes: ?usize = null,
-    critical_bytes: ?usize = null,
-    tx_peer_bytes: ?usize = null,
-    tx_local_descriptors: ?usize = null,
-    tx_local_bytes: ?usize = null,
-    peers_per_pump: ?usize = null,
-    topics_per_pump: ?usize = null,
-    items_per_peer: ?usize = null,
-    items_per_pump: ?usize = null,
-    input_per_peer: ?usize = null,
-    input_per_pump: ?usize = null,
-    output_per_peer: ?usize = null,
-    output_per_pump: ?usize = null,
-    fields_per_peer: ?usize = null,
-    fields_per_pump: ?usize = null,
-    work_per_pump: ?usize = null,
-    calls_per_peer: ?usize = null,
-    calls_per_pump: ?usize = null,
-    decompress_per_peer_bytes: ?usize = null,
-    large_frame_timeout_ms: ?u64 = null,
-    body_buffer_bytes: ?usize = null,
-    receive_arena_bytes: ?usize = null,
-    seen_ttl_ms: ?u64 = null,
-    gossip_factor: ?f64 = null,
-    retained_score_ms: ?u64 = null,
-    ip_allowlist: ?@FieldType(gossip.Options, "ip_allowlist") = null,
-    score_params: ?@FieldType(gossip.Options, "score_params") = null,
-    topic_params: ?@FieldType(gossip.Options, "topic_params") = null,
-    initial_slot: ?u64 = null,
-    opportunistic_graft_interval_ms: ?u64 = null,
-};
 pub const IdentifyOverrides = struct {
     inbound_max: ?u16 = null,
     outbound_max: ?u16 = null,
@@ -99,7 +50,7 @@ pub const Options = struct {
     peers: ?peers.Catalog.Options = null,
     dial: ?peers.Dialing.Options = null,
     reqresp: ReqRespOverrides = .{},
-    gossip: GossipOverrides = .{},
+    gossip: gossip.Options = .{},
     router: RouterOverrides = .{},
     identify: IdentifyOverrides = .{},
     application_requests_max: ?u16 = null,
@@ -189,17 +140,12 @@ pub fn resolve(options: Options) !Resolved {
         .inbound_per_connection_max = @as(u16, requests.inbound_per_connection_max) + rr.outbound_stream_headroom,
     };
     applyOverrides(&router_options, options.router);
-    var gossip_options: gossip.Options = .{
-        .random_seed = options.seed,
-        .connected_capacity = peer_options.max_peers,
-        .connection_slots = limits.connections_max,
-        .retained_capacity = peer_options.capacity,
-        .retained_outbound_reserve = peer_options.outbound_reserve,
-    };
-    if (options.gossip.payload_limits) |payload_limits| {
-        if (payload_limits) |*limits_by_kind| try gossip_options.setPayloadLimits(limits_by_kind);
-    }
-    applyOverrides(&gossip_options, options.gossip);
+    var gossip_options = options.gossip;
+    gossip_options.random_seed = options.seed;
+    gossip_options.connected_capacity = peer_options.max_peers;
+    gossip_options.connection_slots = limits.connections_max;
+    gossip_options.retained_capacity = peer_options.capacity;
+    gossip_options.retained_outbound_reserve = peer_options.outbound_reserve;
     const result: Resolved = .{
         .limits = limits,
         .work_limits = options.work_limits,

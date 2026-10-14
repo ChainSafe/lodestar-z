@@ -9,21 +9,8 @@ import {
   requestForks,
   startRuntime,
   subscriptions,
-  topicKinds,
   topicName,
 } from "./utils/network.js";
-
-test.each(topicKinds)("startup requires a score policy for %s", (kind) => {
-  const config = applicationConfig();
-  Reflect.deleteProperty(config.gossipPolicy.score.topics, kind);
-  expect(() => startRuntime(config)).toThrow("InvalidNetworkConfig");
-});
-
-test("startup rejects an invalid kind score policy", () => {
-  const config = applicationConfig();
-  config.gossipPolicy.score.topics.beacon_attestation.weight = Number.NaN;
-  expect(() => startRuntime(config)).toThrow("InvalidNetworkConfig");
-});
 
 test("compact subscriptions reject invalid boundaries and masks atomically", async () => {
   const config = applicationConfig();

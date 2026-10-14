@@ -1,9 +1,8 @@
 import {expect, it} from "vitest";
 import bindings from "../src/index.js";
-import type {NativeApplicationConfig} from "../src/network.js";
 import {applicationConfig, configureChain, discoveryConfig, startRuntime, testChain} from "./utils/network.js";
 
-const cases: readonly [string, (config: NativeApplicationConfig) => void, string][] = [
+const cases: readonly [string, (config: ReturnType<typeof applicationConfig>) => void, string][] = [
   [
     "invalid Xray endpoint",
     (c) => {
@@ -193,9 +192,9 @@ const cases: readonly [string, (config: NativeApplicationConfig) => void, string
     "InvalidNetworkConfig",
   ],
   [
-    "invalid score decay",
+    "zero validators",
     (c) => {
-      c.gossipPolicy.score.behaviourDecay = 1.1;
+      c.activeValidatorCount = 0;
     },
     "InvalidNetworkConfig",
   ],
@@ -230,7 +229,7 @@ const cases: readonly [string, (config: NativeApplicationConfig) => void, string
   [
     "zero active send capacity",
     (c) => {
-      Reflect.set(c.gossipPolicy.activeSendItems, "beacon_block", 0);
+      c.gossipPolicy.activeSendItems.beacon_block = 0;
     },
     "InvalidNetworkConfig",
   ],
@@ -303,8 +302,6 @@ it("accepts explicit host wire policy and zero IDONTWANT threshold", async () =>
 });
 
 it.each([
-  ["missing interval", {iwantFollowupMs: undefined}, "InvalidNetworkInteger"],
-  ["missing threshold", {idontwantMinDataSize: undefined}, "InvalidNetworkInteger"],
   ["unknown wire field", {iwantDeadline: 12000n}, "InvalidNetworkConfig"],
   ["numeric interval", {iwantFollowupMs: 12000}, "InvalidNetworkInteger"],
   ["zero interval", {iwantFollowupMs: 0n}, "InvalidNetworkConfig"],

@@ -34,6 +34,7 @@
 pub const gossip_processor = @import("gossip_processor/root.zig");
 pub const index_list = @import("index_list.zig");
 pub const chain = @import("chain.zig");
+pub const application_policy = @import("application_policy.zig");
 pub const configuration = @import("configuration.zig");
 pub const metrics = @import("metrics/export.zig");
 pub const logging = @import("logging.zig");
@@ -108,6 +109,7 @@ test {
     _ = @import("deadline_heap.zig");
     _ = index_list;
     _ = configuration;
+    _ = application_policy;
     _ = @import("capabilities.zig");
     _ = identify;
     _ = metrics;

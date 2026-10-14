@@ -57,3 +57,17 @@ pub fn sourceItems(limit: Limit) usize {
 pub fn sourceBytes(limit: Limit, maximum_message: usize, inline_bytes: usize) usize {
     return @max((@as(usize, limit.bytes) + @as(usize, limit.items) * inline_bytes) / 2, maximum_message);
 }
+
+test "gossip limits reject invalid shares and aggregate bounds" {
+    for ([_]Limit{
+        .{ .items = 1, .bytes = 4096 },
+        .{ .items = 8, .bytes = 4097 },
+        .{ .items = 65535, .bytes = 4096 },
+        .{ .items = 8, .bytes = 32 * 1024 * 1024 },
+    }) |limit| {
+        const invalid: Limits = @splat(limit);
+        try std.testing.expectError(error.InvalidGossipProcessorLimits, validate(&invalid));
+    }
+    const valid: Limits = @splat(.{ .items = 8, .bytes = 4096 });
+    try validate(&valid);
+}

@@ -22,7 +22,7 @@ pub const Config = struct {
     bootstrap: [bootstrap_max]struct { bytes: [enr_max]u8, len: u16 },
     bootstrap_count: u8,
     slot: u64,
-    gossip: n.configuration.GossipOverrides,
+    gossip: n.gossipsub.Gossipsub.Options,
     processor_limits: n.gossip_processor.limits.Limits = undefined,
     execution_limits: ?n.gossip_processor.limits.Limits = null,
     allowlist: [32][16]u8,
@@ -101,91 +101,58 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
         if (out.fixed.ip6) |ip| if (n.Address.isIp4Mapped(ip)) return error.InvalidNetworkConfig;
         inline for (.{ out.fixed.udp, out.fixed.udp6, out.fixed.quic, out.fixed.quic6 }) |port| if (port == 0) return error.InvalidNetworkInteger;
     }
-    try parseGossip(value, out);
+    try parseGossip(value, beacon, out);
 }
 
-fn parseGossipLimits(value: Value, items_max: u32, bytes_max: u32) !n.gossip_processor.limits.Limits {
-    try decode.completeObject(value, &topic_kind_names);
-    var limits: n.gossip_processor.limits.Limits = undefined;
-    inline for (std.meta.fields(n.gossip_processor.limits.Kind), 0..) |field, index| {
-        const entry = try decode.get(value, field.name);
-        try decode.completeObject(entry, &.{ "items", "bytes" });
-        limits[index] = .{
-            .items = @intCast(try decode.integer(try decode.get(entry, "items"), items_max)),
-            .bytes = @intCast(try decode.integer(try decode.get(entry, "bytes"), bytes_max)),
-        };
-    }
-    return limits;
-}
-
-fn parseGossip(value: Value, out: *Config) !void {
-    out.gossip = .{};
-    const policy = try decode.get(value, "gossipPolicy");
-    try decode.object(policy, &.{ "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "activeSendTimeoutMs", "activeSendItems", "largeFrameTimeoutMs", "receiveBufferBytes", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score", "processor", "execution" });
-    const processor = try decode.get(policy, "processor");
-    {
-        const limits_mod = n.gossip_processor.limits;
-        const limits = parseGossipLimits(processor, limits_mod.capacity_max, 256 * 1024 * 1024) catch return error.InvalidGossipProcessorLimits;
-        try limits_mod.validate(&limits);
-        out.processor_limits = limits;
-        out.gossip.payload_limits = limits;
-    }
-    const execution = try decode.get(policy, "execution");
-    if (try execution.typeof() != .undefined) {
-        out.execution_limits = parseGossipLimits(execution, 16384, 1024 * 1024 * 1024) catch return error.InvalidGossipExecutionLimits;
-    }
-    out.gossip.iwant_followup_ms = try decode.bigint(try decode.get(policy, "iwantFollowupMs"));
-    out.gossip.idontwant_min_data_size = @as(usize, @intCast(try decode.integer(try decode.get(policy, "idontwantMinDataSize"), n.gossipsub.constants.GOSSIP_MAX_SIZE)));
-    out.gossip.heartbeat_interval_ms = try decode.bigint(try decode.get(policy, "heartbeatIntervalMs"));
-    out.gossip.validation_timeout_ms = try decode.bigint(try decode.get(policy, "validationTimeoutMs"));
-    out.gossip.validation_tombstone_ms = try decode.bigint(try decode.get(policy, "validationTombstoneMs"));
-    out.gossip.pressure_timeout_ms = try decode.bigint(try decode.get(policy, "pressureTimeoutMs"));
-    out.gossip.tx_timeout_ms = try decode.bigint(try decode.get(policy, "txTimeoutMs"));
-    out.gossip.active_send_timeout_ms = try decode.bigint(try decode.get(policy, "activeSendTimeoutMs"));
-    const active_items = try decode.get(policy, "activeSendItems");
-    var item_limits: @FieldType(n.gossipsub.Gossipsub.Options, "active_send_items") = undefined;
-    try decode.completeObject(active_items, &topic_kind_names);
-    inline for (std.meta.fields(n.gossipsub.topic.Kind), 0..) |field, index| {
-        item_limits[index] = @intCast(try decode.integer(try decode.get(active_items, field.name), n.gossipsub.constants.peers_cap));
-    }
-    out.gossip.active_send_items = item_limits;
-    out.gossip.receive_arena_bytes = @intCast(try decode.integer(try decode.get(policy, "receiveBufferBytes"), 1024 * 1024 * 1024));
-    out.gossip.large_frame_timeout_ms = try decode.bigint(try decode.get(policy, "largeFrameTimeoutMs"));
-    out.gossip.seen_ttl_ms = try decode.bigint(try decode.get(policy, "seenTtlMs"));
-    out.gossip.retained_score_ms = try decode.bigint(try decode.get(policy, "retainedScoreMs"));
-    out.gossip.opportunistic_graft_interval_ms = try decode.bigint(try decode.get(policy, "opportunisticGraftIntervalMs"));
+fn parseGossip(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
+    const validators = try decode.integer(try decode.get(value, "activeValidatorCount"), 9007199254740991);
+    out.gossip = try n.application_policy.gossip(beacon.chain.SLOT_DURATION_MS, validators);
     out.gossip.message_id_policy = .{ .phase0_digest = out.chain.phase0_digest };
-    out.gossip.gossip_factor = try decode.number(try decode.get(policy, "gossipFactor"));
-    const allowlist = try decode.get(policy, "ipAllowlist");
-    out.allowlist_count = @intCast(try decode.array(allowlist, out.allowlist.len));
-    for (0..out.allowlist_count) |i| out.allowlist[i] = try decode.fixed(16, try allowlist.getElement(@intCast(i)));
-    const score = try decode.get(policy, "score");
-    try decode.object(score, &.{ "ipColocationWeight", "ipColocationThreshold", "behaviourWeight", "behaviourThreshold", "behaviourDecay", "topicCap", "decayIntervalMs", "decayToZero", "gossipThreshold", "publishThreshold", "graylistThreshold", "opportunisticGraftThreshold", "topics" });
-    var params: n.gossipsub.score.Params = .{};
-    params.ip_colocation_weight = try decode.number(try decode.get(score, "ipColocationWeight"));
-    params.ip_colocation_threshold = @intCast(try decode.integer(try decode.get(score, "ipColocationThreshold"), 65535));
-    params.behaviour_weight = try decode.number(try decode.get(score, "behaviourWeight"));
-    params.behaviour_threshold = try decode.number(try decode.get(score, "behaviourThreshold"));
-    params.behaviour_decay = try decode.number(try decode.get(score, "behaviourDecay"));
-    params.topic_cap = try decode.number(try decode.get(score, "topicCap"));
-    params.decay_interval_ms = try decode.bigint(try decode.get(score, "decayIntervalMs"));
-    params.decay_to_zero = try decode.number(try decode.get(score, "decayToZero"));
-    params.gossip_threshold = try decode.number(try decode.get(score, "gossipThreshold"));
-    params.publish_threshold = try decode.number(try decode.get(score, "publishThreshold"));
-    params.graylist_threshold = try decode.number(try decode.get(score, "graylistThreshold"));
-    params.opportunistic_graft_threshold = try decode.number(try decode.get(score, "opportunisticGraftThreshold"));
-    const topics = try decode.get(score, "topics");
-    try decode.completeObject(topics, &topic_kind_names);
-    var policies: [n.gossipsub.topic_policy.kind_count]n.gossipsub.score.TopicPolicy = undefined;
-    inline for (std.meta.fields(n.gossipsub.topic.Kind), 0..) |field, i| {
-        const topic = try decode.get(topics, field.name);
-        try parseTopicParams(topic, &policies[i].params);
-        policies[i].mesh_delivery_start_slot = try decode.bigint(try decode.get(topic, "meshDeliveryStartSlot"));
-    }
-    out.gossip.topic_params = policies;
     out.gossip.initial_slot = out.slot;
-    params.topic.weight = 0;
-    out.gossip.score_params = params;
+    const boundaries = out.chain.topics[0..out.chain.boundary_count];
+    out.processor_limits = try n.application_policy.processor(boundaries, validators);
+    try out.gossip.setPayloadLimits(&out.processor_limits);
+    const policy = try decode.get(value, "gossipPolicy");
+    if (try policy.typeof() == .undefined) {
+        out.execution_limits = try n.application_policy.execution(boundaries, &out.processor_limits, .{});
+        return;
+    }
+    try decode.object(policy, &.{ "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "activeSendTimeoutMs", "activeSendItems", "largeFrameTimeoutMs", "receiveBufferBytes", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "hostItems", "hostBytes", "topicConcurrency" });
+    var budget: n.application_policy.Execution = .{};
+    if (try policy.hasNamedProperty("hostItems")) budget.items = @intCast(try decode.integer(try decode.get(policy, "hostItems"), 16384));
+    if (try policy.hasNamedProperty("hostBytes")) budget.bytes = @intCast(try decode.integer(try decode.get(policy, "hostBytes"), 1024 * 1024 * 1024));
+    if (try policy.hasNamedProperty("topicConcurrency")) budget.concurrency = @intCast(try decode.integer(try decode.get(policy, "topicConcurrency"), 16384));
+    out.execution_limits = try n.application_policy.execution(boundaries, &out.processor_limits, budget);
+    inline for (.{
+        .{ "iwantFollowupMs", "iwant_followup_ms" },
+        .{ "heartbeatIntervalMs", "heartbeat_interval_ms" },
+        .{ "validationTimeoutMs", "validation_timeout_ms" },
+        .{ "validationTombstoneMs", "validation_tombstone_ms" },
+        .{ "pressureTimeoutMs", "pressure_timeout_ms" },
+        .{ "txTimeoutMs", "tx_timeout_ms" },
+        .{ "activeSendTimeoutMs", "active_send_timeout_ms" },
+        .{ "largeFrameTimeoutMs", "large_frame_timeout_ms" },
+        .{ "seenTtlMs", "seen_ttl_ms" },
+        .{ "retainedScoreMs", "retained_score_ms" },
+        .{ "opportunisticGraftIntervalMs", "opportunistic_graft_interval_ms" },
+    }) |field| {
+        if (try policy.hasNamedProperty(field[0])) @field(out.gossip, field[1]) = try decode.bigint(try decode.get(policy, field[0]));
+    }
+    if (try policy.hasNamedProperty("idontwantMinDataSize")) out.gossip.idontwant_min_data_size = @intCast(try decode.integer(try decode.get(policy, "idontwantMinDataSize"), n.gossipsub.constants.GOSSIP_MAX_SIZE));
+    if (try policy.hasNamedProperty("receiveBufferBytes")) out.gossip.receive_arena_bytes = @intCast(try decode.integer(try decode.get(policy, "receiveBufferBytes"), 1024 * 1024 * 1024));
+    if (try policy.hasNamedProperty("gossipFactor")) out.gossip.gossip_factor = try decode.number(try decode.get(policy, "gossipFactor"));
+    if (try (try decode.get(policy, "activeSendItems")).typeof() != .undefined) {
+        const active_items = try decode.get(policy, "activeSendItems");
+        try decode.object(active_items, &topic_kind_names);
+        inline for (std.meta.fields(n.gossipsub.topic.Kind), 0..) |field, index| {
+            if (try active_items.hasNamedProperty(field.name)) out.gossip.active_send_items[index] = @intCast(try decode.integer(try decode.get(active_items, field.name), n.gossipsub.constants.peers_cap));
+        }
+    }
+    if (try policy.hasNamedProperty("ipAllowlist")) {
+        const allowlist = try decode.get(policy, "ipAllowlist");
+        out.allowlist_count = @intCast(try decode.array(allowlist, out.allowlist.len));
+        for (0..out.allowlist_count) |i| out.allowlist[i] = try decode.fixed(16, try allowlist.getElement(@intCast(i)));
+    }
 }
 
 pub const topic_kind_names = blk: {
@@ -214,27 +181,6 @@ pub fn parseLocal(local: Value, out: *t.LocalState) !void {
     out.*.metadata.syncnets = @intCast(try decode.integer(try decode.get(metadata, "syncnets"), 15));
     out.*.metadata.custody_group_count = try optionalBigint(try decode.get(metadata, "custodyGroupCount"));
     out.fork = .{};
-}
-
-pub fn parseTopicParams(topic: Value, out: *n.gossipsub.score.TopicParams) !void {
-    try decode.completeObject(topic, &.{ "meshDeliveryStartSlot", "weight", "timeInMeshWeight", "timeInMeshCap", "timeInMeshQuantumMs", "firstDeliveryWeight", "firstDeliveryCap", "firstDeliveryDecay", "meshDeliveryWeight", "meshDeliveryThreshold", "meshDeliveryCap", "meshDeliveryDecay", "meshDeliveryActivationMs", "meshDeliveryWindowMs", "meshFailureWeight", "meshFailureDecay", "invalidWeight", "invalidDecay" });
-    out.*.weight = try decode.number(try decode.get(topic, "weight"));
-    out.*.time_in_mesh_weight = try decode.number(try decode.get(topic, "timeInMeshWeight"));
-    out.*.time_in_mesh_cap = try decode.number(try decode.get(topic, "timeInMeshCap"));
-    out.*.time_in_mesh_quantum_ms = try decode.bigint(try decode.get(topic, "timeInMeshQuantumMs"));
-    out.*.first_delivery_weight = try decode.number(try decode.get(topic, "firstDeliveryWeight"));
-    out.*.first_delivery_cap = try decode.number(try decode.get(topic, "firstDeliveryCap"));
-    out.*.first_delivery_decay = try decode.number(try decode.get(topic, "firstDeliveryDecay"));
-    out.*.mesh_delivery_weight = try decode.number(try decode.get(topic, "meshDeliveryWeight"));
-    out.*.mesh_delivery_threshold = try decode.number(try decode.get(topic, "meshDeliveryThreshold"));
-    out.*.mesh_delivery_cap = try decode.number(try decode.get(topic, "meshDeliveryCap"));
-    out.*.mesh_delivery_decay = try decode.number(try decode.get(topic, "meshDeliveryDecay"));
-    out.*.mesh_delivery_activation_ms = try decode.bigint(try decode.get(topic, "meshDeliveryActivationMs"));
-    out.*.mesh_delivery_window_ms = try decode.bigint(try decode.get(topic, "meshDeliveryWindowMs"));
-    out.*.mesh_failure_weight = try decode.number(try decode.get(topic, "meshFailureWeight"));
-    out.*.mesh_failure_decay = try decode.number(try decode.get(topic, "meshFailureDecay"));
-    out.*.invalid_weight = try decode.number(try decode.get(topic, "invalidWeight"));
-    out.*.invalid_decay = try decode.number(try decode.get(topic, "invalidDecay"));
 }
 
 pub fn parseEndpoints(ad: Value) !?n.advertisement.Endpoints {

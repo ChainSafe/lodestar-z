@@ -66,7 +66,7 @@ async function nextGossip(runtime: NativeNetworkApplicationRuntime): Promise<Nat
 }
 async function gossipPair(timeoutMs = 30000n, budget?: number, configure?: (config: NativeApplicationConfig) => void) {
   const pair = await incomingPair(budget, undefined, (left, right) => {
-    right.gossipPolicy.validationTimeoutMs = timeoutMs;
+    right.gossipPolicy = {...right.gossipPolicy, validationTimeoutMs: timeoutMs};
     configure?.(left);
     configure?.(right);
   });
@@ -439,7 +439,7 @@ for (const hoodi of [false, true]) {
           });
         }
         // One peer holds at most half of a kind's processor items pending validation.
-        const held = config.gossipPolicy.processor.beacon_block.items / 2;
+        const held = 4;
         if (!hoodi) {
           for (let i = 0; i < 64; i++)
             await peer.command("gossipPublish", {length: 4000, seed: 900 + i, slot: 100, topic: firstTopic});

@@ -13,7 +13,7 @@ const configuration = @import("configuration.zig");
 const gossip_limits = @import("gossip_limits.zig");
 const gossip_options = @import("gossipsub/options.zig");
 
-test "configuration derives gossip storage from payload limits in different peer capacities" {
+test "configuration preserves gossip storage derived from payload limits in different peer capacities" {
     const mib = 1024 * 1024;
     for ([_]u16{ 96, 200 }) |max_peers| {
         const defaults = try resolve(.{ .limits = .{ .connections_max = 232 }, .peers = .{ .capacity = 512, .target_peers = max_peers - 4, .max_peers = max_peers }, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
@@ -27,8 +27,9 @@ test "configuration derives gossip storage from payload limits in different peer
                 .seed = 1,
                 .forks = &.{},
                 .admission_policy = policy_fixture.config(),
-                .gossip = .{ .topic_policy = &.{topic_fixture.full(@splat(0))}, .payload_limits = limits },
+                .gossip = .{ .topic_policy = &.{topic_fixture.full(@splat(0))} },
             };
+            try request.gossip.setPayloadLimits(&limits);
             const resolved = try resolve(request);
             const options = resolved.core.protocols.gossipsub;
             try std.testing.expectEqual(@as(usize, 26), options.validation_capacity);
@@ -41,7 +42,7 @@ test "configuration derives gossip storage from payload limits in different peer
             try std.testing.expectEqual(@as(usize, 32 * mib), (try resolve(request)).core.protocols.gossipsub.mcache_arena_bytes);
             request.gossip.validation_capacity = 25;
             try std.testing.expectError(error.InvalidLimits, resolve(request));
-            request.gossip.validation_capacity = null;
+            request.gossip.validation_capacity = 26;
             request.gossip.mcache_arena_bytes = gossip_options.mcache_arena_bytes_min - 1;
             try std.testing.expectError(error.InvalidLimits, resolve(request));
         }
@@ -324,6 +325,6 @@ test "configuration rejects invalid complete sections" {
 
 fn resolve(options: configuration.Options) !configuration.Resolved {
     var configured = options;
-    if (configured.gossip.topic_policy == null) configured.gossip.topic_policy = comptime &.{topic_fixture.bytes(@splat(0))};
+    if (configured.gossip.topic_policy.len == 0) configured.gossip.topic_policy = comptime &.{topic_fixture.bytes(@splat(0))};
     return configuration.resolve(configured);
 }

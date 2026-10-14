@@ -59,74 +59,32 @@ export interface NativeDiscoveryConfig {
   fixed: AdvertisedEndpoints;
 }
 
-export interface NativeTopicScoreParams {
-  /** First accepted slot with mesh-delivery penalties enabled. */
-  meshDeliveryStartSlot: bigint;
-  weight: number;
-  timeInMeshWeight: number;
-  timeInMeshCap: number;
-  timeInMeshQuantumMs: bigint;
-  firstDeliveryWeight: number;
-  firstDeliveryCap: number;
-  firstDeliveryDecay: number;
-  meshDeliveryWeight: number;
-  meshDeliveryThreshold: number;
-  meshDeliveryCap: number;
-  meshDeliveryDecay: number;
-  meshDeliveryActivationMs: bigint;
-  meshDeliveryWindowMs: bigint;
-  meshFailureWeight: number;
-  meshFailureDecay: number;
-  invalidWeight: number;
-  invalidDecay: number;
-}
-
-export interface NativeGlobalScoreParams {
-  ipColocationWeight: number;
-  ipColocationThreshold: number;
-  behaviourWeight: number;
-  behaviourThreshold: number;
-  behaviourDecay: number;
-  topicCap: number;
-  decayIntervalMs: bigint;
-  decayToZero: number;
-  gossipThreshold: number;
-  publishThreshold: number;
-  graylistThreshold: number;
-  opportunisticGraftThreshold: number;
-  topics: Readonly<Record<NativeTopicKind, NativeTopicScoreParams>>;
-}
-
-export interface NativeGossipProcessorLimit {
-  items: number;
-  bytes: number;
-}
-
 export interface NativeGossipStartupPolicy {
-  processor: Readonly<Record<NativeTopicKind, NativeGossipProcessorLimit>>;
-  /** Outstanding decoded payloads and messages, held until host completion. Requires processor. */
-  execution?: Readonly<Record<NativeTopicKind, NativeGossipProcessorLimit>>;
-  heartbeatIntervalMs: bigint;
-  iwantFollowupMs: bigint;
-  idontwantMinDataSize: number;
-  validationTimeoutMs: bigint;
-  validationTombstoneMs: bigint;
-  pressureTimeoutMs: bigint;
-  txTimeoutMs: bigint;
+  /** Total host execution allowance. Defaults to 4096 items and 64 MiB. */
+  hostItems?: number;
+  hostBytes?: number;
+  /** Maximum simultaneous messages per kind, further bounded by its resource share. */
+  topicConcurrency?: number;
+  heartbeatIntervalMs?: bigint;
+  iwantFollowupMs?: bigint;
+  idontwantMinDataSize?: number;
+  validationTimeoutMs?: bigint;
+  validationTombstoneMs?: bigint;
+  pressureTimeoutMs?: bigint;
+  txTimeoutMs?: bigint;
   /** Absolute active-frame lifetime. Large payloads share their first recipient's deadline; progress never extends it. */
-  activeSendTimeoutMs: bigint;
+  activeSendTimeoutMs?: bigint;
   /** Distinct large payloads per kind, shared across recipients. */
-  activeSendItems: Readonly<Record<NativeTopicKind, number>>;
+  activeSendItems?: Readonly<Partial<Record<NativeTopicKind, number>>>;
   /** Absolute lifetime of an incomplete frame larger than the private receive buffer. */
-  largeFrameTimeoutMs: bigint;
+  largeFrameTimeoutMs?: bigint;
   /** Shared pool capacity, in multiples of 4096. Frames consume pages only as bytes arrive. */
-  receiveBufferBytes: number;
-  seenTtlMs: bigint;
-  retainedScoreMs: bigint;
-  opportunisticGraftIntervalMs: bigint;
-  gossipFactor: number;
-  ipAllowlist: readonly Uint8Array[];
-  score: NativeGlobalScoreParams;
+  receiveBufferBytes?: number;
+  seenTtlMs?: bigint;
+  retainedScoreMs?: bigint;
+  opportunisticGraftIntervalMs?: bigint;
+  gossipFactor?: number;
+  ipAllowlist?: readonly Uint8Array[];
 }
 
 export type NativeTopicKind =
@@ -145,13 +103,14 @@ export type NativeTopicKind =
   | "data_column_sidecar";
 
 export interface NativeRuntimeConfig {
+  activeValidatorCount: number;
   identitySecretKey: Uint8Array;
   /** IPv6 listeners accept only IPv6; IPv4 and IPv6 listeners may share a port. */
   bind: IpEndpoint | readonly IpEndpoint[];
   local: NativeLocalState;
   discovery: NativeDiscoveryConfig | null;
   initialSlot: bigint;
-  gossipPolicy: NativeGossipStartupPolicy;
+  gossipPolicy?: NativeGossipStartupPolicy;
 }
 
 export interface NativeIdentity {
@@ -183,20 +142,15 @@ export interface NativeLogLoss {
 }
 
 export interface NativeResources {
-  /** Retained peer records, at most 512. */
-  peerCapacity: number;
   /** Steady peer target, strictly below maxPeers to admit locally selected trials. */
   targetPeers: number;
   maxPeers: number;
-  minOutbound: number;
-  outboundReserve: number;
-  connectionCapacity: number;
-  handshakingCapacity: number;
-  /** Concurrent outbound QUIC dials, at most 64, independent of maxPeers - targetPeers. */
-  dialingCapacity: number;
-  receiveBudgetBytes: number;
-  nativeBudgetBytes: number;
-  bridgeBudgetBytes: number;
+  /** Defaults to 512 MiB. */
+  receiveBudgetBytes?: number;
+  /** Defaults to 2 GiB. */
+  nativeBudgetBytes?: number;
+  /** Defaults to 512 MiB. */
+  bridgeBudgetBytes?: number;
 }
 
 /** A peer that served a connection native dialed, remembered so a restart can redial it. */
