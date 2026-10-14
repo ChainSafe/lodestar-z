@@ -200,6 +200,7 @@ test "memory_safety: progressive chunked basic failed publication and slice recl
                     count += 1;
                 }
                 const before = pool.getNodesInUse();
+                var expected_last: u64 = 44;
                 if (slice) {
                     if (view.sliceTo(500)) |sliced| {
                         sliced.deinit();
@@ -217,12 +218,16 @@ test "memory_safety: progressive chunked basic failed publication and slice recl
                         try std.testing.expectEqualSlices(u8, &root, original.getRoot(&pool));
                         try std.testing.expectEqual(@as(u64, 33), try view.get(500));
                         try std.testing.expectEqual(@as(u64, 44), try view.get(1399));
+                        try view.set(1399, 45);
+                        expected_last = 45;
+                        try std.testing.expectEqual(@as(u64, 45), try view.get(1399));
+                        try std.testing.expectEqualSlices(u8, &root, original.getRoot(&pool));
                         for (fillers[0..count]) |node| pool.unref(node);
                         count = 0;
                         try view.commit();
                     };
                     if (count != 0) saw_success = true;
-                    try std.testing.expectEqual(@as(u64, 44), try view.get(1399));
+                    try std.testing.expectEqual(expected_last, try view.get(1399));
                 }
             }
             try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
@@ -452,12 +457,16 @@ test "memory_safety: progressive basic commit retains writes on pool exhaustion"
                     fillers[count] = try pool.createLeafFromUint(0);
                     count += 1;
                 }
+                var expected_last: u64 = 34;
                 view.commit() catch |err| {
                     failures += 1;
                     try std.testing.expectEqual(error.PoolExhausted, err);
                     try std.testing.expectEqual(original, view.getRoot());
                     try std.testing.expectEqual(@as(u64, 12), try view.get(0));
                     try std.testing.expectEqual(@as(u64, 34), try view.get(new_length - 1));
+                    try view.set(new_length - 1, 35);
+                    expected_last = 35;
+                    try std.testing.expectEqual(@as(u64, 35), try view.get(new_length - 1));
                     for (fillers[0..count]) |node| pool.unref(node);
                     count = 0;
                     try view.commit();
@@ -468,7 +477,7 @@ test "memory_safety: progressive basic commit retains writes on pool exhaustion"
                 try expected.resize(allocator, new_length);
                 @memset(expected.items, 0);
                 expected.items[0] = 12;
-                expected.items[new_length - 1] = 34;
+                expected.items[new_length - 1] = expected_last;
                 try expectRoot(List, view, &expected);
             }
             try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
