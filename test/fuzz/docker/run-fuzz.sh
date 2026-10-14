@@ -66,7 +66,14 @@ sync_findings() {  # kind, afl dir, prefix
 # file and renamed, so the platform never reads half a file.
 write_status() {
     s="$OUT/default/fuzzer_stats"
-    [ -f "$s" ] || return 0
+    # The status file's age is the platform's liveness signal, so refresh it
+    # every interval even before afl-fuzz has written stats -- resuming a large
+    # corpus can take minutes, and silence then would read as a hung campaign.
+    # The previous numbers are kept until new ones exist.
+    if [ ! -f "$s" ]; then
+        touch "$FUZZ_METRICS/status"
+        return 0
+    fi
     awk -F' *: *' '
         $1 == "execs_done"    { print "execs_total", $2 }
         $1 == "execs_per_sec" { print "execs_per_second", $2 }
