@@ -207,7 +207,7 @@ pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
 pub const TreeBuilder = struct {
     pool: *Node.Pool,
     roots: [max_tree_subtrees]?Node.Id = @splat(null),
-    subtree: Node.FillWithContentsIterator,
+    subtree: Node.SubtreeBuilder,
     subtree_count: usize = 0,
     subtree_len: usize = 0,
     remaining: usize,
@@ -215,7 +215,7 @@ pub const TreeBuilder = struct {
 
     pub fn init(pool: *Node.Pool, chunk_count: usize) !TreeBuilder {
         if (chunk_count > max_tree_chunks) return error.InputTooLong;
-        return .{ .pool = pool, .subtree = Node.FillWithContentsIterator.init(pool, 0), .remaining = chunk_count };
+        return .{ .pool = pool, .subtree = Node.SubtreeBuilder.init(pool, 0), .remaining = chunk_count };
     }
 
     pub fn deinit(self: *TreeBuilder) void {
@@ -244,7 +244,7 @@ pub const TreeBuilder = struct {
         self.roots[self.subtree_count] = try self.subtree.finish();
         self.subtree_count += 1;
         self.subtree_len = 0;
-        self.subtree = Node.FillWithContentsIterator.init(self.pool, @intCast(2 * self.subtree_count));
+        self.subtree = Node.SubtreeBuilder.init(self.pool, @intCast(2 * self.subtree_count));
     }
 
     pub fn finish(self: *TreeBuilder) !Node.Id {
