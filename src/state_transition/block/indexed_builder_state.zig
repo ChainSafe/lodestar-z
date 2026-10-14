@@ -27,8 +27,8 @@ pub fn IndexedBuilderState(comptime fork: ForkSeq) type {
                 .epoch = computeEpochAtSlot(try state.slot()),
                 .context = .{ .hash_key = undefined },
             };
-            io.random(&self.context.hash_key);
             errdefer self.deinit();
+            io.random(&self.context.hash_key);
             var builders = try state.inner.get("builders");
             try builders.commit();
             const len = try builders.length();
