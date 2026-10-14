@@ -11,7 +11,7 @@ const UintType = @import("uint.zig").UintType;
 const FixedContainerType = @import("container.zig").FixedContainerType;
 const StructContainerType = @import("container.zig").StructContainerType;
 
-test "chunked progressive type roundtrips subtree and payload boundaries" {
+test "chunked progressive type should round-trip subtree and payload boundaries" {
     const allocator = std.testing.allocator;
     inline for (.{
         BoolType(),
@@ -70,7 +70,7 @@ test "chunked progressive type roundtrips subtree and payload boundaries" {
     }
 }
 
-test "chunked progressive tree stores each run of chunks in one chunked leaf" {
+test "chunked progressive tree should store each run of chunks in one chunked leaf" {
     const allocator = std.testing.allocator;
     const List = FixedProgressiveListType(UintType(64), .{ .chunked_leaf = true });
     var pool = try Node.Pool.init(.{
@@ -115,7 +115,7 @@ test "chunked progressive tree stores each run of chunks in one chunked leaf" {
     }
 }
 
-test "chunked progressive tree reads expand implicit zeros and reject plain leaf layouts" {
+test "chunked progressive tree reads should expand implicit zeros and reject plain leaf layouts" {
     const allocator = std.testing.allocator;
     const Plain = FixedProgressiveListType(UintType(64), .{});
     const Chunked = FixedProgressiveListType(UintType(64), .{ .chunked_leaf = true });
@@ -158,7 +158,7 @@ test "chunked progressive tree reads expand implicit zeros and reject plain leaf
     );
 }
 
-test "chunked progressive type preserves malformed byte errors" {
+test "chunked progressive type should preserve malformed byte errors" {
     var pool = try Node.Pool.init(.{
         .page_allocator = std.testing.allocator,
         .allocator = std.testing.allocator,
@@ -179,7 +179,7 @@ test "chunked progressive type preserves malformed byte errors" {
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
-test "memory_safety: chunked progressive tree.toValue leaves default out on malformed trees" {
+test "memory_safety: chunked progressive tree.toValue should leave default out on malformed trees" {
     const allocator = std.testing.allocator;
     const List = FixedProgressiveListType(UintType(64), .{ .chunked_leaf = true });
     var pool = try Node.Pool.init(.{
@@ -215,7 +215,7 @@ test "memory_safety: chunked progressive tree.toValue leaves default out on malf
     try std.testing.expectEqual(@as(usize, 0), out.capacity);
 }
 
-test "memory_safety: chunked progressive type construction releases partial trees" {
+test "memory_safety: chunked progressive type construction should release partial trees" {
     const List = FixedProgressiveListType(UintType(64), .{ .chunked_leaf = true });
     var value: List.Type = .empty;
     defer value.deinit(std.testing.allocator);
@@ -258,7 +258,7 @@ test "memory_safety: chunked progressive type construction releases partial tree
     }
 }
 
-test "progressive list stores struct container elements as single nodes" {
+test "progressive list should store struct container elements as single nodes" {
     const allocator = std.testing.allocator;
     const fields = struct { a: UintType(64), b: UintType(8), c: UintType(64) };
     const List = FixedProgressiveListType(StructContainerType(fields), .{});

@@ -194,7 +194,7 @@ test "memory_safety: nested progressive tree.fromValue reclaims unpublished node
     try expectProgressiveFromValuePoolExhaustionReclaimsNodes(Container, &value, 32);
 }
 
-test "progressive container composes chunked leaf and struct container list fields" {
+test "progressive container should compose chunked leaf and struct container list fields" {
     const allocator = std.testing.allocator;
     const record_fields = struct { a: UintType(64), b: UintType(64) };
     const Records = FixedProgressiveListType(FixedContainerType(record_fields), .{});
