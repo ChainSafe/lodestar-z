@@ -30,12 +30,14 @@ test "full report table still coalesces existing identities and reuses released 
     for (0..table.rows.len) |i| table.addCount(&.{ .identity = identity(@intCast(i)), .action = .high_tolerance }, 1);
     table.addCount(&.{ .identity = identity(600), .action = .fatal }, 1);
     try std.testing.expectEqual(@as(u64, 1), table.ignored);
+    try std.testing.expectEqual(@as(u64, 1), table.dropped);
     table.addCount(&.{ .identity = identity(0), .action = .high_tolerance }, 1);
     try std.testing.expectEqual(@as(u32, 513), table.pending);
     _ = table.next().?;
     _ = table.next().?;
     table.addCount(&.{ .identity = identity(600), .action = .fatal }, 1);
     try std.testing.expectEqual(@as(u64, 1), table.ignored);
+    try std.testing.expectEqual(@as(u64, 1), table.dropped);
     var count: usize = 0;
     for (0..513) |_| {
         const report = table.next() orelse break;

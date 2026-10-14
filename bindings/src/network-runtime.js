@@ -1,22 +1,17 @@
 import bindings from "./bindings.js";
-import {CompletionOwner} from "./network-completions.js";
-import {IncomingRecord, NativeIncoming} from "./network-incoming.js";
-import {NativeRequest, RequestRecord} from "./network-request.js";
+import {NativeIncoming} from "./network-incoming.js";
+import {NativeRequest} from "./network-request.js";
 
 export class NativeRuntime {
   #native;
-  #owner;
   #closed;
 
   constructor(config, onWorkAvailable) {
     this.#native = new bindings.NativeNetworkRuntime();
-    const owner = new CompletionOwner(this.#native);
     const initialized = this.#native.initialize(config, onWorkAvailable);
-    owner.size(initialized.capacities);
-    this.#owner = owner;
     this.identity = initialized.identity;
     this.limits = initialized.limits;
-    this.#closed = owner.closed;
+    this.#closed = initialized.closed;
   }
 
   get closed() {
@@ -35,63 +30,75 @@ export class NativeRuntime {
     this.#native.setLogLevel(level);
   }
   async applyIntent(intent, slot) {
-    return this.#command("applyIntent", () => this.#native.applyIntent(intent, slot));
+    return this.#native.applyIntent(intent, slot);
   }
   updateStatus(status) {
-    return this.#command("updateStatus", () => this.#native.updateStatus(status));
+    return this.#native.updateStatus(status);
   }
   getIdentity() {
-    return this.#command("getIdentity", () => this.#native.getIdentity());
+    return this.#native.getIdentity();
   }
   getPeers() {
-    return this.#command("getPeers", () => this.#native.getPeers());
+    return this.#native.getPeers();
   }
   getGossipDiagnostics(cursor = 0) {
-    return this.#command("getGossipDiagnostics", () => this.#native.getGossipDiagnostics(cursor));
+    return this.#native.getGossipDiagnostics(cursor);
   }
   connect(peerId, addresses, timeoutMs) {
-    return this.#command("connect", () => this.#native.connect(peerId, addresses, timeoutMs));
+    return this.#native.connect(peerId, addresses, timeoutMs);
   }
   disconnect(peerId) {
-    return this.#command("disconnect", () => this.#native.disconnect(peerId));
+    return this.#native.disconnect(peerId);
   }
   reStatusPeers(peerIds) {
-    return this.#command("reStatusPeers", () => this.#native.reStatusPeers(peerIds));
+    return this.#native.reStatusPeers(peerIds);
   }
   addDirectPeer(peerId, addresses) {
-    return this.#command("addDirectPeer", () => this.#native.addDirectPeer(peerId, addresses));
+    return this.#native.addDirectPeer(peerId, addresses);
   }
   removeDirectPeer(peerId) {
-    return this.#command("removeDirectPeer", () => this.#native.removeDirectPeer(peerId));
+    return this.#native.removeDirectPeer(peerId);
   }
   getDirectPeers() {
-    return this.#command("getDirectPeers", () => this.#native.getDirectPeers());
+    return this.#native.getDirectPeers();
   }
   getRememberedPeers() {
-    return this.#command("getRememberedPeers", () => this.#native.getRememberedPeers());
+    return this.#native.getRememberedPeers();
   }
-  /** Admits one command of `kind`, whose completion must name that kind. Refusal throws, as the native call does. */
-  #command(kind, submit) {
-    return this.#owner.admit("command", kind, submit);
-  }
-  exchange(actions, demand) {
-    const result = this.#owner.exchange(actions, demand);
+  exchange() {
+    const result = this.#native.exchange();
     // An exchange that delivered nothing is frozen with no serving starts.
     const serving = result.serving;
     if (serving.length === 0) return result;
     for (let i = 0; i < serving.length; i++) {
       const descriptor = serving[i];
-      const record = new IncomingRecord(this.#native, descriptor.handle);
-      this.#owner.serve(record);
-      serving[i] = new NativeIncoming(descriptor, record);
+      serving[i] = new NativeIncoming(this.#native, descriptor);
     }
     return result;
   }
-  fail(site, reason) {
-    return this.#native.fail(site, reason);
+  drainCompletions() {
+    return this.#native.drainCompletions();
   }
-  checkAction(action) {
-    this.#native.checkAction(action);
+  reportFailure(error) {
+    return this.#native.reportFailure(error);
+  }
+  setCapacity(capacity) {
+    this.#native.setCapacity(capacity);
+  }
+  reportGossip(handle, verdict) {
+    this.#native.reportGossip(handle, verdict);
+  }
+  classifyGossip(handle, available) {
+    this.#native.classifyGossip(handle, available);
+  }
+  notifyBlock(root) {
+    this.#native.notifyBlock(root);
+  }
+  dropQueuedGossip() {
+    this.#native.dropQueuedGossip();
+  }
+  reportPeer(peerId, action, context) {
+    this.#native.reportPeer(peerId, action, context);
   }
   holdVerdicts(held) {
     this.#native.holdVerdicts(held);
@@ -100,12 +107,10 @@ export class NativeRuntime {
     this.#native.holdOperations(held);
   }
   async publishGossip(topic, data, options) {
-    return this.#owner.admit("publication", undefined, () => this.#native.publishGossip(topic, data, options));
+    return this.#native.publishGossip(topic, data, options);
   }
   request(peerId, protocol, data, options) {
-    const record = new RequestRecord();
-    const handle = this.#owner.request(record, () => this.#native.requestStart(peerId, protocol, data, options));
-    return new NativeRequest(this.#native, handle, record);
+    return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options));
   }
   close() {
     this.#native.close();

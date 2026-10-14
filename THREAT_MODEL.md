@@ -33,11 +33,13 @@ another initialization, including from another Node.js environment, is rejected;
 released, a new runtime may initialize. The owning thread coordinates shutdown and joins the network
 thread. Environment cleanup also stops the owner and retires outstanding native obligations, even
 when JavaScript can no longer run. Admission failures are reported before the operation commits.
-Once an exchange applies actions and selects delivery, building and publishing its result are bridge
-obligations. A result-build or result-finish failure while JavaScript remains runnable is a bridge
-contract failure and terminates the process unsuccessfully through a native fatal error. If the
-JavaScript environment has stopped, teardown reclaims the outstanding native obligations. If the runtime otherwise cannot safely continue, the
-host shuts down the beacon node and preserves the terminal failure as an unsuccessful process exit.
+Host feedback is submitted directly; payload delivery and native Promise settlement progress in
+bounded turns. Once selected, delivery must finish or terminate the runtime. A delivery failure while
+JavaScript remains runnable is a bridge contract failure and panics. If the JavaScript environment
+has stopped, teardown reclaims outstanding obligations without restoring or replaying delivery.
+Submitting a gossip verdict transfers it to the owner; it does not acknowledge forwarding. If the
+runtime otherwise cannot safely continue, the host shuts down the beacon node and preserves the
+terminal failure as an unsuccessful process exit.
 
 The assets protected here are:
 

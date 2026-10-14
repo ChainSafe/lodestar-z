@@ -589,11 +589,6 @@ export interface GossipJob {
   readonly kind: NativeTopicKind;
   readonly grouped: boolean;
   readonly messages: readonly GossipMessage[];
-  /**
-   * Resolves after the owner disposes of every returned verdict: eligible accepts have undergone forwarding admission,
-   * and expired or already resolved messages are retired. Rejects with NetworkClosed if shutdown prevents it.
-   */
-  readonly reported: Promise<void>;
 }
 
 export interface DependencyCheck {
@@ -632,7 +627,10 @@ export interface HostCapacity {
   incomingRequestSlots: number;
 }
 
-/** The consumer of one network's delivered work. The binding calls it only from later macrotasks. */
+/**
+ * The consumer of one network's delivered work. Each macrotask hands over one bounded batch without awaiting
+ * asynchronous handlers. Keep synchronous handler work short so other event-loop work can run between batches.
+ */
 export interface NativeHost {
   /** A throw or an invalid value fails the host and stops payload delivery. */
   capacity(): HostCapacity;
@@ -643,7 +641,7 @@ export interface NativeHost {
    */
   subscribeCapacity(wake: () => void): () => void;
   /**
-   * One verdict per message, in order. Must not await job.reported. A throw, a rejection or the wrong verdicts ignore
+   * One verdict per message, in order. A throw, a rejection or the wrong verdicts ignore
    * every message of the job.
    */
   validate(job: GossipJob): Promise<readonly Verdict[]>;
@@ -688,8 +686,8 @@ export interface NativeNetwork {
   /**
    * Supply only the origin captured with the reported work. Omit it when unknown; a current peer snapshot cannot
    * establish where earlier work came from. Identity-only reports never acquire endpoint attribution.
-   * Copies context and coalesces up to 512 distinct peer/action/origin/reason entries. Additional entries are dropped and
-   * counted in lodestar_peers_report_peer_dropped_total. Throws, queueing nothing, for a malformed peer id or unknown action.
+   * Copies context and coalesces reports by identity, origin and reason in native storage. Reports requiring a new
+   * row when the table is full count in lodestar_peers_report_peer_dropped_total. Throws, queueing nothing, for a malformed peer id or unknown action.
    */
   reportPeer(peerId: PeerIdStr, action: NativePeerAction, context?: NativePeerReportContext): void;
   dropQueuedGossip(): void;

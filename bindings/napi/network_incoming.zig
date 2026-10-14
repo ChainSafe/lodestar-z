@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Promise = @import("network_promise.zig");
 const n = @import("network");
 const rr = n.reqresp;
 const Runtime = @import("network_runtime.zig").Runtime;
@@ -12,6 +13,10 @@ pub const Rejection = enum { invalid_context, unknown_fork, chunk_too_large, chu
 pub const Ack = union(enum) { sent, rejected: Rejection, failed: Failure, closed };
 pub const Action = enum { none, finish, fail, cancel, submitted };
 pub const Cell = struct {
+    response_promise: Promise = .{},
+    permission_promise: Promise = .{},
+    closed_promise: Promise = .{},
+
     state: State = .free,
     generation: u64 = 0,
     sequence: u64 = 0,
@@ -175,6 +180,9 @@ pub const Table = struct {
         std.debug.assert(!cell.native and !cell.copying and cell.serving == null);
         cell.state = .terminal;
         self.releasePayload(cell);
+        cell.response_promise.deinit();
+        cell.permission_promise.deinit();
+        cell.closed_promise.deinit();
         cell.* = .{ .generation = cell.generation };
         self.refresh(cell);
         self.diag.occupied -= 1;
@@ -230,13 +238,6 @@ pub const Table = struct {
         }
         return releasable(cell);
     }
-    /// Returns a pinned cell, still due, to where it was.
-    pub fn restore(self: *Table, completion: Completion) void {
-        const cell = self.get(completion.token).?;
-        cell.copying = false;
-        self.releasePayload(cell);
-        self.refresh(cell);
-    }
     pub fn pinStart(self: *Table) ?Token {
         const token = self.oldest() orelse return null;
         const cell = self.get(token).?;
@@ -256,21 +257,6 @@ pub const Table = struct {
         cell.state = if (cell.native) .serving else .terminal;
         self.releasePayload(cell);
         self.refresh(cell);
-    }
-    pub fn restoreStart(self: *Table, token: Token) void {
-        const cell = self.get(token).?;
-        std.debug.assert(cell.copying and !cell.exposed);
-        cell.copying = false;
-        if (cell.native) {
-            cell.state = .queued;
-            self.refresh(cell);
-            return;
-        }
-        // The stream ended while pinned; finish the retirement its end left to the pin.
-        cell.state = .terminal;
-        self.releasePayload(cell);
-        self.refresh(cell);
-        if (cell.serving != null) cell.release_requested = true else self.retire(token);
     }
     pub fn oldest(self: *Table) ?Token {
         var selected: ?Token = null;

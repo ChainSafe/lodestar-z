@@ -1,5 +1,5 @@
 import bindings from "../../src/bindings.js";
-import {nextIncoming, startRuntime} from "../utils/network.js";
+import {exchange, gossipAll, nextIncoming, startRuntime} from "../utils/network.js";
 
 let runtime;
 let sequence = 0;
@@ -23,6 +23,11 @@ const methods = new Set([
   "removeDirectPeer",
   "getDirectPeers",
   "exchange",
+  "setCapacity",
+  "reportGossip",
+  "classifyGossip",
+  "notifyBlock",
+  "reportPeer",
   "publishGossip",
   "getMetrics",
   "drainLogs",
@@ -36,6 +41,7 @@ async function execute(method, args) {
     return runtime.identity;
   }
   if (!runtime) throw new Error("Network peer uninitialized");
+  if (method === "exchange") return exchange(runtime, gossipAll);
   if (methods.has(method)) return runtime[method](...args);
   if (method === "state") return runtime.state;
   if (method === "closed") return runtime.closed;

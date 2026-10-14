@@ -1,3 +1,4 @@
+import {createHook} from "node:async_hooks";
 import {expect, test} from "vitest";
 import type {NativeNetworkApplicationRuntime} from "../src/network-runtime.js";
 import {applicationConfig, localIntent, startRuntime, topicName, unreachableConnect} from "./utils/network.js";
@@ -131,6 +132,26 @@ test("a delivered snapshot keeps its contents while its cell and store serve the
   } finally {
     await runtime.close();
   }
+});
+
+test("close during native Promise creation refuses admission without leaving an operation", async () => {
+  const runtime = startRuntime(applicationConfig());
+  let closedDuringCreation = false;
+  const hook = createHook({
+    init(_id, type) {
+      if (type !== "PROMISE" || closedDuringCreation) return;
+      closedDuringCreation = true;
+      runtime.close();
+    },
+  });
+  try {
+    hook.enable();
+    expect(() => runtime.getIdentity()).toThrow("NetworkClosed");
+  } finally {
+    hook.disable();
+    expect(await runtime.close()).toEqual({reason: "requested"});
+  }
+  expect(closedDuringCreation).toBe(true);
 });
 
 test("the owner starts commands, publications and requests in their admission order", async () => {

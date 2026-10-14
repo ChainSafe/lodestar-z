@@ -41,12 +41,18 @@ pub const Export = struct {
     }
 
     /// The caller holds the runtime mutex. Log delivery continues after the network owner stops.
-    pub fn text(self: *Export, logs: *const n.logging.Stats, xray: ?*n.xray.Probe) n.metrics.registry.Error![]const u8 {
+    pub fn text(self: *Export, logs: *const n.logging.Stats, reports_dropped: u64, xray: ?*n.xray.Probe) n.metrics.registry.Error![]const u8 {
         if (self.failure) |err| return err;
         var writer = std.Io.Writer.fixed(self.buffers[self.published]);
         writer.end = self.lengths[self.published];
         var encoder: n.metrics.registry.Encoder = .{ .writer = &writer };
         try logs.write(&encoder);
+        const reports = try encoder.family(.{
+            .name = "lodestar_peers_report_peer_dropped_total",
+            .kind = .counter,
+            .help = "Peer reports dropped because the binding's pending report table was full",
+        });
+        try reports.sample(.{}, reports_dropped);
         if (xray) |probe| try probe.writeMetrics(&encoder);
         return writer.buffered();
     }

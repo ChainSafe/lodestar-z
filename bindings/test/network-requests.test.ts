@@ -1,5 +1,5 @@
 import {expect, test} from "vitest";
-import type {NativeNetworkApplicationRuntime} from "../src/network-runtime.js";
+import type {NativeRuntimeCloseResult} from "../src/network-runtime.js";
 import {
   applicationConfig,
   childTestTimeout,
@@ -8,9 +8,9 @@ import {
   peerIdFromHex,
   requestForks,
   runChild,
-  settleOnly,
   startRuntime,
 } from "./utils/network.js";
+import {drainUntil} from "./utils/network-bindings.js";
 import {incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 test("application request rejects control protocols at the exported boundary", async () => {
@@ -434,28 +434,23 @@ test.skipIf(!HOST || !HOODI)(
 );
 
 test("native bridge validates full handles and stale retirement", async () => {
-  const {
-    closedBy,
-    commandCompleted,
-    completed,
-    networkBindings: bindings,
-  } = await import("./utils/network-bindings.js");
+  const {closedBy, drainUntil, networkBindings: bindings} = await import("./utils/network-bindings.js");
   const config = applicationConfig();
   const native = new bindings.NativeNetworkRuntime();
   const lifecycle = native.initialize(config, () => undefined);
   try {
     const identity = await lifecycle.identity;
-    await commandCompleted(native, native.applyIntent(localIntent(config), config.initialSlot), settleOnly);
-    const handle = native.requestStart(identity.peerId, BLOCKS, new Uint8Array(32), undefined);
+    await drainUntil(native, native.applyIntent(localIntent(config), config.initialSlot));
+    const {handle} = native.requestStart(identity.peerId, BLOCKS, new Uint8Array(32), undefined);
     expect(() => native.requestPull({...handle, generation: 0n})).toThrow("InvalidRequestHandle");
     expect(() => native.requestPull({...handle, generation: handle.generation + 1n})).toThrow("InvalidRequestHandle");
-    native.requestPull(handle);
+    const pending = native.requestPull(handle);
     expect(() => native.requestPull(handle)).toThrow("NetworkRequestBusy");
-    expect(await completed(native, "request", handle, settleOnly)).toMatchObject({error: {reason: "disconnected"}});
+    await expect(drainUntil(native, pending)).rejects.toMatchObject({reason: "disconnected"});
     expect(() => native.requestPull(handle)).toThrow("InvalidRequestHandle");
     expect(native.requestRetire(handle, true)).toBeUndefined();
   } finally {
-    await closedBy(native, settleOnly);
+    await closedBy(native, lifecycle.closed);
   }
 });
 
@@ -524,17 +519,19 @@ test.skipIf(!NATIVE_PEER)(
 stockTest(
   "direct native calls allow exactly one pending pull",
   async () => {
-    const {completed, native, peer, id, stop} = await connectedNative();
+    const {drainUntil, native, peer, id, stop} = await connectedNative();
     try {
       await peer.command("scenario", {scenario: "hold"});
-      const handle = native.requestStart(id, BLOCKS, new Uint8Array(32), undefined);
-      native.requestPull(handle);
+      const {handle} = native.requestStart(id, BLOCKS, new Uint8Array(32), undefined);
+      const pending = native.requestPull(handle);
       expect(() => native.requestPull(handle)).toThrow("NetworkRequestBusy");
       const {waitFor} = await import("../../test/interop/child.mjs");
       await waitFor(async () => (await peer.command("stats")).lastRequest === "00".repeat(32));
       native.requestRetire(handle, false);
-      expect(await completed(native, "request", handle, settleOnly)).toMatchObject({
-        error: {code: "NetworkRequestFailed", phase: "response", reason: "cancelled"},
+      await expect(drainUntil(native, pending)).rejects.toMatchObject({
+        code: "NetworkRequestFailed",
+        phase: "response",
+        reason: "cancelled",
       });
     } finally {
       await stop();
@@ -546,12 +543,7 @@ stockTest(
 async function connectedNative() {
   if (!HOST) throw Error("LODESTAR_Z_NETWORK_STOCK_HOST is required");
   const {Child} = await import("../../test/interop/child.mjs");
-  const {
-    closedBy,
-    commandCompleted,
-    completed,
-    networkBindings: bindings,
-  } = await import("./utils/network-bindings.js");
+  const {closedBy, drainUntil, networkBindings: bindings} = await import("./utils/network-bindings.js");
   const peer = new Child("request-phase-stock", process.execPath, [
     "--import",
     "tsx",
@@ -559,9 +551,10 @@ async function connectedNative() {
     HOST,
   ]);
   let native: InstanceType<typeof bindings.NativeNetworkRuntime> | undefined;
+  let closing: Promise<NativeRuntimeCloseResult> | undefined;
   const stop = async () => {
     try {
-      if (native) await closedBy(native, settleOnly);
+      if (native && closing) await closedBy(native, closing);
     } finally {
       await peer.stop();
     }
@@ -571,19 +564,19 @@ async function connectedNative() {
     const config = applicationConfig();
     native = new bindings.NativeNetworkRuntime();
     const prepared = native.initialize(config, () => undefined);
+    closing = prepared.closed;
     await prepared.identity;
-    await commandCompleted(native, native.applyIntent(localIntent(config), config.initialSlot), settleOnly);
+    await drainUntil(native, native.applyIntent(localIntent(config), config.initialSlot));
     const id = peerIdFromHex(remote.peer);
-    await commandCompleted(
+    await drainUntil(
       native,
       native.connect(
         id,
         [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: Number(remote.address.split("/")[4])}],
         5000n
-      ),
-      settleOnly
+      )
     );
-    return {bindings, completed, id, native, peer, stop};
+    return {bindings, drainUntil, id, native, peer, stop};
   } catch (error) {
     await stop();
     throw error;
@@ -626,18 +619,6 @@ async function servedPair() {
     await Promise.allSettled([pair.left.stop(), pair.right.close()]);
     throw error;
   }
-}
-
-/**
- * Exchanges until one delivers a request completion, as a held runtime's own host would, then runs `then` in the same
- * job, before any reaction to what the exchange settled.
- */
-async function requestCompleted(runtime: NativeNetworkApplicationRuntime, then?: () => void): Promise<void> {
-  for (let i = 0; i < 2000; i++) {
-    if (runtime.exchange([], settleOnly).completions.some(({family}) => family === "request")) return then?.();
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  throw Error("No request completion arrived");
 }
 
 const chunk = (fill: number) => new Uint8Array(4000).fill(fill);
@@ -687,19 +668,16 @@ test("a return racing a delivered chunk or a pending pull settles the pull first
   const {left, peer, right} = await servedPair();
   holdSettling(right, true);
   try {
-    // The pull took its chunk in an exchange whose reactions have not run when the return arrives.
+    // Returning after a delivered chunk preserves the chunk and retires before another pull.
     const order: string[] = [];
     const first = right.request(peer, BLOCKS, new Uint8Array(32));
     const pulled = first.next();
     void pulled.then(() => order.push("pull"));
     await (await takeIncoming(left)).respond(chunk(5), requestForks[0]);
-    let retired: Promise<unknown> | undefined;
-    await requestCompleted(right, () => {
-      expect(order).toEqual([]);
-      retired = first.return?.();
-      void retired?.then(() => order.push("return"));
-    });
-    await requestCompleted(right);
+    await drainUntil(right, pulled);
+    const retired = first.return?.();
+    void retired?.then(() => order.push("return"));
+    await drainUntil<unknown>(right, retired ?? Promise.resolve());
     expect((await pulled).value?.data).toEqual(chunk(5));
     expect(await retired).toEqual(done);
     expect(order).toEqual(["pull", "return"]);
@@ -718,7 +696,7 @@ test("a return racing a delivered chunk or a pending pull settles the pull first
     await (await takeIncoming(left)).respond(chunk(6), requestForks[0]);
     const retiring = second.return?.();
     void retiring?.then(() => settled.push("return"));
-    await requestCompleted(right);
+    await drainUntil<unknown>(right, retiring ?? Promise.resolve());
     await cancelled;
     expect(await retiring).toEqual(done);
     expect(settled).toEqual(["pull", "return"]);
@@ -783,33 +761,27 @@ test("close hands each unpulled request's outcome to its iterator, whose next pu
 }, 20000);
 
 test("a full request table delivers every outcome and reuses each cell with the next generation", async () => {
-  const {closedBy, commandCompleted, networkBindings: bindings} = await import("./utils/network-bindings.js");
+  const {closedBy, drainUntil, networkBindings: bindings} = await import("./utils/network-bindings.js");
   const config = applicationConfig();
   const native = new bindings.NativeNetworkRuntime();
   const lifecycle = native.initialize(config, () => undefined);
   try {
     const self = lifecycle.identity.peerId;
-    await commandCompleted(native, native.applyIntent(localIntent(config), config.initialSlot), settleOnly);
+    await drainUntil(native, native.applyIntent(localIntent(config), config.initialSlot));
     for (const generation of [1n, 2n]) {
       const handles: ReturnType<typeof native.requestStart>[] = [];
       expect(() => {
         for (let i = 0; i < 1024; i++) handles.push(native.requestStart(self, BLOCKS, new Uint8Array(32), undefined));
       }).toThrow(expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"}));
-      expect(handles.map((handle) => handle.generation)).toEqual(handles.map(() => generation));
-      for (const handle of handles) native.requestPull(handle);
-      const outcomes = new Map<number, unknown>();
-      for (let i = 0; i < 2000 && outcomes.size < handles.length; i++) {
-        for (const completion of native.exchange([], settleOnly).completions)
-          if (completion.family === "request") outcomes.set(completion.handle.index, completion);
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
-      expect([...outcomes.values()]).toEqual(
-        handles.map(() => expect.objectContaining({error: expect.objectContaining({reason: "disconnected"})}))
+      expect(handles.map(({handle}) => handle.generation)).toEqual(handles.map(() => generation));
+      const outcomes = Promise.allSettled(handles.map(({handle}) => native.requestPull(handle)));
+      expect(await drainUntil(native, outcomes)).toEqual(
+        handles.map(() => ({reason: expect.objectContaining({reason: "disconnected"}), status: "rejected"}))
       );
-      for (const handle of handles) expect(() => native.requestPull(handle)).toThrow("InvalidRequestHandle");
+      for (const {handle} of handles) expect(() => native.requestPull(handle)).toThrow("InvalidRequestHandle");
     }
   } finally {
-    await closedBy(native, settleOnly);
+    await closedBy(native, lifecycle.closed);
   }
 });
 

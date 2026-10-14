@@ -30,6 +30,37 @@ test "stop preserves latched success and cancels accepted nonterminal commands" 
     try std.testing.expectEqual(@as(u8, 0), runtime.bridge.commands.occupied);
 }
 
+test "terminal cleanup releases pending Promise references without running JavaScript" {
+    for ([_]bool{ false, true }) |environment| {
+        var runtime: Runtime = .{ .env = undefined, .refs = .init(2), .bridge = .{ .env_alive = false, .notify_live = false } };
+        runtime.bridge.publications = try publications_mod.Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget);
+        defer runtime.bridge.publications.?.deinit();
+        const command = try runtime.reserveCommand(.getIdentity);
+        const publication = try runtime.reservePublication(.beacon_block, 0);
+        const command_cell = runtime.bridge.commands.get(command);
+        const publication_cell = runtime.bridge.publications.?.get(publication).?;
+        command_cell.promise.resolvers = .{ .env = null, .ref_ = @ptrFromInt(1) };
+        publication_cell.promise.resolvers = .{ .env = null, .ref_ = @ptrFromInt(2) };
+        runtime.bridge.commands.transition(command_cell, .terminal);
+        runtime.bridge.publications.?.transition(publication_cell, .terminal);
+        runtime.bridge.quiescent = true;
+        const deleted = support.references_deleted;
+        support.undefined_status = 10;
+        defer support.undefined_status = 0;
+        if (environment) {
+            runtime.cleanup();
+        } else {
+            runtime.notify_finalized = true;
+            runtime.disposed = true;
+            runtime.reclaim();
+        }
+        try std.testing.expectEqual(deleted + 2, support.references_deleted);
+        try std.testing.expectEqual(@as(u8, 0), runtime.bridge.commands.occupied);
+        try std.testing.expectEqual(@as(usize, 0), runtime.bridge.publications.?.diag.occupied);
+        try std.testing.expectEqual(@as(u32, if (environment) 1 else 2), runtime.refs.load(.monotonic));
+    }
+}
+
 test "request table storage retires only after physical quiescence and final pins" {
     var runtime: Runtime = .{ .env = undefined };
     runtime.bridge.payload_budget.limit = 32 + 2 * n.reqresp.Protocol.blocks_by_root_v2.info().response_max;
@@ -188,6 +219,12 @@ test "runtime state follows owner quiescence and a closed notification channel" 
 /// An exchange host that builds only the peer count.
 const PeerHost = struct {
     pub const Result = struct { peers: usize, needs_another_exchange: bool };
+    pub fn settlePublication(_: *PeerHost, _: publications_mod.Token) !void {
+        unreachable;
+    }
+    pub fn settleCommand(_: *PeerHost, _: commands.Token) !void {
+        unreachable;
+    }
     pub fn build(_: *PeerHost, selection: *exchange.Selection) !usize {
         return selection.peer_count;
     }
@@ -230,7 +267,7 @@ test "owner work that races an exchange's check and arm always reaches a later e
     const thread = try std.Thread.spawn(.{}, Producer.run, .{ &producer, &runtime });
     defer thread.join();
     defer producer.stop.store(true, .release);
-    const demand: exchange.Demand = .{ .delivery = .{ .capacity = .{}, .serving_starts = 0, .claim_non_urgent_gossip = false } };
+    runtime.bridge.capacity = .{};
     var host: PeerHost = .{};
     var consumed: usize = 0;
     var again = true;
@@ -239,7 +276,7 @@ test "owner work that races an exchange's check and arm always reaches a later e
         const notified = support.notifications.load(.acquire) != delivered;
         if (notified) delivered += 1;
         if (notified or again) {
-            const output = try exchange.run(&runtime, &.{}, &demand, 0, &host);
+            const output = try exchange.run(&runtime, 0, &host);
             consumed += output.peers;
             again = output.needs_another_exchange;
             exchanges += 1;

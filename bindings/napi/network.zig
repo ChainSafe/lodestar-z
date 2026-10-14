@@ -14,15 +14,13 @@ const incoming_js = @import("network_incoming_js.zig");
 const request_js = @import("network_request_js.zig");
 const exchange_mod = @import("network_exchange.zig");
 const exchange_js = @import("network_exchange_js.zig");
+const feedback = @import("network_feedback.zig");
 const command_js = @import("network_command_js.zig");
-const fatal = @import("network_fatal.zig");
 const network_owner = @import("network_owner.zig");
 const network_storage = @import("network_storage.zig");
 const network_wake = @import("network_wake.zig");
 const network = @import("network");
 const network_logs = @import("network_logs.zig");
-
-const commands = @import("network_commands.zig");
 
 const application_cfg = @import("network_application_config.zig");
 
@@ -73,7 +71,8 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     const holder = try env.createObject();
     try holder.setNamedProperty("identity", try command_js.identity(env, &identity));
     try holder.setNamedProperty("limits", try resolvedLimits(env, runtime));
-    try holder.setNamedProperty("capacities", try capacities(env, runtime));
+    const closed = try runtime.closed.init(env);
+    try holder.setNamedProperty("closed", closed);
     runtime.retain();
     errdefer runtime.release();
     runtime.thread = try std.Thread.spawn(.{ .stack_size = std.Thread.SpawnConfig.default_stack_size }, network_owner.run, .{runtime});
@@ -118,34 +117,117 @@ fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     };
 }
 
-/// One host exchange (network_exchange.zig): the host's actions, then the completions or the close result, and the
-/// payload `demand` asks for, delivered in one result.
-pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value) !js.Value {
+/// Pulls a bounded batch of payloads under standing host capacity. See network_exchange.zig for borrow contracts.
+pub fn exchange(self: *@This()) !js.Value {
     const runtime = try self.owner();
     runtime.retain();
     defer runtime.release();
     if (runtime.in_exchange) return error.NetworkExchangeReentered;
     runtime.in_exchange = true;
     defer runtime.in_exchange = false;
-    var actions: [exchange_mod.action_max]exchange_mod.Action = undefined;
-    const count = try exchange_js.parseActions(actions_value.val, &actions);
-    const demand = try exchange_js.parseDemand(demand_value.val);
     var host: Exchange = .{ .env = js.env(), .runtime = runtime };
     const now = try gossip.monotonic();
-    const result = exchange_mod.run(runtime, actions[0..count], &demand, now, &host) catch |err| {
+    const result = exchange_mod.run(runtime, now, &host) catch |err| {
         if (jsStopped(err)) runtime.forceStop(true);
         return err;
     };
     return .{ .val = result };
 }
 
-/// Throws what an exchange would for `action`, applying nothing, so a host's invalid input fails its own call.
-pub fn checkAction(_: *@This(), action: js.Value) !void {
-    _ = try exchange_js.parseAction(action.val);
+pub fn drainCompletions(self: *@This()) !js.Value {
+    const runtime = try self.owner();
+    runtime.retain();
+    defer runtime.release();
+    if (runtime.in_exchange) return error.NetworkExchangeReentered;
+    runtime.in_exchange = true;
+    defer runtime.in_exchange = false;
+    var host: Exchange = .{ .env = js.env(), .runtime = runtime };
+    const outcome = exchange_mod.drain(runtime, &host) catch |err| {
+        if (jsStopped(err)) runtime.forceStop(true);
+        return err;
+    };
+    return .{ .val = try js.env().getBoolean(outcome.needs_another_exchange) };
 }
 
-/// A private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied, so no
-/// acknowledgement follows them, though expiry still disposes of them; a release wakes the owner.
+/// Records the first host delivery failure without ending host cleanup. The host calls close when cleanup finishes.
+pub fn reportFailure(self: *@This(), failure: js.Value) !js.Value {
+    const runtime = try self.owner();
+    const ref = try napi.Ref.create(runtime.env.env, failure.val, 1);
+    runtime.lock();
+    defer runtime.unlock();
+    if (runtime.bridge.reason == .failed or runtime.closed.resolvers == null) {
+        ref.delete() catch unreachable;
+        return .{ .val = try js.env().getBoolean(false) };
+    }
+    runtime.host_failure = ref;
+    runtime.bridge.reason = .failed;
+    runtime.bridge.terminal_error = error.NativeHostFailure;
+    return .{ .val = try js.env().getBoolean(true) };
+}
+
+pub fn setCapacity(self: *@This(), value: js.Value) !void {
+    const runtime = try self.owner();
+    const capacity = try feedback.capacity(value.val);
+    runtime.lock();
+    defer runtime.unlock();
+    runtime.bridge.capacity = capacity;
+    runtime.notifyIfReadyLocked();
+}
+
+pub fn reportGossip(self: *@This(), handle: js.Value, verdict_value: js.Value) !void {
+    const runtime = try self.owner();
+    const token = try feedback.handle(handle.val);
+    const verdict = try feedback.name(network.gossipsub.Gossipsub.Verdict, verdict_value.val, error.InvalidGossipVerdict);
+    const now = try gossip.monotonic();
+    runtime.lock();
+    defer runtime.unlock();
+    if (runtime.bridge.stop) return;
+    if (runtime.bridge.gossip) |*table| _ = table.report(token, verdict, now);
+    runtime.wakeOwnerLocked();
+}
+
+pub fn classifyGossip(self: *@This(), handle: js.Value, available_value: js.Value) !void {
+    const runtime = try self.owner();
+    const token = try feedback.handle(handle.val);
+    const available = try decode.boolean(available_value.val);
+    runtime.lock();
+    defer runtime.unlock();
+    if (runtime.bridge.stop) return;
+    if (runtime.bridge.gossip) |*table| _ = table.classify(token, available);
+    runtime.wakeOwnerLocked();
+    runtime.notifyIfReadyLocked();
+}
+
+pub fn notifyBlock(self: *@This(), value: js.Value) !void {
+    const runtime = try self.owner();
+    const root = try decode.fixed(32, value.val);
+    runtime.lock();
+    defer runtime.unlock();
+    if (runtime.bridge.stop) return;
+    if (runtime.bridge.gossip) |*table| table.notifyBlock(root);
+    runtime.wakeOwnerLocked();
+}
+
+pub fn dropQueuedGossip(self: *@This()) !void {
+    const runtime = try self.owner();
+    runtime.lock();
+    defer runtime.unlock();
+    if (runtime.bridge.stop) return;
+    if (runtime.bridge.gossip) |*table| table.dropQueued();
+    runtime.wakeOwnerLocked();
+}
+
+pub fn reportPeer(self: *@This(), peer: js.Value, action: js.Value, context: js.Value) !void {
+    const runtime = try self.owner();
+    const report = try feedback.peerReport(peer.val, action.val, context.val);
+    runtime.lock();
+    defer runtime.unlock();
+    if (runtime.bridge.stop) return;
+    runtime.bridge.reports.addCount(&report, 1);
+    runtime.wakeOwnerLocked();
+}
+
+/// Holds verdict application for ownership tests. Expiry continues; a release wakes the owner.
 pub fn holdVerdicts(self: *@This(), held: js.Value) !void {
     const runtime = try self.owner();
     const value = try decode.boolean(held.val);
@@ -164,19 +246,6 @@ pub fn holdOperations(self: *@This(), held: js.Value) !void {
     defer runtime.unlock();
     runtime.bridge.operations_held = value;
     if (!value) runtime.wakeOwnerLocked();
-}
-
-/// Terminates the process at a fatal site JavaScript raises (network_fatal.zig). `reason` is at most 64 printable ASCII
-/// bytes.
-pub fn fail(_: *@This(), site_value: js.Value, reason_value: js.Value) !void {
-    var name: [fatal.name_max]u8 = undefined;
-    const site = std.meta.stringToEnum(fatal.Site, name[0..try decode.text(site_value.val, &name)]) orelse return error.InvalidNetworkConfig;
-    switch (site) {
-        .generated_batch, .completion_contract => {},
-        .exchange_build, .exchange_finish => return error.InvalidNetworkConfig,
-    }
-    var reason: [fatal.detail_max]u8 = undefined;
-    fatal.terminate(js.env(), site, reason[0..try decode.text(reason_value.val, &reason)]);
 }
 
 const Exchange = exchange_js.Host;
@@ -214,16 +283,6 @@ fn resolvedLimits(env: napi.Env, runtime: *const Runtime) !Value {
     return object;
 }
 
-/// Each operation family's cells, which size the completion owner's records.
-fn capacities(env: napi.Env, runtime: *const Runtime) !Value {
-    const object = try env.createObject();
-    try object.setNamedProperty("publication", try env.createUint32(@intCast(runtime.bridge.publications.?.diag.capacity)));
-    try object.setNamedProperty("command", try env.createUint32(commands.capacity));
-    try object.setNamedProperty("request", try env.createUint32(@intCast(runtime.bridge.requests.?.diag.capacity)));
-    try object.setNamedProperty("incoming", try env.createUint32(@intCast(runtime.bridge.incoming.?.diag.capacity)));
-    return object;
-}
-
 /// The gossip SHA-256 implementation this process selected, for packaged qualification records.
 pub fn gossipSha256Backend() js.String {
     return js.String.from(@tagName(network.gossipsub.sha256.backend()));
@@ -235,7 +294,7 @@ pub fn getMetrics(self: *@This()) !js.Value {
         runtime.lock();
         defer runtime.unlock();
         const logs = runtime.logs.snapshot();
-        const borrowed = runtime.metrics.text(&logs, runtime.xray) catch |err| return switch (err) {
+        const borrowed = runtime.metrics.text(&logs, runtime.bridge.reports.dropped, runtime.xray) catch |err| return switch (err) {
             error.WriteFailed, error.MetricCapacity => error.NetworkMetricsCapacity,
             error.DuplicateMetric => error.NetworkMetricsSchema,
         };
@@ -293,21 +352,21 @@ pub fn getRememberedPeers(self: *@This()) !js.Value {
 pub fn requestStart(self: *@This(), peer: js.Value, protocol: js.Value, data: js.Value, options: js.Value) !js.Value {
     return .{ .val = try request_js.start(try self.owner(), peer.val, protocol.val, data.val, options.val) };
 }
-pub fn requestPull(self: *@This(), handle: js.Value) !void {
-    try request_js.pull(try self.owner(), handle.val);
+pub fn requestPull(self: *@This(), handle: js.Value) !js.Value {
+    return .{ .val = try request_js.pull(try self.owner(), handle.val) };
 }
 pub fn requestRetire(self: *@This(), handle: js.Value, abandoned: js.Value) !void {
     try request_js.retire(try self.owner(), handle.val, try decode.boolean(abandoned.val));
 }
 
-pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context: js.Value) !void {
-    try incoming_js.respond(try self.owner(), handle.val, data.val, context.val);
+pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context: js.Value) !js.Value {
+    return .{ .val = try incoming_js.respond(try self.owner(), handle.val, data.val, context.val) };
 }
 pub fn incomingRelease(self: *@This(), handle: js.Value) !void {
     try incoming_js.release(try self.owner(), handle.val);
 }
-pub fn incomingReady(self: *@This(), handle: js.Value) !void {
-    try incoming_js.ready(try self.owner(), handle.val);
+pub fn incomingReady(self: *@This(), handle: js.Value) !js.Value {
+    return .{ .val = try incoming_js.ready(try self.owner(), handle.val) };
 }
 pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, status: js.Value, message: js.Value) !void {
     try incoming_js.terminal(try self.owner(), handle.val, action.val, status.val, message.val);

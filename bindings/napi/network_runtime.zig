@@ -2,6 +2,7 @@ const std = @import("std");
 const n = @import("network");
 const d = @import("discv5");
 const napi = @import("zapi:zapi").napi;
+const Promise = @import("network_promise.zig");
 const network_metrics = @import("network_metrics.zig");
 const network_storage = @import("network_storage.zig");
 const network_peer_reports = @import("network_peer_reports.zig");
@@ -70,8 +71,6 @@ const Bridge = struct {
     /// The owner starts no admitted command, publication or request while an ownership test holds them.
     operations_held: bool = false,
     env_alive: bool = true,
-    /// An exchange delivered the close result, after owner quiescence, the join and every promised completion.
-    close_delivered: bool = false,
     graceful: bool = false,
     stop: bool = false,
     reason: Reason = .requested,
@@ -92,12 +91,14 @@ pub const Runtime = struct {
     thread: ?std.Thread = null,
     /// JS thread: an exchange is running, so a nested one is refused.
     in_exchange: bool = false,
-    /// The exchange results created at initialize, which idle exchanges and rollbacks return.
+    /// Prepared results for exchanges with no stream or payload delivery.
     results: network_exchange_js.Results = .{},
     notify_finalized: bool = false,
     disposed: bool = false,
     hook_live: bool = false,
     env: napi.Env,
+    closed: Promise = .{},
+    host_failure: ?napi.Ref = null,
 
     // Network thread scheduling and counters, read after joining at teardown.
     metrics_due_ms: u64 = 0,
@@ -215,7 +216,6 @@ pub const Runtime = struct {
         defer self.unlock();
         if (self.bridge.stop or self.bridge.quiescent) return;
         self.bridge.stop = true;
-        self.bridge.reason = .requested;
         self.wakeOwnerLocked();
         self.notifyIfReadyLocked();
     }
@@ -233,9 +233,9 @@ pub const Runtime = struct {
     /// Must hold the bridge mutex. Delivery readiness ignores one exchange's temporary allowance.
     pub fn deliverableLocked(self: *Runtime, kind: DeliveryKind) bool {
         if (kind == .completions)
-            return self.completionsReadyLocked() or self.acknowledgingLocked() or (self.bridge.quiescent and !self.bridge.close_delivered);
+            return self.completionsReadyLocked() or (self.bridge.quiescent and self.closed.resolvers != null);
         const capacity = self.bridge.capacity orelse return false;
-        if (self.bridge.close_delivered) return false;
+        if (self.bridge.quiescent and self.closed.resolvers == null) return false;
         if (kind == .peers) return self.bridge.peer_updates != null and self.bridge.peer_updates.?.len > 0;
         if (self.bridge.stop or self.bridge.quiescent) return false;
         return switch (kind) {
@@ -272,10 +272,6 @@ pub const Runtime = struct {
             else => self.failLocked(err),
         };
     }
-    /// An owner disposition of a delivered message that an exchange would acknowledge now. O(1).
-    pub fn acknowledgingLocked(self: *const Runtime) bool {
-        return if (self.bridge.gossip) |*table| table.diag.acknowledging > 0 else false;
-    }
     /// Whether any operation has a completion ready for delivery. O(1).
     pub fn completionsReadyLocked(self: *const Runtime) bool {
         return self.bridge.commands.anyTerminal() or
@@ -308,40 +304,41 @@ pub const Runtime = struct {
     /// Environment disposal reclaims every cell JavaScript can no longer take, rather than emulating its delivery.
     pub fn reclaim(self: *Runtime) void {
         std.debug.assert(self.bridge.quiescent and self.notify_finalized and self.disposed);
-        if (self.bridge.requests) |*table| for (table.cells, 0..) |cell, i| {
+        if (self.bridge.requests) |*table| for (table.cells, 0..) |*cell, i| {
             if (cell.state == .free) continue;
-            std.debug.assert(cell.state == .terminal and cell.native == null and !cell.copying);
+            std.debug.assert(cell.state == .terminal and cell.native == null);
+            cell.copying = false;
             self.retireRequest(.{ .index = @intCast(i), .generation = cell.generation });
         };
-        if (self.bridge.incoming) |*table| for (table.cells, 0..) |cell, i| {
+        if (self.bridge.incoming) |*table| for (table.cells, 0..) |*cell, i| {
             if (cell.state == .free) continue;
-            std.debug.assert(!cell.native and !cell.copying);
+            std.debug.assert(!cell.native);
+            cell.copying = false;
             table.retire(.{ .index = @intCast(i), .generation = cell.generation });
         };
         self.retireClosedPublications();
+        self.retireClosedCommands();
         self.retireRequestStorageLocked();
         self.disposeJsReferences();
     }
-    /// Deletes the prepared exchange results, the runtime's only JavaScript references.
+    /// Deletes the prepared exchange results. Retiring operation cells releases their Promise references.
     pub fn disposeJsReferences(self: *Runtime) void {
         self.results.dispose();
+        self.closed.deinit();
+        if (self.host_failure) |ref| ref.delete() catch unreachable;
+        self.host_failure = null;
     }
     pub fn cleanup(self: *Runtime) void {
         self.hook_live = false;
         self.forceStop(true);
         self.retireClosedPublications();
-        for (0..self.bridge.commands.cells.len) |i| {
-            self.lock();
-            const cell = &self.bridge.commands.cells[i];
-            const token: ?commands.Token = if (cell.state == .free) null else .{ .index = @intCast(i), .generation = cell.generation };
-            std.debug.assert(cell.state != .preparing and cell.state != .copying);
-            self.unlock();
-            if (token) |live| self.abortCommand(live);
-        }
-        if (self.bridge.requests) |*requests| for (requests.cells, 0..) |cell, i| {
+        self.retireClosedCommands();
+        if (self.bridge.requests) |*requests| for (requests.cells, 0..) |*cell, i| {
+            cell.copying = false;
             if (cell.state != .free) self.retireRequest(.{ .index = @intCast(i), .generation = cell.generation });
         };
-        if (self.bridge.incoming) |*incoming| for (incoming.cells, 0..) |cell, i| {
+        if (self.bridge.incoming) |*incoming| for (incoming.cells, 0..) |*cell, i| {
+            cell.copying = false;
             if (cell.state != .free) {
                 incoming.retire(.{ .index = @intCast(i), .generation = cell.generation });
             }
@@ -428,6 +425,14 @@ pub const Runtime = struct {
             self.retirePublication(.{ .index = @intCast(i), .generation = cell.generation });
         }
     }
+    fn retireClosedCommands(self: *Runtime) void {
+        for (0..commands.capacity) |i| {
+            const cell = &self.bridge.commands.cells[i];
+            if (cell.state == .free) continue;
+            std.debug.assert(cell.state == .terminal);
+            self.retireCommand(.{ .index = @intCast(i), .generation = cell.generation });
+        }
+    }
     pub fn reserveCommand(self: *Runtime, command: commands.Command) !commands.Token {
         self.lock();
         defer self.unlock();
@@ -442,7 +447,7 @@ pub const Runtime = struct {
         self.retain();
         return token;
     }
-    pub fn abortCommand(self: *Runtime, token: commands.Token) void {
+    pub fn retireCommand(self: *Runtime, token: commands.Token) void {
         self.lock();
         self.bridge.commands.retire(token);
         self.retireStoresLocked();

@@ -11,48 +11,90 @@ export {testChain};
 import {type ChainConfig, createBeaconConfig} from "@lodestar/config";
 import bindings, {type BeaconConfig} from "../../src/index.js";
 import type {
+  HostCapacity,
   IpEndpoint,
   NativeApplicationConfig,
   NativeDiscoveryConfig,
   NativeGossipProcessorLimit,
   NativeLocalIntent,
   NativeNetwork,
+  NativePeerAction,
+  NativePeerReportContext,
   NativeRuntimeConfig,
   NativeSubscriptionSet,
   NativeTopicKind,
   NativeTopicScoreParams,
 } from "../../src/network.js";
 import type {
-  NativeAction,
   NativeExchange,
-  NativeExchangeDemand,
+  NativeGossipHandle,
+  NativeGossipVerdict,
   NativeIncomingRequest,
   NativeNetworkApplicationRuntime,
 } from "../../src/network-runtime.js";
 
 const MIB = 1024 * 1024;
 
-export const settleOnly = {mode: "control"} as const;
+export const settleOnly = null;
 export const capacity = {gossipValidation: "ready", incomingRequestSlots: 32} as const;
-export const gossipAll = {
-  capacity,
-  claimNonUrgentGossip: true,
-  mode: "delivery",
-  servingStarts: 8,
-} as const;
-export const gossipUrgent = {...gossipAll, claimNonUrgentGossip: false};
+export const gossipAll = capacity;
+export const gossipUrgent = {...capacity, gossipValidation: "backpressured"} as const;
 
+export type Feedback =
+  | {type: "verdict"; handle: NativeGossipHandle; verdict: NativeGossipVerdict}
+  | {type: "classify"; handle: NativeGossipHandle; available: boolean}
+  | {type: "block"; root: Uint8Array}
+  | {type: "dropQueued"}
+  | {type: "reportPeer"; peerId: string; action: NativePeerAction; count: number; context?: NativePeerReportContext};
+
+type ExchangeRuntime = Pick<NativeNetworkApplicationRuntime, "exchange" | "setCapacity" | "drainCompletions">;
+type FeedbackRuntime = ExchangeRuntime &
+  Pick<
+    NativeNetworkApplicationRuntime,
+    "reportGossip" | "classifyGossip" | "notifyBlock" | "dropQueuedGossip" | "reportPeer"
+  >;
+
+export function exchange(runtime: ExchangeRuntime, capacity: HostCapacity | null): NativeExchange;
 export function exchange(
-  runtime: Pick<NativeNetworkApplicationRuntime, "exchange">,
-  demand: NativeExchangeDemand,
-  actions: readonly NativeAction[] = []
+  runtime: FeedbackRuntime,
+  capacity: HostCapacity | null,
+  feedback: readonly Feedback[]
+): NativeExchange;
+export function exchange(
+  runtime: ExchangeRuntime | FeedbackRuntime,
+  capacity: HostCapacity | null,
+  feedback: readonly Feedback[] = []
 ): NativeExchange {
-  return runtime.exchange(actions, demand);
+  if ("reportGossip" in runtime)
+    for (const item of feedback) {
+      switch (item.type) {
+        case "verdict":
+          runtime.reportGossip(item.handle, item.verdict);
+          break;
+        case "classify":
+          runtime.classifyGossip(item.handle, item.available);
+          break;
+        case "block":
+          runtime.notifyBlock(item.root);
+          break;
+        case "dropQueued":
+          runtime.dropQueuedGossip();
+          break;
+        case "reportPeer":
+          for (let i = 0; i < item.count; i++) runtime.reportPeer(item.peerId, item.action, item.context);
+          break;
+      }
+    }
+  runtime.setCapacity(capacity);
+  runtime.drainCompletions();
+  const result = runtime.exchange();
+  runtime.setCapacity(null);
+  return result;
 }
 
 /** For request-only fixtures; unrelated payload delivery fails instead of losing its obligations. */
-export function nextIncoming(runtime: Pick<NativeNetworkApplicationRuntime, "exchange">): NativeIncomingRequest | null {
-  const result = runtime.exchange([], {...gossipAll, servingStarts: 1});
+export function nextIncoming(runtime: ExchangeRuntime): NativeIncomingRequest | null {
+  const result = exchange(runtime, {...gossipAll, incomingRequestSlots: 1});
   assert.equal(result.gossip, null, "Unexpected gossip while taking an incoming request");
   assert.equal(result.checks.length, 0, "Unexpected dependency checks while taking an incoming request");
   assert(result.serving.length <= 1, "Exchange exceeded its serving allowance");
@@ -262,16 +304,13 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
  * with the test, which can also hold the host to take every exchange's results itself.
  */
 function settlingHost(onWorkAvailable: () => void = () => undefined) {
-  let runtime: Pick<NativeNetworkApplicationRuntime, "exchange"> | undefined;
+  let runtime: ExchangeRuntime | undefined;
   let scheduled = false;
   let held = false;
   const drain = () => {
     scheduled = false;
     if (held) return;
-    const result = runtime?.exchange([], settleOnly);
-    if (result?.closed) {
-      runtime = undefined;
-    } else if (result?.needsAnotherExchange) schedule();
+    if (runtime?.drainCompletions()) schedule();
   };
   const schedule = () => {
     if (scheduled) return;
@@ -279,8 +318,11 @@ function settlingHost(onWorkAvailable: () => void = () => undefined) {
     setImmediate(drain);
   };
   return {
-    attach(value: Pick<NativeNetworkApplicationRuntime, "exchange">) {
+    attach(value: ExchangeRuntime & Pick<NativeNetworkApplicationRuntime, "closed">) {
       runtime = value;
+      void value.closed.then(() => {
+        runtime = undefined;
+      });
     },
     hold(value: boolean) {
       held = value;

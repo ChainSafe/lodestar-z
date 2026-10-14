@@ -1,6 +1,6 @@
 import {expect, test} from "vitest";
 import {initializeNativeNetworkRuntime} from "../src/network-runtime.js";
-import {applicationConfig, settleOnly, unreachableConnect} from "./utils/network.js";
+import {applicationConfig, exchange, settleOnly, unreachableConnect} from "./utils/network.js";
 
 /** Closes a runtime and settles its pending connect through the host's exchanges until closed. */
 async function settleClosedConnect() {
@@ -12,7 +12,7 @@ async function settleClosedConnect() {
   });
   for (let i = 0; i < 400 && !closed; i++) {
     await new Promise((resolve) => setTimeout(resolve, 5));
-    runtime.exchange([], settleOnly);
+    exchange(runtime, settleOnly);
   }
   return {closed, error: await connect, facade: new WeakRef(runtime)};
 }

@@ -7,47 +7,17 @@ import type {
   IpEndpoint,
   NativeApplicationConfig,
   NativeConnection,
-  NativeDirectSnapshot,
   NativeForkEntry,
-  NativeGossipDiagnosticsPage,
-  NativeGossipPublishResult,
   NativeIdentity,
-  NativeIdentitySnapshot,
-  NativeIntentResult,
   NativeLogRecord,
   NativeNetwork,
   NativePeerAction,
   NativePeerReportContext,
   NativePeerObservation,
-  NativePeerSnapshot,
   NativeRequestProtocolId,
-  NativeRememberedPeersSnapshot,
-  NativeResponseChunk,
   NativeTopicKind,
   PeerIdStr,
 } from "./network.js";
-
-/** Standing host capacity and this turn's remaining delivery allowance. */
-export type NativeExchangeDemand =
-  | {mode: "control"}
-  | {
-      mode: "delivery";
-      capacity: HostCapacity;
-      servingStarts: number;
-      claimNonUrgentGossip: boolean;
-    };
-
-/**
- * Applied before the exchange selects its delivery: one verdict per delivered message, one classification per
- * delivered check, imported blocks, a recheck of every waiting message, and coalesced peer penalties (1..100).
- */
-export type NativeAction =
-  | {type: "verdict"; handle: NativeGossipHandle; verdict: NativeGossipVerdict}
-  | {type: "classify"; handle: NativeGossipHandle; available: boolean}
-  | {type: "block"; root: Uint8Array}
-  | {type: "recheck"}
-  | {type: "dropQueued"}
-  | {type: "reportPeer"; peerId: PeerIdStr; action: NativePeerAction; count: number; context?: NativePeerReportContext};
 
 /** One exchange's delivery, which the host owns; frozen when it delivers nothing. */
 export interface NativeExchange {
@@ -56,96 +26,9 @@ export interface NativeExchange {
   readonly serving: readonly NativeIncomingRequest[];
   readonly checks: readonly NativeGossipDependencyCheck[];
   readonly gossip: NativeGossipBatch | null;
-  /**
-   * Delivered messages the owner has disposed of, whatever the demand: it applied their verdicts, found them already
-   * resolved or expired them. Each handle arrives once; close drops the rest. Not a peer penalty.
-   */
-  readonly acknowledged: readonly NativeGossipHandle[];
   /** Deliverable work remains, including work deferred by this turn's allowance. */
   readonly needsAnotherExchange: boolean;
-  /**
-   * Completed publications and commands, requests' chunks and terminal outcomes, and incoming streams'
-   * acknowledgements, closes and permissions. Each settles its operation's promise, or its stream's pending calls and
-   * close; the exchange retired each cell's final completion.
-   */
-  readonly completions: readonly NativeCompletion[];
-  /** The close result, in the one exchange that settled it; otherwise null. */
-  readonly closed: NativeRuntimeCloseResult | null;
 }
-
-/** An operation cell's handle, scoped to one runtime and family. */
-export interface NativeCellHandle {
-  index: number;
-  generation: bigint;
-}
-
-/** An operation's error, whose `code` names it. */
-export type NativeOperationError = Error & {code: string};
-
-/** One completed operation cell: the value its promise resolves with, or the error it rejects with. */
-export type NativeCompletion =
-  | ({family: "publication"; handle: NativeCellHandle; kind?: undefined} & (
-      | {value: NativeGossipPublishResult}
-      | {error: NativeOperationError}
-    ))
-  | NativeCommandCompletion
-  | NativeRequestCompletion
-  | NativeIncomingCompletion;
-
-/**
- * A request cell's completion: a chunk its pending pull resolves with, or its terminal outcome, the end of the stream
- * or the error a pending pull rejects with. A terminal outcome also ends a pending return or throw.
- */
-export type NativeRequestCompletion = {family: "request"; handle: NativeCellHandle; kind?: undefined} & (
-  | {value: NativeResponseChunk}
-  | {done: true}
-  | {error: NativeOperationError}
-);
-
-/**
- * An incoming stream cell's completion, whose parts settle in this order: `response`, the pending `respond`'s
- * acknowledgement; `closed`, the stream's end; `ready`, the pending permission's outcome. An outcome without `error`
- * resolves.
- */
-export interface NativeIncomingCompletion {
-  family: "incoming";
-  handle: NativeCellHandle;
-  kind?: undefined;
-  response?: {error?: NativeOperationError};
-  closed?: true;
-  ready?: {error?: NativeOperationError};
-}
-
-/** What each command's promise resolves with, keyed by the runtime method that admitted it. */
-export interface NativeCommandResults {
-  applyIntent: NativeIntentResult;
-  updateStatus: undefined;
-  getIdentity: NativeIdentitySnapshot;
-  getPeers: NativePeerSnapshot;
-  getGossipDiagnostics: NativeGossipDiagnosticsPage;
-  connect: undefined;
-  disconnect: undefined;
-  reStatusPeers: undefined;
-  addDirectPeer: undefined;
-  removeDirectPeer: boolean;
-  getDirectPeers: NativeDirectSnapshot;
-  getRememberedPeers: NativeRememberedPeersSnapshot;
-}
-
-/** A completed command, whose value is its kind's result. */
-export type NativeCommandCompletion = {
-  [Kind in keyof NativeCommandResults]: {family: "command"; handle: NativeCellHandle; kind: Kind} & (
-    | {value: NativeCommandResults[Kind]}
-    | {error: NativeOperationError}
-  );
-}[keyof NativeCommandResults];
-
-/**
- * A fatal site JavaScript raises: `generated_batch`, an exchange threw while processing the pump's batch and demand;
- * `completion_contract`, a completion matched no record the completion owner installed, or native closed with
- * promised completions missing.
- */
-export type NativeEscalation = "generated_batch" | "completion_contract";
 
 export interface NativeNetworkApplicationRuntime
   extends Pick<
@@ -175,18 +58,18 @@ export interface NativeNetworkApplicationRuntime
   reStatusPeers: NativeNetwork["reStatus"];
   addDirectPeer(peerId: PeerIdStr, addresses: readonly IpEndpoint[]): Promise<void>;
   removeDirectPeer(peerId: PeerIdStr): Promise<boolean>;
-  /**
-   * One host turn: applies up to 256 `actions`, delivers up to 32 publication, command, request and
-   * incoming completions per family in `completions`, then the close result once nothing else awaits delivery, and
-   * delivers the payload `demand` asks for. It throws only for invalid input or a nested call, before applying anything. Actions after
-   * a stop are ignored; unknown penalized identities count in peerReportsIgnored. A bridge result or completion-contract
-   * failure terminates the process rather than throwing after partial delivery.
-   */
-  exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): NativeExchange;
-  /** Terminates the process at a fatal site. `reason` is at most 64 printable ASCII characters. */
-  fail(site: NativeEscalation, reason: string): never;
-  /** Throws what an exchange would for `action`, applying nothing. */
-  checkAction(action: NativeAction): void;
+  /** One bounded payload pull under standing host capacity. */
+  exchange(): NativeExchange;
+  setCapacity(capacity: HostCapacity | null): void;
+  reportGossip(handle: NativeGossipHandle, verdict: NativeGossipVerdict): void;
+  classifyGossip(handle: NativeGossipHandle, available: boolean): void;
+  notifyBlock(root: Uint8Array): void;
+  dropQueuedGossip(): void;
+  reportPeer(peerId: PeerIdStr, action: NativePeerAction, context?: NativePeerReportContext): void;
+  /** Settles a bounded batch of native Promises; true means another turn is needed. */
+  drainCompletions(): boolean;
+  /** Records the first host failure; the host closes after its cleanup finishes. */
+  reportFailure(error: Error): boolean;
   /**
    * Private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied. Expiry
    * still disposes of them.
@@ -204,11 +87,10 @@ export interface NativeNetworkApplicationRuntime
  * Initialize from the owning thread using config.beaconConfig. One runtime is live per process;
  * another initializes only after the previous one closes and is fully released, including garbage collection.
  * Copies configuration and returns a running runtime; failure is terminal.
- * Calls onWorkAvailable on that thread when completions, the close result, peer events, incoming requests, or gossip
- * work becomes deliverable under the last exchange's standing capacity.
- * onWorkAvailable must only schedule an exchange in a later macrotask. No further notification arrives while work
- * remains deliverable, so the caller exchanges again while `needsAnotherExchange` is true and schedules when host
- * capacity recovers. Run an initial exchange and never cancel a scheduled exchange, including during shutdown.
+ * Calls onWorkAvailable when Promise settlement or payload delivery becomes ready under standing host capacity.
+ * The callback schedules a later macrotask: set capacity, drain completions, then pull payloads when enabled.
+ * Continue while the last operation reports remaining work; schedule again when host capacity recovers.
+ * Run an initial turn and keep scheduled turns through shutdown.
  * The caller must retain and drain the runtime through its close result.
  */
 export function initializeNativeNetworkRuntime(
@@ -268,8 +150,6 @@ export interface NativeGossipJob {
   start: number;
   length: number;
   grouped: boolean;
-  /** A block, blob sidecar or data column job, which ordinary gating never withholds. */
-  urgent: boolean;
 }
 
 export interface NativeGossipBatch {

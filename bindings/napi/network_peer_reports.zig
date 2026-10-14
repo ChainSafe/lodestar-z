@@ -15,6 +15,7 @@ pub const Table = struct {
     rows: [capacity]Row = @splat(.{}),
     pending: u32 = 0,
     ignored: u64 = 0,
+    dropped: u64 = 0,
     cursor: u16 = 0,
 
     /// Reports from different connections, endpoints or causes must not merge.
@@ -32,6 +33,7 @@ pub const Table = struct {
             }
             const i = vacant orelse {
                 self.ignored +|= 1;
+                self.dropped +|= 1;
                 return;
             };
             self.rows[i] = .{ .occupied = true, .report = report.* };

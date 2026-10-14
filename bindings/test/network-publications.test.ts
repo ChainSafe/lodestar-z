@@ -1,7 +1,15 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test, vi} from "vitest";
 import {initializeNativeNetworkRuntime} from "../src/network-runtime.js";
-import {applicationConfig, holdSettling, localIntent, settleOnly, startRuntime, topicName} from "./utils/network.js";
+import {
+  applicationConfig,
+  exchange,
+  holdSettling,
+  localIntent,
+  settleOnly,
+  startRuntime,
+  topicName,
+} from "./utils/network.js";
 
 const BLOCK = topicName();
 const SYNC = topicName("sync_committee_0");
@@ -114,11 +122,15 @@ test("close settles every pending publication", async () => {
   }
 });
 
-test("settlement retires every completed publication before a lower cell refills", async () => {
+test("native-owned publication Promises settle without completion envelopes", async () => {
   const runtime = initializeNativeNetworkRuntime(applicationConfig(), () => undefined);
+  const delivered: number[] = [];
   const publish = (fill: number) =>
     runtime.publishGossip(BLOCK, new Uint8Array(4000).fill(fill), {allowZeroPeers: true, ignoreDuplicate: true}).then(
-      () => "published",
+      () => {
+        delivered.push(fill);
+        return "published";
+      },
       (error) => error.code
     );
 
@@ -127,46 +139,30 @@ test("settlement retires every completed publication before a lower cell refills
     closed = true;
   });
   const publications = [publish(1), publish(2)];
-  const delivered: number[] = [];
   try {
     await vi.waitFor(() => {
-      for (const {handle} of runtime.exchange([], settleOnly).completions) delivered.push(handle.index);
+      runtime.drainCompletions();
       expect(delivered).toHaveLength(2);
     });
-    expect(delivered).toEqual([0, 1]);
+    expect(delivered).toEqual([1, 2]);
     publications.push(publish(3));
     await vi.waitFor(() => {
-      for (const {handle} of runtime.exchange([], settleOnly).completions) delivered.push(handle.index);
+      runtime.drainCompletions();
       expect(delivered).toHaveLength(3);
     });
-    expect(delivered).toEqual([0, 1, 0]);
+    expect(delivered).toEqual([1, 2, 3]);
   } finally {
     runtime.close();
     for (let i = 0; i < 400 && !closed; i++) {
       await delay(5);
-      for (let pass = 0; pass < 8 && runtime.exchange([], settleOnly).needsAnotherExchange; pass++);
+      for (let pass = 0; pass < 8 && exchange(runtime, settleOnly).needsAnotherExchange; pass++);
     }
   }
   expect(await Promise.all(publications)).toEqual(Array(3).fill("published"));
   expect(await runtime.closed).toEqual({reason: "requested"});
 });
 
-test("a completion delivered in the job that admitted its publication settles the record installed there", async () => {
-  const runtime = startRuntime(applicationConfig());
-  try {
-    const published = runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true});
-    // Without yielding, exchange until the owner has published it, so its completion is the earliest possible.
-    let delivered = 0;
-    for (let i = 0; i < 1_000_000 && delivered === 0; i++)
-      delivered = runtime.exchange([], settleOnly).completions.length;
-    expect(delivered).toBe(1);
-    await expect(published).resolves.toMatchObject({duplicate: false});
-  } finally {
-    await runtime.close();
-  }
-});
-
-test("close settles after every publication and command admitted before it, with bounded completion batches", async () => {
+test("close settles after every publication and command without exposing their completions", async () => {
   const runtime = startRuntime(applicationConfig());
   holdSettling(runtime, true);
   const order: string[] = [];
@@ -184,15 +180,12 @@ test("close settles after every publication and command admitted before it, with
     record(runtime.getPeers(), "command"),
   ];
   const closing = record(runtime.close(), "closed");
-  const delivered: string[][] = [];
   for (let i = 0; i < 400 && !order.includes("closed"); i++) {
     await delay(5);
-    delivered.push(runtime.exchange([], settleOnly).completions.map(({family}) => family));
+    runtime.drainCompletions();
   }
   await Promise.all([...operations, closing]);
   expect(order.at(-1)).toBe("closed");
   expect(order.filter((label) => label === "publication")).toHaveLength(4);
   expect(order.filter((label) => label === "command")).toHaveLength(2);
-  expect(delivered.every((families) => families.length <= 64)).toBe(true);
-  expect(delivered.flat().sort()).toEqual(["command", "command", ...Array(4).fill("publication")]);
 });

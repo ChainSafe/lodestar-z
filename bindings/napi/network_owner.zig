@@ -416,7 +416,7 @@ test "a command queued after wait planning executes in the turn whose poll obser
     const token = SubmitAtPoll.token orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(.terminal, runtime.bridge.commands.get(token).state);
     try std.testing.expect(runtime.bridge.commands.get(token).failure == null);
-    runtime.abortCommand(token);
+    runtime.retireCommand(token);
     runtime.owner = null;
 }
 

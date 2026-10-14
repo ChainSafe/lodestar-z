@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Promise = @import("network_promise.zig");
 const n = @import("network");
 const Runtime = @import("network_runtime.zig").Runtime;
 const Budget = @import("network_budget.zig").Budget;
@@ -12,6 +13,8 @@ pub const Token = struct { index: u8, generation: u64 };
 pub const State = enum { free, preparing, queued, executing, terminal, copying };
 pub const Cell = struct {
     state: State = .free,
+    /// Only the JavaScript thread creates or settles this promise; the owner records its outcome.
+    promise: Promise = .{},
     generation: u64 = 0,
     order: u64 = 0,
     queued_ms: u64 = 0,
@@ -47,7 +50,7 @@ pub const Diagnostics = struct {
 };
 pub const Table = struct {
     cells: []Cell,
-    /// The terminal cells, whose completions an exchange delivers. `transition` keeps it current.
+    /// The terminal cells awaiting Promise settlement. `transition` keeps it current.
     terminal: std.StaticBitSet(capacity_max) = .empty,
     /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
     completion_cursor: usize = 0,
@@ -131,6 +134,7 @@ pub const Table = struct {
         self.ordinary -= @intFromBool(!n.gossip_processor.limits.urgent(cell.kind));
         self.diag.occupied -= 1;
         self.transition(cell, .free);
+        cell.promise.deinit();
         cell.* = .{ .generation = cell.generation };
     }
     /// Moves `cell` to `state`, keeping the terminal set current.

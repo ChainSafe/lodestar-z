@@ -7,7 +7,6 @@ test {
     _ = @import("network_peer_projection.zig");
     _ = @import("network_peer_reports.zig");
     _ = @import("network_owner.zig");
-    _ = @import("network_fatal.zig");
     _ = @import("network.zig");
     _ = @import("network_requests.zig");
     _ = @import("network_incoming.zig");

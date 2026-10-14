@@ -2,13 +2,13 @@ import {setTimeout as delay} from "node:timers/promises";
 import {expect, test} from "vitest";
 import type {NativeGossipProcessorLimit, NativeTopicKind} from "../src/network.js";
 import type {
-  NativeAction,
   NativeGossipDependencyCheck,
   NativeGossipHandle,
   NativeGossipMessage,
   NativeGossipVerdict,
   NativeNetworkApplicationRuntime,
 } from "../src/network-runtime.js";
+import type {Feedback} from "./utils/network.js";
 import {
   applicationConfig,
   exchange,
@@ -38,10 +38,10 @@ function limits(
   >;
 }
 
-function classify(handle: NativeGossipHandle, available: boolean): NativeAction {
+function classify(handle: NativeGossipHandle, available: boolean): Feedback {
   return {available, handle, type: "classify"};
 }
-function verdict(handle: NativeGossipHandle, value: NativeGossipVerdict): NativeAction {
+function verdict(handle: NativeGossipHandle, value: NativeGossipVerdict): Feedback {
   return {handle, type: "verdict", verdict: value};
 }
 
@@ -69,7 +69,7 @@ test.each([
   expect(() => startRuntime(config, () => undefined)).toThrow();
 });
 
-test("exchange actions validate roots, handles and verdicts, and stale handles apply as no-ops", async () => {
+test("direct feedback validates roots, handles and verdicts, and stale handles apply as no-ops", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config, () => undefined);
   try {
@@ -82,9 +82,6 @@ test("exchange actions validate roots, handles and verdicts, and stale handles a
       [classify({...handle, generation: 0n}, true), "InvalidGossipHandle"],
       [classify({...handle, index: 65535}, true), "InvalidNetworkInteger"],
       [{...verdict(handle, "accept"), verdict: "ACCEPT"}, "InvalidGossipVerdict"],
-      [{type: "unknown"}, "InvalidNetworkAction"],
-      [{action: "fatal", count: 0, peerId: runtime.identity.peerId, type: "reportPeer"}, "InvalidNetworkInteger"],
-      [{action: "fatal", count: 101, peerId: runtime.identity.peerId, type: "reportPeer"}, "InvalidNetworkInteger"],
       [{action: "bad", count: 1, peerId: runtime.identity.peerId, type: "reportPeer"}, "InvalidNetworkAction"],
       [
         {action: "fatal", context: {reason: "invented"}, count: 1, peerId: runtime.identity.peerId, type: "reportPeer"},
@@ -116,7 +113,7 @@ test("exchange actions validate roots, handles and verdicts, and stale handles a
         "InvalidNetworkBytes",
       ],
     ] as const)
-      expect(() => runtime.exchange([classify(handle, true), invalid as NativeAction], settleOnly)).toThrow(code);
+      expect(() => exchange(runtime, settleOnly, [classify(handle, true), invalid as Feedback])).toThrow(code);
     expect(
       exchange(runtime, settleOnly, [classify(handle, true), verdict(handle, "ignore")]).needsAnotherExchange
     ).toBe(false);
@@ -181,10 +178,10 @@ test("native processor retains dependencies, protects blocks, batches ready work
     for (const check of waiting) expect(check.root).toEqual(root);
     // A batch with an invalid action applies none of it.
     expect(() =>
-      pair.right.exchange(
-        [classify(waiting[0].handle, false), classify({...waiting[1].handle, generation: 0n}, false)],
-        settleOnly
-      )
+      exchange(pair.right, settleOnly, [
+        classify(waiting[0].handle, false),
+        classify({...waiting[1].handle, generation: 0n}, false),
+      ])
     ).toThrow("InvalidGossipHandle");
 
     exchange(pair.right, settleOnly, [
@@ -204,7 +201,7 @@ test("native processor retains dependencies, protects blocks, batches ready work
       expect(pending).toEqual([]);
       if (!gossip) await delay(5);
       else {
-        expect(gossip.jobs).toEqual([{grouped: false, kind: "beacon_block", length: 1, start: 0, urgent: true}]);
+        expect(gossip.jobs).toEqual([{grouped: false, kind: "beacon_block", length: 1, start: 0}]);
         block = gossip.messages[0];
       }
     }
@@ -228,9 +225,7 @@ test("native processor retains dependencies, protects blocks, batches ready work
       batch = result.gossip;
     }
     if (!batch) throw Error("Attestation group deadline");
-    expect(batch.jobs).toEqual([
-      {grouped: true, kind: "beacon_attestation", length: batch.messages.length, start: 0, urgent: false},
-    ]);
+    expect(batch.jobs).toEqual([{grouped: true, kind: "beacon_attestation", length: batch.messages.length, start: 0}]);
     expect(exchange(pair.right, ordinary).gossip).toBeNull();
     expect(batch.messages).toHaveLength(2);
     expect(batch.messages.map((message) => message.attestationData)).toEqual([

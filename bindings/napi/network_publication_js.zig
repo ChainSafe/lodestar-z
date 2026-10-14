@@ -18,8 +18,7 @@ fn payloadLength(data: Value) !usize {
     if (len > clock.payload_max) return error.PayloadTooLarge;
     return len;
 }
-/// Admits one publication and returns its handle, which JavaScript's record holds before an exchange can deliver the
-/// completion. A refusal leaves no cell.
+/// Admits one publication and returns its Promise. A refusal leaves no cell.
 pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !Value {
     runtime.retain();
     defer runtime.release();
@@ -36,10 +35,9 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     cell.options = publish_options;
     const copy = try r.allocator.alloc(u8, len);
     errdefer r.allocator.free(copy);
-    // Prepared before admission commits, so every admitted publication has a handle to complete.
-    const handle = try js.handle(runtime.env, token.index, token.generation);
     try decode.bytes(data, copy);
     const queued_ms = try clock.monotonic();
+    const promise = try cell.promise.init(runtime.env);
     runtime.lock();
     defer runtime.unlock();
     if (runtime.bridge.stop or runtime.bridge.quiescent) return error.NetworkClosed;
@@ -52,16 +50,11 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     runtime.wakeOwnerLocked();
     // Ref does not allocate JS values or invoke JavaScript.
     runtime.bridge.notify.ref(runtime.env) catch {};
-    return handle;
+    return promise;
 }
 
-/// A completed publication's record: its outcome, or the error its operation rejects with.
-pub fn completion(env: napi.Env, token: p.Token, cell: *const p.Cell) !Value {
-    const object = try env.createObject();
-    try object.setNamedProperty("family", try env.createStringUtf8("publication"));
-    try object.setNamedProperty("handle", try js.handle(env, token.index, token.generation));
+pub fn settle(env: napi.Env, cell: *p.Cell) !void {
     if (cell.failure) |err| {
-        try object.setNamedProperty("error", try js.settled(env, g.publishError(env, err)));
-    } else try object.setNamedProperty("value", try g.publishResult(env, cell.outcome));
-    return object;
+        try cell.promise.settle(env, .reject, try js.settled(env, g.publishError(env, err)));
+    } else try cell.promise.settle(env, .resolve, try g.publishResult(env, cell.outcome));
 }

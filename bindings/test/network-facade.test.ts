@@ -17,7 +17,6 @@ import {runtimeOf} from "../src/network-runtime.js";
 import {
   applicationConfig,
   childTestTimeout,
-  gossipAll,
   localIntent,
   metricValue,
   runChild,
@@ -104,14 +103,12 @@ async function facadeWithPeers(
 /** Takes the next gossip messages a subprocess peer received, ignoring each, until `count` arrived. */
 async function received(peer: PeerRuntime, count: number): Promise<number[]> {
   const bytes: number[] = [];
-  let verdicts: {handle: {index: number; generation: bigint}; type: "verdict"; verdict: "ignore"}[] = [];
   for (let i = 0; i < 1000 && bytes.length < count; i++) {
-    const {gossip} = await peer.exchange(verdicts, gossipAll);
-    verdicts = (gossip?.messages ?? []).map(({handle}) => ({handle, type: "verdict", verdict: "ignore"}));
+    const {gossip} = await peer.exchange();
+    for (const {handle} of gossip?.messages ?? []) await peer.reportGossip(handle, "ignore");
     bytes.push(...(gossip?.messages ?? []).map(({data}) => data[0]));
     if (!gossip) await delay(5);
   }
-  await peer.exchange(verdicts, gossipAll);
   return bytes;
 }
 
@@ -158,7 +155,7 @@ test("native Xray exports while JavaScript is blocked and reconnects after idle 
   }
 }, 30_000);
 
-test("a job's deferred handler runs only after the owner applied its verdicts, admitting forwarding", async () => {
+test("deferred handlers run after validation without waiting for the owner to apply verdicts", async () => {
   // More than one owner turn's 64 verdicts, and fewer rejects than a graylist costs.
   const COUNT = 80;
   const verdictOf = (byte: number): Verdict =>
@@ -167,26 +164,11 @@ test("a job's deferred handler runs only after the owner applied its verdicts, a
   let network: NativeNetwork | undefined;
   const validated: number[] = [];
   const handled: number[] = [];
-  const failures: {byte: number; code: unknown}[] = [];
-  // Promises derived from the last job's report, which the test holds instead of the report.
-  let closing: Promise<unknown>[] = [];
   const networkHost = host({
     validate(job: GossipJob) {
       const byte = job.messages[0].data[0];
       validated.push(byte);
-      if (byte === COUNT) {
-        const outcome = (promise: Promise<unknown>) =>
-          promise.then(
-            () => "resolved",
-            (error: {code?: unknown}) => error.code
-          );
-        closing = [outcome(job.reported), outcome(Promise.all([delay(0), job.reported]))];
-      }
-      // As #9990 defers a handler to a later macrotask, and here also until the owner disposed of the job.
-      void Promise.all([delay(0), job.reported]).then(
-        () => handled.push(byte),
-        (error) => failures.push({byte, code: (error as {code?: unknown}).code})
-      );
+      setImmediate(() => handled.push(byte));
       return Promise.resolve(job.messages.map(({data}) => verdictOf(data[0])));
     },
   });
@@ -206,67 +188,14 @@ test("a job's deferred handler runs only after the owner applied its verdicts, a
     // Every verdict was reported and every handler's timer is due, but the owner holds the verdicts.
     await delay(50);
     expect(validated.slice().sort((a, b) => a - b)).toEqual([...Array(COUNT).keys()]);
-    expect(handled).toEqual([]);
+    expect(handled.slice().sort((a, b) => a - b)).toEqual([...Array(COUNT).keys()]);
     runtime.holdVerdicts(false);
     await vi.waitFor(() => expect(handled).toHaveLength(COUNT), {timeout: 10000});
     expect(handled.slice().sort((a, b) => a - b)).toEqual([...Array(COUNT).keys()]);
-    expect(failures).toEqual([]);
     // Application admitted each accepted message, and no other, for forwarding.
     expect((await received(receiver, accepted.length)).sort((a, b) => a - b)).toEqual(accepted);
-
-    // Close prevents the owner from disposing of a held verdict: its report rejects and its handler never runs.
-    runtime.holdVerdicts(true);
-    await publisher.publishGossip(TOPIC, blockPayload(COUNT), {allowZeroPeers: false});
-    await vi.waitFor(() => expect(closing).toHaveLength(2), {timeout: 5000});
-    global.gc?.();
-    // The facade stays reachable until close completes, so derivatives of the report settle as it does.
-    expect(await network.close()).toEqual({reason: "requested"});
-    expect(await Promise.all(closing)).toEqual(["NetworkClosed", "NetworkClosed"]);
-    await vi.waitFor(() => expect(failures).toEqual([{byte: COUNT, code: "NetworkClosed"}]));
-    expect(handled).toHaveLength(COUNT);
   } finally {
     await Promise.allSettled([network.close(), ...peers.map((peer) => peer.stop())]);
-  }
-}, 60000);
-
-test("reports resolve through expiry and cell reuse", async () => {
-  const handled: number[] = [];
-  const failures: {byte: number; code: unknown}[] = [];
-  const networkHost = host({
-    async validate(job: GossipJob) {
-      const byte = job.messages[0].data[0];
-      void Promise.all([delay(0), job.reported]).then(
-        () => handled.push(byte),
-        (error) => failures.push({byte, code: (error as {code?: unknown}).code})
-      );
-      // Past the validation timeout, the owner expires the message and disposes of the late verdict.
-      if (byte === 200) await delay(1300);
-      return job.messages.map(() => "accept" as const);
-    },
-  });
-  const {network, peers} = await facadeWithPeers(networkHost, 1, (config) => {
-    config.gossipPolicy.validationTimeoutMs = 1000n;
-  });
-  const [publisher] = peers;
-  try {
-    // The block kind's eight cells are reused in order, so the ninth and tenth messages reuse cells with new
-    // generations while earlier handles have been acknowledged.
-    for (let byte = 1; byte <= 10; byte++) {
-      await publisher.publishGossip(TOPIC, blockPayload(byte), {allowZeroPeers: false});
-      await vi.waitFor(() => expect(handled).toContain(byte), {timeout: 5000});
-    }
-    expect(handled).toEqual([...Array(10).keys()].map((i) => i + 1));
-    const accepted = () => metricValue(network.metrics(), 'gossipsub_accepted_messages_total{topic="beacon_block"}');
-    await expect.poll(accepted, {timeout: 5000}).toBe(10);
-
-    await publisher.publishGossip(TOPIC, blockPayload(200), {allowZeroPeers: false});
-    await vi.waitFor(() => expect(handled).toContain(200), {timeout: 5000});
-    // Close renders the owner's final counters, including disposition of the late verdict.
-    await network.close();
-    expect(accepted()).toBe(10);
-    expect(failures).toEqual([]);
-  } finally {
-    await Promise.allSettled([network.close(), publisher.stop()]);
   }
 }, 60000);
 
@@ -472,7 +401,6 @@ test("the facade validates its host, starts without host callbacks and hides the
     expect(rendered).toEqual([
       ...native,
       "lodestar_network_drain_burst_seconds",
-      "lodestar_peers_report_peer_dropped_total",
       "lodestar_network_log_delivery_errors_total",
       "lodestar_network_log_drain_errors_total",
     ]);
@@ -483,7 +411,7 @@ test("the facade validates its host, starts without host callbacks and hides the
   expect(await network.closed).toEqual({reason: "requested"});
 });
 
-test.each(["close-reports", "close-batches"])("explicit close lifecycle: %s", childTestTimeout(), (mode) => {
+test.each(["close-validation", "close-batches"])("explicit close lifecycle: %s", childTestTimeout(), (mode) => {
   const output = runChild(["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode]);
   expect(output).toContain(`${mode}-settled`);
 });

@@ -1,15 +1,7 @@
 import {expect, test} from "vitest";
-import type {NativeForkEntry, NativeIdentity} from "../src/network.js";
-import type {NativeAction, NativeExchange, NativeExchangeDemand} from "../src/network-runtime.js";
-import {
-  applicationConfig,
-  childTestTimeout,
-  gossipAll,
-  localIntent,
-  requestForks,
-  runChild,
-  settleOnly,
-} from "./utils/network.js";
+import type {HostCapacity, NativeForkEntry, NativeIdentity, NativeIntentResult} from "../src/network.js";
+import type {NativeExchange, NativeRuntimeCloseResult} from "../src/network-runtime.js";
+import {applicationConfig, childTestTimeout, gossipAll, localIntent, requestForks, runChild} from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
 import {startPeer} from "./utils/network-peer.js";
 
@@ -34,23 +26,26 @@ interface IncomingHandle {
 }
 interface IncomingDescriptor {
   handle: IncomingHandle;
+  closed: Promise<void>;
 }
 interface DirectIncomingBridge {
-  initialize(config: ReturnType<typeof applicationConfig>, onWorkAvailable: () => void): {identity: NativeIdentity};
-  applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): IncomingHandle;
-  exchange(
-    actions: readonly NativeAction[],
-    demand: NativeExchangeDemand
-  ): NativeExchange & {serving: IncomingDescriptor[]};
+  initialize(
+    config: ReturnType<typeof applicationConfig>,
+    onWorkAvailable: () => void
+  ): {identity: NativeIdentity; closed: Promise<NativeRuntimeCloseResult>};
+  applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): Promise<NativeIntentResult>;
+  exchange(): NativeExchange & {serving: IncomingDescriptor[]};
+  drainCompletions(): boolean;
+  setCapacity(capacity: HostCapacity | null): void;
   incomingTerminal(handle: IncomingHandle, action: number, status?: number, message?: Uint8Array): void;
   incomingRelease(handle: IncomingHandle): void;
-  incomingRespond(handle: IncomingHandle, data: Uint8Array, context: NativeForkEntry): void;
+  incomingRespond(handle: IncomingHandle, data: Uint8Array, context: NativeForkEntry): Promise<void>;
   requestPull(handle: IncomingHandle): void;
   close(): void;
 }
 
 test("incoming tokens reject malformed handles and stale slot generations", async () => {
-  const {closedBy, commandCompleted, completed, networkBindings: exports} = await import("./utils/network-bindings.js");
+  const {closedBy, drainUntil, networkBindings: exports} = await import("./utils/network-bindings.js");
   const {NativeNetworkRuntime} = exports as unknown as {NativeNetworkRuntime: new () => DirectIncomingBridge};
   const config = applicationConfig();
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
@@ -59,12 +54,12 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
   clientConfig.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
   const client = await startPeer(clientConfig);
   const native = new NativeNetworkRuntime();
+  const promises = native.initialize(config, () => undefined);
   try {
-    const promises = native.initialize(config, () => undefined);
     const [, identity] = await Promise.all([client.identity, promises.identity]);
     const intent = native.applyIntent(localIntent(config), config.initialSlot);
     await client.applyIntent(localIntent(clientConfig), clientConfig.initialSlot);
-    await commandCompleted(native, intent, settleOnly);
+    await drainUntil(native, intent);
     await client.connect(identity.peerId, [identity.localEndpoint], 5000n);
     let previous: IncomingHandle | undefined;
     for (let i = 0; i < 2; i++) {
@@ -76,7 +71,8 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
         .poll(
           () => {
             // Peer events are taken too, so nothing waits.
-            incoming = native.exchange([], {...gossipAll, servingStarts: 1}).serving[0] ?? null;
+            native.setCapacity({...gossipAll, incomingRequestSlots: 1});
+            incoming = native.exchange().serving[0] ?? null;
             return incoming !== null;
           },
           {timeout: 5000}
@@ -89,24 +85,16 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
         expect(() => native.incomingTerminal(invalid, 2, undefined, undefined)).toThrow("InvalidNetworkInteger");
       expect(() => native.requestPull(handle)).toThrow();
       if (previous) {
-        native.incomingRespond(handle, new Uint8Array(4000), requestForks[0]);
+        const responded = native.incomingRespond(handle, new Uint8Array(4000), requestForks[0]);
         expect(handle.index).toBe(previous.index);
         expect(handle.generation).toBe(previous.generation + 1n);
         const stale = previous;
         expect(() => native.incomingTerminal(stale, 2, undefined, undefined)).toThrow("NetworkIncomingClosed");
-        expect(await completed(native, "incoming", handle, settleOnly)).toEqual({
-          family: "incoming",
-          handle,
-          response: {},
-        });
+        await drainUntil(native, responded);
         expect((await pending).done).toBe(false);
       }
       native.incomingTerminal(handle, 0, undefined, undefined);
-      expect(await completed(native, "incoming", handle, settleOnly)).toEqual({
-        closed: true,
-        family: "incoming",
-        handle,
-      });
+      await drainUntil(native, descriptor.closed);
       native.incomingRelease(handle);
       await expect
         .poll(() => {
@@ -123,6 +111,6 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
       previous = handle;
     }
   } finally {
-    await Promise.all([client.stop(), closedBy(native, settleOnly)]);
+    await Promise.all([client.stop(), closedBy(native, promises.closed)]);
   }
 }, 15000);

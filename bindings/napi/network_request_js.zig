@@ -5,11 +5,12 @@ const decode = @import("network_js_input.zig");
 const n = @import("network");
 const r = @import("network_runtime.zig");
 const requests = @import("network_requests.zig");
+const Promise = @import("network_promise.zig");
 const Runtime = r.Runtime;
 const network_js = @import("network_js.zig");
 
-const bytes = @import("network_js.zig").bytes;
-const errorValue = @import("network_js.zig").errorValue;
+const bytes = network_js.bytes;
+const errorValue = network_js.errorValue;
 fn optionsFor(value: Value) !n.reqresp.ReqResp.RequestOptions {
     var result_options: n.reqresp.ReqResp.RequestOptions = .{};
     if (try value.typeof() == .undefined) return result_options;
@@ -60,7 +61,9 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     const cell = runtime.bridge.requests.?.get(token).?;
     cell.peer = identity;
     cell.options = request_options;
-    const value = try network_js.handle(runtime.env, token.index, token.generation);
+    const value = try runtime.env.createObject();
+    try value.setNamedProperty("handle", try network_js.handle(runtime.env, token.index, token.generation));
+    try value.setNamedProperty("closed", try cell.closed_promise.init(runtime.env));
     try decode.bytes(data, cell.input);
     runtime.lock();
     defer runtime.unlock();
@@ -79,8 +82,11 @@ fn rejectAdmission(env: napi.Env) anyerror {
 }
 /// Arms a pull, whose chunk or terminal outcome an exchange delivers. The iterator allows one pull at a time, so a
 /// second one breaks its contract.
-pub fn pull(runtime: *Runtime, handle: Value) !void {
+pub fn pull(runtime: *Runtime, handle: Value) !Value {
     const token = try decode.handle(requests.Token, handle, requests.capacity_max);
+    var promise: Promise = .{};
+    const value = try promise.init(runtime.env);
+    errdefer promise.deinit();
     runtime.lock();
     const cell = runtime.bridge.requests.?.get(token) orelse {
         runtime.unlock();
@@ -90,10 +96,12 @@ pub fn pull(runtime: *Runtime, handle: Value) !void {
         runtime.unlock();
         return error.NetworkRequestBusy;
     }
+    cell.pull_promise = promise;
     requests.armPull(runtime, cell);
     const ref_notify = runtime.bridge.notify_live;
     runtime.unlock();
     if (ref_notify) runtime.bridge.notify.ref(runtime.env) catch {};
+    return value;
 }
 /// Cancels and retires the request. Its terminal completion ends a retirement the iterator awaits, one not
 /// `abandoned`; a stale handle's request already retired.
@@ -137,13 +145,8 @@ fn terminalError(env: napi.Env, terminal: requests.Terminal, cell: *const reques
         .done => unreachable,
     }
 }
-/// A request completion: `value`, a copy of the chunk its pending pull resolves with, or its terminal outcome, `done`
-/// or the `error` a pending pull rejects with.
-pub fn completion(env: napi.Env, runtime: *Runtime, delivered: requests.Completion) !Value {
+pub fn settle(env: napi.Env, runtime: *Runtime, delivered: requests.Completion) !void {
     const cell = &runtime.bridge.requests.?.cells[delivered.token.index];
-    const object = try env.createObject();
-    try object.setNamedProperty("family", try env.createStringUtf8("request"));
-    try object.setNamedProperty("handle", try network_js.handle(env, delivered.token.index, delivered.token.generation));
     switch (delivered.value) {
         .chunk => |chunk| {
             const value = try env.createObject();
@@ -154,12 +157,24 @@ pub fn completion(env: napi.Env, runtime: *Runtime, delivered: requests.Completi
             try value.setNamedProperty("fork", if (requests.forkLabel(chunk.fork)) |fork| try env.createStringUtf8(fork) else try env.getNull());
             try value.setNamedProperty("protocol", try env.createStringUtf8(cell.protocol.id()));
             try value.setNamedProperty("origin", try network_js.peerOrigin(env, chunk.origin));
-            try object.setNamedProperty("value", value);
+            const result = try env.createObject();
+            try result.setNamedProperty("done", try env.getBoolean(false));
+            try result.setNamedProperty("value", value);
+            try cell.pull_promise.settle(env, .resolve, result);
         },
-        .terminal => |terminal| if (terminal == .done)
-            try object.setNamedProperty("done", try env.getBoolean(true))
-        else
-            try object.setNamedProperty("error", try network_js.settled(env, terminalError(env, terminal, cell))),
+        .terminal => |terminal| {
+            const err = if (terminal == .done) null else try network_js.settled(env, terminalError(env, terminal, cell));
+            if (cell.pull_promise.resolvers != null) {
+                if (err) |failure| {
+                    try cell.pull_promise.settle(env, .reject, failure);
+                } else {
+                    const result = try env.createObject();
+                    try result.setNamedProperty("done", try env.getBoolean(true));
+                    try result.setNamedProperty("value", try env.getUndefined());
+                    try cell.pull_promise.settle(env, .resolve, result);
+                }
+            }
+            try cell.closed_promise.settle(env, .resolve, err orelse try env.getNull());
+        },
     }
-    return object;
 }

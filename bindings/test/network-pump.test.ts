@@ -10,11 +10,9 @@ import type {
   NativeTopicKind,
   Verdict,
 } from "../src/network.js";
-import {BUDGET_MS, BURST_NAME, NativePump, closeResult} from "../src/network-pump.js";
+import {BURST_NAME, NativePump} from "../src/network-pump.js";
 import type {
-  NativeAction,
   NativeExchange,
-  NativeExchangeDemand,
   NativeGossipBatch,
   NativeGossipDependencyCheck,
   NativeGossipHandle,
@@ -23,20 +21,11 @@ import type {
   NativeLogBatch,
 } from "../src/network-runtime.js";
 import {childTestTimeout, spawnChild} from "./utils/network.js";
-import {Escalated, immediates, runUntilEscalated} from "./utils/network-turn-scheduler.js";
 
-const full = {
-  capacity: {gossipValidation: "ready", incomingRequestSlots: 32},
-  claimNonUrgentGossip: true,
-  mode: "delivery",
-  servingStarts: 8,
-} as const;
-const control = {mode: "control"} as const;
+const full = {gossipValidation: "ready", incomingRequestSlots: 32} as const;
+const control = null;
 const idle: NativeExchange = {
-  acknowledged: [],
   checks: [],
-  closed: null,
-  completions: [],
   gossip: null,
   needsAnotherExchange: false,
   peers: [],
@@ -91,7 +80,6 @@ function gossip(...specs: JobSpec[]): NativeGossipBatch {
       kind: kind ?? (urgent ? "beacon_block" : grouped ? "beacon_attestation" : "voluntary_exit"),
       length: indexes.length,
       start,
-      urgent,
     };
   });
   return {jobs, messages};
@@ -132,16 +120,30 @@ const peerEvent: NativePeerObservation = {
 function fixture() {
   let now = 0;
   vi.spyOn(performance, "now").mockImplementation(() => now);
-  const closed = deferred<{reason: "requested"} | {reason: "failed"; error: Error}>();
+  const terminal: {failure: Error | null} = {failure: null};
+  const completion = deferred<{reason: "requested"} | {reason: "failed"; error: Error}>();
+  const closed = {
+    ...completion,
+    resolve(result: {reason: "requested"} | {reason: "failed"; error: Error}) {
+      completion.resolve(terminal.failure ? {error: terminal.failure, reason: "failed"} : result);
+    },
+  };
   running.push(closed);
   const runtime = {
+    classifyGossip: vi.fn((_handle: NativeGossipHandle, _available: boolean) => undefined),
     close: vi.fn(() => closed.promise),
     closed: closed.promise,
+    drainCompletions: vi.fn(() => false),
     drainLogs: vi.fn((_max: number): NativeLogBatch => noLogs),
-    exchange: vi.fn((_actions: readonly NativeAction[], _demand: NativeExchangeDemand): NativeExchange => idle),
-    fail: vi.fn((site: string, _reason: string): never => {
-      throw new Escalated(site);
+    exchange: vi.fn((): NativeExchange => idle),
+    reportFailure: vi.fn((error: Error) => {
+      if (runtime.state === "failed") return false;
+      runtime.state = "failed";
+      terminal.failure = error;
+      return true;
     }),
+    reportGossip: vi.fn((_handle: NativeGossipHandle, _verdict: Verdict) => undefined),
+    setCapacity: vi.fn((_capacity: HostCapacity | null) => undefined),
     state: "running",
   };
   const host = {
@@ -157,16 +159,13 @@ function fixture() {
       (job: GossipJob): Promise<readonly Verdict[]> => Promise.resolve(job.messages.map(() => "accept" as const))
     ),
   };
-  const terminal: {failure: Error | null} = {failure: null};
-  const pump = new NativePump(host, terminal);
+  const pump = new NativePump(host);
   pump.attach(runtime);
   return {
-    actions: (i: number) => runtime.exchange.mock.calls[i][0],
     advance(ms: number) {
       now += ms;
     },
-    /** Actions and demand of each exchange. */
-    calls: () => runtime.exchange.mock.calls,
+    capacities: () => runtime.setCapacity.mock.calls.map(([capacity]) => capacity),
     closed,
     host,
     get now() {
@@ -187,29 +186,6 @@ afterEach(async () => {
 });
 
 describe("binding pump scheduling", () => {
-  it.each(["Uint8Array", "Buffer"])("copies queued roots from a reused %s", async (kind) => {
-    const node = fixture();
-    const root = kind === "Buffer" ? Buffer.alloc(32, 1) : new Uint8Array(32).fill(1);
-    node.pump.block(root);
-    root.fill(2);
-    node.pump.block(root);
-    root.fill(3);
-    await macrotask();
-    expect(node.actions(0)).toEqual([
-      {root: new Uint8Array(32).fill(1), type: "block"},
-      {root: new Uint8Array(32).fill(2), type: "block"},
-    ]);
-  });
-
-  it("keeps a queued root after the caller transfers its buffer", async () => {
-    const node = fixture();
-    const root = new Uint8Array(32).fill(7);
-    node.pump.block(root);
-    structuredClone(root, {transfer: [root.buffer]});
-    await macrotask();
-    expect(node.actions(0)).toEqual([{root: new Uint8Array(32).fill(7), type: "block"}]);
-  });
-
   it("only schedules on notification and makes one exchange per turn", async () => {
     const node = fixture();
     node.pump.request();
@@ -217,7 +193,7 @@ describe("binding pump scheduling", () => {
     expect(node.runtime.exchange).not.toHaveBeenCalled();
     await macrotask();
     expect(node.host.capacity).toHaveBeenCalledOnce();
-    expect(node.runtime.exchange).toHaveBeenCalledExactlyOnceWith([], full);
+    expect(node.runtime.exchange).toHaveBeenCalledExactlyOnceWith();
     for (const callback of ["validate", "checkDependencies", "serve", "peers"] as const)
       expect(node.host[callback]).not.toHaveBeenCalled();
     await macrotask();
@@ -233,48 +209,36 @@ describe("binding pump scheduling", () => {
     node.runtime.exchange.mockReturnValueOnce({...idle, checks: [check(1)], peers: [peerEvent]});
     node.pump.request();
     await macrotask();
-    expect(node.calls()).toEqual([
-      [[], {...full, capacity: {gossipValidation: "backpressured", incomingRequestSlots: 32}}],
-      [[], control],
-    ]);
+    expect(node.capacities()).toEqual([{gossipValidation: "backpressured", incomingRequestSlots: 32}, control]);
     // Control-only draining hands the host nothing.
     expect(node.host.peers).not.toHaveBeenCalled();
     expect(node.host.checkDependencies).not.toHaveBeenCalled();
   });
 
-  it("turns again at once for held jobs, and yields them to the time budget", async () => {
-    const node = fixture();
-    node.host.validate.mockImplementation(() => {
-      node.advance(BUDGET_MS);
-      return new Promise(() => undefined);
-    });
-    node.runtime.exchange.mockReturnValueOnce({...idle, gossip: gossip({messages: [1]}, {messages: [2]})});
-    node.pump.request();
-    await macrotask();
-    expect(node.host.validate).toHaveBeenCalledOnce();
-    await macrotask();
-    expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
-    // Held jobs withhold the claim, and the held job starts.
-    expect(node.calls()[1][1]).toMatchObject({claimNonUrgentGossip: false});
-    expect(node.host.validate).toHaveBeenCalledTimes(2);
-    await macrotask();
-    expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
-  });
-
-  it("turns again at once when the time budget left ordinary work unclaimed", async () => {
+  it("hands over a complete batch after expensive capacity and exchange calls, then yields before the next batch", async () => {
     const node = fixture();
     node.host.capacity.mockImplementationOnce(() => {
-      node.advance(BUDGET_MS);
+      node.advance(100);
       return {gossipValidation: "ready", incomingRequestSlots: 32};
     });
-    node.runtime.exchange.mockReturnValueOnce({...idle, needsAnotherExchange: true});
+    node.host.validate.mockImplementation(() => {
+      node.advance(100);
+      return new Promise(() => undefined);
+    });
+    node.runtime.exchange
+      .mockImplementationOnce(() => {
+        node.advance(100);
+        return {...idle, gossip: gossip({messages: [1]}, {messages: [2]}), needsAnotherExchange: true};
+      })
+      .mockReturnValueOnce({...idle, gossip: gossip({messages: [3]})});
     node.pump.request();
     await macrotask();
+    expect(node.runtime.exchange).toHaveBeenCalledOnce();
+    expect(node.host.validate).toHaveBeenCalledTimes(2);
+    expect(node.capacities()[0]).toEqual(full);
     await macrotask();
-    expect(node.calls().map(([, demand]) => demand.mode === "delivery" && demand.claimNonUrgentGossip)).toEqual([
-      false,
-      true,
-    ]);
+    expect(node.host.validate).toHaveBeenCalledTimes(3);
+    expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
     await macrotask();
     expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
   });
@@ -293,12 +257,13 @@ describe("binding pump scheduling", () => {
       incomingRequestSlots: 32 - node.host.serve.mock.calls.length,
     }));
     node.host.serve.mockImplementation(() => new Promise(() => undefined));
-    node.runtime.exchange.mockImplementation((_actions, demand) => {
-      if (demand.mode === "control") return idle;
-      const serving = queue.splice(0, Math.min(8, demand.servingStarts, demand.capacity.incomingRequestSlots));
+    node.runtime.exchange.mockImplementation(() => {
+      const demand = node.capacities().at(-1);
+      if (!demand) return idle;
+      const serving = queue.splice(0, Math.min(8, 8, demand.incomingRequestSlots));
       return {
         ...idle,
-        needsAnotherExchange: queue.length > 0 && demand.capacity.incomingRequestSlots > serving.length,
+        needsAnotherExchange: queue.length > 0 && demand.incomingRequestSlots > serving.length,
         serving,
       };
     });
@@ -306,10 +271,7 @@ describe("binding pump scheduling", () => {
     for (let turn = 0; turn < 4; turn++) {
       await macrotask();
       expect(node.host.serve, `serving starts after turn ${turn}`).toHaveBeenCalledTimes((turn + 1) * 8);
-      expect(node.calls()[turn][1]).toMatchObject({
-        capacity: {incomingRequestSlots: 32 - turn * 8},
-        servingStarts: 8,
-      });
+      expect(node.capacities()[turn]).toMatchObject({incomingRequestSlots: 32 - turn * 8});
     }
     expect(node.host.serve.mock.calls.map(([request]) => request.data)).toEqual(
       starts.slice(0, 32).map((start) => start.data)
@@ -321,6 +283,16 @@ describe("binding pump scheduling", () => {
     await macrotask();
     expect(node.runtime.exchange).toHaveBeenCalledTimes(4);
     expect(vi.getTimerCount()).toBe(LOG_TIMER);
+  });
+
+  it("uses readiness after payload delivery instead of scheduling an empty follow-up turn", async () => {
+    const node = fixture();
+    node.runtime.drainCompletions.mockReturnValueOnce(true);
+    node.runtime.exchange.mockReturnValueOnce({...idle, peers: [peerEvent]});
+    await macrotask();
+    await macrotask();
+    expect(node.runtime.exchange).toHaveBeenCalledOnce();
+    expect(node.host.peers).toHaveBeenCalledOnce();
   });
 
   it("waits for a capacity notification without polling", async () => {
@@ -349,37 +321,12 @@ describe("binding pump scheduling", () => {
     node.pump.stopDelivery();
     await macrotask();
     expect(unsubscribe).toHaveBeenCalledOnce();
-    expect(node.calls().at(-1)).toEqual([[], control]);
+    expect(node.capacities().at(-1)).toEqual(control);
     node.pump.request();
     await macrotask();
     expect(node.host.capacity).toHaveBeenCalledOnce();
-    expect(node.runtime.exchange).toHaveBeenCalledTimes(3);
-  });
-
-  it("keeps a penalty reported while its batch is in flight for the next exchange", async () => {
-    const node = fixture();
-    // Legacy settlement can run a promise's `then` getter inside the exchange, which may report the same peer.
-    node.runtime.exchange.mockImplementationOnce(() => {
-      node.pump.reportPeer("peer", "fatal");
-      return idle;
-    });
-    node.pump.reportPeer("peer", "fatal");
-    await macrotask();
-    await macrotask();
-    const report = {action: "fatal", count: 1, peerId: "peer", type: "reportPeer"};
-    expect(node.calls().map(([actions]) => actions)).toEqual([[report], [report]]);
-  });
-
-  it("escalates a batch native refuses", () => {
-    const queued = immediates();
-    const node = fixture();
-    const refusal = Object.assign(new Error("InvalidNetworkActions"), {code: "InvalidNetworkActions"});
-    node.runtime.exchange.mockImplementationOnce(() => {
-      throw refusal;
-    });
-    node.pump.request();
-    expect(() => queued.shift()?.()).toThrow(Escalated);
-    expect(node.runtime.fail).toHaveBeenCalledExactlyOnceWith("generated_batch", "InvalidNetworkActions");
+    expect(node.runtime.drainCompletions).toHaveBeenCalledTimes(3);
+    expect(node.runtime.exchange).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -395,79 +342,22 @@ describe("binding pump scheduling", () => {
     const node = fixture();
     node.host.capacity.mockImplementation(read as () => HostCapacity);
     await macrotask();
-    expect(node.calls()[0]).toEqual([[], control]);
+    expect(node.capacities()[0]).toEqual(control);
     expect(node.host.failed).toHaveBeenCalledOnce();
     expect(node.host.subscribeCapacity.mock.results[0].value).toHaveBeenCalledOnce();
     node.pump.request();
     await macrotask();
     expect(node.host.capacity).toHaveBeenCalledOnce();
     expect(node.host.peers).not.toHaveBeenCalled();
-    expect(node.runtime.fail).not.toHaveBeenCalled();
+    expect(node.runtime.drainCompletions).toHaveBeenCalledTimes(2);
   });
-
-  it("escalates the first exchange failure even when capacity also fails", () => {
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-    const queued = immediates();
-    const node = fixture();
-    node.host.capacity.mockImplementation(() => {
-      throw new Error("capacity failed");
-    });
-    node.runtime.exchange.mockImplementation(() => {
-      throw new Error("exchange failed");
-    });
-    node.pump.request();
-    expect(runUntilEscalated(queued, 20)).toBe(true);
-    expect(node.host.capacity).toHaveBeenCalledTimes(1);
-    expect(node.runtime.exchange).toHaveBeenCalledTimes(1);
-    expect(node.runtime.fail).toHaveBeenCalledExactlyOnceWith("generated_batch", "exchange failed");
-  });
-
-  it.each([
-    ["generated_batch", "generated_batch", "InvalidNetworkInteger"],
-    ["uncoded_exchange", "generated_batch", "exchange failed"],
-    ["completion_contract", "completion_contract", "completed publication 0:1"],
-    ["close_missing", "completion_contract", "closed with records unsettled: 1"],
-  ])(
-    "raising %s over a real native runtime terminates the process through native fail, in a child process",
-    childTestTimeout(),
-    (scenario, site, reason) => {
-      const child = spawnChild(["--import", "tsx", "bindings/test/fixtures/network-escalation.mjs", scenario]);
-      expect(child.signal, child.stderr).toBe("SIGABRT");
-      expect(child.stdout).not.toContain("survived");
-      expect(child.stderr).toContain(`FATAL ERROR: native network bridge ${site}: ${reason}\n`);
-    }
-  );
 
   it("a real runtime settles commands after capacity failure and closes", childTestTimeout(), () => {
-    const child = spawnChild(["--import", "tsx", "bindings/test/fixtures/network-escalation.mjs", "capacity_failure"]);
+    const child = spawnChild(["--import", "tsx", "bindings/test/fixtures/network-capacity-failure.mjs"]);
     expect(child.status, child.stderr).toBe(0);
     expect(child.signal, child.stderr).toBeNull();
     expect(child.stdout).toContain("capacity failed; identity settled; closed");
     expect(child.stdout).not.toContain("survived");
-  });
-
-  it("never escalates turns without deliveries: external backpressure and held jobs", async () => {
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-    const node = fixture();
-    node.runtime.exchange.mockReturnValue(idle);
-    node.runtime.exchange.mockReturnValueOnce({
-      ...idle,
-      gossip: gossip(...Array.from({length: 20}, (_, i) => ({messages: [i]}))),
-    });
-    // Every validation spends the budget, so each turn starts one held job.
-    node.host.validate.mockImplementation(() => {
-      node.advance(BUDGET_MS);
-      return new Promise(() => undefined);
-    });
-    node.pump.request();
-    for (let i = 0; i < 30; i++) {
-      await macrotask();
-      vi.advanceTimersByTime(25);
-    }
-    expect(node.host.validate).toHaveBeenCalledTimes(20);
-    expect(node.runtime.exchange).toHaveBeenCalledTimes(20);
-    expect(node.runtime.fail).not.toHaveBeenCalled();
-    node.closed.resolve({reason: "requested"});
   });
 
   it("keeps turning whatever the host's error sink throws", async () => {
@@ -482,28 +372,9 @@ describe("binding pump scheduling", () => {
     node.pump.request();
     await macrotask();
     await macrotask();
-    expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
-    expect(node.calls()[1][1]).toEqual(control);
-  });
-
-  it("exposes dropped peer reports and preserves the counter after draining", async () => {
-    const node = fixture();
-    const metric = "lodestar_peers_report_peer_dropped_total";
-    expect(node.pump.metrics()).toContain(`${metric} 0\n`);
-    for (let i = 0; i < 513; i++) node.pump.reportPeer(`peer-${i}`, "low_tolerance");
-    expect(node.pump.metrics()).toContain(`# TYPE ${metric} counter\n`);
-    expect(node.pump.metrics()).toContain(`${metric} 1\n`);
-    for (let i = 0; i < 4; i++) await macrotask();
-    expect(
-      node
-        .calls()
-        .flatMap(([actions]) => actions)
-        .filter((action) => action.type === "reportPeer")
-    ).toHaveLength(512);
-    expect(node.pump.metrics()).toContain(`${metric} 1\n`);
-    node.pump.reportPeer("next-peer", "low_tolerance");
-    await macrotask();
-    expect(node.pump.metrics()).toContain(`${metric} 1\n`);
+    expect(node.runtime.drainCompletions).toHaveBeenCalledTimes(2);
+    expect(node.runtime.exchange).not.toHaveBeenCalled();
+    expect(node.capacities()[1]).toEqual(control);
   });
 
   it("measures each turn's burst through its continuations up to the next macrotask checkpoint", async () => {
@@ -569,7 +440,7 @@ describe("binding pump delivery", () => {
     node.pump.request();
     await macrotask();
     const job = node.host.validate.mock.calls[0][0];
-    expect(Object.keys(job).sort()).toEqual(["grouped", "kind", "messages", "reported"]);
+    expect(Object.keys(job).sort()).toEqual(["grouped", "kind", "messages"]);
     expect(job).toMatchObject({grouped: true, kind: "beacon_attestation"});
     expect(Object.keys(job.messages[0]).sort()).toEqual([
       "attestationData",
@@ -598,102 +469,25 @@ describe("binding pump delivery", () => {
       expect(start[method]).toHaveBeenCalledOnce();
   });
 
-  it("starts ordinary jobs until the budget, and one held job per turn, before claiming more", async () => {
-    const node = fixture();
-    node.host.validate.mockImplementation(() => {
-      node.advance(5);
-      return new Promise(() => undefined);
-    });
-    node.runtime.exchange
-      .mockReturnValueOnce({...idle, gossip: gossip({messages: [1]}, {messages: [2]}, {messages: [3]})})
-      .mockImplementationOnce(() => {
-        // Settlement spent this turn's budget before delivery; the held job still starts.
-        node.advance(BUDGET_MS);
-        return {...idle, needsAnotherExchange: true};
-      })
-      .mockReturnValueOnce({...idle, gossip: gossip({messages: [4]})});
-    node.pump.request();
-    await macrotask();
-    expect(node.host.validate).toHaveBeenCalledTimes(2);
-    await macrotask();
-    expect(node.host.validate).toHaveBeenCalledTimes(3);
-    await macrotask();
-    expect(node.host.validate).toHaveBeenCalledTimes(4);
-    expect(node.calls().map(([, demand]) => demand.mode === "delivery" && demand.claimNonUrgentGossip)).toEqual([
-      true,
-      false,
-      true,
-    ]);
-  });
-
-  it("starts every urgent job in one turn past the budget while ordinary jobs yield at it", async () => {
+  it("delivers gossip in native priority order despite expensive handlers earlier in the batch", async () => {
     const node = fixture();
     const started: number[] = [];
     node.host.validate.mockImplementation((job) => {
       started.push(job.messages[0].data[0]);
-      node.advance(5);
+      node.advance(100);
       return new Promise(() => undefined);
     });
-    node.runtime.exchange
-      .mockReturnValueOnce({
-        ...idle,
-        gossip: gossip(
-          {messages: [4], urgent: true},
-          {messages: [5], urgent: true},
-          {messages: [6], urgent: true},
-          {
-            messages: [1],
-          },
-          {messages: [2]},
-          {messages: [3]}
-        ),
-      })
-      .mockReturnValueOnce({...idle, gossip: gossip({messages: [7], urgent: true})})
-      .mockReturnValueOnce({...idle, needsAnotherExchange: true})
-      .mockReturnValueOnce({...idle, gossip: gossip({messages: [8]})});
-    node.pump.request();
-    await macrotask();
-    // All three blocks start although the first spends the budget; then one ordinary job starts.
-    expect(started).toEqual([4, 5, 6, 1]);
-    // Urgent work is delivered while ordinary jobs wait, and ordinary work is not claimed for the queue.
-    await macrotask();
-    expect(started).toEqual([4, 5, 6, 1, 7, 2]);
-    await macrotask();
-    expect(started).toEqual([4, 5, 6, 1, 7, 2, 3]);
-    await macrotask();
-    expect(started).toEqual([4, 5, 6, 1, 7, 2, 3, 8]);
-    expect(node.calls().map(([, demand]) => demand.mode === "delivery" && demand.claimNonUrgentGossip)).toEqual([
-      true,
-      false,
-      false,
-      true,
-    ]);
-  });
-
-  it("defers newly delivered ordinary jobs when earlier work in the turn spent its budget", async () => {
-    const node = fixture();
-    const started: number[] = [];
-    node.host.validate.mockImplementation((job) => {
-      started.push(job.messages[0].data[0]);
-      return new Promise(() => undefined);
-    });
-    // Peers ran past the deadline before gossip delivery.
-    node.host.peers.mockImplementation(() => node.advance(BUDGET_MS + 1));
+    node.host.peers.mockImplementation(() => node.advance(100));
     node.runtime.exchange.mockReturnValueOnce({
       ...idle,
-      gossip: gossip({messages: [1]}, {messages: [2], urgent: true}),
+      gossip: gossip({messages: [4], urgent: true}, {messages: [5], urgent: true}, {messages: [1]}, {messages: [2]}),
       peers: [peerEvent],
     });
     node.pump.request();
     await macrotask();
-    expect(started).toEqual([2]);
-    // The next turn starts the held job whatever its budget, so held work progresses.
-    node.runtime.exchange.mockImplementationOnce(() => {
-      node.advance(BUDGET_MS);
-      return idle;
-    });
+    expect(started).toEqual([4, 5, 1, 2]);
     await macrotask();
-    expect(started).toEqual([2, 1]);
+    expect(node.runtime.exchange).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -729,9 +523,9 @@ describe("binding pump delivery", () => {
     await macrotask();
     await macrotask();
     expect(node.host.checkDependencies).toHaveBeenCalledOnce();
-    expect(node.actions(1)).toEqual([
-      {available: classes[0], handle: handle(1), type: "classify"},
-      {available: classes[1], handle: handle(2), type: "classify"},
+    expect(node.runtime.classifyGossip.mock.calls).toEqual([
+      [handle(1), classes[0]],
+      [handle(2), classes[1]],
     ]);
     if (error === null) expect(node.host.error).not.toHaveBeenCalled();
     else expect(node.host.error).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({message: error}));
@@ -764,61 +558,47 @@ describe("binding pump delivery", () => {
     node.pump.request();
     await macrotask();
     await macrotask();
-    expect(node.actions(1)).toEqual([
-      {handle: handle(1), type: "verdict", verdict: "ignore"},
-      {handle: handle(2), type: "verdict", verdict: "ignore"},
-      {handle: handle(3), type: "verdict", verdict: "accept"},
+    expect(node.runtime.reportGossip.mock.calls).toEqual([
+      [handle(1), "ignore"],
+      [handle(2), "ignore"],
+      [handle(3), "accept"],
     ]);
     expect(node.host.error).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({message: error}));
     expect(node.terminal.failure).toBeNull();
   });
 
-  it("a throwing peer handler ignores every job, cancels every unstarted start once and fails the network", async () => {
+  it("a throwing peer handler ignores every job, cancels every unstarted request once and fails the network", async () => {
     const node = fixture();
-    const held = incoming("held");
-    const delivered = incoming("delivered");
-    node.runtime.exchange
-      .mockImplementationOnce(() => {
-        node.advance(BUDGET_MS);
-        return {...idle, serving: [held as NativeIncomingRequest]};
-      })
-      .mockReturnValueOnce({
-        ...idle,
-        checks: [check(3)],
-        gossip: gossip({messages: [4], urgent: true}, {grouped: true, messages: [5, 6]}),
-        peers: [peerEvent],
-        serving: [delivered as NativeIncomingRequest],
-      });
+    const starts = [incoming("first"), incoming("second")];
+    node.runtime.exchange.mockReturnValueOnce({
+      ...idle,
+      checks: [check(3)],
+      gossip: gossip({messages: [4], urgent: true}, {grouped: true, messages: [5, 6]}),
+      peers: [peerEvent],
+      serving: starts as NativeIncomingRequest[],
+    });
     const failure = new Error("peer handler failed");
     node.host.peers.mockImplementation(() => {
       throw failure;
     });
     node.pump.request();
     await macrotask();
-    expect(held.retainUntil).not.toHaveBeenCalled();
-    await macrotask();
     expect(node.terminal.failure).toBe(failure);
     expect(node.host.failed).toHaveBeenCalledExactlyOnceWith(failure);
     // The host closes the network once its cleanup finishes.
     expect(node.runtime.close).not.toHaveBeenCalled();
-    expect(delivered.cancel).toHaveBeenCalledOnce();
-    expect(held.cancel).toHaveBeenCalledOnce();
+    for (const start of starts) {
+      expect(start.retainUntil).not.toHaveBeenCalled();
+      expect(start.cancel).toHaveBeenCalledOnce();
+    }
     await macrotask();
-    // The failed network settles only, and reports what the host never took.
-    expect(node.calls()[2]).toEqual([
-      [
-        {handle: handle(4), type: "verdict", verdict: "ignore"},
-        {handle: handle(5), type: "verdict", verdict: "ignore"},
-        {handle: handle(6), type: "verdict", verdict: "ignore"},
-        {available: false, handle: handle(3), type: "classify"},
-      ],
-      control,
-    ]);
+    expect(node.capacities()[1]).toBeNull();
+    expect(node.runtime.reportGossip.mock.calls).toEqual([4, 5, 6].map((index) => [handle(index), "ignore"]));
+    expect(node.runtime.classifyGossip.mock.calls).toEqual([[handle(3), false]]);
     for (const callback of ["validate", "checkDependencies", "serve"] as const)
       expect(node.host[callback]).not.toHaveBeenCalled();
     node.pump.stopDelivery();
-    expect(held.cancel).toHaveBeenCalledOnce();
-    expect(delivered.cancel).toHaveBeenCalledOnce();
+    for (const start of starts) expect(start.cancel).toHaveBeenCalledOnce();
   });
 
   it("keeps settling after a peer handler fails until the host closes", async () => {
@@ -827,13 +607,11 @@ describe("binding pump delivery", () => {
     node.host.peers.mockImplementationOnce(() => {
       throw first;
     });
-    node.runtime.exchange
-      .mockReturnValueOnce({...idle, needsAnotherExchange: true, peers: [peerEvent]})
-      .mockReturnValueOnce({...idle, needsAnotherExchange: true})
-      .mockReturnValueOnce({...idle, needsAnotherExchange: true});
+    node.runtime.exchange.mockReturnValueOnce({...idle, needsAnotherExchange: true, peers: [peerEvent]});
+    node.runtime.drainCompletions.mockReturnValueOnce(true).mockReturnValueOnce(true).mockReturnValueOnce(true);
     node.pump.request();
     for (let i = 0; i < 4; i++) await macrotask();
-    expect(node.calls().map(([, demand]) => demand)).toEqual([full, control, control, control]);
+    expect(node.capacities()).toEqual([full, control, control, control]);
     expect(node.host.capacity).toHaveBeenCalledOnce();
     expect(node.host.failed).toHaveBeenCalledExactlyOnceWith(first);
     expect(node.terminal.failure).toBe(first);
@@ -856,85 +634,29 @@ describe("binding pump delivery", () => {
     expect(node.host.error).toHaveBeenCalledExactlyOnceWith(thrown);
   });
 
-  it("checks the budget between serving starts and keeps their order and capacity across turns", () => {
+  it("starts every request in a bounded batch in order without waiting for handlers to settle", async () => {
     const node = fixture();
     const starts = Array.from({length: 8}, (_, i) => incoming(`start-${i}`));
-    const queue = starts.slice();
-    node.runtime.exchange.mockImplementation((_actions, demand) => ({
-      ...idle,
-      serving: queue.splice(
-        0,
-        demand.mode === "delivery" ? Math.min(demand.servingStarts, demand.capacity.incomingRequestSlots) : 0
-      ),
-    }));
+    node.runtime.exchange.mockImplementationOnce(() => {
+      node.advance(100);
+      return {...idle, serving: starts as NativeIncomingRequest[]};
+    });
     node.host.serve.mockImplementation(() => {
-      node.advance(BUDGET_MS);
+      node.advance(100);
       return new Promise(() => undefined);
     });
-    for (let i = 0; i < starts.length; i++) {
-      expect(node.pump.turn()).toBe(i === starts.length - 1 ? "idle" : "now");
-      expect(node.host.serve).toHaveBeenCalledTimes(i + 1);
-      expect(starts[i].retainUntil).toHaveBeenCalledOnce();
-      const held = i === 0 ? 0 : starts.length - i;
-      expect(node.calls()[i][1]).toMatchObject({capacity: {incomingRequestSlots: 32 - held}, servingStarts: 8 - held});
-    }
-    expect(starts.every((start) => start.cancel.mock.calls.length === 0)).toBe(true);
-  });
-
-  it("holds serving starts once the budget is spent and starts them first next turn, counted once", async () => {
-    const node = fixture();
-    const starts = Array.from({length: 6}, (_, i) => incoming(`start-${i}`));
-    const queue = starts.slice();
-    let spend = true;
-    node.runtime.exchange.mockImplementation((_actions, demand) => {
-      if (spend) node.advance(BUDGET_MS);
-      const count =
-        demand.mode === "delivery" ? Math.min(demand.servingStarts, demand.capacity.incomingRequestSlots) : 0;
-      return {...idle, serving: queue.splice(0, count) as NativeIncomingRequest[]};
-    });
-    node.host.capacity.mockReturnValue({gossipValidation: "ready", incomingRequestSlots: 5});
     node.pump.request();
     await macrotask();
-    // Settlement spent the budget: the delivered starts wait for the next turn, which follows at once.
-    expect(queue).toHaveLength(1);
-    expect(node.host.serve).not.toHaveBeenCalled();
-    spend = false;
-    node.host.capacity.mockReturnValue({gossipValidation: "ready", incomingRequestSlots: 6});
-    await macrotask();
-    // Held starts count once against the next turn's capacity and allowance, and start before its new ones.
-    expect(node.calls()[1][1]).toMatchObject({capacity: {incomingRequestSlots: 1}, servingStarts: 3});
-    expect(queue).toHaveLength(0);
-    expect(node.host.serve).toHaveBeenCalledTimes(6);
+    expect(node.host.serve).toHaveBeenCalledTimes(8);
+    for (const start of starts) {
+      expect(start.retainUntil).toHaveBeenCalledOnce();
+      expect(start.cancel).not.toHaveBeenCalled();
+    }
     const retained = starts.map((start) => start.retainUntil.mock.invocationCallOrder[0]);
     expect(retained).toEqual([...retained].sort((a, b) => a - b));
-  });
-
-  it("starts held requests after expensive exchanges within the per-turn allowance", async () => {
-    const node = fixture();
-    const queue = Array.from({length: 40}, (_, i) => incoming(`start-${i}`));
-    let spend = 4;
-    node.runtime.exchange.mockImplementation((_actions, demand) => {
-      if (spend > 0) {
-        spend--;
-        node.advance(BUDGET_MS);
-      }
-      const count =
-        demand.mode === "delivery" ? Math.min(demand.servingStarts, demand.capacity.incomingRequestSlots) : 0;
-      return {...idle, serving: queue.splice(0, count) as NativeIncomingRequest[]};
-    });
-    node.pump.request();
-    for (let i = 0; i < 4; i++) {
-      await macrotask();
-      expect(node.host.serve).toHaveBeenCalledTimes(i);
-    }
-    expect(queue).toHaveLength(30);
-    expect(node.calls()[3][1]).toMatchObject({capacity: {incomingRequestSlots: 25}, servingStarts: 1});
+    expect(node.capacities()[0]).toEqual(full);
     await macrotask();
-    expect(node.host.serve).toHaveBeenCalledTimes(11);
-    expect(queue).toHaveLength(29);
-    node.pump.request();
-    await macrotask();
-    expect(node.host.serve).toHaveBeenCalledTimes(19);
+    expect(node.runtime.exchange).toHaveBeenCalledOnce();
   });
 
   it("retains serving capacity until serve settles, registered before host code; a failure fails the stream once", async () => {
@@ -961,7 +683,7 @@ describe("binding pump delivery", () => {
     });
     node.pump.request();
     await macrotask();
-    // A start whose stream ended while it was held is not served.
+    // A start whose stream ended before adoption is not served.
     expect(node.host.serve).toHaveBeenCalledTimes(3);
     const retirement = (start: Incoming) => {
       let settled = false;
@@ -1010,9 +732,10 @@ describe("binding pump delivery", () => {
       close("capacity read");
       return {gossipValidation: "ready", incomingRequestSlots: 32};
     });
-    node.runtime.exchange.mockImplementationOnce((_actions, demand) => {
+    node.runtime.exchange.mockImplementationOnce(() => {
+      const demand = node.capacities().at(-1);
       close("exchange's settlement");
-      if (demand.mode === "control") return idle;
+      if (!demand) return idle;
       return {
         ...idle,
         checks: [check(7)],
@@ -1042,168 +765,40 @@ describe("binding pump delivery", () => {
     expect(node.host.validate).toHaveBeenCalledTimes(validated);
     expect(starts.map(({cancel}) => cancel.mock.calls.length).reduce((a, b) => a + b)).toBe(cancelled);
     if (served === 1) expect(starts[1].cancel).toHaveBeenCalledOnce();
-    // The next exchange settles only, retiring each undelivered message and check once.
-    const retired: NativeAction[] = ignored.map((index) => ({
-      handle: handle(index),
-      type: "verdict",
-      verdict: "ignore",
-    }));
-    if (available !== 0) retired.push({available, handle: handle(7), type: "classify"});
-    if (retired.length === 0)
-      expect(node.calls()).toEqual([
-        [[], control],
-        [[], control],
-      ]);
-    else {
-      expect(node.calls()[1][1]).toEqual(control);
-      expect(node.actions(1)).toHaveLength(retired.length);
-      expect(node.actions(1)).toEqual(expect.arrayContaining(retired));
-    }
+    expect(node.runtime.reportGossip.mock.calls).toEqual(ignored.map((index) => [handle(index), "ignore"]));
+    expect(node.runtime.classifyGossip.mock.calls).toEqual(available === 0 ? [] : [[handle(7), available]]);
+    expect(node.capacities().at(-1)).toEqual(control);
   });
 
-  it("close cancels held serving starts once and ignores held jobs", async () => {
+  it("stopping delivery leaves already adopted asynchronous work with the host", async () => {
     const node = fixture();
-    const held = incoming("held");
-    node.runtime.exchange.mockImplementationOnce(() => {
-      node.advance(BUDGET_MS);
-      return {...idle, gossip: gossip({messages: [1]}), serving: [held as NativeIncomingRequest]};
-    });
-    node.pump.request();
-    await macrotask();
-    node.pump.stopDelivery();
-    node.pump.stopDelivery();
-    expect(held.cancel).toHaveBeenCalledOnce();
-    await macrotask();
-    expect(node.calls()[1]).toEqual([[{handle: handle(1), type: "verdict", verdict: "ignore"}], control]);
-    expect(node.host.validate).not.toHaveBeenCalled();
-    expect(node.host.serve).not.toHaveBeenCalled();
-    node.closed.resolve({reason: "requested"});
-    await macrotask();
-    expect(held.cancel).toHaveBeenCalledOnce();
-  });
-});
-
-describe("binding pump acknowledgements", () => {
-  it("resolves a job's report only when every message has an owner disposition", async () => {
-    const node = fixture();
-    node.runtime.exchange.mockReturnValueOnce({...idle, gossip: gossip({grouped: true, messages: [1, 2, 3]})});
-    node.pump.request();
-    await macrotask();
-    const job = node.host.validate.mock.calls[0][0];
-    let reported = false;
-    void job.reported.then(() => {
-      reported = true;
-    });
-    // Acknowledgements are control work: they arrive whatever the demand, and hand the host nothing else.
-    node.pump.stopDelivery();
+    const start = incoming();
+    node.host.serve.mockImplementation(() => new Promise(() => undefined));
+    node.host.validate.mockImplementation(() => new Promise(() => undefined));
     node.runtime.exchange.mockReturnValueOnce({
       ...idle,
-      acknowledged: [handle(1), handle(3)],
-      needsAnotherExchange: true,
-    });
-    await macrotask();
-    await macrotask();
-    expect(reported).toBe(false);
-    node.runtime.exchange.mockReturnValueOnce({...idle, acknowledged: [handle(2)]});
-    node.pump.request();
-    await macrotask();
-    await macrotask();
-    expect(reported).toBe(true);
-    expect(node.host.peers).not.toHaveBeenCalled();
-  });
-
-  it("matches acknowledgements by generation, so a reused cell's stale handle resolves nothing", async () => {
-    const node = fixture();
-    node.runtime.exchange.mockReturnValueOnce({...idle, gossip: gossip({generation: 1n, messages: [0]})});
-    node.pump.request();
-    await macrotask();
-    node.runtime.exchange.mockReturnValueOnce({
-      ...idle,
-      acknowledged: [handle(0, 1n)],
-      gossip: gossip({generation: 2n, messages: [0]}),
+      gossip: gossip({messages: [1]}),
+      serving: [start as NativeIncomingRequest],
     });
     node.pump.request();
     await macrotask();
-    const [first, second] = node.host.validate.mock.calls.map(([job]) => job);
-    await expect(first.reported).resolves.toBeUndefined();
-    let reported = false;
-    void second.reported.then(() => {
-      reported = true;
-    });
-    node.runtime.exchange.mockReturnValueOnce({...idle, acknowledged: [handle(0, 1n), handle(9, 2n)]});
-    node.pump.request();
+    expect(node.host.validate).toHaveBeenCalledOnce();
+    expect(node.host.serve).toHaveBeenCalledOnce();
+    node.pump.stopDelivery();
+    node.pump.stopDelivery();
     await macrotask();
-    await macrotask();
-    expect(reported).toBe(false);
-    node.runtime.exchange.mockReturnValueOnce({...idle, acknowledged: [handle(0, 2n)]});
-    node.pump.request();
-    await macrotask();
-    await expect(second.reported).resolves.toBeUndefined();
-  });
-
-  it("rejects every outstanding report when native closes, and keeps resolved ones", async () => {
-    const node = fixture();
-    node.runtime.exchange.mockReturnValueOnce({
-      ...idle,
-      gossip: gossip({messages: [1]}, {grouped: true, messages: [2, 3]}),
-    });
-    node.pump.request();
-    await macrotask();
-    node.runtime.exchange.mockReturnValueOnce({...idle, acknowledged: [handle(1), handle(2)]});
-    node.pump.request();
-    await macrotask();
-    const [done, open] = node.host.validate.mock.calls.map(([job]) => job);
+    expect(start.cancel).not.toHaveBeenCalled();
+    expect(node.capacities()[1]).toEqual(control);
     node.closed.resolve({reason: "requested"});
-    await expect(done.reported).resolves.toBeUndefined();
-    await expect(open.reported).rejects.toMatchObject({code: "NetworkClosed"});
-    node.pump.request();
     await macrotask();
-    expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
-  });
-
-  it("settles derived report promises at native close", async () => {
-    const node = fixture();
-    const outcome = (promise: Promise<unknown>) =>
-      promise.then(
-        () => "resolved",
-        (error: {code?: unknown}) => error.code
-      );
-    let derived: Promise<unknown>[] = [];
-    let source: WeakRef<Promise<void>> | undefined;
-    node.host.validate.mockImplementation((job) => {
-      derived = [outcome(job.reported), outcome(Promise.all([macrotask(), job.reported]))];
-      source = new WeakRef(job.reported);
-      return new Promise(() => undefined);
-    });
-    node.runtime.exchange.mockReturnValueOnce({...idle, gossip: gossip({messages: [1]})});
-    node.pump.request();
-    await macrotask();
-    // Only the pump now holds the report.
-    node.host.validate.mockClear();
-    for (let i = 0; i < 3; i++) {
-      global.gc?.();
-      await macrotask();
-    }
-    expect(source?.deref()).toBeInstanceOf(Promise);
-    node.closed.resolve({reason: "requested"});
-    expect(await Promise.all(derived)).toEqual(["NetworkClosed", "NetworkClosed"]);
+    expect(start.cancel).not.toHaveBeenCalled();
   });
 });
 
 describe("binding pump close results", () => {
-  it("reports a requested close, and a failed one with the owner's terminal error", async () => {
-    const node = fixture();
-    const owner = Object.assign(new Error("NetworkWakeFailed"), {code: "NetworkWakeFailed"});
-    expect(await closeResult(Promise.resolve({reason: "requested"}), node.terminal)).toEqual({reason: "requested"});
-    expect(await closeResult(Promise.resolve({error: owner, reason: "failed"}), node.terminal)).toEqual({
-      error: owner,
-      reason: "failed",
-    });
-  });
-
   it("reports an owner failure that follows a requested close", async () => {
     const node = fixture();
-    const result = closeResult(node.runtime.closed, node.terminal);
+    const result = node.runtime.closed;
     node.pump.stopDelivery();
     const owner = new Error("owner failed while stopping");
     node.closed.resolve({error: owner, reason: "failed"});
@@ -1212,7 +807,7 @@ describe("binding pump close results", () => {
 
   it("reports a delivery failure first, once native settles the close the host then requests", async () => {
     const node = fixture();
-    const result = closeResult(node.runtime.closed, node.terminal);
+    const result = node.runtime.closed;
     let settled = false;
     void result.then(() => {
       settled = true;
@@ -1231,13 +826,10 @@ describe("binding pump close results", () => {
     expect(await result).toEqual({error: failure, reason: "failed"});
   });
 
-  it.each([
-    "held",
-    "unadopted",
-  ] as const)("keeps a delivery failure first when cancelling a %s serving start records a later owner failure", async (kind) => {
+  it("keeps a delivery failure first when cancelling an unadopted request records a later owner failure", async () => {
     const node = fixture();
-    const result = closeResult(node.runtime.closed, node.terminal);
-    const start = incoming(kind);
+    const result = node.runtime.closed;
+    const start = incoming();
     // A real cancellation reaches native, whose wake can record a terminal failure.
     start.cancel.mockImplementation(() => {
       node.runtime.state = "failed";
@@ -1247,22 +839,13 @@ describe("binding pump close results", () => {
     node.host.peers.mockImplementation(() => {
       throw failure;
     });
-    if (kind === "held")
-      node.runtime.exchange
-        .mockImplementationOnce(() => {
-          node.advance(BUDGET_MS);
-          return {...idle, serving: [start as NativeIncomingRequest]};
-        })
-        .mockReturnValueOnce({...idle, peers: [peerEvent]});
-    else
-      node.runtime.exchange.mockReturnValueOnce({
-        ...idle,
-        peers: [peerEvent],
-        serving: [start as NativeIncomingRequest],
-      });
+    node.runtime.exchange.mockReturnValueOnce({
+      ...idle,
+      peers: [peerEvent],
+      serving: [start as NativeIncomingRequest],
+    });
     node.pump.request();
     await macrotask();
-    if (kind === "held") await macrotask();
     expect(start.cancel).toHaveBeenCalledOnce();
     expect(node.runtime.state).toBe("failed");
     expect(node.host.failed).toHaveBeenCalledExactlyOnceWith(failure);
@@ -1273,7 +856,7 @@ describe("binding pump close results", () => {
 
   it("leaves the close result to an owner that failed first, and reports a later delivery failure", async () => {
     const node = fixture();
-    const result = closeResult(node.runtime.closed, node.terminal);
+    const result = node.runtime.closed;
     node.runtime.state = "failed";
     const failure = new Error("peer handler failed");
     node.host.peers.mockImplementation(() => {
@@ -1330,5 +913,5 @@ it("fails delivery when subscription setup throws while continuing completions",
   await macrotask();
   expect(node.host.failed).toHaveBeenCalledExactlyOnceWith(failure);
   expect(node.host.capacity).not.toHaveBeenCalled();
-  expect(node.calls()[0]).toEqual([[], control]);
+  expect(node.capacities()[0]).toEqual(control);
 });

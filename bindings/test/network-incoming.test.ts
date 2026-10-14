@@ -1,5 +1,4 @@
 import {expect, test} from "vitest";
-import type {NativeCompletion, NativeNetworkApplicationRuntime} from "../src/network-runtime.js";
 import {
   applicationConfig,
   holdSettling,
@@ -7,9 +6,9 @@ import {
   metricValue,
   nextIncoming,
   requestForks,
-  settleOnly,
   startRuntime,
 } from "./utils/network.js";
+import {drainUntil} from "./utils/network-bindings.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 test("incoming request take is empty on an active application", async () => {
@@ -377,16 +376,6 @@ test("a ready incoming response delivers its bytes and preserves control progres
   }
 }, 20000);
 
-/** Exchanges until one delivers an incoming completion, as a held runtime's own host would, and returns it. */
-async function incomingCompleted(runtime: NativeNetworkApplicationRuntime): Promise<NativeCompletion> {
-  for (let i = 0; i < 2000; i++) {
-    const completion = runtime.exchange([], settleOnly).completions.find(({family}) => family === "incoming");
-    if (completion) return completion;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  throw Error("No incoming completion arrived");
-}
-
 /** Reproducible bytes that snappy cannot compress, so their frame stays as large as they are. */
 function incompressible(length: number, seed: number): Uint8Array {
   const data = new Uint8Array(length);
@@ -425,12 +414,9 @@ test("a permission the stream's end overtakes arrives with the close and settles
     await expect
       .poll(() => metricValue(pair.right.getMetrics(), "beacon_reqresp_retiring_count"), {timeout: 5000})
       .toBe(1);
-    expect(await incomingCompleted(pair.right)).toMatchObject({
-      closed: true,
-      family: "incoming",
-      ready: {error: {code: "NetworkIncomingClosed"}},
+    await expect(drainUntil(pair.right, permission)).rejects.toMatchObject({
+      code: "NetworkIncomingClosed",
     });
-    await expect(permission).rejects.toMatchObject({code: "NetworkIncomingClosed"});
     expect(order).toEqual(["closed", "NetworkIncomingClosed"]);
   } finally {
     holdSettling(pair.right, false);
@@ -454,9 +440,7 @@ test("an acknowledgement due with the stream's close arrives in one completion a
     await expect
       .poll(() => metricValue(pair.right.getMetrics(), "beacon_reqresp_retiring_count"), {timeout: 5000})
       .toBe(1);
-    const completion = await incomingCompleted(pair.right);
-    expect(completion).toEqual({closed: true, family: "incoming", handle: expect.anything(), response: {}});
-    await responded;
+    await drainUntil(pair.right, responded);
     await incoming.closed;
     expect(order).toEqual(["pending", "closed"]);
   } finally {

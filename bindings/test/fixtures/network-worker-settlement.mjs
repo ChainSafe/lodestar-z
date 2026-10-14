@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {once} from "node:events";
 import {isMainThread, parentPort, Worker} from "node:worker_threads";
-import {applicationConfig, localIntent, runtimeReleased, startRuntime, topicName} from "../utils/network.js";
+import {applicationConfig, holdSettling, localIntent, runtimeReleased, startRuntime, topicName} from "../utils/network.js";
 
 if (isMainThread) {
   // Each phase line names the step that follows, for the parent's watchdog to report.
@@ -35,6 +35,7 @@ if (isMainThread) {
   const config = applicationConfig();
   const runtime = startRuntime(config);
   await runtime.applyIntent(localIntent(config), config.initialSlot);
+  holdSettling(runtime, true);
   const payload = new Uint8Array(4000);
   new DataView(payload.buffer).setBigUint64(100, config.initialSlot, true);
   const pending = [];

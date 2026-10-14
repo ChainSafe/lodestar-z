@@ -1,130 +1,25 @@
 const std = @import("std");
-const n = @import("network");
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
-const decode = @import("network_js_input.zig");
 const r = @import("network_runtime.zig");
 const Runtime = r.Runtime;
 const g = @import("network_gossip.zig");
 const incoming = @import("network_incoming.zig");
 const projection = @import("network_peer_projection.zig");
 const publications = @import("network_publications.zig");
-const fatal = @import("network_fatal.zig");
+const commands = @import("network_commands.zig");
+const requests = @import("network_requests.zig");
+const Promise = @import("network_promise.zig");
 const exchange_mod = @import("network_exchange.zig");
-const Demand = exchange_mod.Demand;
-const Action = exchange_mod.Action;
 const Selection = exchange_mod.Selection;
 const Outcome = exchange_mod.Outcome;
-const Closed = exchange_mod.Closed;
-const action_max = exchange_mod.action_max;
-const serving_max = exchange_mod.serving_max;
-const bytes = @import("network_js.zig").bytes;
-const network_peer_reports = @import("network_peer_reports.zig");
+const bytes = network_js.bytes;
 const network_incoming_js = @import("network_incoming_js.zig");
 const network_js = @import("network_js.zig");
 const network_publication_js = @import("network_publication_js.zig");
 const network_command_js = @import("network_command_js.zig");
 const network_request_js = @import("network_request_js.zig");
 const network_gossip_js = @import("network_gossip_js.zig");
-
-pub fn parseDemand(value: Value) !Demand {
-    _ = try object(value);
-    const mode = try name(enum { control, delivery }, try decode.get(value, "mode"), error.InvalidNetworkConfig);
-    if (mode == .control) return .control;
-    const capacity = try object(try decode.get(value, "capacity"));
-    return .{ .delivery = .{
-        .serving_starts = @intCast(try decode.integer(try decode.get(value, "servingStarts"), serving_max)),
-        .claim_non_urgent_gossip = try decode.boolean(try decode.get(value, "claimNonUrgentGossip")),
-        .capacity = .{
-            .incoming_request_slots = @intCast(try decode.integer(try decode.get(capacity, "incomingRequestSlots"), incoming.capacity_max)),
-            .gossip_validation = try name(@FieldType(r.Capacity, "gossip_validation"), try decode.get(capacity, "gossipValidation"), error.InvalidNetworkConfig),
-        },
-    } };
-}
-
-fn object(value: Value) !Value {
-    if (try value.typeof() != .object or try value.isArray()) return error.InvalidNetworkConfig;
-    return value;
-}
-
-const ActionType = enum { verdict, classify, block, recheck, dropQueued, reportPeer };
-
-pub fn parseActions(value: Value, into: *[action_max]Action) !usize {
-    if (!try value.isArray()) return error.InvalidNetworkActions;
-    const count = try value.getArrayLength();
-    if (count > action_max) return error.InvalidNetworkActions;
-    for (into[0..count], 0..) |*action, i| action.* = try parseAction(try value.getElement(@intCast(i)));
-    return count;
-}
-
-pub fn parseAction(value: Value) !Action {
-    _ = object(value) catch return error.InvalidNetworkAction;
-    return switch (try name(ActionType, try decode.get(value, "type"), error.InvalidNetworkAction)) {
-        .verdict => .{ .verdict = .{
-            .token = try handle(try decode.get(value, "handle")),
-            .verdict = try name(n.gossipsub.Gossipsub.Verdict, try decode.get(value, "verdict"), error.InvalidGossipVerdict),
-        } },
-        .classify => .{ .classify = .{ .token = try handle(try decode.get(value, "handle")), .available = try decode.boolean(try decode.get(value, "available")) } },
-        .block => .{ .block = try decode.fixed(32, try decode.get(value, "root")) },
-        .recheck => .recheck,
-        .dropQueued => .drop_queued,
-        .reportPeer => .{ .report_peer = .{
-            .report = .{
-                .identity = try decode.peerIdFrom(try decode.get(value, "peerId")),
-                .action = try name(n.peers.types.PeerAction, try decode.get(value, "action"), error.InvalidNetworkAction),
-                .origin = try reportOrigin(try decode.get(value, "context")),
-                .reason = try reportReason(try decode.get(value, "context")),
-            },
-            .count = try reportCount(try decode.get(value, "count")),
-        } },
-    };
-}
-
-fn name(comptime T: type, value: Value, invalid: anyerror) !T {
-    var text: [32]u8 = undefined;
-    const len = decode.text(value, &text) catch return invalid;
-    return std.meta.stringToEnum(T, text[0..len]) orelse invalid;
-}
-
-fn handle(value: Value) !g.Token {
-    if (try value.typeof() != .object) return error.InvalidGossipHandle;
-    const index = try decode.integer(try decode.get(value, "index"), n.gossip_processor.limits.capacity_max - 1);
-    const generation = try decode.bigint(try decode.get(value, "generation"));
-    if (generation == 0) return error.InvalidGossipHandle;
-    return .{ .index = @intCast(index), .generation = generation };
-}
-
-fn reportOrigin(context: Value) !?n.types.PeerOrigin {
-    if (try context.typeof() == .undefined) return null;
-    try decode.object(context, &.{ "origin", "reason" });
-    const origin = try decode.get(context, "origin");
-    if (try origin.typeof() == .undefined or try origin.typeof() == .null) return null;
-    try decode.object(origin, &.{ "connection", "endpoint" });
-    const connection = try decode.get(origin, "connection");
-    try decode.object(connection, &.{ "index", "generation" });
-    const generation = try decode.integer(try decode.get(connection, "generation"), std.math.maxInt(u32));
-    const endpoint = try decode.get(origin, "endpoint");
-    return .{
-        .connection = .{
-            .index = @intCast(try decode.integer(try decode.get(connection, "index"), std.math.maxInt(u16))),
-            .generation = @intCast(generation),
-        },
-        .endpoint = if (try endpoint.typeof() == .null) null else n.Address.fromNetwork(try decode.endpoint(endpoint)),
-    };
-}
-
-fn reportReason(context: Value) !n.peers.types.PeerReport.Reason {
-    if (try context.typeof() == .undefined) return .host;
-    const value = try decode.get(context, "reason");
-    if (try value.typeof() == .undefined) return .host;
-    return name(n.peers.types.PeerReport.Reason, value, error.InvalidNetworkAction);
-}
-
-fn reportCount(value: Value) !u8 {
-    const result = try decode.integer(value, network_peer_reports.report_max);
-    if (result == 0) return error.InvalidNetworkInteger;
-    return @intCast(result);
-}
 
 /// The N-API side of an exchange: the result's JS values.
 pub const Host = struct {
@@ -133,6 +28,31 @@ pub const Host = struct {
 
     pub const Result = Value;
 
+    pub fn settlePublication(self: *Host, token: publications.Token) !void {
+        try network_publication_js.settle(self.env, self.runtime.bridge.publications.?.get(token).?);
+    }
+    pub fn settleCommand(self: *Host, token: commands.Token) !void {
+        try network_command_js.settle(self.env, self.runtime, token);
+    }
+    pub fn settleRequest(self: *Host, completion: requests.Completion) !void {
+        try network_request_js.settle(self.env, self.runtime, completion);
+    }
+    pub fn settleIncoming(self: *Host, completion: incoming.Completion) !void {
+        try network_incoming_js.settle(self.env, self.runtime, completion);
+    }
+    pub fn settleClose(self: *Host, promise: *Promise) !void {
+        const value = try self.env.createObject();
+        try value.setNamedProperty("reason", try self.env.createStringUtf8(@tagName(self.runtime.bridge.reason)));
+        if (self.runtime.bridge.reason == .failed) {
+            const failure = if (self.runtime.host_failure) |ref| try ref.getValue() else try network_js.settled(self.env, network_js.errorValue(self.env, @errorName(self.runtime.bridge.terminal_error.?)));
+            try value.setNamedProperty("error", failure);
+        }
+        try promise.settle(self.env, .resolve, value);
+        if (self.runtime.host_failure) |ref| {
+            ref.delete() catch unreachable;
+            self.runtime.host_failure = null;
+        }
+    }
     /// A fresh result, or null when there is nothing to deliver and a prepared one serves.
     pub fn build(self: *Host, selection: *exchange_mod.Selection) !?Value {
         if (!selection.delivers()) return null;
@@ -157,8 +77,8 @@ pub const Host = struct {
         _ = self.env.getAndClearLastException() catch return .stopped;
         return .contract;
     }
-    pub fn terminate(self: *Host, site: fatal.Site, err: anyerror) noreturn {
-        fatal.terminate(self.env, site, @errorName(err));
+    pub fn terminate(_: *Host, err: anyerror) noreturn {
+        std.debug.panic("native network bridge: {s}", .{@errorName(err)});
     }
 };
 
@@ -172,9 +92,8 @@ pub const Results = struct {
         try empty.objectFreeze();
         for (&self.idle, 0..) |*slot, i| {
             const result = try env.createObject();
-            inline for (.{ "peers", "serving", "checks", "acknowledged", "completions" }) |field| try result.setNamedProperty(field, empty);
+            inline for (.{ "peers", "serving", "checks" }) |field| try result.setNamedProperty(field, empty);
             try result.setNamedProperty("gossip", try env.getNull());
-            try result.setNamedProperty("closed", try env.getNull());
             try schedule(env, result, .{ .needs_another_exchange = i != 0 });
             try result.objectFreeze();
             slot.* = try napi.Ref.create(env.env, result, 1);
@@ -218,39 +137,9 @@ fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     }
     try result.setNamedProperty("checks", checks);
     try result.setNamedProperty("gossip", if (selection.gossip) |*batch| try jobs(env, runtime, batch) else try env.getNull());
-    const acknowledged = try env.createArrayWithLength(selection.acknowledged_count);
-    for (selection.acknowledged[0..selection.acknowledged_count], 0..) |token, i| {
-        const reference = try network_js.handle(env, token.index, token.generation);
-        try acknowledged.setElement(@intCast(i), reference);
-    }
-    try result.setNamedProperty("acknowledged", acknowledged);
-    const completions = try env.createArrayWithLength(@intCast(selection.publication_count + selection.command_count + selection.request_count + selection.incoming_count));
-    for (selection.publications[0..selection.publication_count], 0..) |token, i| {
-        try completions.setElement(@intCast(i), try network_publication_js.completion(env, token, runtime.bridge.publications.?.get(token).?));
-    }
-    for (selection.commands[0..selection.command_count], selection.publication_count..) |token, i| {
-        try completions.setElement(@intCast(i), try network_command_js.completion(env, runtime, token));
-    }
-    for (selection.requests[0..selection.request_count], selection.publication_count + selection.command_count..) |completion, i| {
-        try completions.setElement(@intCast(i), try network_request_js.completion(env, runtime, completion));
-    }
-    for (selection.incoming[0..selection.incoming_count], selection.publication_count + selection.command_count + selection.request_count..) |completion, i| {
-        try completions.setElement(@intCast(i), try network_incoming_js.completion(env, completion));
-    }
-    try result.setNamedProperty("completions", completions);
-    try result.setNamedProperty("closed", if (selection.closed) |closed| try closedValue(env, closed) else try env.getNull());
     return result;
 }
 
-/// `{reason: "requested"}`, or `{reason: "failed", error}` with the first failure's code.
-fn closedValue(env: napi.Env, closed: Closed) !Value {
-    const value = try env.createObject();
-    try value.setNamedProperty("reason", try env.createStringUtf8(@tagName(closed.reason)));
-    if (closed.failure) |err| try value.setNamedProperty("error", try network_js.settled(env, network_js.errorValue(env, @errorName(err))));
-    return value;
-}
-
-/// Sets a fresh result's scheduling fields, or returns the prepared result when nothing was built.
 fn finishResult(env: napi.Env, runtime: *Runtime, output: ?Value, outcome: Outcome) !Value {
     const result = output orelse return runtime.results.idle[@intFromBool(outcome.needs_another_exchange)].?.getValue();
     try schedule(env, result, outcome);
@@ -272,7 +161,6 @@ fn jobs(env: napi.Env, runtime: *Runtime, batch: *const g.Batch) !Value {
         try value.setNamedProperty("start", try env.createUint32(@intCast(job.start)));
         try value.setNamedProperty("length", try env.createUint32(@intCast(job.len)));
         try value.setNamedProperty("grouped", try env.getBoolean(job.grouped));
-        try value.setNamedProperty("urgent", try env.getBoolean(n.gossip_processor.limits.urgent(job.kind)));
         try list.setElement(@intCast(i), value);
     }
     try result.setNamedProperty("jobs", list);

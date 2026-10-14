@@ -32,28 +32,27 @@ fn napiGetUndefined(_: ?*anyopaque, result: *?*anyopaque) callconv(.c) c_uint {
     result.* = null;
     return undefined_status;
 }
-/// N-API calls the tests link but never reach: no cleanup hook is live, no reference was created, and a notification
+pub var references_deleted: usize = 0;
+fn napiDeleteReference(_: ?*anyopaque, ref: ?*anyopaque) callconv(.c) c_uint {
+    std.debug.assert(ref != null);
+    references_deleted += 1;
+    return 0;
+}
+/// N-API calls the tests link but never reach: no cleanup hook is live, and a notification
 /// fails before calling its callback.
 fn napiUnreached() callconv(.c) c_uint {
     return napi.c.napi_generic_failure;
 }
-/// As Node's does, prints the location and message, then aborts.
-fn napiFatalError(location: [*]const u8, location_len: usize, message: [*]const u8, message_len: usize) callconv(.c) noreturn {
-    var buffer: [256]u8 = undefined;
-    const line = std.fmt.bufPrint(&buffer, "FATAL ERROR: {s} {s}\n", .{ location[0..location_len], message[0..message_len] }) catch unreachable;
-    _ = std.c.write(2, line.ptr, line.len);
-    std.c.abort();
-}
 comptime {
     @export(&napiCallThreadsafeFunction, .{ .name = "napi_call_threadsafe_function" });
-    @export(&napiFatalError, .{ .name = "napi_fatal_error" });
     @export(&napiIsExceptionPending, .{ .name = "napi_is_exception_pending" });
     @export(&napiGetAndClearLastException, .{ .name = "napi_get_and_clear_last_exception" });
     @export(&napiGetUndefined, .{ .name = "napi_get_undefined" });
-    for (.{ "napi_remove_env_cleanup_hook", "napi_delete_reference", "napi_call_function" }) |name| @export(&napiUnreached, .{ .name = name });
+    @export(&napiDeleteReference, .{ .name = "napi_delete_reference" });
+    for (.{ "napi_remove_env_cleanup_hook", "napi_call_function" }) |name| @export(&napiUnreached, .{ .name = name });
 }
 
-/// Runs `run` in a child process, which must abort after printing exactly `expected` to stderr.
+/// Runs `run` in a child process, which must abort after printing `expected` to stderr.
 pub fn expectFatal(comptime run: fn () void, expected: []const u8) !void {
     var fds: [2]std.c.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
@@ -78,5 +77,5 @@ pub fn expectFatal(comptime run: fn () void, expected: []const u8) !void {
     const code: u32 = @bitCast(wait_status);
     try std.testing.expect(std.c.W.IFSIGNALED(code));
     try std.testing.expectEqual(std.c.SIG.ABRT, std.c.W.TERMSIG(code));
-    try std.testing.expectEqualStrings(expected, output[0..len]);
+    try std.testing.expect(std.mem.find(u8, output[0..len], expected) != null);
 }

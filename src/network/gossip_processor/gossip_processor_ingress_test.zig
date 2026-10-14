@@ -168,7 +168,7 @@ test "gossip saturated attestation intake preserves block priority and storage" 
     const batch = table.claimDemand(2, .{ .ordinary = false });
     try t.expectEqual(@as(usize, 1), batch.len);
     try t.expectEqual(.beacon_block, table.get(batch.tokens[0]).?.kind);
-    table.finish(&batch, false);
+    table.finish(&batch);
 }
 
 fn vote(bytes: []u8, tag: u8, slot: u64) void {
@@ -252,7 +252,7 @@ test "gossip admission leaves queued work intact when a host copy pins the requi
     table.maintain(60, table.slot);
     const copying = table.claim(60);
     try t.expectEqual(@as(usize, 1), copying.len);
-    defer table.finish(&copying, false);
+    defer table.finish(&copying);
     var small: [240]u8 = undefined;
     for (0..2) |i| {
         vote(&small, @intCast(i + 2), 1);
@@ -307,14 +307,14 @@ test "gossip admission after a refused victim selection retires only its own vic
     try t.expectEqual(@as(u64, 1), table.diag.capacityRefusals);
     try t.expectEqual(@as(u64, 0), table.diag.reportsAppliedIgnore);
     try t.expectEqual(@as(usize, 3), table.diag.occupied);
-    table.finish(&copying, false);
+    table.finish(&copying);
     vote(&candidate, 5, 1);
     try receive(&g, 2, attestation, &candidate);
-    try t.expectEqual(@as(u64, 1), table.diag.reportsAppliedIgnore);
-    try t.expect(table.get(copying.tokens[0]) == null);
+    try t.expectEqual(@as(u64, 0), table.diag.reportsAppliedIgnore);
+    try t.expect(table.get(copying.tokens[0]) != null);
     try t.expect(table.get(oldest_small) != null);
-    try t.expectEqual(@as(usize, 3), table.diag.occupied);
-    try t.expectEqual(@as(usize, 3), g.resourceSnapshot().pending_validations);
+    try t.expectEqual(@as(usize, 4), table.diag.occupied);
+    try t.expectEqual(@as(usize, 4), g.resourceSnapshot().pending_validations);
 }
 
 const IwantFixture = struct {
@@ -450,7 +450,7 @@ test "gossip identified receipts settle only their IWANT ID across providers des
                 f.table.maintain(300, 96);
                 const batch = f.table.claim(300);
                 try t.expectEqual(count, batch.len);
-                f.table.finish(&batch, true);
+                f.table.finish(&batch);
             }
         }
         const before = f.table.diag.occupied;
@@ -644,60 +644,47 @@ fn oldestReplaceable(table: *const processor.GossipProcessor) processor.GossipPr
     return oldest.?;
 }
 
-test "gossip replacement keeps original arrival age across dependency promotion and copy rollback" {
-    for ([_]bool{ false, true }) |rollback| {
-        var f: IwantFixture = .{};
-        try f.init(64);
-        defer f.deinit();
-        var data: [240]u8 = undefined;
-        vote(&data, 1, 96);
-        _ = try f.message(0, &data);
-        const first = oldestReplaceable(&f.table);
-        const first_handle = f.table.get(first).?.handle;
-        const deadline = f.table.get(first).?.deadline;
-        const root = f.table.get(first).?.metadata.root.?;
-        const checks = f.table.claimChecks(f.now, processor.GossipProcessor.batch_max);
-        try t.expectEqual(@as(usize, 1), checks.len);
-        try t.expect(f.table.classify(first, rollback));
-        var copying: processor.GossipProcessor.Batch = .{};
-        if (rollback) {
-            f.now += 60;
-            f.table.maintain(f.now, 96);
-            copying = f.table.claim(f.now);
-            try t.expectEqual(@as(usize, 1), copying.len);
-        }
-        // Later arrivals include an older (still useful) slot. Eviction age is
-        // network arrival, not unauthenticated slot rank.
-        for (0..3) |i| {
-            vote(&data, @intCast(i + 2), if (i == 0) 95 else 96);
-            _ = try f.message(if (i == 0) 0 else 1, &data);
-        }
-        const later = f.table.claimChecks(f.now, processor.GossipProcessor.batch_max);
-        try t.expectEqual(@as(usize, 3), later.len);
-        for (later.tokens[0..later.len]) |token| try t.expect(f.table.classify(token, true));
-        if (rollback) {
-            f.table.finish(&copying, false);
-        } else {
-            f.table.notifyBlock(root);
-            f.table.maintain(f.now, 96);
-            const promoted = f.table.claimChecks(f.now, processor.GossipProcessor.batch_max);
-            try t.expectEqual(@as(usize, 1), promoted.len);
-            try t.expectEqual(first, promoted.tokens[0]);
-            try t.expect(f.table.classify(first, true));
-        }
-        try t.expectEqual(deadline, f.table.get(first).?.deadline);
-        const queued = f.table.queues[@intFromEnum(processor.limits.Kind.beacon_attestation)][@intFromEnum(processor.GossipProcessor.State.queued)];
-        try t.expectEqual(first.index, queued.tail);
-        try t.expect(queued.head != first.index);
-        vote(&data, 9, 95);
-        _ = try f.message(2, &data);
-        try t.expect(f.table.get(first) == null);
-        for (later.tokens[0..later.len]) |token| try t.expect(f.table.get(token) != null);
-        try t.expectEqual(@as(usize, 4), f.table.diag.occupied);
-        try t.expectEqual(@as(u64, 1), f.table.diag.reportsAppliedIgnore);
-        try t.expectEqual(Gossipsub.ReportOutcome.already_resolved, f.g.report(first_handle, .reject, Now.fromMilliseconds(.{ .mono_ms = f.now, .unix_s = 0 })));
-        try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
+test "gossip replacement keeps original arrival age across dependency promotion" {
+    var f: IwantFixture = .{};
+    try f.init(64);
+    defer f.deinit();
+    var data: [240]u8 = undefined;
+    vote(&data, 1, 96);
+    _ = try f.message(0, &data);
+    const first = oldestReplaceable(&f.table);
+    const first_handle = f.table.get(first).?.handle;
+    const deadline = f.table.get(first).?.deadline;
+    const root = f.table.get(first).?.metadata.root.?;
+    const checks = f.table.claimChecks(f.now, processor.GossipProcessor.batch_max);
+    try t.expectEqual(@as(usize, 1), checks.len);
+    try t.expect(f.table.classify(first, false));
+    // Later arrivals include an older (still useful) slot. Eviction age is
+    // network arrival, not unauthenticated slot rank.
+    for (0..3) |i| {
+        vote(&data, @intCast(i + 2), if (i == 0) 95 else 96);
+        _ = try f.message(if (i == 0) 0 else 1, &data);
     }
+    const later = f.table.claimChecks(f.now, processor.GossipProcessor.batch_max);
+    try t.expectEqual(@as(usize, 3), later.len);
+    for (later.tokens[0..later.len]) |token| try t.expect(f.table.classify(token, true));
+    f.table.notifyBlock(root);
+    f.table.maintain(f.now, 96);
+    const promoted = f.table.claimChecks(f.now, processor.GossipProcessor.batch_max);
+    try t.expectEqual(@as(usize, 1), promoted.len);
+    try t.expectEqual(first, promoted.tokens[0]);
+    try t.expect(f.table.classify(first, true));
+    try t.expectEqual(deadline, f.table.get(first).?.deadline);
+    const queued = f.table.queues[@intFromEnum(processor.limits.Kind.beacon_attestation)][@intFromEnum(processor.GossipProcessor.State.queued)];
+    try t.expectEqual(first.index, queued.tail);
+    try t.expect(queued.head != first.index);
+    vote(&data, 9, 95);
+    _ = try f.message(2, &data);
+    try t.expect(f.table.get(first) == null);
+    for (later.tokens[0..later.len]) |token| try t.expect(f.table.get(token) != null);
+    try t.expectEqual(@as(usize, 4), f.table.diag.occupied);
+    try t.expectEqual(@as(u64, 1), f.table.diag.reportsAppliedIgnore);
+    try t.expectEqual(Gossipsub.ReportOutcome.already_resolved, f.g.report(first_handle, .reject, Now.fromMilliseconds(.{ .mono_ms = f.now, .unix_s = 0 })));
+    try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
 }
 
 test "gossip eviction scan is work charged and leaves candidates untouched on exhaustion" {
@@ -863,7 +850,7 @@ test "gossip processor pending validation quota preserves room for another peer 
         try t.expectEqual(@as(usize, 1), batch.len);
         const token = batch.tokens[0];
         const held = table.get(token).?.handle;
-        table.finish(&batch, true);
+        table.finish(&batch);
         try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, first.index, "second", 2));
         try std.testing.expectEqual(@as(?usize, 0), try support.message(&g, first.index, "third", 3));
         try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.peer_validations)]);
@@ -872,7 +859,7 @@ test "gossip processor pending validation quota preserves room for another peer 
         try t.expect(table.report(token, .ignore, 5));
         try std.testing.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(held, .ignore, Now.fromMilliseconds(.{ .mono_ms = 5, .unix_s = 0 })));
         table.retire(token);
-        table.acknowledge(token);
+
         try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, first.index, "third", 6));
     }
 }
@@ -907,7 +894,7 @@ test "gossip protocol expiry frees compressed storage while host work retains pr
     try t.expectEqual(@as(usize, 1), batch.len);
     const token = batch.tokens[0];
     const validation = table.get(token).?.handle;
-    table.finish(&batch, true);
+    table.finish(&batch);
     try t.expectEqual(@as(usize, 0), table.used_bytes[kind]);
     try t.expectEqual(@as(usize, 2), g.messages.store.pending_by_kind[kind]);
 
@@ -934,8 +921,8 @@ test "gossip protocol expiry frees compressed storage while host work retains pr
     try t.expectEqual(@as(usize, 0), table.claim(103).len);
     try t.expect(!table.report(token, .accept, 104));
     try t.expectEqual(Gossipsub.ReportOutcome.expired, g.report(validation, .accept, Now.fromMilliseconds(.{ .mono_ms = 104, .unix_s = 0 })));
-    table.acknowledge(token);
+
     const next = table.claim(104);
     try t.expectEqual(@as(usize, 1), next.len);
-    table.finish(&next, false);
+    table.finish(&next);
 }

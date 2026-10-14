@@ -1,4 +1,4 @@
-import {NativePump, closeResult} from "./network-pump.js";
+import {NativePump} from "./network-pump.js";
 import {NativeRuntime, registerRuntime} from "./network-runtime.js";
 
 const HOST_METHODS = [
@@ -20,14 +20,13 @@ class NativeNetwork {
   constructor(config, host) {
     for (const name of HOST_METHODS)
       if (typeof host?.[name] !== "function") throw new TypeError(`NativeHost.${name} must be a function`);
-    const terminal = {failure: null};
-    const pump = new NativePump(host, terminal);
+    const pump = new NativePump(host);
     const runtime = new NativeRuntime(config, pump.request);
     pump.attach(runtime);
     this.#runtime = runtime;
     this.#pump = pump;
     this.limits = Object.freeze({...runtime.limits});
-    this.closed = closeResult(runtime.closed, terminal);
+    this.closed = runtime.closed;
     registerRuntime(this, runtime);
   }
 
@@ -38,15 +37,13 @@ class NativeNetwork {
     return this.#runtime.updateStatus(status);
   }
   blockImported(root) {
-    this.#runtime.checkAction({root, type: "block"});
-    this.#pump.block(root);
+    this.#runtime.notifyBlock(root);
   }
   reportPeer(peerId, action, context) {
-    this.#runtime.checkAction({action, context, count: 1, peerId, type: "reportPeer"});
-    this.#pump.reportPeer(peerId, action, context);
+    this.#runtime.reportPeer(peerId, action, context);
   }
   dropQueuedGossip() {
-    this.#pump.dropQueued();
+    this.#runtime.dropQueuedGossip();
   }
   stopDelivery() {
     this.#pump.stopDelivery();

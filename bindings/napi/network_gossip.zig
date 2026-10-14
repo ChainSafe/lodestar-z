@@ -33,9 +33,7 @@ pub fn projectWall(admitted: u64, clock: n.Now) !u64 {
     if (wall_ms < 0 or wall_ms > 9007199254740991 or elapsed > wall_ms) return error.InvalidNetworkClock;
     return @as(u64, @intCast(wall_ms)) - elapsed;
 }
-/// Runs processor maintenance and applies queued verdicts, unless the host holds them. Each message the host was
-/// handed then awaits acknowledgement of its disposition. Returns whether bounded carry-over work remains for the
-/// next turn.
+/// Runs processor maintenance and applies submitted verdicts. Returns whether bounded work remains for the next turn.
 pub fn maintain(runtime: *Runtime, io: std.Io, tick: n.Now) !bool {
     runtime.lock();
     defer runtime.unlock();

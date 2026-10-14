@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Promise = @import("network_promise.zig");
 const n = @import("network");
 const rr = n.reqresp;
 const Budget = @import("network_budget.zig").Budget;
@@ -19,6 +20,9 @@ pub const Terminal = union(enum) {
 pub const Rejection = enum { disconnected, protocol_disabled, invalid_request, invalid_request_options, too_many_requests, slots_exhausted, negotiation_table_full, transport };
 pub const Chunk = struct { len: usize, fork: ?@FieldType(n.types.ForkEntry, "fork"), origin: n.types.PeerOrigin };
 pub const Cell = struct {
+    pull_promise: Promise = .{},
+    closed_promise: Promise = .{},
+
     state: State = .free,
     generation: u64 = 0,
     order: u64 = 0,
@@ -149,6 +153,8 @@ pub const Table = struct {
         cell.state = .terminal;
         cell.chunk = null;
         self.releasePayload(cell);
+        cell.pull_promise.deinit();
+        cell.closed_promise.deinit();
         cell.state = .free;
         cell.pulling = false;
         cell.retirement_awaited = false;
@@ -210,13 +216,6 @@ pub const Table = struct {
         self.releasePayload(cell);
         self.refresh(cell);
         return false;
-    }
-    /// Returns a pinned cell, still due, to where it was.
-    pub fn restore(self: *Table, completion: Completion) void {
-        const cell = self.get(completion.token).?;
-        cell.copying = false;
-        self.releasePayload(cell);
-        self.refresh(cell);
     }
     pub fn snapshot(self: *const Table) Diagnostics {
         var result = self.diag;

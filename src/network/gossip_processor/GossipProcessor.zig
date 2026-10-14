@@ -63,9 +63,7 @@ victim_tokens: [batch_max]Token = undefined,
 victim_handles: [batch_max]native.Gossipsub.ValidationHandle = undefined,
 
 pub const Token = struct { index: u16, generation: u64 };
-/// `acknowledging`: the owner disposed of a message the host was handed, and the cell keeps its generation until an
-/// exchange hands that acknowledgement to the host.
-pub const State = enum { free, needs_check, checking, waiting, queued, copying, delivered, verdict_pending, acknowledging };
+pub const State = enum { free, needs_check, checking, waiting, queued, copying, delivered, verdict_pending };
 pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,
@@ -100,8 +98,6 @@ pub const Cell = struct {
     execution_bytes: usize = 0,
     source_charge: usize = 0,
     retired: bool = false,
-    /// The host was handed this message and awaits the owner's disposition of it.
-    exposed: bool = false,
     verdict: native.Gossipsub.Verdict = .ignore,
 
     pub fn replaceable(self: *const Cell) bool {
@@ -118,7 +114,6 @@ pub const Diagnostics = struct {
     highWater: usize = 0,
     queued: usize = 0,
     pendingVerdicts: usize = 0,
-    acknowledging: usize = 0,
     payloadBytes: usize = 0,
     copyingBytes: usize = 0,
     copying: usize = 0,
@@ -198,7 +193,13 @@ pub fn backingBytes(options: *const Options) usize {
     const bytes = limits_mod.bytes(&options.limits);
     return capacity * @sizeOf(Cell) + Groups.backingBytes(options.limits[@intFromEnum(Kind.beacon_attestation)].items) + Dependencies.backingBytes(capacity) + storage.Store.metadataBytes(capacity, bytes) + bytes / storage.page_bytes * storage.page_bytes;
 }
+/// All readers must have returned. Teardown may discard a delivery JavaScript could not finish.
 pub fn deinit(self: *GossipProcessor) void {
+    self.close();
+    for (self.cells, 0..) |cell, i| if (cell.state == .copying) {
+        self.transition(@intCast(i), .delivered);
+        self.retire(self.token(@intCast(i)));
+    };
     assert(self.diag.occupied == 0);
     if (self.cells.len == 0) return;
     self.backing.free(self.cells);
@@ -383,7 +384,6 @@ fn countState(self: *GossipProcessor, state: State, add: bool, bytes: usize) voi
         .copying => &self.diag.copying,
         .needs_check, .checking => &self.diag.checking,
         .verdict_pending => &self.diag.pendingVerdicts,
-        .acknowledging => &self.diag.acknowledging,
         else => null,
     };
     if (count) |value| {
@@ -422,16 +422,13 @@ fn releaseExecution(self: *GossipProcessor, cell: *Cell) void {
     self.diag.executingBytes -= cell.execution_bytes;
     cell.executing = false;
 }
-/// Frees the cell's resources. A cell the host was handed then awaits acknowledgement of this disposition,
-/// unless the table closed.
 pub fn retire(self: *GossipProcessor, handle: Token) void {
     const cell = self.get(handle).?;
-    assert(cell.state != .copying and cell.state != .acknowledging);
-    const acknowledged = cell.exposed and !self.closed;
+    assert(cell.state != .copying);
     if (cell.expiry_link.linked) self.expiry.remove(self.cells, "expiry_link", handle.index);
     self.releasePayload(cell);
     self.releaseExecution(cell);
-    self.transition(handle.index, if (acknowledged) .acknowledging else .free);
+    self.transition(handle.index, .free);
     self.used_items[@intFromEnum(cell.kind)] -= 1;
     if (cell.source_charge > 0) {
         const source = cell.source.?;
@@ -446,34 +443,13 @@ pub fn retire(self: *GossipProcessor, handle: Token) void {
     const kind = cell.kind;
     const link = cell.state_link;
     cell.* = .{ .state = state, .generation = generation, .kind = kind, .state_link = link };
-    if (!acknowledged) self.freed(handle.index);
+    self.freed(handle.index);
     self.diag.occupied -= 1;
 }
 /// A cell whose last generation is spent leaves the free list for good.
 fn freed(self: *GossipProcessor, index: u32) void {
     const cell = &self.cells[index];
     if (cell.generation == std.math.maxInt(u64)) self.queue(cell.kind, .free).remove(self.cells, "state_link", index);
-}
-/// Up to `out.len` owner dispositions awaiting acknowledgement, by kind priority. O(out.len + kinds).
-pub fn acknowledgements(self: *const GossipProcessor, out: []Token) usize {
-    var count: usize = 0;
-    for (limits_mod.priority) |kind| {
-        var index = self.queueValue(kind, .acknowledging).head;
-        for (0..out.len - count) |_| {
-            if (index == none) break;
-            out[count] = self.token(index);
-            count += 1;
-            index = self.cells[index].state_link.next;
-        }
-    }
-    return count;
-}
-/// Frees a cell whose disposition the host received. A token close freed, or a reused cell, is ignored.
-pub fn acknowledge(self: *GossipProcessor, handle: Token) void {
-    const cell = self.get(handle) orelse return;
-    if (cell.state != .acknowledging) return;
-    self.transition(handle.index, .free);
-    self.freed(handle.index);
 }
 pub fn oldest(self: *const GossipProcessor) ?Token {
     var selected: u32 = none;
@@ -517,7 +493,6 @@ pub fn maintain(self: *GossipProcessor, now: u64, slot: u64) void {
     if (self.closed) return;
     self.expire(now);
     self.groups.advance(now, batch_max);
-    self.dependencies.advanceRecheck(batch_max);
     if (self.slot != slot) {
         self.slot = slot;
         self.prune_cursor = 0;
@@ -545,10 +520,6 @@ pub fn close(self: *GossipProcessor) void {
     self.closed = true;
     for (self.cells, 0..) |*cell, i| {
         if (cell.state == .free) continue;
-        if (cell.state == .acknowledging) {
-            self.acknowledge(self.token(@intCast(i)));
-            continue;
-        }
         cell.retired = true;
         if (cell.state != .copying) self.retire(self.token(@intCast(i)));
     }
@@ -651,11 +622,6 @@ pub fn claimChecks(self: *GossipProcessor, now: u64, limit: usize) Batch {
     }
     return batch;
 }
-pub fn retryChecks(self: *GossipProcessor, batch: *const Batch) void {
-    for (batch.tokens[0..batch.len]) |handle| if (self.get(handle)) |cell| {
-        if (cell.state == .checking) self.transition(handle.index, .needs_check);
-    };
-}
 pub fn classify(self: *GossipProcessor, handle: Token, available: bool) bool {
     const cell = self.get(handle) orelse return false;
     if (cell.state != .checking or cell.retired) return false;
@@ -681,10 +647,6 @@ pub fn classify(self: *GossipProcessor, handle: Token, available: bool) bool {
 pub fn notifyBlock(self: *GossipProcessor, root: [32]u8) void {
     self.dependencies.notify(&root);
 }
-/// Retries every waiting message once the owner has walked the dependency rows.
-pub fn recheck(self: *GossipProcessor) void {
-    self.dependencies.recheck();
-}
 pub fn ignore(self: *GossipProcessor, cell: *Cell) void {
     assert(!cell.executing);
     if (!self.eligible(cell)) self.diag.slotRefusals +|= 1;
@@ -703,19 +665,15 @@ pub fn nextVerdict(self: *const GossipProcessor) ?Token {
     }
     return null;
 }
-pub fn finish(self: *GossipProcessor, batch: *const Batch, success: bool) void {
+pub fn finish(self: *GossipProcessor, batch: *const Batch) void {
     for (batch.tokens[0..batch.len]) |handle| {
         const cell = self.get(handle).?;
         assert(cell.state == .copying);
-        self.transition(handle.index, if (success) .delivered else .queued);
-        if (!success) self.releaseExecution(cell);
-        if (success) {
-            cell.exposed = true;
-            self.diag.messagesCopied +|= 1;
-            self.diag.bytesCopied +|= cell.input.len;
-            self.releasePayload(cell);
-        }
-        if (cell.retired and (!success or self.closed)) self.retire(handle);
+        self.transition(handle.index, .delivered);
+        self.diag.messagesCopied +|= 1;
+        self.diag.bytesCopied +|= cell.input.len;
+        self.releasePayload(cell);
+        if (self.closed) self.retire(handle);
     }
 }
 /// Records the host's verdict. A late verdict, or one for a message expiry already retired, retires it here.
@@ -744,11 +702,10 @@ pub fn outcome(self: *GossipProcessor, result: native.Gossipsub.ReportOutcome) v
     }
 }
 
-/// Work the owner carries over turns in bounded batches: a slot prune, a dependency recheck,
-/// dependency promotion or, unless `verdicts` is false, queued verdicts.
+/// Work the owner carries over turns in bounded batches: slot pruning, dependency promotion and submitted verdicts.
 pub fn pending(self: *const GossipProcessor, verdicts: bool) bool {
     if (self.closed) return false;
-    return self.prune_remaining > 0 or self.dependencies.rechecking() or self.dependencies.promoting.len > 0 or (verdicts and self.diag.pendingVerdicts > 0);
+    return self.prune_remaining > 0 or self.dependencies.promoting.len > 0 or (verdicts and self.diag.pendingVerdicts > 0);
 }
 /// Earliest attestation group or expiry deadline. O(1).
 pub fn deadline(self: *const GossipProcessor) ?u64 {

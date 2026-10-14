@@ -1,5 +1,4 @@
-//! Command submission and results for JavaScript: a completed command's record, whose result copies the command's typed store before
-//! the exchange that delivers it retires the cell.
+//! Native-owned command promises. Result construction borrows the cell's typed store until settlement finishes.
 const decode = @import("network_js_input.zig");
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
@@ -12,17 +11,11 @@ const cfg = @import("network_config.zig");
 const application_cfg = @import("network_application_config.zig");
 const network_gossip_diagnostics = @import("network_gossip_diagnostics.zig");
 
-/// A completed command's record: the result its promise resolves with, or the error it rejects with.
-pub fn completion(env: napi.Env, runtime: *Runtime, token: commands.Token) !Value {
+pub fn settle(env: napi.Env, runtime: *Runtime, token: commands.Token) !void {
     const cell = runtime.bridge.commands.get(token);
-    const object = try env.createObject();
-    try object.setNamedProperty("family", try env.createStringUtf8("command"));
-    try object.setNamedProperty("handle", try js.handle(env, token.index, token.generation));
-    try object.setNamedProperty("kind", try env.createStringUtf8(@tagName(cell.input.command)));
     if (cell.failure) |err| {
-        try object.setNamedProperty("error", try js.settled(env, js.errorValue(env, @errorName(err))));
-    } else try object.setNamedProperty("value", try result(env, runtime, token.index));
-    return object;
+        try cell.promise.settle(env, .reject, try js.settled(env, js.errorValue(env, @errorName(err))));
+    } else try cell.promise.settle(env, .resolve, try result(env, runtime, token.index));
 }
 
 fn result(env: napi.Env, runtime: *Runtime, index: usize) !Value {
@@ -108,7 +101,7 @@ fn parseAddresses(value: Value, input: *commands.Input) !void {
 }
 pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Command, args: []const Value) !Value {
     const token = try runtime.reserveCommand(command);
-    errdefer runtime.abortCommand(token);
+    errdefer runtime.retireCommand(token);
     const operation = &runtime.bridge.commands.cells[token.index];
     const store = runtime.bridge.commands.cells[token.index].store;
     switch (command) {
@@ -135,9 +128,8 @@ pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Comma
             }
         },
     }
-    // Prepared before admission commits, so every admitted command has a handle to complete.
-    const handle = try js.handle(env, token.index, token.generation);
+    const promise = try operation.promise.init(env);
     try runtime.queueCommand(token);
     runtime.bridge.notify.ref(env) catch {};
-    return handle;
+    return promise;
 }

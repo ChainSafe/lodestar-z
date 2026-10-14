@@ -25,12 +25,10 @@ fn add(table: *p.GossipProcessor, kind: Kind, now: u64, metadata: p.metadata.Met
 
 fn verify(table: *const p.GossipProcessor) !void {
     var occupied: usize = 0;
-    var acknowledging: usize = 0;
     var executing: usize = 0;
     var payload: usize = 0;
     for (table.cells, 0..) |cell, i| {
-        occupied += @intFromBool(cell.state != .free and cell.state != .acknowledging);
-        acknowledging += @intFromBool(cell.state == .acknowledging);
+        occupied += @intFromBool(cell.state != .free);
         executing += @intFromBool(cell.executing);
         payload += cell.input.len;
         if (cell.state != .free) try t.expectEqual(cell.state_link.linked, true);
@@ -63,7 +61,6 @@ fn verify(table: *const p.GossipProcessor) !void {
         if (slot > 0) try t.expect(table.groups.rows[table.groups.timers[(slot - 1) / 2]].due <= table.groups.rows[index].due);
     }
     try t.expectEqual(occupied, table.diag.occupied);
-    try t.expectEqual(acknowledging, table.diag.acknowledging);
     try t.expectEqual(executing, table.diag.executing);
     try t.expectEqual(payload, table.diag.payloadBytes);
 }
@@ -89,7 +86,7 @@ test "gossip scheduler batches kinds as separate validator jobs in native priori
         .{ .kind = .voluntary_exit, .start = 2, .len = 1, .grouped = false },
         .{ .kind = .beacon_attestation, .start = 3, .len = 2, .grouped = true },
     }, batch.jobs[0..batch.job_count]);
-    table.finish(&batch, false);
+    table.finish(&batch);
     try verify(&table);
 }
 
@@ -101,7 +98,7 @@ test "gossip scheduler keeps execution charged across timeout until real complet
     table.execution[0].items = 1;
     const first = try add(&table, .beacon_block, 1, .{});
     const batch = table.claim(1);
-    table.finish(&batch, true);
+    table.finish(&batch);
     const second = try add(&table, .beacon_block, 50, .{});
     table.expire(101);
     try t.expectEqual(@as(usize, 0), table.claim(101).len);
@@ -109,7 +106,7 @@ test "gossip scheduler keeps execution charged across timeout until real complet
     try t.expect(!table.report(first, .accept, 101));
     const ready = table.claim(101);
     try t.expectEqual(second, ready.tokens[0]);
-    table.finish(&ready, true);
+    table.finish(&ready);
     try t.expect(table.report(second, .accept, 102));
     try t.expectEqual(@as(usize, 0), table.diag.executing);
     try verify(&table);
@@ -165,7 +162,7 @@ test "gossip scheduler indexes survive bounded randomized lifecycle interleaving
         for (checks.tokens[0..checks.len]) |token| _ = table.classify(token, step % 2 == 0);
         const batch = table.claimDemand(now, .{ .items = 3, .ordinary = step % 4 != 0 });
         if (step % 13 == 0) table.expire(now + 1);
-        table.finish(&batch, step % 3 != 0);
+        table.finish(&batch);
         for (kinds) |selected| {
             const queue = table.queues[@intFromEnum(selected)][@intFromEnum(p.GossipProcessor.State.delivered)];
             if (queue.head != lists.none and step % 4 != 0) _ = table.report(.{ .index = @intCast(queue.head), .generation = table.cells[queue.head].generation }, .accept, now);
@@ -198,7 +195,7 @@ test "gossip scheduler source limits cover unfinished execution and survive peer
     try t.expectError(error.NetworkGossipFull, table.capture(&message, topic_mod.parseCanonical(topic).?, &.{}, false, 1));
     try t.expect(table.sourceRoom(.{ .index = 1, .generation = 1 }, .beacon_block, 4));
     const batch = table.claim(1);
-    table.finish(&batch, true);
+    table.finish(&batch);
     table.expire(101);
     try t.expect(!table.sourceRoom(source, .beacon_block, 4));
     try t.expect(!table.report(batch.tokens[0], .accept, 102));
@@ -258,13 +255,14 @@ test "gossip scheduler prefilter permits replacement only for eligible queued ki
     try t.expect(table.checkAdmissionCapacity(.beacon_attestation, 1));
     const batch = table.claimDemand(2, .{ .items = 1 });
     try t.expectEqual(newest, batch.tokens[0]);
-    table.finish(&batch, true);
+    table.finish(&batch);
     // Protect delivered execution and copying simultaneously.
     table.execution[@intFromEnum(Kind.beacon_attestation)].items = 2;
     const copying = table.claimDemand(2, .{ .items = 1 });
     try t.expectEqual(oldest, copying.tokens[0]);
     try t.expect(!table.checkAdmissionCapacity(.beacon_attestation, 1));
-    table.finish(&copying, false);
+    table.finish(&copying);
+    table.retire(oldest);
     try t.expect(table.checkAdmissionCapacity(.beacon_attestation, 1));
     _ = try add(&table, .beacon_block, 3, .{});
     _ = try add(&table, .beacon_block, 4, .{});
@@ -293,7 +291,7 @@ test "gossip readiness reports checks and executable urgent and ordinary jobs" {
     const batch = table.claimDemand(1, .{ .ordinary = false });
     try t.expectEqual(@as(usize, 1), batch.len);
     try t.expectEqual(Work{ .checks = true, .ordinary = true }, table.readiness());
-    table.finish(&batch, true);
+    table.finish(&batch);
     const checks = table.claimChecks(1, p.GossipProcessor.batch_max);
     try t.expectEqual(@as(usize, 1), checks.len);
     try t.expectEqual(Work{ .ordinary = true }, table.readiness());
