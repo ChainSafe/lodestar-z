@@ -1,3 +1,4 @@
+import {ownerStopped} from "../utils/network.js";
 import {holdSettling, requestForks, runtimeReleased} from "../utils/network.js";
 import assert from "node:assert/strict";
 import {setTimeout as delay} from "node:timers/promises";
@@ -47,8 +48,12 @@ try {
     void closed.then(() => order.push("closed"));
     const closing = right.close();
     try {
-      for (let i = 0; i < 500 && right.state !== "closed"; i++) await delay(10);
-      assert.equal(right.state, "closed");
+      let stopped = false;
+    for (let i = 0; i < 500 && !stopped; i++) {
+      stopped = ownerStopped(right);
+      if (!stopped) await delay(10);
+    }
+    assert(stopped, "The owner must stop while delivery is held");
     } finally {
       holdSettling(right, false);
     }

@@ -3,7 +3,6 @@ import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {expect, it, vi} from "vitest";
 import type {HostCapacity} from "../src/network.js";
-import {initializeNativeNetworkRuntime} from "../src/network-runtime.js";
 import type {Feedback} from "./utils/network.js";
 import {
   applicationConfig,
@@ -24,6 +23,7 @@ import {
 } from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
 import {startPeer} from "./utils/network-peer.js";
+import {initializeNativeNetworkRuntime} from "./utils/network-runtime.js";
 
 function report(peerId: string): Feedback {
   return {action: "fatal", count: 1, peerId, type: "reportPeer"};
@@ -60,13 +60,11 @@ it("owns a real native socket and releases it on idempotent close", childTestTim
       );
     }
     expect(identity.localEndpoint.port).toBeGreaterThan(0);
-    expect(runtime.state).toBe("running");
     expect((await runtime.applyIntent(localIntent(config), 101n)).slot).toBe(101n);
     const closing = runtime.close();
     expect(terminal).toBe(closing);
     expect(runtime.close()).toBe(closing);
     await closing;
-    expect(runtime.state).toBe("closed");
     runChild([
       "--import",
       "tsx",
@@ -111,7 +109,6 @@ it("starts without subscriptions and accepts ordinary updates after rejecting an
   const config = applicationConfig();
   const runtime = startRuntime(config);
   try {
-    expect(runtime.state).toBe("running");
     expect((await runtime.getGossipDiagnostics()).topics.some((topic) => topic.subscribed)).toBe(false);
     expect(exchange(runtime, gossipAll)).toMatchObject({
       checks: [],
@@ -121,7 +118,6 @@ it("starts without subscriptions and accepts ordinary updates after rejecting an
     const intent = localIntent(config);
     intent.subscriptions = [{digest: new Uint8Array(4).fill(255), subnets: {}}];
     await expect(runtime.applyIntent(intent, config.initialSlot)).rejects.toThrow("InvalidTopic");
-    expect(runtime.state).toBe("running");
     const topic = topicName();
     intent.subscriptions = subscriptions(topic);
     await runtime.applyIntent(intent, config.initialSlot);
@@ -199,7 +195,6 @@ it.each([
 
 it("rejects another initialization while one is live and accepts one after release", async () => {
   let runtime: ReturnType<typeof startRuntime> | null = startRuntime(applicationConfig());
-  expect(runtime.state).toBe("running");
   expect(typeof runtime.identity.peerId).toBe("string");
   expect(() => startRuntime(applicationConfig())).toThrow("NetworkAlreadyInitialized");
   expect((await runtime.getIdentity()).peerId).toEqual(runtime.identity.peerId);
@@ -207,7 +202,6 @@ it("rejects another initialization while one is live and accepts one after relea
   runtime = null;
   await runtimeReleased();
   const next = startRuntime(applicationConfig());
-  expect(next.state).toBe("running");
   await next.close();
 });
 
@@ -216,7 +210,6 @@ it("joins immediately after initialization and closes idempotently", async () =>
   const closing = runtime.close();
   expect(runtime.close()).toBe(closing);
   expect(await closing).toEqual({reason: "requested"});
-  expect(runtime.state).toBe("closed");
 });
 
 it("rejects invalid standing capacity without changing the running runtime", async () => {
@@ -246,13 +239,9 @@ it("keeps the first host failure as the native close result", async () => {
 
 it.each([
   ["closed-gc", "closed-gc-rebound"],
-  ["exit", "ready-exit"],
+  ["open", "open-until-close"],
   ["promises", "promises-settled"],
   ["await-close", "close-awaited"],
-  ["publication-exit", "published-exit"],
-  ["command-exit", "commanded-exit"],
-  ["request-exit", "requested-exit"],
-  ["incoming-exit", "served-exit"],
 ])("finishes bounded %s subprocess lifecycle", childTestTimeout(), (mode, expected) => {
   const output = runChild(["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode]);
   expect(output).toContain(expected);
@@ -378,7 +367,6 @@ it.each([17, 64])("accepts a bounded discovery bootstrap list of %i entries", as
   config.discovery.bootstrapEnrs = Array.from({length: count}, () => enr.slice());
   const runtime = startRuntime(config);
   try {
-    expect(runtime.state).toBe("running");
     expect(runtime.identity.localEnr).toBeInstanceOf(Uint8Array);
   } finally {
     await runtime.close();
@@ -449,7 +437,7 @@ it("publishes copied peer observations without repeating unread notifications", 
       pending,
       delay(3000).then(async () => {
         throw new Error(
-          `Peer observation timeout ${runtime.getMetrics()} remote=${JSON.stringify(await remote.command("controlSnapshot"))}`
+          `Peer observation timeout ${await runtime.getMetrics()} remote=${JSON.stringify(await remote.command("controlSnapshot"))}`
         );
       }),
     ]);
@@ -524,7 +512,7 @@ it("settles results only in an exchange and notifies once until an exchange find
     expect(exchange(runtime, settleOnly).needsAnotherExchange).toBe(false);
     await delay(0);
     expect([intentSettled(), identitySettled()]).toEqual([true, true]);
-    expect(Object.isFrozen(exchange(runtime, settleOnly))).toBe(true);
+    expect(exchange(runtime, settleOnly)).toMatchObject({checks: [], gossip: null, peers: [], serving: []});
     expect((await intent).slot).toBe(config.initialSlot);
     expect((await identity).peerId).toBe(runtime.identity.peerId);
     const pull = runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next();

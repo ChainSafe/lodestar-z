@@ -134,7 +134,7 @@ test("remembered peers return in the snapshot without expired or duplicate peers
     expect(peers.size).toBe(2);
     expect(peers.get(kept.peerId)).toEqual(kept);
     expect(peers.get(newer.peerId)).toEqual(newer);
-    const metrics = runtime.getMetrics();
+    const metrics = await runtime.getMetrics();
     for (const [outcome, count] of [
       ["loaded", 2],
       ["expired", 1],
@@ -235,7 +235,7 @@ test("accepts transport overrides and exposes their effective values", async () 
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;
-    const metrics = runtime.getMetrics();
+    const metrics = await runtime.getMetrics();
     expect(metrics).toContain("lodestar_quic_initial_congestion_window_packets 32");
     expect(metrics).toContain("lodestar_quic_receive_datagrams_per_turn 128");
   } finally {

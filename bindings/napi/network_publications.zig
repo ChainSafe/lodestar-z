@@ -165,9 +165,6 @@ pub const Table = struct {
         }
     }
     /// Whether an admitted publication still owes its caller an outcome, which its completion delivers.
-    pub fn obligated(self: *const Table) bool {
-        return self.diag.occupied > 0;
-    }
     pub fn snapshot(self: *const Table) Diagnostics {
         var result = self.diag;
         for (self.cells) |*cell| {

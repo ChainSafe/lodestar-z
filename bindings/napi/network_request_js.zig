@@ -98,9 +98,7 @@ pub fn pull(runtime: *Runtime, handle: Value) !Value {
     }
     cell.pull_promise = promise;
     requests.armPull(runtime, cell);
-    const ref_notify = runtime.bridge.notify_live;
     runtime.unlock();
-    if (ref_notify) runtime.bridge.notify.ref(runtime.env) catch {};
     return value;
 }
 /// Cancels and retires the request. Its terminal completion ends a retirement the iterator awaits, one not
@@ -113,9 +111,7 @@ pub fn retire(runtime: *Runtime, handle: Value, abandoned: bool) !void {
         return;
     };
     requests.armRetirement(runtime, cell, !abandoned);
-    const ref_notify = runtime.bridge.notify_live;
     runtime.unlock();
-    if (ref_notify and !abandoned) runtime.bridge.notify.ref(runtime.env) catch {};
 }
 fn terminalError(env: napi.Env, terminal: requests.Terminal, cell: *const requests.Cell) !Value {
     switch (terminal) {

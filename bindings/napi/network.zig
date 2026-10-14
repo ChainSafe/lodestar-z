@@ -20,6 +20,8 @@ const network_owner = @import("network_owner.zig");
 const network_storage = @import("network_storage.zig");
 const network_wake = @import("network_wake.zig");
 const network = @import("network");
+const network_metrics = @import("network_metrics.zig");
+const Promise = @import("network_promise.zig");
 const network_logs = @import("network_logs.zig");
 
 const application_cfg = @import("network_application_config.zig");
@@ -62,12 +64,10 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     runtime.bridge.notify = try r.Notify.create(env, callback.val, null, name, 1, 1, runtime, Runtime.finalize, onNotify);
     runtime.retain();
     errdefer runtime.bridge.notify.release(.abort) catch unreachable;
-    try runtime.bridge.notify.unref(env);
     try env.addEnvCleanupHook(Runtime, runtime, Runtime.cleanup);
     runtime.hook_live = true;
     runtime.retain();
     errdefer runtime.removeHook();
-    try runtime.results.prepare(env);
     const holder = try env.createObject();
     try holder.setNamedProperty("identity", try command_js.identity(env, &identity));
     try holder.setNamedProperty("limits", try resolvedLimits(env, runtime));
@@ -83,11 +83,11 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     return .{ .val = holder };
 }
 
+/// The JS wrapper retains this object through close; environment cleanup joins the owner before finalization.
 pub fn deinit(self: *@This()) void {
     if (self.runtime) |runtime| {
-        runtime.forceStop(false);
-        runtime.removeHook();
-        if (runtime.notify_finalized) runtime.reclaim();
+        std.debug.assert(runtime.bridge.quiescent and runtime.thread == null);
+        std.debug.assert(!runtime.hook_live and runtime.closed.resolvers == null and runtime.host_failure == null);
         runtime.release();
         self.runtime = null;
     }
@@ -95,7 +95,7 @@ pub fn deinit(self: *@This()) void {
 
 fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
     // Only an environment that stopped running JavaScript fails the notification's own N-API calls.
-    notify(env, callback, runtime) catch runtime.forceStop(true);
+    notify(env, callback, runtime) catch runtime.forceStop();
 }
 
 /// Node may disable JavaScript before running environment cleanup hooks.
@@ -117,7 +117,7 @@ fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     };
 }
 
-/// Pulls a bounded batch of payloads under standing host capacity. See network_exchange.zig for borrow contracts.
+/// Settles native Promises and pulls a bounded batch under standing host capacity. See network_exchange.zig for borrow contracts.
 pub fn exchange(self: *@This()) !js.Value {
     const runtime = try self.owner();
     runtime.retain();
@@ -128,25 +128,10 @@ pub fn exchange(self: *@This()) !js.Value {
     var host: Exchange = .{ .env = js.env(), .runtime = runtime };
     const now = try gossip.monotonic();
     const result = exchange_mod.run(runtime, now, &host) catch |err| {
-        if (jsStopped(err)) runtime.forceStop(true);
+        if (jsStopped(err)) runtime.forceStop();
         return err;
     };
     return .{ .val = result };
-}
-
-pub fn drainCompletions(self: *@This()) !js.Value {
-    const runtime = try self.owner();
-    runtime.retain();
-    defer runtime.release();
-    if (runtime.in_exchange) return error.NetworkExchangeReentered;
-    runtime.in_exchange = true;
-    defer runtime.in_exchange = false;
-    var host: Exchange = .{ .env = js.env(), .runtime = runtime };
-    const outcome = exchange_mod.drain(runtime, &host) catch |err| {
-        if (jsStopped(err)) runtime.forceStop(true);
-        return err;
-    };
-    return .{ .val = try js.env().getBoolean(outcome.needs_another_exchange) };
 }
 
 /// Records the first host delivery failure without ending host cleanup. The host calls close when cleanup finishes.
@@ -165,13 +150,13 @@ pub fn reportFailure(self: *@This(), failure: js.Value) !js.Value {
     return .{ .val = try js.env().getBoolean(true) };
 }
 
+/// Updates the remaining host allowance without notifying JS; the caller drives exchange when capacity recovers.
 pub fn setCapacity(self: *@This(), value: js.Value) !void {
     const runtime = try self.owner();
     const capacity = try feedback.capacity(value.val);
     runtime.lock();
     defer runtime.unlock();
     runtime.bridge.capacity = capacity;
-    runtime.notifyIfReadyLocked();
 }
 
 pub fn reportGossip(self: *@This(), handle: js.Value, verdict_value: js.Value) !void {
@@ -254,22 +239,11 @@ fn owner(self: *@This()) !*Runtime {
     return self.runtime orelse error.NetworkClosed;
 }
 
-pub fn getState(self: *@This()) !js.Value {
-    const runtime = try self.owner();
-    runtime.lock();
-    const state = runtime.stateLocked();
-    runtime.unlock();
-    return .{ .val = try js.env().createStringUtf8(@tagName(state)) };
-}
 pub fn close(self: *@This()) void {
     self.stopped = true;
     if (self.runtime) |runtime| {
         runtime.lock();
-        const ref_notify = runtime.bridge.env_alive and runtime.bridge.notify_live;
-        runtime.unlock();
-        if (ref_notify) runtime.bridge.notify.ref(runtime.env) catch {};
-        runtime.lock();
-        runtime.bridge.graceful = !runtime.disposed;
+        runtime.bridge.graceful = runtime.bridge.env_alive;
         runtime.unlock();
         runtime.requestStop();
     }
@@ -290,19 +264,15 @@ pub fn gossipSha256Backend() js.String {
 
 pub fn getMetrics(self: *@This()) !js.Value {
     const runtime = try self.owner();
-    const metrics_text = copy: {
-        runtime.lock();
-        defer runtime.unlock();
-        const logs = runtime.logs.snapshot();
-        const borrowed = runtime.metrics.text(&logs, runtime.bridge.reports.dropped, runtime.xray) catch |err| return switch (err) {
-            error.WriteFailed, error.MetricCapacity => error.NetworkMetricsCapacity,
-            error.DuplicateMetric => error.NetworkMetricsSchema,
-        };
-        break :copy try r.allocator.dupe(u8, borrowed);
+    const value = command_js.submit(js.env(), runtime, .getMetrics, &.{}) catch |err| {
+        if (err != error.NetworkClosed) return err;
+        var promise: Promise = .{};
+        const result = try promise.init(runtime.env);
+        defer promise.deinit();
+        try promise.settle(runtime.env, .resolve, try network_metrics.value(runtime));
+        return .{ .val = result };
     };
-    defer r.allocator.free(metrics_text);
-
-    return .{ .val = try runtime.env.createStringUtf8(metrics_text) };
+    return .{ .val = value };
 }
 
 pub fn drainLogs(self: *@This(), limit: js.Value) !js.Value {
@@ -382,5 +352,5 @@ test "a notification JavaScript cannot run stops locally" {
     defer shim.undefined_status = napi.c.napi_ok;
     var notified: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false } };
     onNotify(undefined, undefined, &notified, undefined);
-    try std.testing.expect(notified.disposed and notified.bridge.stop and !notified.bridge.env_alive);
+    try std.testing.expect(notified.bridge.stop and !notified.bridge.env_alive);
 }

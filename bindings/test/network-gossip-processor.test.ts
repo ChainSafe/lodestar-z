@@ -242,9 +242,9 @@ test("native processor retains dependencies, protects blocks, batches ready work
     await pair.left.publishGossip(ATTESTATION, data);
     await expect
       .poll(
-        () =>
+        async () =>
           metricValue(
-            pair.right.getMetrics(),
+            await pair.right.getMetrics(),
             'lodestar_gossip_validation_refusals_total{topic="beacon_attestation",reason="ineligible"}'
           ),
         {timeout: 5000}
@@ -295,14 +295,14 @@ test("expired validation execution remains visible until late host completion", 
     if (!message) throw Error("Block dispatch deadline");
 
     const expiredSample = "lodestar_gossip_validation_expired_executing_count 1\n";
-    for (let i = 0; i < 1000 && !pair.right.getMetrics().includes(expiredSample); i++) await delay(5);
-    expect(pair.right.getMetrics()).toContain(expiredSample);
+    for (let i = 0; i < 1000 && !(await pair.right.getMetrics()).includes(expiredSample); i++) await delay(5);
+    expect(await pair.right.getMetrics()).toContain(expiredSample);
 
     // A late verdict retires the message without applying it.
     exchange(pair.right, settleOnly, [verdict(message.handle, "accept"), verdict(message.handle, "reject")]);
 
-    for (let i = 0; i < 1000 && pair.right.getMetrics().includes(expiredSample); i++) await delay(5);
-    expect(pair.right.getMetrics()).toContain("lodestar_gossip_validation_expired_executing_count 0\n");
+    for (let i = 0; i < 1000 && (await pair.right.getMetrics()).includes(expiredSample); i++) await delay(5);
+    expect(await pair.right.getMetrics()).toContain("lodestar_gossip_validation_expired_executing_count 0\n");
   } finally {
     await Promise.all([pair.left.stop(), pair.right.close()]);
   }

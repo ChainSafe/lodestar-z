@@ -53,20 +53,14 @@ pub const Host = struct {
             self.runtime.host_failure = null;
         }
     }
-    /// A fresh result, or null when there is nothing to deliver and a prepared one serves.
-    pub fn build(self: *Host, selection: *exchange_mod.Selection) !?Value {
-        if (!selection.delivers()) return null;
+    pub fn build(self: *Host, selection: *exchange_mod.Selection) !Value {
         return try buildResult(self.env, self.runtime, selection);
     }
-    pub fn finish(self: *Host, output: ?Value, outcome: exchange_mod.Outcome) !Value {
-        return finishResult(self.env, self.runtime, output, outcome);
+    pub fn finish(self: *Host, output: Value, outcome: exchange_mod.Outcome) !Value {
+        try schedule(self.env, output, outcome);
+        return output;
     }
-    pub fn keepAlive(self: *Host) void {
-        self.runtime.bridge.notify.ref(self.env) catch {};
-    }
-    pub fn idle(self: *Host) void {
-        self.runtime.bridge.notify.unref(self.env) catch {};
-    }
+
     /// An exception that clears means the bridge broke its contract. One that will not clear means JavaScript cannot
     /// run, as does a pending-exception status with none pending, which N-API returns for cannot_run_js to this
     /// module version.
@@ -82,37 +76,11 @@ pub const Host = struct {
     }
 };
 
-/// Results created once, one per combination of the scheduling fields, so an exchange that delivers nothing
-/// allocates nothing.
-pub const Results = struct {
-    idle: [2]?napi.Ref = @splat(null),
-
-    pub fn prepare(self: *Results, env: napi.Env) !void {
-        const empty = try env.createArrayWithLength(0);
-        try empty.objectFreeze();
-        for (&self.idle, 0..) |*slot, i| {
-            const result = try env.createObject();
-            inline for (.{ "peers", "serving", "checks" }) |field| try result.setNamedProperty(field, empty);
-            try result.setNamedProperty("gossip", try env.getNull());
-            try schedule(env, result, .{ .needs_another_exchange = i != 0 });
-            try result.objectFreeze();
-            slot.* = try napi.Ref.create(env.env, result, 1);
-        }
-    }
-
-    pub fn dispose(self: *Results) void {
-        for (&self.idle) |*slot| {
-            if (slot.*) |ref| ref.delete() catch unreachable;
-            slot.* = null;
-        }
-    }
-};
-
 fn schedule(env: napi.Env, result: Value, outcome: Outcome) !void {
     try result.setNamedProperty("needsAnotherExchange", try env.getBoolean(outcome.needs_another_exchange));
 }
 
-/// Builds a fresh result for a selection that delivers something.
+/// Builds one bounded delivery, including an empty one while only completions progress.
 fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     const result = try env.createObject();
     const peers = try env.createArrayWithLength(selection.peer_count);
@@ -137,12 +105,6 @@ fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     }
     try result.setNamedProperty("checks", checks);
     try result.setNamedProperty("gossip", if (selection.gossip) |*batch| try jobs(env, runtime, batch) else try env.getNull());
-    return result;
-}
-
-fn finishResult(env: napi.Env, runtime: *Runtime, output: ?Value, outcome: Outcome) !Value {
-    const result = output orelse return runtime.results.idle[@intFromBool(outcome.needs_another_exchange)].?.getValue();
-    try schedule(env, result, outcome);
     return result;
 }
 

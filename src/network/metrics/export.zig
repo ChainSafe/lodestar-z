@@ -7,7 +7,6 @@ pub const processor = @import("processor.zig");
 const prom = registry;
 
 pub const Context = @import("context.zig").Context;
-pub const interval_ms = 1_000;
 pub const fixed_text_capacity = 1024 * 1024;
 
 pub fn textCapacity(boundaries: []const policy.Boundary) usize {

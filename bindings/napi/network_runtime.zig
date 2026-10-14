@@ -7,7 +7,6 @@ const network_metrics = @import("network_metrics.zig");
 const network_storage = @import("network_storage.zig");
 const network_peer_reports = @import("network_peer_reports.zig");
 const network_budget = @import("network_budget.zig");
-const network_exchange_js = @import("network_exchange_js.zig");
 pub const gossip_mod = @import("network_gossip.zig");
 pub const incoming_mod = @import("network_incoming.zig");
 pub const requests_mod = @import("network_requests.zig");
@@ -19,7 +18,6 @@ const Wake = @import("network_wake.zig").Wake;
 pub const DeliveryKind = enum { completions, peers, checks, serving, gossip };
 pub const Owner = @import("network_owner.zig").Owner;
 pub const allocator = std.heap.c_allocator;
-pub const State = enum { running, stopping, closed, failed };
 pub const Reason = enum { requested, failed };
 pub const Notify = napi.ThreadSafeFunction(Runtime, void);
 const processor_metrics = n.metrics.processor;
@@ -91,17 +89,12 @@ pub const Runtime = struct {
     thread: ?std.Thread = null,
     /// JS thread: an exchange is running, so a nested one is refused.
     in_exchange: bool = false,
-    /// Prepared results for exchanges with no stream or payload delivery.
-    results: network_exchange_js.Results = .{},
-    notify_finalized: bool = false,
-    disposed: bool = false,
     hook_live: bool = false,
     env: napi.Env,
     closed: Promise = .{},
     host_failure: ?napi.Ref = null,
 
     // Network thread scheduling and counters, read after joining at teardown.
-    metrics_due_ms: u64 = 0,
     health_log_due_ms: u64 = 0,
     closing_deadline: ?u64 = null,
     /// Owner thread: an event capture left host work for the next apply, so the next turn is due now.
@@ -109,13 +102,6 @@ pub const Runtime = struct {
     owner_turns: u64 = 0,
     operational_failures: u64 = 0,
 
-    /// No admitted operation awaits its outcome and the owner runs, so the event loop need not wait for this runtime.
-    pub fn idleLocked(self: *const Runtime) bool {
-        return self.bridge.commands.occupied == 0 and (self.bridge.publications == null or !self.bridge.publications.?.obligated()) and !self.requestObligations() and self.bridge.notify_live and !self.bridge.stop;
-    }
-    pub fn requestObligations(self: *const Runtime) bool {
-        return (if (self.bridge.requests) |*requests| requests.obligated() else false) or (if (self.bridge.incoming) |*incoming| incoming.obligated() else false);
-    }
     pub fn retireRequest(self: *Runtime, token: requests_mod.Token) void {
         self.lock();
         self.bridge.requests.?.retire(token);
@@ -153,11 +139,7 @@ pub const Runtime = struct {
                     self.captureProcessorLocked(&owner.processor_metrics);
                     var context = n.metrics.Context.init(&owner.core, (n.Now.read(owner.threaded.io()) catch owner.core.last_now).floor(owner.core.last_now), false);
                     context.processor = &owner.processor_metrics;
-                    if (self.metrics.render(&context)) |index| {
-                        self.metrics.published = index;
-                        self.metrics.failure = null;
-                    } else |err| self.metrics.failure = err;
-                    self.metrics.finish();
+                    self.metrics.render(&context) catch {};
                 }
                 owner.core.deinit(owner.threaded.io());
             }
@@ -204,11 +186,6 @@ pub const Runtime = struct {
             const claimed = runtime_live.swap(false, .release);
             std.debug.assert(claimed);
         }
-    }
-    pub fn stateLocked(self: *const Runtime) State {
-        if (self.bridge.reason == .failed) return .failed;
-        if (self.bridge.quiescent) return .closed;
-        return if (self.bridge.stop) .stopping else .running;
     }
 
     pub fn requestStop(self: *Runtime) void {
@@ -291,46 +268,25 @@ pub const Runtime = struct {
         self.hook_live = false;
         self.release();
     }
-    pub fn forceStop(self: *Runtime, env_dying: bool) void {
+    pub fn forceStop(self: *Runtime) void {
         self.lock();
-        self.disposed = true;
-        if (env_dying) self.bridge.env_alive = false;
+        self.bridge.env_alive = false;
         self.bridge.graceful = false;
         if (self.bridge.stop and !self.bridge.quiescent) self.wakeOwnerLocked();
         self.unlock();
         self.requestStop();
         self.join();
     }
-    /// Environment disposal reclaims every cell JavaScript can no longer take, rather than emulating its delivery.
-    pub fn reclaim(self: *Runtime) void {
-        std.debug.assert(self.bridge.quiescent and self.notify_finalized and self.disposed);
-        if (self.bridge.requests) |*table| for (table.cells, 0..) |*cell, i| {
-            if (cell.state == .free) continue;
-            std.debug.assert(cell.state == .terminal and cell.native == null);
-            cell.copying = false;
-            self.retireRequest(.{ .index = @intCast(i), .generation = cell.generation });
-        };
-        if (self.bridge.incoming) |*table| for (table.cells, 0..) |*cell, i| {
-            if (cell.state == .free) continue;
-            std.debug.assert(!cell.native);
-            cell.copying = false;
-            table.retire(.{ .index = @intCast(i), .generation = cell.generation });
-        };
-        self.retireClosedPublications();
-        self.retireClosedCommands();
-        self.retireRequestStorageLocked();
-        self.disposeJsReferences();
-    }
-    /// Deletes the prepared exchange results. Retiring operation cells releases their Promise references.
     pub fn disposeJsReferences(self: *Runtime) void {
-        self.results.dispose();
         self.closed.deinit();
         if (self.host_failure) |ref| ref.delete() catch unreachable;
         self.host_failure = null;
     }
+    /// Joins the owner and retires abandoned work before Node runs object finalizers.
     pub fn cleanup(self: *Runtime) void {
         self.hook_live = false;
-        self.forceStop(true);
+        self.forceStop();
+        std.debug.assert(self.bridge.quiescent);
         self.retireClosedPublications();
         self.retireClosedCommands();
         if (self.bridge.requests) |*requests| for (requests.cells, 0..) |*cell, i| {
@@ -347,8 +303,6 @@ pub const Runtime = struct {
         self.release();
     }
     pub fn finalize(_: napi.Env, self: *Runtime) void {
-        self.notify_finalized = true;
-        if (self.disposed) self.reclaim();
         self.release();
     }
 
@@ -356,7 +310,8 @@ pub const Runtime = struct {
         for (&self.bridge.commands.cells, 0..) |*cell, i| {
             switch (cell.state) {
                 .queued, .executing, .waiting => {
-                    self.bridge.commands.cells[i].failure = self.bridge.terminal_error orelse error.NetworkClosed;
+                    // Owner shutdown rendered the final snapshot before cancelling commands.
+                    self.bridge.commands.cells[i].failure = if (cell.input.command == .getMetrics) null else self.bridge.terminal_error orelse error.NetworkClosed;
                     self.bridge.commands.transition(cell, .terminal);
                 },
                 else => {},

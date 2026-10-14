@@ -12,6 +12,7 @@ import {
   exchange,
   gossipAll,
   localIntent,
+  ownerStopped,
   runChild,
   settleOnly,
   startRuntime,
@@ -35,12 +36,10 @@ test("running application advances fork state only when the host updates intent"
     await delay(40);
     expect((await runtime.getIdentity()).localEnr).toEqual(identity.localEnr);
     const slot = boundarySlot;
-    expect(runtime.state).toBe("running");
 
     const fresh = localIntent(config);
     const result = await runtime.applyIntent(fresh, slot);
     expect(result).toMatchObject({changed: true, slot});
-    expect(runtime.state).toBe("running");
 
     expect((await runtime.getIdentity()).localEnr).not.toEqual(identity.localEnr);
     expect((await runtime.applyIntent(fresh, slot)).changed).toBe(false);
@@ -85,7 +84,6 @@ test("failed intent leaves running state and clock unchanged", async () => {
     const intent = localIntent(config);
     intent.subscriptions = [{digest: new Uint8Array(4).fill(255), subnets: {}}];
     await expect(runtime.applyIntent(intent, 101n)).rejects.toThrow();
-    expect(runtime.state).toBe("running");
 
     expect((await runtime.applyIntent(localIntent(config), config.initialSlot)).slot).toBe(config.initialSlot);
     const first = await runtime.applyIntent(localIntent(config), 102n);
@@ -485,9 +483,9 @@ test("all typed stores and the connect allowance reject without partial admissio
   }
 });
 
-test("application exits with idle native work", childTestTimeout(), () => {
+test("application exits after explicit close", childTestTimeout(), () => {
   const output = runChild(["--import", "tsx", "bindings/test/fixtures/network-application-lifecycle.mjs"]);
-  expect(output).toContain("application-ready-exit");
+  expect(output).toContain("application-closed-exit");
 });
 
 test("identity reads the current signed ENR and copied intent ignores later input mutation", async () => {
@@ -550,8 +548,12 @@ test("graceful physical shutdown progresses while host callbacks are stalled", a
     await a.connect(identity.peerId, [identity.localEndpoint], 5000n);
     const closed = a.close();
     const wait = new Int32Array(new SharedArrayBuffer(4));
-    for (let i = 0; i < 250 && a.state !== "closed"; i++) Atomics.wait(wait, 0, 0, 10);
-    expect(a.state).toBe("closed");
+    let stopped = false;
+    for (let i = 0; i < 250 && !stopped; i++) {
+      stopped = ownerStopped(a);
+      if (!stopped) Atomics.wait(wait, 0, 0, 10);
+    }
+    expect(stopped).toBe(true);
 
     expect(await closed).toEqual({reason: "requested"});
   } finally {

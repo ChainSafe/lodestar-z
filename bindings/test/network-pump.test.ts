@@ -12,7 +12,7 @@ import type {
 } from "../src/network.js";
 import {BURST_NAME, NativePump} from "../src/network-pump.js";
 import type {
-  NativeExchange,
+  NativeDelivery as NativeExchange,
   NativeGossipBatch,
   NativeGossipDependencyCheck,
   NativeGossipHandle,
@@ -21,6 +21,16 @@ import type {
   NativeLogBatch,
 } from "../src/network-runtime.js";
 import {childTestTimeout, spawnChild} from "./utils/network.js";
+
+vi.mock("../src/network-incoming.js", () => {
+  class NativeIncoming {
+    constructor(_native: unknown, descriptor: NativeIncomingRequest) {
+      Object.assign(this, descriptor);
+    }
+  }
+  // biome-ignore lint/style/useNamingConvention: The mock must export the module's constructor name.
+  return {NativeIncoming};
+});
 
 const full = {gossipValidation: "ready", incomingRequestSlots: 32} as const;
 const control = null;
@@ -98,6 +108,7 @@ function incoming(name = "start") {
     data: new Uint8Array(32),
     fail: vi.fn((_status: number, _message: Uint8Array) => Promise.resolve()),
     finish: vi.fn(() => Promise.resolve()),
+    handle: {generation: 1n, index: 0},
     name,
     peerId: "peer",
     protocol: "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy" as const,
@@ -133,7 +144,6 @@ function fixture() {
     classifyGossip: vi.fn((_handle: NativeGossipHandle, _available: boolean) => undefined),
     close: vi.fn(() => closed.promise),
     closed: closed.promise,
-    drainCompletions: vi.fn(() => false),
     drainLogs: vi.fn((_max: number): NativeLogBatch => noLogs),
     exchange: vi.fn((): NativeExchange => idle),
     reportFailure: vi.fn((error: Error) => {
@@ -160,7 +170,7 @@ function fixture() {
     ),
   };
   const pump = new NativePump(host);
-  pump.attach(runtime);
+  pump.attach(runtime, closed.promise);
   return {
     advance(ms: number) {
       now += ms;
@@ -287,7 +297,6 @@ describe("binding pump scheduling", () => {
 
   it("uses readiness after payload delivery instead of scheduling an empty follow-up turn", async () => {
     const node = fixture();
-    node.runtime.drainCompletions.mockReturnValueOnce(true);
     node.runtime.exchange.mockReturnValueOnce({...idle, peers: [peerEvent]});
     await macrotask();
     await macrotask();
@@ -310,6 +319,13 @@ describe("binding pump scheduling", () => {
     wake();
     await macrotask();
     expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
+    wake();
+    await macrotask();
+    expect(node.runtime.exchange).toHaveBeenCalledTimes(3);
+    expect(node.capacities().slice(-2)).toEqual([
+      {gossipValidation: "ready", incomingRequestSlots: 1},
+      {gossipValidation: "ready", incomingRequestSlots: 1},
+    ]);
     expect(vi.getTimerCount()).toBe(LOG_TIMER);
   });
 
@@ -325,8 +341,7 @@ describe("binding pump scheduling", () => {
     node.pump.request();
     await macrotask();
     expect(node.host.capacity).toHaveBeenCalledOnce();
-    expect(node.runtime.drainCompletions).toHaveBeenCalledTimes(3);
-    expect(node.runtime.exchange).toHaveBeenCalledOnce();
+    expect(node.runtime.exchange).toHaveBeenCalledTimes(3);
   });
 
   it.each([
@@ -349,7 +364,7 @@ describe("binding pump scheduling", () => {
     await macrotask();
     expect(node.host.capacity).toHaveBeenCalledOnce();
     expect(node.host.peers).not.toHaveBeenCalled();
-    expect(node.runtime.drainCompletions).toHaveBeenCalledTimes(2);
+    expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
   });
 
   it("a real runtime settles commands after capacity failure and closes", childTestTimeout(), () => {
@@ -372,8 +387,7 @@ describe("binding pump scheduling", () => {
     node.pump.request();
     await macrotask();
     await macrotask();
-    expect(node.runtime.drainCompletions).toHaveBeenCalledTimes(2);
-    expect(node.runtime.exchange).not.toHaveBeenCalled();
+    expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
     expect(node.capacities()[1]).toEqual(control);
   });
 
@@ -420,7 +434,7 @@ describe("binding pump delivery", () => {
       checks: [check(9)],
       gossip: gossip({messages: [1], urgent: true}, {messages: [2]}),
       peers: [peerEvent],
-      serving: [incoming() as NativeIncomingRequest],
+      serving: [incoming()],
     });
     node.pump.request();
     await macrotask();
@@ -435,7 +449,7 @@ describe("binding pump delivery", () => {
       ...idle,
       checks: [check(9)],
       gossip: gossip({grouped: true, messages: [1, 2]}),
-      serving: [start as NativeIncomingRequest],
+      serving: [start],
     });
     node.pump.request();
     await macrotask();
@@ -575,7 +589,7 @@ describe("binding pump delivery", () => {
       checks: [check(3)],
       gossip: gossip({messages: [4], urgent: true}, {grouped: true, messages: [5, 6]}),
       peers: [peerEvent],
-      serving: starts as NativeIncomingRequest[],
+      serving: starts,
     });
     const failure = new Error("peer handler failed");
     node.host.peers.mockImplementation(() => {
@@ -608,7 +622,9 @@ describe("binding pump delivery", () => {
       throw first;
     });
     node.runtime.exchange.mockReturnValueOnce({...idle, needsAnotherExchange: true, peers: [peerEvent]});
-    node.runtime.drainCompletions.mockReturnValueOnce(true).mockReturnValueOnce(true).mockReturnValueOnce(true);
+    node.runtime.exchange
+      .mockReturnValueOnce({...idle, needsAnotherExchange: true})
+      .mockReturnValueOnce({...idle, needsAnotherExchange: true});
     node.pump.request();
     for (let i = 0; i < 4; i++) await macrotask();
     expect(node.capacities()).toEqual([full, control, control, control]);
@@ -639,7 +655,7 @@ describe("binding pump delivery", () => {
     const starts = Array.from({length: 8}, (_, i) => incoming(`start-${i}`));
     node.runtime.exchange.mockImplementationOnce(() => {
       node.advance(100);
-      return {...idle, serving: starts as NativeIncomingRequest[]};
+      return {...idle, serving: starts};
     });
     node.host.serve.mockImplementation(() => {
       node.advance(100);
@@ -679,7 +695,7 @@ describe("binding pump delivery", () => {
       .mockImplementationOnce(() => Promise.reject(failure));
     node.runtime.exchange.mockReturnValueOnce({
       ...idle,
-      serving: [slow, thrown, rejected, ended] as NativeIncomingRequest[],
+      serving: [slow, thrown, rejected, ended],
     });
     node.pump.request();
     await macrotask();
@@ -741,7 +757,7 @@ describe("binding pump delivery", () => {
         checks: [check(7)],
         gossip: gossip({messages: [1], urgent: true}, {messages: [2]}, {messages: [3]}),
         peers: [peerEvent],
-        serving: starts as NativeIncomingRequest[],
+        serving: starts,
       };
     });
     node.host.peers.mockImplementation(() => close("peer handler"));
@@ -778,7 +794,7 @@ describe("binding pump delivery", () => {
     node.runtime.exchange.mockReturnValueOnce({
       ...idle,
       gossip: gossip({messages: [1]}),
-      serving: [start as NativeIncomingRequest],
+      serving: [start],
     });
     node.pump.request();
     await macrotask();
@@ -842,7 +858,7 @@ describe("binding pump close results", () => {
     node.runtime.exchange.mockReturnValueOnce({
       ...idle,
       peers: [peerEvent],
-      serving: [start as NativeIncomingRequest],
+      serving: [start],
     });
     node.pump.request();
     await macrotask();

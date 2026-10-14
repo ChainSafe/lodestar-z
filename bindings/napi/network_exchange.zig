@@ -29,10 +29,6 @@ pub const Selection = struct {
     gossip: ?g.Batch = null,
     /// The owner has work from this exchange.
     wake: bool = false,
-
-    pub fn delivers(self: *const Selection) bool {
-        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null;
-    }
 };
 
 /// Scheduling after settlement and delivery.
@@ -109,8 +105,7 @@ fn selectServing(runtime: *Runtime, serving_starts: u8, selection: *Selection) v
     }
 }
 
-/// Returns whether serving starts now await closes that keep the event loop alive.
-fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
+fn commitLocked(runtime: *Runtime, selection: *Selection) void {
     if (selection.peer_count > 0) {
         runtime.bridge.peer_updates.?.commit(selection.peer_count);
         // Committed events free lane room the owner publishes into.
@@ -134,7 +129,6 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
         runtime.bridge.gossip.?.finish(batch);
     }
     if (runtime.bridge.quiescent) if (runtime.bridge.gossip) |*table| table.trim();
-    return selection.serving_count > 0 and runtime.bridge.notify_live;
 }
 
 /// Check and arm under the mutex so publication cannot race rearming.
@@ -152,29 +146,33 @@ fn gossipMarks(runtime: *Runtime) struct { bool, ?u64 } {
 
 /// Builds payloads outside the mutex. Failed construction is terminal; teardown releases the abandoned pins.
 pub fn run(runtime: *Runtime, now: u64, host: anytype) !@TypeOf(host.*).Result {
+    const closed = try settle(runtime, host);
     var selection: Selection = .{};
-    runtime.lock();
-    runtime.bridge.notification_armed = false;
-    const marks = gossipMarks(runtime);
-    selectLocked(runtime, now, &selection);
-    // Ignored claims leave verdicts to apply and can move the owner's deadline.
-    if (!std.meta.eql(marks, gossipMarks(runtime))) selection.wake = true;
-    runtime.unlock();
+    if (!closed) {
+        runtime.lock();
+        runtime.bridge.notification_armed = false;
+        const marks = gossipMarks(runtime);
+        selectLocked(runtime, now, &selection);
+        // Ignored claims leave verdicts to apply and can move the owner's deadline.
+        if (!std.meta.eql(marks, gossipMarks(runtime))) selection.wake = true;
+        runtime.unlock();
+    }
     const output = host.build(&selection) catch |err| {
         const failure = host.classify(err);
         return fail(host, failure, err);
     };
-    runtime.lock();
-    const keep_alive = commitLocked(runtime, &selection);
-    const outcome = endLocked(runtime, &selection);
-    runtime.unlock();
-    if (keep_alive) host.keepAlive();
+    const outcome: Outcome = if (closed) .{} else blk: {
+        runtime.lock();
+        defer runtime.unlock();
+        commitLocked(runtime, &selection);
+        break :blk endLocked(runtime, &selection);
+    };
     return host.finish(output, outcome) catch |err| return fail(host, host.classify(err), err);
 }
 
 /// Settles bounded native-owned Promises independently of payload capacity. Close follows a macrotask boundary
 /// after the last operation settlement, allowing public async wrappers to settle before it.
-pub fn drain(runtime: *Runtime, host: anytype) !Outcome {
+fn settle(runtime: *Runtime, host: anytype) !bool {
     runtime.lock();
     runtime.bridge.notification_armed = false;
     const closing = runtime.bridge.quiescent and runtime.closed.resolvers != null and !runtime.completionsReadyLocked();
@@ -191,12 +189,7 @@ pub fn drain(runtime: *Runtime, host: anytype) !Outcome {
         host.settleClose(&promise) catch |err| return fail(host, host.classify(err), err);
         runtime.removeHook();
     }
-    runtime.lock();
-    const idle = runtime.idleLocked();
-    const outcome = endLocked(runtime, &.{});
-    runtime.unlock();
-    if (idle) host.idle();
-    return outcome;
+    return closing;
 }
 
 fn settleStreams(runtime: *Runtime, host: anytype) !void {

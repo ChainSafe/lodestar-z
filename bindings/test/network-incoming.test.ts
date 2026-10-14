@@ -39,7 +39,7 @@ test("incoming cancellation retains execution until host work retires", async ()
     await incoming.cancel();
     await pending;
 
-    const retiring = () => metricValue(pair.right.getMetrics(), "beacon_reqresp_retiring_count");
+    const retiring = async () => metricValue(await pair.right.getMetrics(), "beacon_reqresp_retiring_count");
     await expect.poll(retiring, {timeout: 5000}).toBe(1);
     retire();
     await expect.poll(retiring, {timeout: 5000}).toBe(0);
@@ -343,7 +343,8 @@ test("terminal before take never exposes a retired request", async () => {
   try {
     const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
     const pending = stream.next().catch(() => undefined);
-    const waiting = () => metricValue(pair.right.getMetrics(), 'beacon_reqresp_incoming_count{phase="waiting_host"}');
+    const waiting = async () =>
+      metricValue(await pair.right.getMetrics(), 'beacon_reqresp_incoming_count{phase="waiting_host"}');
     await expect.poll(waiting, {timeout: 5000}).toBe(1);
     await stream.return?.();
     await pair.left.disconnect(pair.remote.peerId);
@@ -411,9 +412,17 @@ test("a permission the stream's end overtakes arrives with the close and settles
     const order = settlementOrder(incoming.closed, permission);
     await stream.return?.();
     await pending;
+    // An outstanding call prevents another permission; closure becomes observable without draining either Promise.
     await expect
-      .poll(() => metricValue(pair.right.getMetrics(), "beacon_reqresp_retiring_count"), {timeout: 5000})
-      .toBe(1);
+      .poll(
+        () =>
+          incoming.ready().then(
+            () => "ready",
+            (error) => error.code
+          ),
+        {timeout: 5000}
+      )
+      .toBe("NetworkIncomingClosed");
     await expect(drainUntil(pair.right, permission)).rejects.toMatchObject({
       code: "NetworkIncomingClosed",
     });
@@ -437,9 +446,17 @@ test("an acknowledgement due with the stream's close arrives in one completion a
     // End the stream before an exchange delivers the response acknowledgement.
     expect((await first).value?.data).toEqual(data);
     await stream.return?.();
+    // An outstanding call prevents another permission; closure becomes observable without draining either Promise.
     await expect
-      .poll(() => metricValue(pair.right.getMetrics(), "beacon_reqresp_retiring_count"), {timeout: 5000})
-      .toBe(1);
+      .poll(
+        () =>
+          incoming.ready().then(
+            () => "ready",
+            (error) => error.code
+          ),
+        {timeout: 5000}
+      )
+      .toBe("NetworkIncomingClosed");
     await drainUntil(pair.right, responded);
     await incoming.closed;
     expect(order).toEqual(["pending", "closed"]);

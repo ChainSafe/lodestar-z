@@ -48,8 +48,6 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     runtime.bridge.publications.?.diag.copies +|= 1;
     runtime.bridge.publications.?.diag.bytesCopied +|= len;
     runtime.wakeOwnerLocked();
-    // Ref does not allocate JS values or invoke JavaScript.
-    runtime.bridge.notify.ref(runtime.env) catch {};
     return promise;
 }
 

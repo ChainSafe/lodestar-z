@@ -15,13 +15,10 @@ fn cellFor(runtime: *Runtime, token: incoming.Token) !*incoming.Cell {
     const table = if (runtime.bridge.incoming) |*table| table else return error.InvalidIncomingHandle;
     return table.get(token) orelse error.NetworkIncomingClosed;
 }
-/// Wakes the owner for the host's change and keeps the event loop alive for the promises it awaits.
-fn refNotify(runtime: *Runtime) void {
+fn wakeOwner(runtime: *Runtime) void {
     runtime.lock();
-    const live = runtime.bridge.notify_live;
     runtime.wakeOwnerLocked();
     runtime.unlock();
-    if (live) runtime.bridge.notify.ref(runtime.env) catch {};
 }
 /// A serving start's descriptor, whose stream the binding's record owns from here.
 pub fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *incoming.Cell) !Value {
@@ -113,7 +110,7 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
     runtime.bridge.incoming.?.refresh(cell);
     runtime.bridge.incoming.?.diag.responseBytesCopied +|= len;
     runtime.unlock();
-    refNotify(runtime);
+    wakeOwner(runtime);
     return result;
 }
 pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_value: Value, message_value: Value) !void {
@@ -152,11 +149,10 @@ pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_val
         }
     }
     runtime.unlock();
-    refNotify(runtime);
+    wakeOwner(runtime);
 }
 
-/// Returns the serving slot the host's work retained. The owner releases it without JavaScript, so the call keeps no
-/// event loop alive.
+/// Releases host retention; the owner returns the serving slot after stream retirement.
 pub fn release(runtime: *Runtime, value: Value) !void {
     const handle = try decode.handle(incoming.Token, value, incoming.capacity_max);
     runtime.lock();
@@ -190,7 +186,7 @@ pub fn ready(runtime: *Runtime, value: Value) !Value {
     cell.permission_ready = false;
     runtime.bridge.incoming.?.refresh(cell);
     runtime.unlock();
-    refNotify(runtime);
+    wakeOwner(runtime);
     return result;
 }
 fn ackError(env: napi.Env, ack: incoming.Ack) !Value {

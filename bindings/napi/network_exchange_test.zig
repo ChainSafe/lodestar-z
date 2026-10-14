@@ -29,8 +29,6 @@ const Host = struct {
     fail_finish: bool = false,
     failure: exchange.Failure = .stopped,
     builds: usize = 0,
-    kept_alive: usize = 0,
-    idled: usize = 0,
     terminated: bool = false,
     started: bool = false,
     ran_during: bool = false,
@@ -115,12 +113,7 @@ const Host = struct {
         result.outcome = outcome;
         return result;
     }
-    pub fn keepAlive(self: *Host) void {
-        self.kept_alive += 1;
-    }
-    pub fn idle(self: *Host) void {
-        self.idled += 1;
-    }
+
     pub fn classify(self: *Host, _: anyerror) exchange.Failure {
         return self.failure;
     }
@@ -138,7 +131,6 @@ const Host = struct {
             self.runtime.closed.resolvers = .{ .env = null, .ref_ = @ptrFromInt(1) };
         }
         self.runtime.bridge.capacity = demand;
-        _ = try exchange.drain(self.runtime, self);
         return exchange.run(self.runtime, self.clock, self);
     }
 };
@@ -345,6 +337,7 @@ test "blocked arrivals wait for host capacity while urgent arrivals still notify
     try std.testing.expect(runtime.bridge.notification_armed);
     const before = tsfn.notifications.load(.acquire);
     const request = try queueRequest(runtime);
+    const second_request = try queueRequest(runtime);
     const exit = try admit(runtime, .voluntary_exit, null, "data");
     try std.testing.expectEqual(before, tsfn.notifications.load(.acquire));
     const parked = try host.turn(demand);
@@ -364,6 +357,11 @@ test "blocked arrivals wait for host capacity while urgent arrivals still notify
     try std.testing.expect(!delivered.outcome.needs_another_exchange);
     try std.testing.expectEqual(before + 1, tsfn.notifications.load(.acquire));
     retireServed(&runtime.bridge.incoming.?, request);
+    const replenished = try host.turn(demand);
+    try std.testing.expectEqualSlices(incoming.Token, &.{second_request}, replenished.serving[0..replenished.serving_count]);
+    try std.testing.expect(!replenished.outcome.needs_another_exchange);
+    try std.testing.expectEqual(before + 1, tsfn.notifications.load(.acquire));
+    retireServed(&runtime.bridge.incoming.?, second_request);
     for ([_]g.Token{ exit, column }) |token| runtime.bridge.gossip.?.retire(token);
 }
 
@@ -526,8 +524,6 @@ test "publication completions batch terminal cells while unfinished work stays a
     }
     // Both terminal cells arrive together; refilling uses fresh generations.
     try std.testing.expectEqualSlices(publications.Token, &.{ low, high, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 3 } }, &delivered);
-    // Unfinished publications keep the runtime busy.
-    try std.testing.expectEqual(@as(usize, 0), host.idled);
     for (unfinished) |token| runtime.retirePublication(token);
 }
 
@@ -543,13 +539,11 @@ test "a stopped environment during Promise settlement retires the borrowed publi
     try std.testing.expectError(error.PendingException, host.turn(control));
     try std.testing.expect(runtime.bridge.publications.?.get(tokens[0]) == null);
     try std.testing.expectEqual(publications.State.terminal, runtime.bridge.publications.?.get(tokens[1]).?.state);
-    try std.testing.expectEqual(@as(usize, 0), host.idled);
     host.fail = null;
     const result = try host.turn(control);
     try std.testing.expectEqualSlices(publications.Token, tokens[1..], result.publications[0..result.publication_count]);
     try std.testing.expect(!result.outcome.needs_another_exchange and runtime.bridge.publications.?.diag.occupied == 0);
     // The remaining terminal cell still settles; the failed settlement is never retried.
-    try std.testing.expectEqual(@as(usize, 1), host.idled);
 }
 
 /// A command the owner completed at the lowest free cell, as execution leaves it.
@@ -592,7 +586,6 @@ test "command completions batch terminal cells while unfinished work stays admit
     try std.testing.expectEqualSlices(commands.Token, &.{ low, high, .{ .index = low.index, .generation = low.generation + 1 }, .{ .index = low.index, .generation = low.generation + 2 } }, &delivered);
     // Delivery freed each snapshot store, so both remain available.
     try std.testing.expect(!runtime.bridge.commands.stores[1][0] and !runtime.bridge.commands.stores[1][1]);
-    try std.testing.expectEqual(@as(usize, 0), host.idled);
     for (unfinished) |token| runtime.retireCommand(token);
 }
 
@@ -766,8 +759,6 @@ test "request completions batch terminal cells while unfinished work stays admit
     }
     // Both terminal cells arrive together; refilling uses fresh generations.
     try std.testing.expectEqualSlices(outgoing.Token, &.{ low, high, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 3 } }, &delivered);
-    // Once no pull awaits a completion, unpulled requests let the event loop go: after each exchange.
-    try std.testing.expectEqual(@as(usize, 3), host.idled);
     for (unpulled) |token| {
         table.retire(token);
         runtime.release();
@@ -791,9 +782,8 @@ test "a stopped environment reclaims abandoned request chunks and outcomes" {
     for ([_]outgoing.Token{ streaming, ended }) |token| try std.testing.expect(!table.get(token).?.copying);
     outgoing.closeLocked(runtime);
     runtime.bridge.quiescent = true;
-    runtime.notify_finalized = true;
-    runtime.disposed = true;
-    runtime.reclaim();
+    runtime.retain();
+    runtime.cleanup();
     try std.testing.expectEqual(@as(usize, 0), table.diag.occupied);
     try std.testing.expectEqual(@as(usize, 0), runtime.bridge.payload_budget.used);
 }
@@ -911,8 +901,6 @@ test "incoming completions batch terminal cells while unfinished work stays admi
         }
     }
     try std.testing.expectEqualSlices(incoming.Token, &.{ low, high, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 3 } }, &delivered);
-    // The running streams' closes keep the event loop alive.
-    try std.testing.expectEqual(@as(usize, 0), host.idled);
     for (running) |token| retireServed(table, token);
 }
 
@@ -930,9 +918,8 @@ test "a stopped environment reclaims abandoned incoming completions" {
     for ([_]incoming.Token{ acknowledged, ended }) |token| try std.testing.expect(!table.get(token).?.copying);
     incoming.closeLocked(runtime);
     runtime.bridge.quiescent = true;
-    runtime.notify_finalized = true;
-    runtime.disposed = true;
-    runtime.reclaim();
+    runtime.retain();
+    runtime.cleanup();
     try std.testing.expectEqual(@as(usize, 0), table.diag.occupied);
     try std.testing.expectEqual(@as(usize, 0), runtime.bridge.payload_budget.used);
 }

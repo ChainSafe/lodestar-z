@@ -285,11 +285,6 @@ pub const Table = struct {
         }
         return result;
     }
-    /// Whether the host awaits a close, an acknowledgement or a permission, which keeps the event loop alive.
-    pub fn obligated(self: *const Table) bool {
-        for (self.cells) |*cell| if (awaited(cell)) return true;
-        return false;
-    }
 };
 
 fn rejection(err: rr.ReqResp.RespondError) error{ Terminal, StaleHandle, Busy }!Rejection {

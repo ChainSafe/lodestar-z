@@ -1,6 +1,6 @@
 import {expect, test} from "vitest";
 import type {HostCapacity, NativeForkEntry, NativeIdentity, NativeIntentResult} from "../src/network.js";
-import type {NativeExchange, NativeRuntimeCloseResult} from "../src/network-runtime.js";
+import type {NativeDelivery, NativeRuntimeCloseResult} from "../src/network-runtime.js";
 import {applicationConfig, childTestTimeout, gossipAll, localIntent, requestForks, runChild} from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
 import {startPeer} from "./utils/network-peer.js";
@@ -34,8 +34,8 @@ interface DirectIncomingBridge {
     onWorkAvailable: () => void
   ): {identity: NativeIdentity; closed: Promise<NativeRuntimeCloseResult>};
   applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): Promise<NativeIntentResult>;
-  exchange(): NativeExchange & {serving: IncomingDescriptor[]};
-  drainCompletions(): boolean;
+  exchange(): NativeDelivery;
+
   setCapacity(capacity: HostCapacity | null): void;
   incomingTerminal(handle: IncomingHandle, action: number, status?: number, message?: Uint8Array): void;
   incomingRelease(handle: IncomingHandle): void;

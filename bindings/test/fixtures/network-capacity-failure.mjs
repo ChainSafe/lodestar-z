@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import {NativePump} from "../../src/network-pump.js";
-import {NativeRuntime} from "../../src/network-runtime.js";
+import {createNativeNetwork} from "../../src/network.js";
 import {applicationConfig} from "../utils/network.js";
 
 let capacityReads = 0;
 const {promise: failed, resolve: fail} = Promise.withResolvers();
 const error = new Error("capacity failed");
-const pump = new NativePump({
+const runtime = createNativeNetwork(applicationConfig(), {
   subscribeCapacity: () => () => {},
   capacity: () => { capacityReads++; throw error; },
   validate: async () => [],
@@ -16,8 +15,6 @@ const pump = new NativePump({
   failed: fail,
   logs: () => {},
 });
-const runtime = new NativeRuntime(applicationConfig(), pump.request);
-pump.attach(runtime);
 await runtime.getIdentity();
 assert.equal(await failed, error);
 assert.equal(capacityReads, 1);

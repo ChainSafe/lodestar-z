@@ -62,11 +62,12 @@ function commands(): [string, [string, Command][]][] {
   const [peer, endpoints] = unreachableConnect();
   return [
     [
-      "ten kinds",
+      "eleven kinds",
       [
         ["applyIntent", (runtime) => runtime.applyIntent(localIntent(config), 100n)],
         ["updateStatus", (runtime) => runtime.updateStatus(config.local.status)],
         ["getIdentity", (runtime) => runtime.getIdentity()],
+        ["getMetrics", (runtime) => runtime.getMetrics()],
         ["getPeers", (runtime) => runtime.getPeers()],
         ["getGossipDiagnostics", (runtime) => runtime.getGossipDiagnostics(0)],
         ["connect", (runtime) => runtime.connect(peer, endpoints, 60000n)],
@@ -86,7 +87,7 @@ function commands(): [string, [string, Command][]][] {
   ];
 }
 
-test.each(commands())("%s, held unstarted at close, each reject with NetworkClosed", async (_, kinds) => {
+test.each(commands())("%s, held unstarted at close, settle without executing", async (_, kinds) => {
   const runtime = startRuntime(applicationConfig());
   // Held, the owner starts none of them, so the close cancels each one queued.
   runtime.holdOperations(true);
@@ -97,7 +98,9 @@ test.each(commands())("%s, held unstarted at close, each reject with NetworkClos
     )
   );
   const closed = runtime.close();
-  expect(await Promise.all(outcomes)).toEqual(kinds.map(([kind]) => `${kind} NetworkClosed`));
+  expect(await Promise.all(outcomes)).toEqual(
+    kinds.map(([kind]) => `${kind} ${kind === "getMetrics" ? "resolved" : "NetworkClosed"}`)
+  );
   expect(await closed).toEqual({reason: "requested"});
 });
 

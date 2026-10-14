@@ -1,4 +1,5 @@
 //! Native-owned command promises. Result construction borrows the cell's typed store until settlement finishes.
+const network_metrics = @import("network_metrics.zig");
 const decode = @import("network_js_input.zig");
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
@@ -15,13 +16,20 @@ pub fn settle(env: napi.Env, runtime: *Runtime, token: commands.Token) !void {
     const cell = runtime.bridge.commands.get(token);
     if (cell.failure) |err| {
         try cell.promise.settle(env, .reject, try js.settled(env, js.errorValue(env, @errorName(err))));
-    } else try cell.promise.settle(env, .resolve, try result(env, runtime, token.index));
+    } else {
+        const value = result(env, runtime, token.index) catch |err| switch (err) {
+            error.NetworkMetricsCapacity, error.NetworkMetricsSchema => return cell.promise.settle(env, .reject, try js.settled(env, js.errorValue(env, @errorName(err)))),
+            else => return err,
+        };
+        try cell.promise.settle(env, .resolve, value);
+    }
 }
 
 fn result(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     const operation = &runtime.bridge.commands.cells[index];
     const store = runtime.bridge.commands.cells[index].store;
     const object = switch (operation.input.command) {
+        .getMetrics => return network_metrics.value(runtime),
         .getGossipDiagnostics => try network_gossip_diagnostics.copy(env, &runtime.bridge.stores.?.gossip_diagnostics[store.?]),
         .getIdentity => try identity(env, &operation.identity),
         .applyIntent, .getPeers, .getDirectPeers, .getRememberedPeers => try env.createObject(),
@@ -110,7 +118,7 @@ pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Comma
             try application_cfg.parseIntent(args[0], &runtime.bridge.stores.?.intents[store.?], runtime.max_peers);
         },
         .updateStatus => try cfg.parseStatus(args[0], &operation.input.status),
-        .getIdentity, .getPeers, .getDirectPeers, .getRememberedPeers => {},
+        .getIdentity, .getPeers, .getDirectPeers, .getRememberedPeers, .getMetrics => {},
         .getGossipDiagnostics => operation.input.diagnostics_cursor = @intCast(try decode.integer(args[0], 512)),
         .reStatusPeers => {
             operation.input.target_count = @intCast(try decode.array(args[0], 256));
@@ -130,6 +138,5 @@ pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Comma
     }
     const promise = try operation.promise.init(env);
     try runtime.queueCommand(token);
-    runtime.bridge.notify.ref(env) catch {};
     return promise;
 }

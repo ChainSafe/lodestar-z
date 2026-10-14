@@ -1,4 +1,5 @@
 const std = @import("std");
+const Promise = @import("network_promise.zig");
 const Now = @import("network").Now;
 const n = @import("network");
 const r = @import("network_runtime.zig");
@@ -17,48 +18,44 @@ test "stop preserves latched success and cancels accepted nonterminal commands" 
     const success = try runtime.bridge.commands.reserve(.getIdentity);
     const waiting = try runtime.bridge.commands.reserve(.connect);
     const queued = try runtime.bridge.commands.reserve(.getIdentity);
+    const metrics = try runtime.bridge.commands.reserve(.getMetrics);
     const preparing = try runtime.bridge.commands.reserve(.applyIntent);
     runtime.bridge.commands.transition(runtime.bridge.commands.get(success), .terminal);
     runtime.bridge.commands.transition(runtime.bridge.commands.get(waiting), .waiting);
     runtime.bridge.commands.transition(runtime.bridge.commands.get(queued), .queued);
+    runtime.bridge.commands.transition(runtime.bridge.commands.get(metrics), .queued);
     runtime.cancelCommandsLocked();
     try std.testing.expect(runtime.bridge.commands.cells[success.index].failure == null);
     try std.testing.expectEqual(error.NetworkClosed, runtime.bridge.commands.cells[waiting.index].failure.?);
     try std.testing.expectEqual(error.NetworkClosed, runtime.bridge.commands.cells[queued.index].failure.?);
+    try std.testing.expectEqual(commands.State.terminal, runtime.bridge.commands.get(metrics).state);
+    try std.testing.expect(runtime.bridge.commands.get(metrics).failure == null);
     try std.testing.expectEqual(commands.State.preparing, runtime.bridge.commands.get(preparing).state);
-    for ([_]commands.Token{ success, waiting, queued, preparing }) |token| runtime.bridge.commands.retire(token);
+    for ([_]commands.Token{ success, waiting, queued, metrics, preparing }) |token| runtime.bridge.commands.retire(token);
     try std.testing.expectEqual(@as(u8, 0), runtime.bridge.commands.occupied);
 }
 
 test "terminal cleanup releases pending Promise references without running JavaScript" {
-    for ([_]bool{ false, true }) |environment| {
-        var runtime: Runtime = .{ .env = undefined, .refs = .init(2), .bridge = .{ .env_alive = false, .notify_live = false } };
-        runtime.bridge.publications = try publications_mod.Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget);
-        defer runtime.bridge.publications.?.deinit();
-        const command = try runtime.reserveCommand(.getIdentity);
-        const publication = try runtime.reservePublication(.beacon_block, 0);
-        const command_cell = runtime.bridge.commands.get(command);
-        const publication_cell = runtime.bridge.publications.?.get(publication).?;
-        command_cell.promise.resolvers = .{ .env = null, .ref_ = @ptrFromInt(1) };
-        publication_cell.promise.resolvers = .{ .env = null, .ref_ = @ptrFromInt(2) };
-        runtime.bridge.commands.transition(command_cell, .terminal);
-        runtime.bridge.publications.?.transition(publication_cell, .terminal);
-        runtime.bridge.quiescent = true;
-        const deleted = support.references_deleted;
-        support.undefined_status = 10;
-        defer support.undefined_status = 0;
-        if (environment) {
-            runtime.cleanup();
-        } else {
-            runtime.notify_finalized = true;
-            runtime.disposed = true;
-            runtime.reclaim();
-        }
-        try std.testing.expectEqual(deleted + 2, support.references_deleted);
-        try std.testing.expectEqual(@as(u8, 0), runtime.bridge.commands.occupied);
-        try std.testing.expectEqual(@as(usize, 0), runtime.bridge.publications.?.diag.occupied);
-        try std.testing.expectEqual(@as(u32, if (environment) 1 else 2), runtime.refs.load(.monotonic));
-    }
+    var runtime: Runtime = .{ .env = undefined, .refs = .init(2), .bridge = .{ .env_alive = false, .notify_live = false } };
+    runtime.bridge.publications = try publications_mod.Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget);
+    defer runtime.bridge.publications.?.deinit();
+    const command = try runtime.reserveCommand(.getIdentity);
+    const publication = try runtime.reservePublication(.beacon_block, 0);
+    const command_cell = runtime.bridge.commands.get(command);
+    const publication_cell = runtime.bridge.publications.?.get(publication).?;
+    command_cell.promise.resolvers = .{ .env = null, .ref_ = @ptrFromInt(1) };
+    publication_cell.promise.resolvers = .{ .env = null, .ref_ = @ptrFromInt(2) };
+    runtime.bridge.commands.transition(command_cell, .terminal);
+    runtime.bridge.publications.?.transition(publication_cell, .terminal);
+    runtime.bridge.quiescent = true;
+    const deleted = support.references_deleted;
+    support.undefined_status = 10;
+    defer support.undefined_status = 0;
+    runtime.cleanup();
+    try std.testing.expectEqual(deleted + 2, support.references_deleted);
+    try std.testing.expectEqual(@as(u8, 0), runtime.bridge.commands.occupied);
+    try std.testing.expectEqual(@as(usize, 0), runtime.bridge.publications.?.diag.occupied);
+    try std.testing.expectEqual(@as(u32, 1), runtime.refs.load(.monotonic));
 }
 
 test "request table storage retires only after physical quiescence and final pins" {
@@ -121,8 +118,8 @@ test "forced teardown wakes an owner already stopping gracefully" {
     try runtime.bridge.wake.?.drain();
     var readable = [_]std.c.pollfd{.{ .fd = runtime.bridge.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
     try std.testing.expectEqual(@as(c_int, 0), std.c.poll(&readable, 1, 0));
-    runtime.forceStop(false);
-    try std.testing.expect(runtime.disposed and !runtime.bridge.graceful);
+    runtime.forceStop();
+    try std.testing.expect(!runtime.bridge.env_alive and !runtime.bridge.graceful);
     try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&readable, 1, 0));
     try runtime.bridge.wake.?.drain();
 }
@@ -183,9 +180,7 @@ test "an owner completion notifies once while armed and leaves settlement to the
 
 test "the first terminal failure is the close result's, also after a requested stop" {
     var runtime: Runtime = .{ .env = undefined };
-    try std.testing.expectEqual(r.State.running, runtime.stateLocked());
     runtime.requestStop();
-    try std.testing.expectEqual(r.State.stopping, runtime.stateLocked());
     try std.testing.expectEqual(r.Reason.requested, runtime.bridge.reason);
     // A notification the host cannot receive fails the stopping owner; a later failure keeps the first.
     support.status = 9;
@@ -199,21 +194,17 @@ test "the first terminal failure is the close result's, also after a requested s
     try std.testing.expectEqual(r.Reason.failed, runtime.bridge.reason);
     try std.testing.expect(first != error.NetworkWakeFailed);
     try std.testing.expectEqual(first, runtime.bridge.terminal_error.?);
-    try std.testing.expect(runtime.stateLocked() == .failed);
     runtime.bridge.quiescent = true;
-    try std.testing.expectEqual(r.State.failed, runtime.stateLocked());
 }
 
-test "runtime state follows owner quiescence and a closed notification channel" {
+test "a closed notification channel stops the owner" {
     var runtime: Runtime = .{ .env = undefined };
     support.status = 16;
     defer support.status = 0;
     runtime.lock();
     defer runtime.unlock();
     runtime.notifyHostLocked();
-    try std.testing.expectEqual(r.State.stopping, runtime.stateLocked());
-    runtime.bridge.quiescent = true;
-    try std.testing.expectEqual(r.State.closed, runtime.stateLocked());
+    try std.testing.expect(runtime.bridge.stop);
 }
 
 /// An exchange host that builds only the peer count.
@@ -225,14 +216,24 @@ const PeerHost = struct {
     pub fn settleCommand(_: *PeerHost, _: commands.Token) !void {
         unreachable;
     }
+    pub fn settleRequest(_: *PeerHost, _: r.requests_mod.Completion) !void {
+        unreachable;
+    }
+    pub fn settleIncoming(_: *PeerHost, _: r.incoming_mod.Completion) !void {
+        unreachable;
+    }
+    pub fn settleClose(_: *PeerHost, _: *Promise) !void {
+        unreachable;
+    }
+    pub fn terminate(_: *PeerHost, _: anyerror) noreturn {
+        unreachable;
+    }
     pub fn build(_: *PeerHost, selection: *exchange.Selection) !usize {
         return selection.peer_count;
     }
     pub fn finish(_: *PeerHost, peers: usize, outcome: exchange.Outcome) !Result {
         return .{ .peers = peers, .needs_another_exchange = outcome.needs_another_exchange };
     }
-    pub fn keepAlive(_: *PeerHost) void {}
-    pub fn idle(_: *PeerHost) void {}
     pub fn classify(_: *PeerHost, _: anyerror) exchange.Failure {
         unreachable;
     }

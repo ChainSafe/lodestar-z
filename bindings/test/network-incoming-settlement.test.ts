@@ -1,6 +1,6 @@
 import {expect, test} from "vitest";
-import {initializeNativeNetworkRuntime} from "../src/network-runtime.js";
 import {applicationConfig, exchange, settleOnly, unreachableConnect} from "./utils/network.js";
+import {initializeNativeNetworkRuntime} from "./utils/network-runtime.js";
 
 /** Closes a runtime and settles its pending connect through the host's exchanges until closed. */
 async function settleClosedConnect() {

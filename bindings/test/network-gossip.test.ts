@@ -185,7 +185,7 @@ test.each([
     await vi.waitFor(
       async () => {
         const sent = await pair.left.getMetrics();
-        const received = pair.right.getMetrics();
+        const received = await pair.right.getMetrics();
         expect(metricValue(sent, "gossipsub_rpc_sent_message_total")).toBe(1);
         expect(metricValue(received, "gossipsub_rpc_recv_message_total")).toBe(1);
         const publishedBytes = metricValue(sent, 'gossipsub_msg_publish_bytes_total{topic="beacon_block"}');
@@ -218,7 +218,7 @@ test.each([
     const verdictMetric = {accept: "accepted", ignore: "ignored", reject: "rejected"}[verdict];
     await vi.waitFor(
       async () => {
-        const metrics = pair.right.getMetrics();
+        const metrics = await pair.right.getMetrics();
         expect(metrics).toContain(`gossipsub_${verdictMetric}_messages_total{topic="beacon_block"} 1\n`);
         expect(metrics).toContain("gossipsub_async_validation_delay_from_first_seen_count 1\n");
       },
@@ -446,7 +446,8 @@ for (const hoodi of [false, true]) {
           const active = runtime;
           await expect
             .poll(
-              () => metricValue(active.getMetrics(), 'lodestar_gossip_validation_queue_length{topic="beacon_block"}'),
+              async () =>
+                metricValue(await active.getMetrics(), 'lodestar_gossip_validation_queue_length{topic="beacon_block"}'),
               {timeout: 5000}
             )
             .toBe(held);

@@ -1,13 +1,13 @@
+import {ownerStopped} from "../utils/network.js";
 import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {setTimeout as delay} from "node:timers/promises";
-import {createNativeNetwork} from "../../src/network.js";
-import {initializeNativeNetworkRuntime, runtimeOf} from "../../src/network-runtime.js";
+import {createNativeNetwork} from "../utils/network-runtime.js";
+import {initializeNativeNetworkRuntime, runtimeOf} from "../utils/network-runtime.js";
 import {
   applicationConfig,
   holdSettling,
   localIntent,
-  requestForks,
   runtimeReleased,
   Settlements,
   settleOnly,
@@ -20,10 +20,22 @@ import {
 
 const mode = process.argv[2];
 const noop = () => undefined;
-if (mode === "exit") {
-  const runtime = startRuntime(applicationConfig());
-  assert.equal(runtime.state, "running");
-  console.log("ready-exit");
+if (mode === "open") {
+  let network = createNativeNetwork(applicationConfig(), {
+    subscribeCapacity: () => () => {},
+    capacity: () => ({gossipValidation: "backpressured", incomingRequestSlots: 0}),
+    validate: async () => [], checkDependencies: () => [], serve: (request) => request.cancel(),
+    peers: noop, failed: noop, logs: noop,
+  });
+  const weak = new WeakRef(network);
+  network = null;
+  setTimeout(async () => {
+    global.gc();
+    const open = weak.deref();
+    assert(open, "An open network owns its lifetime until close");
+    assert.deepEqual(await open.close(), {reason: "requested"});
+    console.log("open-until-close");
+  }, 50).unref();
 } else if (mode === "closed-gc") {
   let runtime = startRuntime(applicationConfig());
   const identity = runtime.identity;
@@ -146,8 +158,8 @@ if (mode === "exit") {
     });
     network.stopDelivery();
     const runtime = runtimeOf(network);
-    const drain = runtime.drainCompletions.bind(runtime);
-    runtime.drainCompletions = () => {
+    const drain = runtime.exchange.bind(runtime);
+    runtime.exchange = () => {
       const result = drain();
       batches.push(result);
       return result;
@@ -164,71 +176,6 @@ if (mode === "exit") {
   assert.deepEqual(settlements.outcomes, Array(100).fill("NetworkClosed"));
   assert(batches.length >= 4);
   console.log("close-batches-settled");
-} else if (mode === "publication-exit" || mode === "command-exit" || mode === "request-exit") {
-  // A completed publication, command or request pull leaves a running, idle network, which the process exits under
-  // without a close. So does a request whose outcome no pull took.
-  const network = createNativeNetwork(applicationConfig(), {
-    subscribeCapacity: () => () => {},
-    capacity: () => ({gossipValidation: "ready", incomingRequestSlots: 32}),
-    validate: (job) => Promise.resolve(job.messages.map(() => "ignore")),
-    checkDependencies: (checks) => checks.map(() => false),
-    serve: (request) => request.cancel(),
-    peers: noop,
-    failed: noop,
-    logs: noop,
-  });
-  globalThis.retained = network;
-  if (mode === "command-exit") {
-    assert.equal(typeof (await network.getIdentity()).peerId, "string");
-    console.log("commanded-exit");
-  } else if (mode === "request-exit") {
-    const {peerId} = await network.getIdentity();
-    const blocks = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
-    await assert.rejects(network.request(peerId, blocks, new Uint8Array(32)).next(), {reason: "disconnected"});
-    globalThis.unpulled = network.request(peerId, blocks, new Uint8Array(32));
-    console.log("requested-exit");
-  } else {
-    const published = await network.publish(topicName(), new Uint8Array(4000), {allowZeroPeers: true});
-    assert.equal(published.duplicate, false);
-    console.log("published-exit");
-  }
-} else if (mode === "incoming-exit") {
-  // A served stream whose close and retirement completed leaves a running, idle network, which the process exits
-  // under without a close.
-  const {startPeer} = await import("../utils/network-peer.js");
-  const {BLOCKS} = await import("../utils/network-incoming.js");
-  const config = applicationConfig();
-  let served = noop;
-  const retired = new Promise((resolve) => {
-    served = resolve;
-  });
-  const network = createNativeNetwork(config, {
-    subscribeCapacity: () => () => {},
-    capacity: () => ({gossipValidation: "ready", incomingRequestSlots: 32}),
-    validate: (job) => Promise.resolve(job.messages.map(() => "ignore")),
-    checkDependencies: (checks) => checks.map(() => false),
-    async serve(request) {
-      await request.respond(new Uint8Array(4000).fill(5), requestForks[0]);
-      await request.finish();
-      served();
-    },
-    peers: noop,
-    failed: noop,
-    logs: noop,
-  });
-  globalThis.retained = network;
-  const remote = await network.getIdentity();
-  await network.applyIntent(localIntent(config), config.initialSlot);
-  const peerConfig = applicationConfig();
-  peerConfig.identitySecretKey[31] = 2;
-  const peer = await startPeer(peerConfig);
-  await peer.applyIntent(localIntent(peerConfig), peerConfig.initialSlot);
-  await peer.connect(remote.peerId, [remote.localEndpoint], 5000n);
-  const stream = peer.request(remote.peerId, BLOCKS, new Uint8Array(32));
-  assert.deepEqual((await stream.next()).value.data, new Uint8Array(4000).fill(5));
-  await retired;
-  await peer.stop();
-  console.log("served-exit");
 } else if (mode === "saturated-close") {
   // Close begins with every family outstanding: each promise settles before closed, which leaves no cell, store or
   // event-loop hold, and a collected runtime makes way for the next one.
@@ -289,7 +236,12 @@ if (mode === "exit") {
   for (let i = 0; i < 20; i++) settlements.watch(() => runtime.getIdentity());
   const closing = runtime.close();
   // The owner stops and releases the notifier, which finalizes while every completion waits for an exchange.
-  for (let i = 0; i < 400 && runtime.state !== "closed"; i++) await delay(5);
+  let stopped = false;
+    for (let i = 0; i < 400 && !stopped; i++) {
+      stopped = ownerStopped(runtime);
+      if (!stopped) await delay(5);
+    }
+    assert(stopped, "The owner must stop while delivery is held");
   await delay(50);
   assert(settlements.counts.every((count) => count === 0));
   holdSettling(runtime, false);
@@ -354,7 +306,7 @@ if (mode === "exit") {
   });
   for (let i = 0; i < 400 && !closed; i++) {
     runtime.setCapacity(settleOnly);
-    runtime.drainCompletions();
+    runtime.exchange();
     await delay(5);
   }
   assert.equal((await intent).slot, config.initialSlot);

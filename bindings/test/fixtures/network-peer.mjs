@@ -43,7 +43,6 @@ async function execute(method, args) {
   if (!runtime) throw new Error("Network peer uninitialized");
   if (method === "exchange") return exchange(runtime, gossipAll);
   if (methods.has(method)) return runtime[method](...args);
-  if (method === "state") return runtime.state;
   if (method === "closed") return runtime.closed;
   if (method === "request") {
     if (requests.size >= 64) throw new Error("Network peer request capacity");

@@ -7,7 +7,7 @@ import type {
   NativeResponseChunk,
 } from "../../src/network.js";
 import type {
-  NativeExchange,
+  NativeDelivery,
   NativeNetworkApplicationRuntime,
   NativeRuntimeCloseResult,
 } from "../../src/network-runtime.js";
@@ -21,9 +21,9 @@ interface NativeBridge {
   /** Operations return native-owned Promises, settled by completion draining. */
   applyIntent: NativeNetworkApplicationRuntime["applyIntent"];
   connect: NativeNetworkApplicationRuntime["connect"];
-  exchange(): NativeExchange;
+  exchange(): NativeDelivery;
   setCapacity(capacity: HostCapacity | null): void;
-  drainCompletions(): boolean;
+
   close(): void;
   initialize(
     config: unknown,
@@ -48,11 +48,7 @@ interface NetworkTestBindings {
 export const networkBindings = bindings as NetworkTestBindings;
 
 /** Drains a runtime until the native-owned Promise settles. */
-export async function drainUntil<T>(
-  native: Pick<NativeBridge, "drainCompletions">,
-  command: Promise<T>,
-  timeoutMs = 10000
-): Promise<T> {
+export async function drainUntil<T>(native: {exchange(): unknown}, command: Promise<T>, timeoutMs = 10000): Promise<T> {
   let settled = false;
   void command.then(
     () => {
@@ -64,7 +60,7 @@ export async function drainUntil<T>(
   );
   const deadline = Date.now() + timeoutMs;
   while (!settled) {
-    native.drainCompletions();
+    native.exchange();
     if (Date.now() > deadline) throw Error("The native Promise did not settle");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -73,7 +69,7 @@ export async function drainUntil<T>(
 
 /** Closes and drains native Promises without taking payloads. */
 export async function closedBy(
-  native: Pick<NativeBridge, "close" | "drainCompletions">,
+  native: {close(): void; exchange(): unknown},
   closed: Promise<NativeRuntimeCloseResult>,
   timeoutMs = 10000
 ): Promise<NativeRuntimeCloseResult> {

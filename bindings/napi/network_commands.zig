@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Promise = @import("network_promise.zig");
 const network_runtime = @import("network_runtime.zig");
+const network_owner = @import("network_owner.zig");
 
 pub const capacity = 32;
 pub const connect_max = 16;
@@ -125,7 +126,7 @@ pub const Table = struct {
 };
 
 const n = @import("network");
-pub const Command = enum { applyIntent, updateStatus, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, getRememberedPeers };
+pub const Command = enum { applyIntent, updateStatus, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, getRememberedPeers, getMetrics };
 fn storageKind(command: Command) Kind {
     return switch (command) {
         .applyIntent => .intent,
@@ -179,6 +180,10 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             var status = input.status;
             status.fork_digest = core.localState().status.fork_digest;
             try core.updateStatus(&status);
+        },
+        .getMetrics => network_owner.renderMetrics(self, timestamp) catch |err| return switch (err) {
+            error.WriteFailed, error.MetricCapacity => error.NetworkMetricsCapacity,
+            error.DuplicateMetric => error.NetworkMetricsSchema,
         },
         .getIdentity => operation.identity = try self.owner.?.readIdentity(),
         .getPeers => {

@@ -5,7 +5,7 @@ import {setTimeout as delay} from "node:timers/promises";
 import {publicKeyFromProtobuf} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {testChain} from "../../../test/interop/network_chain.mjs";
-import {initializeNativeNetworkRuntime} from "../../src/network-runtime.js";
+import {initializeNativeNetworkRuntime} from "./network-runtime.js";
 export {testChain};
 
 import {type ChainConfig, createBeaconConfig} from "@lodestar/config";
@@ -47,7 +47,7 @@ export type Feedback =
   | {type: "dropQueued"}
   | {type: "reportPeer"; peerId: string; action: NativePeerAction; count: number; context?: NativePeerReportContext};
 
-type ExchangeRuntime = Pick<NativeNetworkApplicationRuntime, "exchange" | "setCapacity" | "drainCompletions">;
+type ExchangeRuntime = Pick<NativeNetworkApplicationRuntime, "exchange" | "setCapacity">;
 type FeedbackRuntime = ExchangeRuntime &
   Pick<
     NativeNetworkApplicationRuntime,
@@ -86,7 +86,6 @@ export function exchange(
       }
     }
   runtime.setCapacity(capacity);
-  runtime.drainCompletions();
   const result = runtime.exchange();
   runtime.setCapacity(null);
   return result;
@@ -310,7 +309,7 @@ function settlingHost(onWorkAvailable: () => void = () => undefined) {
   const drain = () => {
     scheduled = false;
     if (held) return;
-    if (runtime?.drainCompletions()) schedule();
+    if (runtime?.exchange().needsAnotherExchange) schedule();
   };
   const schedule = () => {
     if (scheduled) return;
@@ -586,4 +585,10 @@ export async function waitForGossipReady(
     await delay(10);
   }
   throw new Error(`Gossip readiness deadline: ${waiting}`);
+}
+
+export function ownerStopped(runtime: Pick<NativeNetworkApplicationRuntime, "drainLogs">): boolean {
+  return runtime
+    .drainLogs()
+    .records.some((record) => record.scope === "network_runtime" && record.message.startsWith("owner_stopped "));
 }

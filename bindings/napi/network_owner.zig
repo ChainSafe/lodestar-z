@@ -91,7 +91,7 @@ pub fn initialize(self: *Runtime) !void {
     }
     try self.owner.?.core.setHostWake(self.bridge.wake.?.read_fd);
 
-    try publishMetrics(self, try Now.read(io));
+    try renderMetrics(self, try Now.read(io));
     std.log.scoped(.network_runtime).info("owner_initialized target_peers={d} max_peers={d}", .{ self.owner.?.resolved.core.peers.target_peers, self.owner.?.resolved.core.peers.max_peers });
 }
 pub fn run(self: *Runtime) void {
@@ -157,12 +157,12 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
     return result;
 }
 
-/// The earliest host-owned deadline, read under the lock: metrics rendering, the health log,
+/// The earliest host-owned deadline, read under the lock: the health log,
 /// connect timeouts, the graceful close and the gossip processor's groups and expiry. Host work
 /// found by the previous turn's event capture is due now.
 fn hostDeadline(self: *Runtime, timestamp: n.Now) u64 {
     if (self.host_due) return timestamp.millis();
-    var deadline = @min(self.metrics_due_ms, self.health_log_due_ms);
+    var deadline = self.health_log_due_ms;
     if (commands.connectDeadline(&self.bridge.commands)) |value| deadline = @min(deadline, value);
     if (self.closing_deadline) |value| deadline = @min(deadline, value);
     if (self.bridge.gossip) |*table| if (table.deadline()) |value| {
@@ -298,14 +298,6 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
 }
 
 fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n.Now, sequence: u64) void {
-    if (timestamp.millis() >= self.metrics_due_ms) {
-        publishMetrics(self, timestamp) catch |err| {
-            self.lock();
-            self.metrics.failure = err;
-            self.unlock();
-        };
-        self.metrics_due_ms = timestamp.millis() +| n.metrics.interval_ms;
-    }
     self.lock();
     if (timestamp.millis() >= self.health_log_due_ms) {
         const counts = self.owner.?.core.peerCounts();
@@ -324,21 +316,18 @@ fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n
     self.unlock();
 }
 
-fn publishMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!void {
+pub fn renderMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!void {
     var context = n.metrics.Context.init(&self.owner.?.core, timestamp, true);
+    // On-demand scrapes share one buffer with JS readers; rendering holds the mutex and can delay a JS turn.
     self.lock();
     if (self.bridge.gossip) |*table| {
         const state = table.snapshot(timestamp.millis());
         context.expired_executing = state.expiredExecuting;
     }
     self.captureProcessorLocked(&self.owner.?.processor_metrics);
-    self.unlock();
+    defer self.unlock();
     context.processor = &self.owner.?.processor_metrics;
-    const index = try self.metrics.render(&context);
-    self.lock();
-    self.metrics.published = index;
-    self.metrics.failure = null;
-    self.unlock();
+    try self.metrics.render(&context);
 }
 
 test "a command queued after wait planning executes in the turn whose poll observes the wake" {

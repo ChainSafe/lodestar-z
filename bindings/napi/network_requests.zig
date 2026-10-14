@@ -231,11 +231,6 @@ pub const Table = struct {
         }
         return result;
     }
-    /// Whether a pull or a return awaits a completion, which keeps the event loop alive.
-    pub fn obligated(self: *const Table) bool {
-        for (self.cells) |*cell| if (cell.pulling or cell.retirement_awaited) return true;
-        return false;
-    }
 };
 
 /// A received chunk and a pull waiting for it.

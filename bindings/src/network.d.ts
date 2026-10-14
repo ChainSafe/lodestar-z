@@ -720,10 +720,10 @@ export interface NativeNetwork {
   /** Remembered peers for the host to persist. Take the final snapshot before close, which refuses it. */
   getRememberedPeers(): Promise<NativeRememberedPeersSnapshot>;
   /**
-   * Prometheus text: the owner's families, rendered once per second, the drain burst histogram, dropped peer reports
-   * and log delivery errors.
+   * Prometheus text rendered on demand, including binding counters. Concurrent scrapes share one request;
+   * after close, returns the final owner snapshot with current binding counters.
    */
-  metrics(): string;
+  metrics(): Promise<string>;
   /** Selects the threshold native records are kept at from now on. */
   setLogLevel(level: NativeLogLevel): void;
   /**

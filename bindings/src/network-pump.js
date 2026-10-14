@@ -1,5 +1,6 @@
 // @ts-check
 import assert from "node:assert/strict";
+import {NativeIncoming} from "./network-incoming.js";
 import {LogDelivery} from "./network-log-delivery.js";
 import {TurnScheduler} from "./network-turn-scheduler.js";
 
@@ -7,7 +8,7 @@ import {TurnScheduler} from "./network-turn-scheduler.js";
  * @typedef {import("./network-turn-scheduler.js").Continuation} Continuation
  * @typedef {import("./network-runtime.js").NativeGossipHandle} Handle
  * @typedef {import("./network-runtime.js").NativeIncomingRequest} Incoming
- * @typedef {import("./network-runtime.js").NativeExchange} Exchange
+ * @typedef {import("./network-runtime.js").NativeDelivery} Exchange
  * @typedef {import("./network.js").NativeHost} Host
  * @typedef {import("./network.js").CloseResult} CloseResult
  * @typedef {import("./network.js").GossipJob} GossipJob
@@ -17,9 +18,9 @@ import {TurnScheduler} from "./network-turn-scheduler.js";
  * @typedef {import("./network-runtime.js").NativeGossipBatch} NativeGossipBatch
  * @typedef {import("./network-runtime.js").NativeGossipDependencyCheck} NativeGossipDependencyCheck
  * @typedef {{adopted: boolean, handles: Handle[], job: GossipJob | null}} Job
- * @typedef {Pick<NativeNetworkApplicationRuntime, "exchange" | "drainCompletions" | "reportFailure" | "drainLogs" | "setCapacity" | "reportGossip" | "classifyGossip"> & {
- * closed: Promise<CloseResult>,
- * close(): Promise<CloseResult>,
+ * @typedef {Pick<NativeNetworkApplicationRuntime, "reportFailure" | "drainLogs" | "setCapacity" | "reportGossip" | "classifyGossip"> & {
+ * close(): void,
+ * exchange(): Exchange,
  * }} Runtime
  */
 
@@ -105,11 +106,12 @@ export class NativePump {
   /**
    * Starts draining `runtime`, whose notifications call `request`, and delivering its log records.
    * @param {Runtime} runtime
+   * @param {Promise<CloseResult>} closed
    */
-  attach(runtime) {
+  attach(runtime, closed) {
     this.#runtime = runtime;
     const stop = () => this.#stop();
-    runtime.closed.then(stop, stop);
+    closed.then(stop, stop);
     this.#logs = new LogDelivery(runtime, this.#host, /** @param {unknown} error */ (error) => this.#error(error));
     this.#logs.start();
     this.#schedule();
@@ -251,23 +253,21 @@ export class NativePump {
       this.#fail();
     }
     let result;
-    let pending;
     try {
       this.#runtime.setCapacity(demand);
-      pending = this.#runtime.drainCompletions();
-      result = demand === null ? null : this.#runtime.exchange();
+      result = this.#runtime.exchange();
     } catch (error) {
       this.#arbitrate(error);
       this.#fail();
       return "idle";
     }
     try {
-      if (result !== null) this.#deliver(result);
+      this.#deliver(result);
     } catch {
       // The delivery arbitrated it before its cleanup.
       this.#fail();
     }
-    return (result?.needsAnotherExchange ?? pending) ? "now" : "idle";
+    return result.needsAnotherExchange ? "now" : "idle";
   }
 
   /**
@@ -280,7 +280,10 @@ export class NativePump {
    */
   #deliver(result) {
     const jobs = this.#jobs(result.gossip);
-    const starts = result.serving.map((incoming) => ({adopted: false, incoming}));
+    const starts = result.serving.map((descriptor) => ({
+      adopted: false,
+      incoming: new NativeIncoming(this.#runtime, descriptor),
+    }));
     const checks = result.checks;
     let checked = checks.length === 0;
     try {

@@ -12,8 +12,6 @@ import type {
   NativeNetwork,
   Verdict,
 } from "../src/network.js";
-import {createNativeNetwork} from "../src/network.js";
-import {runtimeOf} from "../src/network-runtime.js";
 import {
   applicationConfig,
   childTestTimeout,
@@ -27,6 +25,7 @@ import {
 } from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
 import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
+import {createNativeNetwork, runtimeOf} from "./utils/network-runtime.js";
 
 const TOPIC = topicName();
 
@@ -136,15 +135,15 @@ test("native Xray exports while JavaScript is blocked and reconnects after idle 
     });
     const {network, peers} = fixture;
     await expect.poll(() => attaches).toBe(1);
-    const before = metricValue(network.metrics(), "lodestar_xray_sent_bytes_total") ?? 0;
+    const before = metricValue(await network.metrics(), "lodestar_xray_sent_bytes_total") ?? 0;
     const payload = randomFillSync(blockPayload(0));
     new DataView(payload.buffer).setBigUint64(100, 100n, true);
     const sent = peers[0].publishGossip(TOPIC, payload, {allowZeroPeers: false});
     // The subprocess produces traffic while this environment cannot run callbacks or timers.
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
-    expect(metricValue(network.metrics(), "lodestar_xray_sent_bytes_total")).toBeGreaterThan(before + 4000);
+    expect(metricValue(await network.metrics(), "lodestar_xray_sent_bytes_total")).toBeGreaterThan(before + 4000);
     await sent;
-    expect(metricValue(network.metrics(), "lodestar_xray_dropped_bytes_total")).toBe(0);
+    expect(metricValue(await network.metrics(), "lodestar_xray_dropped_bytes_total")).toBe(0);
     for (const socket of sockets) socket.destroy();
     await expect.poll(() => attaches, {timeout: 5000}).toBe(2);
   } finally {
@@ -220,7 +219,7 @@ test("serving capacity stays charged after the stream closes until serve settles
     const pending = stream.next().catch(() => undefined);
     await vi.waitFor(() => expect(started).toBeDefined(), {timeout: 5000});
     await pending;
-    const retiring = () => metricValue(network.metrics(), "beacon_reqresp_retiring_count");
+    const retiring = async () => metricValue(await network.metrics(), "beacon_reqresp_retiring_count");
     await expect.poll(retiring, {timeout: 5000}).toBe(1);
     retire();
     await expect.poll(retiring, {timeout: 5000}).toBe(0);
@@ -395,8 +394,8 @@ test("the facade validates its host, starts without host callbacks and hides the
     expect(await network.setDirectPeer(direct, null)).toBe(false);
     // The native registry's families and the binding's families, each exactly once.
     const families = (text: string) => [...text.matchAll(/^# TYPE (\S+) /gm)].map(([, name]) => name);
-    const native = families(runtimeOf(network)?.getMetrics() ?? "");
-    const rendered = families(network.metrics());
+    const native = families((await runtimeOf(network)?.getMetrics()) ?? "");
+    const rendered = families(await network.metrics());
     expect(native.length).toBeGreaterThan(0);
     expect(rendered).toEqual([
       ...native,
@@ -431,4 +430,26 @@ test("promise-returning operations reject admission failures without throwing", 
   await expect(network.getPeers()).rejects.toThrow("NetworkClosed");
   await expect(network.getDirectPeers()).rejects.toThrow("NetworkClosed");
   await expect(network.getRememberedPeers()).rejects.toThrow("NetworkClosed");
+});
+
+test("concurrent metrics scrapes share one owner command and the final snapshot survives close", async () => {
+  const network = createNativeNetwork(applicationConfig(), host());
+  const native = runtimeOf(network);
+  if (!native) throw new Error("Missing native runtime");
+  const scrape = vi.spyOn(native, "getMetrics");
+  try {
+    native.holdOperations(true);
+    const first = network.metrics();
+    const second = network.metrics();
+    expect(second).toBe(first);
+    expect(scrape).toHaveBeenCalledOnce();
+    native.holdOperations(false);
+    expect(await first).toContain("lodestar_network_running_bool 1\n");
+    expect(await second).toBe(await first);
+    await network.close();
+    expect(await network.metrics()).toContain("lodestar_network_running_bool 0\n");
+  } finally {
+    native.holdOperations(false);
+    await network.close();
+  }
 });

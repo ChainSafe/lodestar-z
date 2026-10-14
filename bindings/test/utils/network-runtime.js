@@ -1,8 +1,11 @@
-import bindings from "./bindings.js";
-import {NativeIncoming} from "./network-incoming.js";
-import {NativeRequest} from "./network-request.js";
+import {createNativeNetwork as createNetwork} from "../../src/network.js";
+import bindings from "../../src/bindings.js";
+import {NativeIncoming} from "../../src/network-incoming.js";
+import {NativeRequest} from "../../src/network-request.js";
 
-export class NativeRuntime {
+const live = new Set();
+
+class NativeRuntime {
   #native;
   #closed;
 
@@ -12,13 +15,12 @@ export class NativeRuntime {
     this.identity = initialized.identity;
     this.limits = initialized.limits;
     this.#closed = initialized.closed;
+    live.add(this);
+    void this.#closed.then(() => live.delete(this));
   }
 
   get closed() {
     return this.#closed;
-  }
-  get state() {
-    return this.#native.getState();
   }
   getMetrics() {
     return this.#native.getMetrics();
@@ -67,7 +69,6 @@ export class NativeRuntime {
   }
   exchange() {
     const result = this.#native.exchange();
-    // An exchange that delivered nothing is frozen with no serving starts.
     const serving = result.serving;
     if (serving.length === 0) return result;
     for (let i = 0; i < serving.length; i++) {
@@ -75,9 +76,6 @@ export class NativeRuntime {
       serving[i] = new NativeIncoming(this.#native, descriptor);
     }
     return result;
-  }
-  drainCompletions() {
-    return this.#native.drainCompletions();
   }
   reportFailure(error) {
     return this.#native.reportFailure(error);
@@ -123,11 +121,10 @@ export function initializeNativeNetworkRuntime(config, onWorkAvailable) {
   return new NativeRuntime(config, onWorkAvailable);
 }
 
-/** Each facade's runtime, for binding ownership tests. */
-const runtimes = new WeakMap();
-export function registerRuntime(network, runtime) {
-  runtimes.set(network, runtime);
-}
+export {createNetwork as createNativeNetwork};
+
+/** Accesses the raw binding only in tests that inspect the public wrapper's native work. */
 export function runtimeOf(network) {
-  return runtimes.get(network);
+  const key = Object.getOwnPropertySymbols(network).find((symbol) => symbol.description === "NativeNetwork.runtime");
+  return key === undefined ? undefined : network[key];
 }

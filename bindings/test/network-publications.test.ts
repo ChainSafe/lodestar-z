@@ -1,6 +1,5 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test, vi} from "vitest";
-import {initializeNativeNetworkRuntime} from "../src/network-runtime.js";
 import {
   applicationConfig,
   exchange,
@@ -10,6 +9,7 @@ import {
   startRuntime,
   topicName,
 } from "./utils/network.js";
+import {initializeNativeNetworkRuntime} from "./utils/network-runtime.js";
 
 const BLOCK = topicName();
 const SYNC = topicName("sync_committee_0");
@@ -141,13 +141,13 @@ test("native-owned publication Promises settle without completion envelopes", as
   const publications = [publish(1), publish(2)];
   try {
     await vi.waitFor(() => {
-      runtime.drainCompletions();
+      runtime.exchange();
       expect(delivered).toHaveLength(2);
     });
     expect(delivered).toEqual([1, 2]);
     publications.push(publish(3));
     await vi.waitFor(() => {
-      runtime.drainCompletions();
+      runtime.exchange();
       expect(delivered).toHaveLength(3);
     });
     expect(delivered).toEqual([1, 2, 3]);
@@ -182,7 +182,7 @@ test("close settles after every publication and command without exposing their c
   const closing = record(runtime.close(), "closed");
   for (let i = 0; i < 400 && !order.includes("closed"); i++) {
     await delay(5);
-    runtime.drainCompletions();
+    runtime.exchange();
   }
   await Promise.all([...operations, closing]);
   expect(order.at(-1)).toBe("closed");

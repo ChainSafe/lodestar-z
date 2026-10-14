@@ -15,11 +15,7 @@ import {configuredChain} from "./network.js";
 type AsyncMethods<T> = {
   [K in keyof T]: T[K] extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : T[K];
 };
-export type PeerRuntime = Omit<
-  AsyncMethods<NativeNetworkApplicationRuntime>,
-  "request" | "takeIncomingRequest" | "state"
-> & {
-  readonly state: Promise<NativeNetworkApplicationRuntime["state"]>;
+export type PeerRuntime = Omit<AsyncMethods<NativeNetworkApplicationRuntime>, "request" | "takeIncomingRequest"> & {
   request: NativeNetworkApplicationRuntime["request"];
   takeIncomingRequest(): Promise<NativeIncomingRequest | null>;
   /** Closes the runtime and waits for the child process to exit. */
@@ -183,7 +179,6 @@ export async function startPeer(config: NativeApplicationConfig): Promise<PeerRu
       get(target, property) {
         if (property === "then") return undefined;
         if (property in target) return Reflect.get(target, property);
-        if (property === "state") return call("state");
         return (...args: unknown[]) => call(String(property), args);
       },
     }) as unknown as PeerRuntime;

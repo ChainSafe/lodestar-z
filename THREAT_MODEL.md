@@ -25,8 +25,8 @@ work. Future unsupported hard forks may be scheduled and advertised, but the act
 requested gossip namespace must be supported. The host must upgrade before requesting an unsupported
 fork's subscriptions or activating that fork; native initialization and updates reject an active
 unsupported fork. The host applies subscriptions and peer demand through ordinary runtime updates.
-The application owns the network and explicitly closes it; dropping JavaScript references does not
-request shutdown. Once close begins, the binding retains its pump through delivery of outstanding
+The application owns the network and explicitly closes it. An open runtime keeps its JavaScript
+wrapper and the event loop alive until close; dropping application references does not request shutdown. Once close begins, the binding retains its pump through delivery of outstanding
 completions and the close result, without waiting for host serving or validation tasks to retire.
 An initialization failure or shutdown is terminal for that runtime. While one runtime is live,
 another initialization, including from another Node.js environment, is rejected; after it is fully
