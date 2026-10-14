@@ -115,26 +115,26 @@ pub fn ProgressiveBitListType() type {
             }
         }
 
-        const SerializedChunks = struct {
-            data: []const u8,
+        const SerializedChunkIterator = struct {
+            bytes: std.mem.WindowIterator(u8),
             bit_len: usize,
-            offset: usize = 0,
 
-            fn init(data: []const u8) !SerializedChunks {
+            fn init(data: []const u8) !SerializedChunkIterator {
                 const bit_len = try serialized.length(data);
                 const byte_len = bit_len / 8 + @intFromBool(bit_len % 8 != 0);
-                return .{ .data = data[0..byte_len], .bit_len = bit_len };
+                return .{ .bytes = std.mem.window(u8, data[0..byte_len], 32, 32), .bit_len = bit_len };
             }
 
-            fn next(self: *SerializedChunks, out: *[32]u8) bool {
-                if (self.offset == self.data.len) return false;
-                const count = @min(out.len, self.data.len - self.offset);
-                out.* = chunk_utils.fromBytes(self.data[self.offset..][0..count]);
-                self.offset += count;
-                if (self.offset == self.data.len and self.bit_len % 8 != 0) {
-                    out[count - 1] ^= @as(u8, 1) << @intCast(self.bit_len % 8);
+            /// Borrows full chunks from the input; uses `out` only for padding or delimiter removal.
+            fn next(self: *SerializedChunkIterator, out: *[32]u8) ?*const [32]u8 {
+                const bytes = self.bytes.next() orelse return null;
+                const has_delimiter = self.bytes.index == null and self.bit_len % 8 != 0;
+                if (bytes.len == 32 and !has_delimiter) return bytes[0..32];
+                out.* = chunk_utils.fromBytes(bytes);
+                if (has_delimiter) {
+                    out[bytes.len - 1] &= ~(@as(u8, 1) << @intCast(self.bit_len % 8));
                 }
-                return true;
+                return out;
             }
         };
 
@@ -174,10 +174,10 @@ pub fn ProgressiveBitListType() type {
             }
 
             pub fn hashTreeRoot(_: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
-                var chunks = try SerializedChunks.init(data);
+                var chunks = try SerializedChunkIterator.init(data);
                 var accumulator = try progressive.MerkleAccumulator.init(chunkCountForLength(chunks.bit_len));
-                var chunk: [32]u8 = undefined;
-                while (chunks.next(&chunk)) try accumulator.append(&chunk);
+                var scratch: [32]u8 = undefined;
+                while (chunks.next(&scratch)) |chunk| try accumulator.append(chunk);
                 try accumulator.finish(out);
                 mixInLength(chunks.bit_len, out);
             }
@@ -240,11 +240,11 @@ pub fn ProgressiveBitListType() type {
             }
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
-                var chunks = try SerializedChunks.init(data);
+                var chunks = try SerializedChunkIterator.init(data);
                 var builder = try progressive.TreeBuilder.init(pool, chunkCountForLength(chunks.bit_len));
                 defer builder.deinit();
-                var chunk: [32]u8 = undefined;
-                while (chunks.next(&chunk)) try builder.appendOwned(try pool.createLeaf(&chunk));
+                var scratch: [32]u8 = undefined;
+                while (chunks.next(&scratch)) |chunk| try builder.appendOwned(try pool.createLeaf(chunk));
                 const contents = try builder.finish();
                 errdefer pool.unref(contents);
                 const length_leaf = try pool.createLeafFromUint(chunks.bit_len);
