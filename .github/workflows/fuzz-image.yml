@@ -94,7 +94,7 @@ jobs:
           sudo chown -R 60001:60001 /tmp/fz
           docker run -d --name smoke --user 60001:60001 --read-only --cap-drop all \
             --security-opt no-new-privileges --network none --init --pids-limit 4096 \
-            -e FUZZ_PROJECT=lodestar-z -e FUZZ_TARGET=ssz_basic \
+            -e FUZZ_PROJECT=lodestar-z -e FUZZ_TARGET=ssz-basic \
             -e FUZZ_STATE=/fuzz/state -e FUZZ_ARTIFACTS=/fuzz/artifacts \
             -e FUZZ_FAILURES=/fuzz/failures -e FUZZ_METRICS=/fuzz/metrics \
             -e TMPDIR=/local -e STATS_INTERVAL=10 \

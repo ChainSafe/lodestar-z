@@ -228,11 +228,13 @@ on `main` moves `main`.
 
 One entry per target in `fuzz_jobs` (lodestar-ansible-development,
 `group_vars/fuzzer/vars.yml`), referencing the `main` tag. It never needs editing
-when a new image is published:
+when a new image is published. The platform's target names allow hyphens but not
+underscores, so write the harness name with hyphens; the entrypoint maps
+`ssz-basic` back to `fuzz-ssz_basic`:
 
 ```yaml
 - project: lodestar-z
-  target: ssz_basic                       # becomes FUZZ_TARGET
+  target: ssz-basic                       # becomes FUZZ_TARGET
   image: ghcr.io/chainsafe/lodestar-z-fuzz:main
   cores: 1
   memory_mb: 2048

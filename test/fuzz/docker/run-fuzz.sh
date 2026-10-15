@@ -16,7 +16,7 @@
 # volume on /fuzz works for local runs (see test/fuzz/README.md).
 set -u
 
-: "${FUZZ_TARGET:?FUZZ_TARGET is required, e.g. ssz_basic -- see /opt/fuzz/bin}"
+: "${FUZZ_TARGET:?FUZZ_TARGET is required, e.g. ssz-basic -- see /opt/fuzz/bin}"
 FUZZ_PROJECT="${FUZZ_PROJECT:-lodestar-z}"
 FUZZ_STATE="${FUZZ_STATE:-/fuzz/state}"
 FUZZ_FAILURES="${FUZZ_FAILURES:-/fuzz/failures}"
@@ -25,11 +25,14 @@ TMPDIR="${TMPDIR:-/tmp}"
 # afl-fuzz rewrites fuzzer_stats once a minute; reporting faster repeats stale numbers.
 STATS_INTERVAL="${STATS_INTERVAL:-60}"
 
-BIN="/opt/fuzz/bin/fuzz-$FUZZ_TARGET"
+# The fuzz platform's target names allow hyphens but not underscores, so
+# `ssz-basic` and `ssz_basic` both select the ssz_basic harness and corpus.
+HARNESS=$(printf '%s' "$FUZZ_TARGET" | tr '-' '_')
+BIN="/opt/fuzz/bin/fuzz-$HARNESS"
 OUT="$FUZZ_STATE/afl"
 
 if [ ! -x "$BIN" ]; then
-    echo "FATAL unknown FUZZ_TARGET '$FUZZ_TARGET'; available:" $(ls /opt/fuzz/bin | sed 's/^fuzz-//')
+    echo "FATAL unknown FUZZ_TARGET '$FUZZ_TARGET'; available:" $(ls /opt/fuzz/bin | sed 's/^fuzz-//; s/_/-/g')
     exit 2
 fi
 mkdir -p "$FUZZ_STATE" "$FUZZ_FAILURES" "$FUZZ_METRICS" "$TMPDIR"
@@ -37,7 +40,7 @@ mkdir -p "$FUZZ_STATE" "$FUZZ_FAILURES" "$FUZZ_METRICS" "$TMPDIR"
 # Seeds, best first: the minimised corpus, the hand-made one, else one byte.
 # Only used to start a campaign; a restart resumes from $OUT (AFL_AUTORESUME).
 SEEDS=""
-for d in "/opt/fuzz/corpus/$FUZZ_TARGET-cmin" "/opt/fuzz/corpus/$FUZZ_TARGET-initial"; do
+for d in "/opt/fuzz/corpus/$HARNESS-cmin" "/opt/fuzz/corpus/$HARNESS-initial"; do
     if [ -d "$d" ] && [ -n "$(ls -A "$d")" ]; then SEEDS="$d"; break; fi
 done
 if [ -z "$SEEDS" ]; then
