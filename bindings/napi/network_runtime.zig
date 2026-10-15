@@ -135,12 +135,6 @@ pub const Runtime = struct {
             if (owner.checkpoint) |*checkpoint| checkpoint.deinit(owner.threaded.io());
             if (owner.core_live) {
                 owner.core.shutdown((n.Now.read(owner.threaded.io()) catch owner.core.last_now).floor(owner.core.last_now));
-                if (self.metrics.allocatedBytes() > 0) {
-                    self.captureProcessorLocked(&owner.processor_metrics);
-                    var context = n.metrics.Context.init(&owner.core, (n.Now.read(owner.threaded.io()) catch owner.core.last_now).floor(owner.core.last_now), false);
-                    context.processor = &owner.processor_metrics;
-                    self.metrics.render(&context) catch {};
-                }
                 owner.core.deinit(owner.threaded.io());
             }
             if (owner.threaded_live) owner.threaded.deinit();
@@ -311,8 +305,7 @@ pub const Runtime = struct {
         for (&self.bridge.commands.cells, 0..) |*cell, i| {
             switch (cell.state) {
                 .queued, .executing, .waiting => {
-                    // Owner shutdown rendered the final snapshot before cancelling commands.
-                    self.bridge.commands.cells[i].failure = if (cell.input == .getMetrics) null else self.bridge.terminal_error orelse error.NetworkClosed;
+                    self.bridge.commands.cells[i].failure = self.bridge.terminal_error orelse error.NetworkClosed;
                     self.bridge.commands.transition(cell, .terminal);
                 },
                 else => {},

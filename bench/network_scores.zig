@@ -82,7 +82,7 @@ pub fn run(init: std.process.Init) !void {
                 collect_elapsed.* = timestamp(io) - start;
                 connected += populations.populations[0].peers[0];
                 start = timestamp(io);
-                var context = network.metrics.Context.init(node, now, true);
+                var context = network.metrics.Context.init(node, now);
                 var writer = std.Io.Writer.fixed(buffer);
                 try network.metrics.write(&context, &writer);
                 export_elapsed.* = timestamp(io) - start;

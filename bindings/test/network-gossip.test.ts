@@ -271,7 +271,6 @@ test.each([
     scored.ip.fill(0);
     scored.topics.length = 0;
     expect((await pair.right.getGossipDiagnostics()).peers[0].identity).toEqual(pair.identity.peerId);
-    await Promise.all([pair.left.close(), pair.right.close()]);
     expect(await pair.left.getMetrics()).toContain(
       'gossipsub_data_recipients_total{origin="publication",outcome="completed"} 1\n'
     );

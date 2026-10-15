@@ -84,9 +84,9 @@ pub fn writeCounters(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
     try eviction_age.histogram(.{}, &g.messages.validation.attribution_eviction_age);
 }
 
-pub fn writeScores(g: *const Gossipsub, running: bool, now_ms: u64, w: *prom.Encoder) prom.Error!void {
+pub fn writeScores(g: *const Gossipsub, now_ms: u64, w: *prom.Encoder) prom.Error!void {
     const ScorePopulations = @import("metrics.zig").ScorePopulations;
-    const populations: ScorePopulations = if (running) .collect(&g.peers, g.overlay, g.sessions, now_ms) else .{};
+    const populations: ScorePopulations = .collect(&g.peers, g.overlay, g.sessions, now_ms);
     try populations.write(w);
 }
 

@@ -20,7 +20,6 @@ const network_owner = @import("network_owner.zig");
 const network_storage = @import("network_storage.zig");
 const network_wake = @import("network_wake.zig");
 const network = @import("network");
-const network_metrics = @import("network_metrics.zig");
 const Promise = @import("network_promise.zig");
 const network_logs = @import("network_logs.zig");
 
@@ -264,16 +263,7 @@ pub fn gossipSha256Backend() js.String {
 }
 
 pub fn getMetrics(self: *@This()) !js.Value {
-    const runtime = try self.owner();
-    const value = command_js.submit(js.env(), runtime, .getMetrics, &.{}) catch |err| {
-        if (err != error.NetworkClosed) return err;
-        var promise: Promise = .{};
-        const result = try promise.init(runtime.env);
-        defer promise.deinit();
-        try promise.settle(runtime.env, .resolve, try network_metrics.value(runtime));
-        return .{ .val = result };
-    };
-    return .{ .val = value };
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .getMetrics, &.{}) };
 }
 
 pub fn drainLogs(self: *@This(), limit: js.Value) !js.Value {

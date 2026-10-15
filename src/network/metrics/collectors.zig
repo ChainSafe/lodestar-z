@@ -39,16 +39,14 @@ pub const registry = prom.Registry(Context, .{
 });
 
 fn writePeers(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try peer_metrics.writePeers(&self.owner.peer_manager, &self.population, self.running, w);
+    try peer_metrics.writePeers(&self.owner.peer_manager, &self.population, w);
 }
 
 fn writeRuntime(self: *const Context, w: *prom.Encoder) prom.Error!void {
     if (self.owner.discovery) |discovery| {
-        try w.scalar(.{ .name = "lodestar_discv5_active_session_count", .kind = .gauge, .help = "Stored discovery sessions" }, self.live(discovery.transport.engine.channel.sessions.sessionCount()));
-        try w.scalar(.{ .name = "lodestar_discv5_kad_table_size", .kind = .gauge, .help = "Discovery routing table entries" }, self.live(discovery.transport.engine.peerCount()));
+        try w.scalar(.{ .name = "lodestar_discv5_active_session_count", .kind = .gauge, .help = "Stored discovery sessions" }, discovery.transport.engine.channel.sessions.sessionCount());
+        try w.scalar(.{ .name = "lodestar_discv5_kad_table_size", .kind = .gauge, .help = "Discovery routing table entries" }, discovery.transport.engine.peerCount());
     }
-    try w.scalar(.{ .name = "lodestar_network_metrics_updated_timestamp_seconds", .kind = .gauge, .help = "Unix time at which the owner last collected this metrics export", .unit = .seconds }, self.now.unixSeconds());
-    try w.scalar(.{ .name = "lodestar_network_running_bool", .kind = .gauge, .help = "Network owner is running" }, @intFromBool(self.running));
     try w.scalar(.{ .name = "lodestar_network_transport_failures_total", .kind = .counter, .help = "Failed owner clock reads and transport receive steps" }, self.owner.counters.transport_failures);
     try w.scalar(.{ .name = "lodestar_network_readiness_failures_total", .kind = .counter, .help = "Failed owner readiness polls" }, self.owner.counters.readiness_failures);
     const steps = try w.histograms(.{ .name = "lodestar_network_step_seconds", .kind = .histogram, .help = "Network step duration after native readiness polling, covering transport, protocols and discovery", .unit = .seconds }, timing.Duration);
@@ -86,7 +84,7 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
 
 fn writeQuic(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const transport = &self.owner.transport;
-    const snapshot = transport.engine.metricsSnapshot(self.running);
+    const snapshot = transport.engine.metricsSnapshot();
     try snapshot.write(w);
     try w.scalar(.{ .name = "lodestar_quic_receive_turns_total", .kind = .counter, .help = "QUIC socket receive turns" }, transport.counters.receive_turns);
     try w.scalar(.{ .name = "lodestar_quic_receive_budget_exhausted_total", .kind = .counter, .help = "QUIC receive turns that consumed the datagram budget; more data may remain in the socket" }, transport.counters.receive_budget_exhausted);
@@ -127,15 +125,8 @@ fn writeSockets(self: *const Context, w: *prom.Encoder) prom.Error!void {
 }
 
 fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    var resources = self.owner.protocols.gossipsub.resourceSnapshot();
-    if (!self.running) {
-        resources.receive_pages = 0;
-        resources.pending_validations = 0;
-        resources.resolved_attributions = 0;
-        resources.delivery_descriptors_available = resources.delivery_descriptors_capacity;
-        resources.queued_bytes = 0;
-        resources.store_pages = 0;
-    }
+    const resources = self.owner.protocols.gossipsub.resourceSnapshot();
+
     inline for (.{
         .{ "receive_pages_count", "receive_pages", "Receive pages holding partial inbound frames" },
         .{ "receive_pages_capacity_count", "receive_page_capacity", "Receive pages the pool holds" },
@@ -156,8 +147,8 @@ fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void 
 fn writeRequestResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const requests = self.owner.protocols.reqresp.resourceSnapshot();
     try w.scalar(.{ .name = "beacon_reqresp_serving_capacity_count", .kind = .gauge, .help = "Incoming requests the host may serve at once" }, requests.serving_capacity);
-    try w.scalar(.{ .name = "beacon_reqresp_serving_count", .kind = .gauge, .help = "Incoming requests the host is serving" }, self.live(requests.serving_occupied));
-    try w.scalar(.{ .name = "beacon_reqresp_retiring_count", .kind = .gauge, .help = "Serving resources awaiting host retirement" }, self.live(requests.retiring));
+    try w.scalar(.{ .name = "beacon_reqresp_serving_count", .kind = .gauge, .help = "Incoming requests the host is serving" }, requests.serving_occupied);
+    try w.scalar(.{ .name = "beacon_reqresp_retiring_count", .kind = .gauge, .help = "Serving resources awaiting host retirement" }, requests.retiring);
 }
 
 fn writePeerCloses(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -170,8 +161,8 @@ fn writeRememberedPeers(self: *const Context, w: *prom.Encoder) prom.Error!void 
 
 fn writeTransportConnections(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const transport = self.owner.transport.engine.resourceSnapshot();
-    try w.scalar(.{ .name = "lodestar_quic_connection_slots_count", .kind = .gauge, .help = "Occupied QUIC slots, including closed connections awaiting retirement" }, self.live(transport.active));
-    try w.scalar(.{ .name = "lodestar_quic_connections_handshaking_count", .kind = .gauge, .help = "Inbound QUIC connections still handshaking" }, self.live(transport.handshaking));
+    try w.scalar(.{ .name = "lodestar_quic_connection_slots_count", .kind = .gauge, .help = "Occupied QUIC slots, including closed connections awaiting retirement" }, transport.active);
+    try w.scalar(.{ .name = "lodestar_quic_connections_handshaking_count", .kind = .gauge, .help = "Inbound QUIC connections still handshaking" }, transport.handshaking);
 }
 
 fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -179,7 +170,7 @@ fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!voi
 }
 
 fn writeTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try topic_metrics.write(self.owner.protocols.gossipsub, self.running, self.owner.peer_manager.local.fork.digest, w);
+    try topic_metrics.write(self.owner.protocols.gossipsub, self.owner.peer_manager.local.fork.digest, w);
 }
 
 fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -234,7 +225,7 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .kind = .gauge,
         .help = "Occupied incoming request slots by current phase, including terminal owners awaiting recycling",
         .labels = &.{"phase"},
-    }, rr.ReqResp.metrics.InboundPhase, &self.live(self.owner.protocols.reqresp.resourceSnapshot().inbound_phases));
+    }, rr.ReqResp.metrics.InboundPhase, &self.owner.protocols.reqresp.resourceSnapshot().inbound_phases);
 }
 
 fn writeRequestStreams(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -308,7 +299,7 @@ fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {
 }
 
 fn writeBridge(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try processor_metrics.write(self.processor orelse &processor_metrics.empty, self.running, w);
+    try processor_metrics.write(self.processor orelse &processor_metrics.empty, w);
 }
 
 fn writeGossipExecution(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -328,7 +319,7 @@ fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
 }
 
 fn writeGossipScores(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try gossip_metrics.writeScores(self.owner.protocols.gossipsub, self.running, self.now.millis(), w);
+    try gossip_metrics.writeScores(self.owner.protocols.gossipsub, self.now.millis(), w);
 }
 
 fn writeGossipTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -368,5 +359,5 @@ fn writePeerEvents(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try peer_metrics.writePeerEvents(&self.owner.peer_manager, w);
 }
 fn writePeerPolicy(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try policy_metrics.write(&self.owner.peer_manager, self.running, w);
+    try policy_metrics.write(&self.owner.peer_manager, w);
 }

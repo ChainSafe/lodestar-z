@@ -124,6 +124,7 @@ class NativeNetwork {
     return this.#metricsPending;
   }
   async #collectMetrics() {
+    this.#checkOpen();
     return (await this.#native.getMetrics()) + this.#pump.metrics();
   }
   setLogLevel(level) {

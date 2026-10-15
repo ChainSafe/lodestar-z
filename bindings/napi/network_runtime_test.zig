@@ -29,7 +29,7 @@ test "stop preserves latched success and cancels accepted nonterminal commands" 
     try std.testing.expectEqual(error.NetworkClosed, runtime.bridge.commands.cells[waiting.index].failure.?);
     try std.testing.expectEqual(error.NetworkClosed, runtime.bridge.commands.cells[queued.index].failure.?);
     try std.testing.expectEqual(commands.State.terminal, runtime.bridge.commands.get(metrics).state);
-    try std.testing.expect(runtime.bridge.commands.get(metrics).failure == null);
+    try std.testing.expectEqual(error.NetworkClosed, runtime.bridge.commands.get(metrics).failure.?);
     try std.testing.expectEqual(commands.State.preparing, runtime.bridge.commands.get(preparing).state);
     for ([_]commands.Token{ success, waiting, queued, metrics, preparing }) |token| runtime.bridge.commands.retire(token);
     try std.testing.expectEqual(@as(u8, 0), runtime.bridge.commands.occupied);

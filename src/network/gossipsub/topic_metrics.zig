@@ -4,25 +4,23 @@ const Gossipsub = @import("Gossipsub.zig");
 const policy = gossip.topic_policy;
 const prom = @import("../metrics/registry.zig");
 
-pub fn write(g: *const Gossipsub, running: bool, digest: [4]u8, w: *prom.Encoder) prom.Error!void {
+pub fn write(g: *const Gossipsub, digest: [4]u8, w: *prom.Encoder) prom.Error!void {
     const overlay = g.overlay;
     const ns = &overlay.namespace;
     var mesh: [policy.topic_max]u16 = @splat(0);
     var subscribed = std.StaticBitSet(policy.topic_max).empty;
     var visible = std.StaticBitSet(policy.boundary_max).empty;
-    if (running) {
-        for (ns.boundaries, 0..) |*boundary, index| {
-            if (std.mem.eql(u8, &boundary.digest, &digest)) visible.set(index);
-        }
-        for (overlay.rows, 0..) |*row, ordinal| {
-            if (!row.active) continue;
-            mesh[ordinal] = @intCast(row.mesh.count());
-            if (!row.subscribed) continue;
-            subscribed.set(ordinal);
-            for (ns.offsets, ns.boundaries, 0..) |starts, boundary, index| {
-                const last = starts[policy.kind_count - 1] + boundary.rules[policy.kind_count - 1].count;
-                if (ordinal >= starts[0] and ordinal < last) visible.set(index);
-            }
+    for (ns.boundaries, 0..) |*boundary, index| {
+        if (std.mem.eql(u8, &boundary.digest, &digest)) visible.set(index);
+    }
+    for (overlay.rows, 0..) |*row, ordinal| {
+        if (!row.active) continue;
+        mesh[ordinal] = @intCast(row.mesh.count());
+        if (!row.subscribed) continue;
+        subscribed.set(ordinal);
+        for (ns.offsets, ns.boundaries, 0..) |starts, boundary, index| {
+            const last = starts[policy.kind_count - 1] + boundary.rules[policy.kind_count - 1].count;
+            if (ordinal >= starts[0] and ordinal < last) visible.set(index);
         }
     }
     inline for (.{ "mesh", "topic" }) |group| {

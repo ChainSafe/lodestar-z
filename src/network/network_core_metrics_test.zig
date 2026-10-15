@@ -46,9 +46,9 @@ const Fixture = struct {
         std.testing.allocator.destroy(self.node);
     }
 
-    fn render(self: *Fixture, running: bool) ![]const u8 {
-        var context = metrics.Context.init(self.node, Now.fromMilliseconds(.{ .mono_ms = 2500, .unix_s = 123456 }), running);
-        context.expired_executing = if (running) 3 else 0;
+    fn render(self: *Fixture) ![]const u8 {
+        var context = metrics.Context.init(self.node, Now.fromMilliseconds(.{ .mono_ms = 2500, .unix_s = 123456 }));
+        context.expired_executing = 3;
         var writer = std.Io.Writer.fixed(self.buffer);
         try metrics.write(&context, &writer);
         var encoder: metrics.registry.Encoder = .{ .writer = &writer };
@@ -232,8 +232,6 @@ const contract = [_]Series{
     .{ .name = "lodestar_udp_socket_buffer_bytes", .kind = "gauge", .labels = &.{ "role", "family", "direction" } },
     // Owner and resources
     .{ .name = "lodestar_network_step_seconds", .kind = "histogram" },
-    .{ .name = "lodestar_network_running_bool", .kind = "gauge" },
-    .{ .name = "lodestar_network_metrics_updated_timestamp_seconds", .kind = "gauge" },
     .{ .name = "lodestar_network_transport_failures_total", .kind = "counter" },
     .{ .name = "lodestar_network_readiness_failures_total", .kind = "counter" },
     .{ .name = "lodestar_network_logs_dropped_total", .kind = "counter", .labels = &.{ "level", "scope" } },
@@ -291,7 +289,7 @@ fn boundary(digest: [4]u8, epoch: u64) policy.Boundary {
     return value;
 }
 
-test "metrics read owner counters exactly and preserve totals and capacities after shutdown" {
+test "metrics read owner counters exactly without consuming them" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
     const node = f.node;
@@ -313,7 +311,7 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     node.protocols.gossipsub.messages.storage_refusals[0] = 11;
     node.peer_manager.selection.deficits.outbound = 7;
     const original = node.peer_manager.counters;
-    const output = try f.render(true);
+    const output = try f.render();
     try contains(output, "lodestar_network_transport_failures_total 18446744073709551615\n");
     const closed = @tagName(@as(types.DisconnectReason, @enumFromInt(0)));
     var line: [128]u8 = undefined;
@@ -328,21 +326,11 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     try contains(output, "beacon_reqresp_admission_refusals_total{method=\"status\",reason=\"connection_capacity\"} 7\n");
     try contains(output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method=\"status\"} 2\n");
     try contains(output, "lodestar_gossip_validation_expired_executing_count 3\n");
-    try contains(output, "lodestar_network_metrics_updated_timestamp_seconds 123456\n");
     try std.testing.expect(std.mem.find(u8, output, "lodestar_peer_manager_starved_bool") == null);
     try std.testing.expect(std.mem.find(u8, output, "lodestar_discovery_total_dial_attempts") == null);
     try std.testing.expect(std.mem.find(u8, output, "_total_total") == null);
-    _ = try f.render(true);
+    _ = try f.render();
     try std.testing.expectEqualDeep(original, node.peer_manager.counters);
-    const stopped = try f.render(false);
-    try contains(stopped, "lodestar_network_running_bool 0\n");
-    try contains(stopped, "lodestar_peer_outbound_deficit_count 0\n");
-    try contains(stopped, closes);
-    try contains(stopped, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n");
-    try contains(stopped, "beacon_reqresp_outgoing_opened_streams_total{method=\"status\"} 7\n");
-    try contains(stopped, "beacon_reqresp_outgoing_closed_streams_total{method=\"status\"} 3\n");
-    try contains(stopped, "beacon_reqresp_dial_errors_total 5\n");
-    try contains(stopped, "lodestar_gossip_validation_expired_executing_count 0\n");
 }
 
 test "metrics include remote subscriptions on inactive topics and follow local fork boundary visibility" {
@@ -356,7 +344,7 @@ test "metrics include remote subscriptions on inactive topics and follow local f
     _ = g.overlay.peerSubscription(&context, peer.index, name, true);
     try std.testing.expect(g.overlay.findTopic(name) == null);
     try std.testing.expectEqual(@as(usize, 1), g.resourceSnapshot().remote_subscriptions);
-    var output = try f.render(true);
+    var output = try f.render();
     try contains(output, "lodestar_gossip_topic_peers_by_data_column_subnet_count{subnet=\"9\",boundary=\"fulu_100\"} 1\n");
     try contains(output, "lodestar_gossip_mesh_peers_by_data_column_subnet_count{subnet=\"9\",boundary=\"fulu_100\"} 0\n");
     try contains(output, "gossipsub_topic_subscription_status{topicStr=\"/eth2/00000000/data_column_sidecar_9/ssz_snappy\"} 0\n");
@@ -364,16 +352,16 @@ test "metrics include remote subscriptions on inactive topics and follow local f
     try std.testing.expect(std.mem.find(u8, output, "fulu_200") == null);
     const future = "/eth2/01010101/beacon_block/ssz_snappy";
     try gossip_test.subscribe(g, future);
-    output = try f.render(true);
+    output = try f.render();
     try contains(output, "lodestar_gossip_mesh_peers_by_type_count{type=\"beacon_block\",boundary=\"fulu_200\"} 0\n");
     try contains(output, "gossipsub_topic_subscription_status{topicStr=\"/eth2/01010101/beacon_block/ssz_snappy\"} 1\n");
     try gossip_test.unsubscribe(g, future);
-    output = try f.render(true);
+    output = try f.render();
     try std.testing.expect(std.mem.find(u8, output, "fulu_200") == null);
     const connection = g.sessions.rows[peer.index].conn;
     g.connectionClosed(connection);
     g.connectionClosed(connection);
-    output = try f.render(true);
+    output = try f.render();
     try contains(output, "lodestar_gossip_topic_peers_by_data_column_subnet_count{subnet=\"9\",boundary=\"fulu_100\"} 0\n");
     try std.testing.expectEqual(@as(usize, 0), g.resourceSnapshot().remote_subscriptions);
 }
@@ -389,7 +377,7 @@ test "metrics maximum configured topic domain fits its startup exposition reserv
         try gossip_test.subscribe(g, topic_mod.build(value.digest, "beacon_block", &name));
     }
     f.node.counters.dial_started = std.math.maxInt(u64);
-    const output = try f.render(true);
+    const output = try f.render();
     try std.testing.expect(output.len < f.buffer.len);
     try std.testing.expectEqual(@as(usize, 64 * 128), std.mem.count(u8, output, "lodestar_gossip_topic_peers_by_data_column_subnet_count{subnet="));
     try contains(output, "boundary=\"fulu_18446744073709551615\"");
@@ -402,18 +390,18 @@ test "metrics preserve outgoing queue refusals across session retirement and reu
     const first = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     g.counters.ihave_budget_skipped = 7;
     g.sessions.rows[first.index].io.tx.drops[0] = 3;
-    try contains(try f.render(true), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 3\n");
+    try contains(try f.render(), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 3\n");
     const conn = g.sessions.rows[first.index].conn;
     g.connectionClosed(conn);
     g.connectionClosed(conn);
-    try contains(try f.render(true), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 3\n");
+    try contains(try f.render(), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 3\n");
     const next = gossip_test.addPeer(g, .{ .index = 0, .generation = 2 }, .v1_2).?;
     try std.testing.expectEqual(first.index, next.index);
     g.sessions.rows[next.index].io.tx.drops[0] = 2;
-    try contains(try f.render(true), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 5\n");
+    try contains(try f.render(), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 5\n");
     g.connectionClosed(g.sessions.rows[next.index].conn);
-    try contains(try f.render(false), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 5\n");
-    try contains(try f.render(false), "gossipsub_ihave_budget_skipped_total 7\n");
+    try contains(try f.render(), "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 5\n");
+    try contains(try f.render(), "gossipsub_ihave_budget_skipped_total 7\n");
 }
 
 test "metrics distinguish gossip kind allowances from recipient queue capacity" {
@@ -434,13 +422,13 @@ test "metrics distinguish gossip kind allowances from recipient queue capacity" 
     try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, message, .forward, limits, 1));
     try std.testing.expectEqual(.full, tx.queueData(&g.messages.store, message, .iwant, limits, 1));
     try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, message, .publication, limits, 1));
-    const before = try f.render(true);
+    const before = try f.render();
     try contains(before, "gossipsub_queue_drops_total{reason=\"data_kind_descriptors\"} 1\n");
     try contains(before, "gossipsub_queue_drops_total{reason=\"data_kind_bytes\"} 1\n");
     try contains(before, "gossipsub_queue_drops_total{reason=\"data_descriptors\"} 0\n");
     try contains(before, "gossipsub_queue_drops_total{reason=\"data_bytes\"} 0\n");
     g.connectionClosed(g.sessions.rows[peer.index].conn);
-    const after = try f.render(false);
+    const after = try f.render();
     try contains(after, "gossipsub_queue_drops_total{reason=\"data_kind_descriptors\"} 1\n");
     try contains(after, "gossipsub_queue_drops_total{reason=\"data_kind_bytes\"} 1\n");
 }
@@ -453,7 +441,7 @@ test "metrics preserve gossip RPC admissions through cancellation retirement and
     const peer = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     try std.testing.expect(g.sessions.rows[peer.index].io.tx.submit(&.{ .graft = "t" }, &g.sessions.control_scratch, 1) != null);
     for (0..3) |stage| {
-        const output = try f.render(stage < 2);
+        const output = try f.render();
         try contains(output, "gossipsub_rpc_recv_bytes_total 123\n");
         try contains(output, "gossipsub_rpc_recv_count_total 1\n");
         inline for (.{ "subscription", "message", "ihave", "iwant", "graft", "prune", "idontwant" }, 2..) |field, count| {
@@ -470,12 +458,12 @@ test "metrics preserve gossip RPC admissions through cancellation retirement and
     const reused = gossip_test.addPeer(g, .{ .index = 0, .generation = 2 }, .v1_2).?;
     try std.testing.expectEqual(peer.index, reused.index);
     try std.testing.expect(g.sessions.rows[reused.index].io.tx.submit(&.{ .graft = "t" }, &g.sessions.control_scratch, 2) != null);
-    try contains(try f.render(true), "gossipsub_rpc_sent_count_total 2\n");
-    try contains(try f.render(true), "gossipsub_rpc_sent_bytes_total 14\n");
-    try contains(try f.render(true), "gossipsub_rpc_sent_graft_total 2\n");
+    try contains(try f.render(), "gossipsub_rpc_sent_count_total 2\n");
+    try contains(try f.render(), "gossipsub_rpc_sent_bytes_total 14\n");
+    try contains(try f.render(), "gossipsub_rpc_sent_graft_total 2\n");
 }
 
-test "metrics render retained usable coverage and suppress deficits when stopped" {
+test "metrics render retained usable coverage" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
     const manager = &f.node.peer_manager;
@@ -486,35 +474,31 @@ test "metrics render retained usable coverage and suppress deficits when stopped
     var inputs = [_]selection.Input{ .{ .coverage = .{ .attnets = 1, .syncnets = 1 }, .outbound = true }, .{ .coverage = .{ .attnets = 3 }, .reject = .banned } };
     inputs[0].coverage.groups.set(0);
     manager.selection = selection.select(&inputs, &manager.demand, .{ .target_peers = 8, .max_peers = 12 }, 0);
-    const output = try f.render(true);
+    const output = try f.render();
     try contains(output, "lodestar_peer_count_per_sampling_group{groupIndex=\"0\"} 1\n");
     try contains(output, "lodestar_peer_count_per_sampling_group{groupIndex=\"127\"} 0\n");
     try contains(output, "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 3\n");
-    try contains(try f.render(false), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
-    try contains(try f.render(true), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 3\n");
+    try contains(try f.render(), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 3\n");
 }
 
-test "metrics follow demand replacement and owner shutdown" {
+test "metrics follow demand replacement" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
     const demand: types.Demand = .{ .attnets = 3, .attestation_target = 2 };
     try core_test.updateDemand(f.node, &demand, f.node.last_now);
     var result = f.node.advance(std.testing.io, .{ .now = f.node.last_now, .readiness = .{} }, .{}, .{});
     try std.testing.expect(result.failure == null);
-    try contains(try f.render(f.node.phase() == .running), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 4\n");
+    try contains(try f.render(), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 4\n");
 
     try core_test.updateDemand(f.node, &.{}, f.node.last_now);
     result = f.node.advance(std.testing.io, .{ .now = f.node.last_now, .readiness = .{} }, .{}, .{});
     try std.testing.expect(result.failure == null);
-    try contains(try f.render(f.node.phase() == .running), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
+    try contains(try f.render(), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
 
     try core_test.updateDemand(f.node, &demand, f.node.last_now);
     result = f.node.advance(std.testing.io, .{ .now = f.node.last_now, .readiness = .{} }, .{}, .{});
     try std.testing.expect(result.failure == null);
-    try contains(try f.render(f.node.phase() == .running), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 4\n");
-    f.node.shutdown(f.node.last_now);
-    try std.testing.expectEqual(.stopped, f.node.phase());
-    try contains(try f.render(f.node.phase() == .running), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
+    try contains(try f.render(), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 4\n");
 }
 
 test "metrics render exactly the measurement contract families with their types and labels" {
@@ -522,7 +506,7 @@ test "metrics render exactly the measurement contract families with their types 
     defer f.deinit();
     // A connected gossip peer gives the score statistics a population to sample.
     _ = gossip_test.addPeer(f.node.protocols.gossipsub, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    const output = try f.render(true);
+    const output = try f.render();
     var missing: usize = 0;
     for (contract) |series| {
         if (hasSeries(output, series)) continue;
@@ -548,7 +532,7 @@ test "metrics render exactly the measurement contract families with their types 
 test "metrics report the kernel's buffer sizes and drops for every UDP socket" {
     var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) } });
     defer f.deinit();
-    const output = try f.render(true);
+    const output = try f.render();
     const roles = [_]struct { []const u8, *Sockets }{
         .{ "quic", &f.node.transport.sockets },
         .{ "discovery", &f.node.discovery.?.transport.sockets },
@@ -564,7 +548,7 @@ test "metrics report the kernel's buffer sizes and drops for every UDP socket" {
     }
     try std.testing.expect(std.mem.find(u8, output, "family=\"ip6\"") == null);
     f.node.discovery.?.transport.sockets.buffers[0].?.receive = null;
-    const unknown = try f.render(true);
+    const unknown = try f.render();
     try std.testing.expect(std.mem.find(u8, unknown, "role=\"discovery\",family=\"ip4\",direction=\"receive\"") == null);
     try contains(unknown, "role=\"discovery\",family=\"ip4\",direction=\"send\"");
 }
@@ -573,18 +557,18 @@ test "metrics label redials after a health close in the dial retries contract se
     var f = try Fixture.init(&.{});
     defer f.deinit();
     f.node.peer_manager.dialing.retries[@intFromEnum(types.DialFailure.health)] = 2;
-    try contains(try f.render(true), "lodestar_peer_dial_retries_total{previous=\"health\"} 2\n");
+    try contains(try f.render(), "lodestar_peer_dial_retries_total{previous=\"health\"} 2\n");
 }
 
-test "metrics export dial time by outcome in seconds through shutdown" {
+test "metrics export cumulative dial time by outcome in seconds" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
     const dialing = &f.node.peer_manager.dialing;
     const connected = @intFromEnum(types.DialOutcome.connected);
     dialing.durations[connected].observe(180);
     dialing.outcomes[connected] = 1;
-    for ([_]bool{ true, false }) |running| {
-        const output = try f.render(running);
+    for (0..2) |_| {
+        const output = try f.render();
         try contains(output, "# TYPE lodestar_peer_dial_time_seconds histogram\n");
         try contains(output, "lodestar_peer_dial_time_seconds_bucket{outcome=\"connected\",le=\"0.1\"} 0\n");
         try contains(output, "lodestar_peer_dial_time_seconds_bucket{outcome=\"connected\",le=\"0.25\"} 1\n");
@@ -606,7 +590,7 @@ test "metrics export cumulative discovery lookups and datagram rejections" {
     coordinator.datagram_rejections[@intFromEnum(d.types.RejectReason.invalid_handshake)] = 3;
     _ = coordinator.consume(&.{ .datagram = .{ .rejected = .record_admission_limited } }, &.{}, &.{});
     _ = coordinator.consume(&.{ .datagram = .{ .rejected = .admission_limited } }, &.{}, &.{});
-    const output = try f.render(true);
+    const output = try f.render();
     try contains(output, "lodestar_discovery_find_node_query_requests_total{action=\"start\"} 5\n");
     try contains(output, "lodestar_discovery_find_node_query_time_seconds_count 2\n");
     try contains(output, "lodestar_discovery_find_node_query_time_seconds_sum 10\n");
@@ -615,8 +599,8 @@ test "metrics export cumulative discovery lookups and datagram rejections" {
     try contains(output, "lodestar_discovery_datagram_rejections_total{stage=\"record\",reason=\"record_admission_limited\"} 1\n");
     try contains(output, "lodestar_discovery_datagram_rejections_total{stage=\"admission\",reason=\"admission_limited\"} 1\n");
     try contains(output, "lodestar_discovery_datagram_rejections_total{stage=\"record\",reason=\"invalid_record\"} 0\n");
-    try contains(try f.render(false), "lodestar_discovery_find_node_query_requests_total{action=\"start\"} 5\n");
-    try contains(try f.render(false), "lodestar_discovery_find_node_query_time_seconds_count 2\n");
+    try contains(try f.render(), "lodestar_discovery_find_node_query_requests_total{action=\"start\"} 5\n");
+    try contains(try f.render(), "lodestar_discovery_find_node_query_time_seconds_count 2\n");
 }
 
 test "metrics export stock per-topic gossipsub peer gauges under full topic strings" {
@@ -627,7 +611,7 @@ test "metrics export stock per-topic gossipsub peer gauges under full topic stri
     const context = g.overlayContext(g.last_now_ms);
     const column = "/eth2/00000000/data_column_sidecar_9/ssz_snappy";
     _ = g.overlay.peerSubscription(&context, peer.index, column, true);
-    var output = try f.render(true);
+    var output = try f.render();
     try contains(output, "# TYPE gossipsub_topic_peer_count gauge\n");
     try contains(output, "gossipsub_topic_peer_count{topicStr=\"" ++ column ++ "\"} 1\n");
     try contains(output, "gossipsub_mesh_peer_count{topicStr=\"" ++ column ++ "\"} 0\n");
@@ -636,7 +620,7 @@ test "metrics export stock per-topic gossipsub peer gauges under full topic stri
     try std.testing.expect(std.mem.find(u8, output, "/eth2/01010101/") == null);
     const future = "/eth2/01010101/beacon_block/ssz_snappy";
     try gossip_test.subscribe(g, future);
-    output = try f.render(true);
+    output = try f.render();
     try contains(output, "gossipsub_mesh_peer_count{topicStr=\"" ++ future ++ "\"} 0\n");
 }
 
@@ -646,19 +630,20 @@ test "metrics export gossip score populations and zero empty statistics" {
     const g = f.node.protocols.gossipsub;
     _ = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     gossip_test.penalize(g, g.sessions.rows[0].conn, 7);
-    const running = try f.render(true);
+    const running = try f.render();
     try contains(running, "lodestar_gossip_peer_score_by_threshold_count{threshold=\"all\"} 1\n");
     try contains(running, "lodestar_gossip_peer_score_by_threshold_count{threshold=\"mesh\"} 0\n");
     try contains(running, "lodestar_gossip_mesh_peer_score_by_threshold_count{threshold=\"all\"} 0\n");
     try contains(running, "lodestar_gossip_score_avg_min_max_max -10\n");
     try contains(running, "lodestar_gossip_mesh_score_avg_min_max_avg 0\n");
-    const stopped = try f.render(false);
-    try contains(stopped, "lodestar_gossip_peer_score_by_threshold_count{threshold=\"all\"} 0\n");
-    try contains(stopped, "lodestar_gossip_score_avg_min_max_avg 0\n");
-    try contains(stopped, "lodestar_gossip_mesh_score_avg_min_max_avg 0\n");
+    g.connectionClosed(g.sessions.rows[0].conn);
+    const retired = try f.render();
+    try contains(retired, "lodestar_gossip_peer_score_by_threshold_count{threshold=\"all\"} 0\n");
+    try contains(retired, "lodestar_gossip_score_avg_min_max_avg 0\n");
+    try contains(retired, "lodestar_gossip_mesh_score_avg_min_max_avg 0\n");
 }
 
-test "metrics export gossip message, mesh change, penalty and promise counters through shutdown" {
+test "metrics export gossip message, mesh change, penalty and promise counters through peer retirement" {
     var f = try Fixture.init(&.{boundary(@splat(0), 100)});
     defer f.deinit();
     const g = f.node.protocols.gossipsub;
@@ -686,16 +671,16 @@ test "metrics export gossip message, mesh change, penalty and promise counters t
         "gossipsub_receive_discards_total{reason=\"unattributed_timeout\"} 0\n",
         "gossipsub_iwant_promise_sent_total 9\n",
     };
-    const running = try f.render(true);
+    const running = try f.render();
     for (expected) |line| try contains(running, line);
     try std.testing.expectEqual(@as(usize, (policy.kind_count + 1) * 12), std.mem.count(u8, running, "gossipsub_mesh_changes_total{"));
     g.connectionClosed(g.sessions.rows[peer.index].conn);
-    const stopped = try f.render(false);
-    for (expected) |line| try contains(stopped, line);
-    try contains(stopped, "gossipsub_mesh_changes_total{topic=\"beacon_block\",event=\"leave\",reason=\"session_end\"} 1\n");
+    const retired = try f.render();
+    for (expected) |line| try contains(retired, line);
+    try contains(retired, "gossipsub_mesh_changes_total{topic=\"beacon_block\",event=\"leave\",reason=\"session_end\"} 1\n");
 }
 
-test "stopped metrics report all delivery descriptors available with zero occupancy" {
+test "metrics report delivery capacity and available descriptors without changing the pool" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
     const pool = f.node.protocols.gossipsub.sessions.deliveries;
@@ -703,23 +688,20 @@ test "stopped metrics report all delivery descriptors available with zero occupa
     pool.available -= 1;
     defer pool.available = capacity;
     var line: [128]u8 = undefined;
-    const running = try f.render(true);
+    const running = try f.render();
     try contains(running, try std.fmt.bufPrint(&line, "gossipsub_delivery_descriptors_available_count {d}\n", .{capacity - 1}));
-    const stopped = try f.render(false);
-    try contains(stopped, try std.fmt.bufPrint(&line, "gossipsub_delivery_descriptors_capacity_count {d}\n", .{capacity}));
-    try contains(stopped, try std.fmt.bufPrint(&line, "gossipsub_delivery_descriptors_available_count {d}\n", .{capacity}));
-    try contains(stopped, "gossipsub_queued_bytes 0\n");
+    try contains(running, try std.fmt.bufPrint(&line, "gossipsub_delivery_descriptors_capacity_count {d}\n", .{capacity}));
     try std.testing.expectEqual(capacity - 1, pool.available);
 }
 
-test "metrics expose local UDP send drops by role and pressure without clearing at stop" {
+test "metrics expose local UDP send drops by role and pressure without clearing on read" {
     var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) } });
     defer f.deinit();
     f.node.transport.send_drops.add(.would_block, 17);
     f.node.transport.send_drops.add(.would_block, 19);
     f.node.discovery.?.transport.send_drops.add(.system_resources, 23);
-    for ([_]bool{ true, false }) |running| {
-        const output = try f.render(running);
+    for (0..2) |_| {
+        const output = try f.render();
         try contains(output, "lodestar_udp_send_dropped_datagrams_total{role=\"quic\",reason=\"would_block\"} 2\n");
         try contains(output, "lodestar_udp_send_dropped_bytes_total{role=\"quic\",reason=\"would_block\"} 36\n");
         try contains(output, "lodestar_udp_send_dropped_datagrams_total{role=\"discovery\",reason=\"system_resources\"} 1\n");
@@ -754,7 +736,7 @@ test "core metrics aggregate subnets and count distinct mesh peers" {
         mesh_count = pair.client.protocols.gossipsub.resourceSnapshot().mesh_members;
         if (mesh_count == 3) break;
     }
-    const context = metrics.Context.init(&pair.client, pair.client.last_now, true);
+    const context = metrics.Context.init(&pair.client, pair.client.last_now);
     try std.testing.expectEqual(@as(usize, 3), mesh_count);
     try std.testing.expectEqual(@as(usize, 1), context.population.count);
     var mesh_peers: usize = 0;
@@ -765,14 +747,6 @@ test "core metrics aggregate subnets and count distinct mesh peers" {
     }
     try std.testing.expectEqual(@as(usize, 1), mesh_peers);
     try std.testing.expectEqual(@as(usize, 1), scored_peers);
-    const again = metrics.Context.init(&pair.client, pair.client.last_now, true);
+    const again = metrics.Context.init(&pair.client, pair.client.last_now);
     try std.testing.expectEqualDeep(context.population, again.population);
-    const stopped = metrics.Context.init(&pair.client, pair.client.last_now, false);
-    try std.testing.expectEqual(@as(usize, 0), stopped.population.count);
-    try std.testing.expectEqual(@as(u64, 0), stopped.population.attnets.count);
-    for (stopped.population.mesh_clients, stopped.population.scores, stopped.population.gossip_scores) |meshed, app, gossip| {
-        try std.testing.expectEqual(@as(u16, 0), meshed);
-        try std.testing.expectEqual(@as(u64, 0), app.count);
-        try std.testing.expectEqual(@as(u64, 0), gossip.count);
-    }
 }

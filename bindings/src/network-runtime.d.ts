@@ -52,7 +52,7 @@ export interface NativeNetworkApplicationRuntime
     | "disconnect"
   > {
   drainLogs(maxRecords?: number): NativeLogBatch;
-  /** Prometheus text rendered on demand by the owner. The final snapshot survives close. */
+  /** Prometheus text rendered on demand by the owner. Rejects with NetworkClosed once the owner stops. */
   getMetrics: NativeNetwork["metrics"];
   publishGossip: NativeNetwork["publish"];
   /** A failed runtime cannot restart. The host must shut down the beacon node on terminal failure. */

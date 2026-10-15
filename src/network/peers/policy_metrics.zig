@@ -1,13 +1,10 @@
 const std = @import("std");
 const prom = @import("../metrics/registry.zig");
 const PeerManager = @import("../peer_manager.zig").PeerManager;
-const policy = @import("policy.zig");
 
-/// The latest peer selection's deficits and sampling-group coverage. Gauges read zero once the
-/// owner stops.
-pub fn write(manager: *const PeerManager, running: bool, w: *prom.Encoder) prom.Error!void {
-    const empty: policy.Result = .{};
-    const selection = if (running) &manager.selection else &empty;
+/// The latest peer selection's deficits and sampling-group coverage.
+pub fn write(manager: *const PeerManager, w: *prom.Encoder) prom.Error!void {
+    const selection = &manager.selection;
     const memberships = try w.family(.{
         .name = "lodestar_discovery_subnet_peers_to_connect",
         .kind = .gauge,

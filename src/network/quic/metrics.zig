@@ -41,11 +41,10 @@ pub const Snapshot = struct {
     cwnd: Range = .{},
     rtt: Range = .{},
 
-    pub fn observe(self: *Snapshot, conn: *c.quiche_conn, running: bool) void {
+    pub fn observe(self: *Snapshot, conn: *c.quiche_conn) void {
         var stats: c.quiche_stats = undefined;
         c.quiche_conn_stats(conn, &stats);
         self.counters.add(&stats);
-        if (!running) return;
         // A migration can leave old paths behind. Bound scrape work and expose missed samples.
         for (0..@min(stats.paths_count, 8)) |index| {
             var path: c.quiche_path_stats = undefined;

@@ -24,7 +24,7 @@ function samples(text: string): Map<string, number> {
   return result;
 }
 
-test("a scrape racing shutdown during admission returns the available snapshot", async () => {
+test("a scrape racing shutdown during admission rejects with NetworkClosed", async () => {
   const runtime = startRuntime(applicationConfig());
   let closedDuringCreation = false;
   const hook = createHook({
@@ -36,57 +36,44 @@ test("a scrape racing shutdown during admission returns the available snapshot",
   });
   try {
     hook.enable();
-    const scrape = runtime.getMetrics();
+    expect(() => runtime.getMetrics()).toThrow("NetworkClosed");
     hook.disable();
-    expect(samples(await scrape).has("lodestar_network_running_bool")).toBe(true);
     expect(closedDuringCreation).toBe(true);
   } finally {
     hook.disable();
     await runtime.close();
   }
-  expect(samples(await runtime.getMetrics()).get("lodestar_network_running_bool")).toBe(0);
+  expect(() => runtime.getMetrics()).toThrow("NetworkClosed");
 });
 
-test("shutdown completes a queued scrape with the final snapshot", async () => {
+test("shutdown rejects a queued scrape", async () => {
   const runtime = startRuntime(applicationConfig());
   try {
     runtime.holdOperations(true);
     const scrape = runtime.getMetrics();
+    const rejected = expect(scrape).rejects.toThrow("NetworkClosed");
     const closed = runtime.close();
-    expect(samples(await scrape).get("lodestar_network_running_bool")).toBe(0);
+    await rejected;
     expect(await closed).toEqual({reason: "requested"});
   } finally {
     await runtime.close();
   }
 });
 
-test("metrics are available through startup and remain readable after close", async () => {
+test("metrics are available while open and reject after close", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config, () => undefined);
-  const capacities = new Map<string, number>();
   try {
     expect(samples(await runtime.getMetrics()).get("libp2p_peers")).toBe(0);
     expect(samples(await runtime.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
     await runtime.identity;
     await runtime.applyIntent(localIntent(config));
-    await vi.waitFor(async () =>
-      expect(samples(await runtime.getMetrics()).get("lodestar_network_running_bool")).toBe(1)
-    );
     const metrics = samples(await runtime.getMetrics());
     const validationCapacity = metrics.get("gossipsub_validation_capacity_count");
     expect(validationCapacity).toBeGreaterThan(0);
     expect(metrics.has("lodestar_peer_manager_starved_bool")).toBe(false);
     expect(metrics.has("lodestar_discovery_total_dial_attempts")).toBe(false);
-    const published = metrics.get("lodestar_network_metrics_updated_timestamp_seconds");
-    expect(published).toBeGreaterThan(0);
-    await vi.waitFor(
-      async () => {
-        const next = samples(await runtime.getMetrics());
-        expect(next.get("lodestar_network_metrics_updated_timestamp_seconds")).toBeGreaterThan(published ?? 0);
-        expect(next.get("lodestar_network_step_seconds_count")).toBeGreaterThan(0);
-      },
-      {timeout: 5000}
-    );
+    expect(metrics.get("lodestar_network_step_seconds_count")).toBeGreaterThan(0);
     expect(metrics.get("lodestar_gossip_validation_expired_executing_count")).toBe(0);
     expect(metrics.get('lodestar_gossip_validation_queue_length{topic="beacon_block"}')).toBe(0);
     for (const reason of [
@@ -109,7 +96,6 @@ test("metrics are available through startup and remain readable after close", as
       const value = metrics.get(name);
       expect(value).toBeGreaterThan(0);
       if (value === undefined) throw Error(`Missing capacity: ${name}`);
-      capacities.set(name, value);
     }
     expect(metrics.get("gossipsub_iwant_rcv_dont_have_msgids_total")).toBe(0);
     for (const direction of ["recv", "sent"]) {
@@ -135,15 +121,7 @@ test("metrics are available through startup and remain readable after close", as
   } finally {
     await runtime.close();
   }
-  const closed = await runtime.getMetrics();
-  const closedSamples = samples(closed);
-  expect(closedSamples.get("lodestar_gossip_validation_expired_executing_count")).toBe(0);
-  for (const [name, value] of capacities) expect(closedSamples.get(name)).toBe(value);
-  expect(samples(closed).get("lodestar_network_running_bool")).toBe(0);
-  expect(samples(closed).get("libp2p_peers")).toBe(0);
-  expect(samples(closed).get("lodestar_peer_connection_seconds_count")).toBe(0);
-  expect(samples(closed).get("lodestar_quic_connection_slots_count")).toBe(0);
-  expect(await runtime.getMetrics()).toBe(closed);
+  expect(() => runtime.getMetrics()).toThrow("NetworkClosed");
 }, 20000);
 
 test("real request and peer metrics are isolated, cumulative and do not drain requests", async () => {
@@ -202,18 +180,6 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
       {timeout: 5000}
     );
     for (let i = 0; i < 10; i++) expect(samples(await pair.left.getMetrics()).get(outgoing)).toBe(1);
-    await Promise.all([pair.left.close(), pair.right.close()]);
-    expect(samples(await pair.left.getMetrics()).get(outgoing)).toBe(1);
-    expect(samples(await pair.right.getMetrics()).get(incoming)).toBe(1);
-    expect(samples(await pair.left.getMetrics()).get("libp2p_peers")).toBe(0);
-    expect(samples(await pair.left.getMetrics()).get('lodestar_peer_dial_outcomes_total{outcome="connected"}')).toBe(1);
-    expect(samples(await pair.left.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
-    expect(samples(await pair.left.getMetrics()).get("lodestar_peer_long_lived_attnets_count_count")).toBe(0);
-    expect(
-      samples(await pair.left.getMetrics()).get(
-        'beacon_reqresp_outgoing_closed_streams_total{method="beacon_blocks_by_root"}'
-      )
-    ).toBe(1);
   } finally {
     await Promise.all([pair.left.stop(), pair.right.close()]);
   }
@@ -245,5 +211,4 @@ test("incoming error responses use the request error metric exactly once", async
   } finally {
     await Promise.all([pair.left.stop(), pair.right.close()]);
   }
-  expect(samples(await pair.right.getMetrics()).get(incomingErrors)).toBe(expected);
 }, 20000);

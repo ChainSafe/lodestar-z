@@ -157,10 +157,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             status.fork_digest = core.localState().status.fork_digest;
             try core.updateStatus(&status);
         },
-        .getMetrics => network_owner.renderMetrics(self, timestamp) catch |err| return switch (err) {
-            error.WriteFailed, error.MetricCapacity => error.NetworkMetricsCapacity,
-            error.DuplicateMetric => error.NetworkMetricsSchema,
-        },
+        .getMetrics => network_owner.renderMetrics(self, timestamp),
         .getPeerScores => try self.bridge.diagnostics.?.captureScores(core, timestamp),
         .getGossipDiagnostics => |cursor| try n.gossipsub.diagnostics.capture(core.protocols.gossipsub, cursor, timestamp, &self.bridge.diagnostics.?.gossip),
         .removeDirectPeer => |*peer| operation.boolean = core.removeDirectPeer(peer),

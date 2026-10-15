@@ -20,8 +20,7 @@ pub const Snapshot = struct {
 
 pub const empty: Snapshot = .{};
 
-/// Renders processor series. Processor gauges read zero once the owner stops.
-pub fn write(snapshot: *const Snapshot, running: bool, w: *prom.Encoder) prom.Error!void {
+pub fn write(snapshot: *const Snapshot, w: *prom.Encoder) prom.Error!void {
     inline for (.{
         .{ "lodestar_gossip_validation_queue_length", .queued, "Gossip messages queued for validation" },
         .{ "lodestar_gossip_validation_waiting_block_count", .waiting, "Gossip messages waiting for an unknown block" },
@@ -30,7 +29,7 @@ pub fn write(snapshot: *const Snapshot, running: bool, w: *prom.Encoder) prom.Er
     }) |metric| {
         const items = try w.family(.{ .name = metric[0], .kind = .gauge, .help = metric[2], .labels = &.{"topic"} });
         for (snapshot.items, 0..) |states, k| {
-            try items.sample(.{@tagName(@as(Kind, @enumFromInt(k)))}, if (running) states[@intFromEnum(@as(processor.GossipProcessor.Occupancy, metric[1]))] else 0);
+            try items.sample(.{@tagName(@as(Kind, @enumFromInt(k)))}, states[@intFromEnum(@as(processor.GossipProcessor.Occupancy, metric[1]))]);
         }
     }
     var waiting: u64 = 0;
@@ -39,7 +38,7 @@ pub fn write(snapshot: *const Snapshot, running: bool, w: *prom.Encoder) prom.Er
         .name = "lodestar_awaiting_block_gossip_messages_per_slot_total",
         .kind = .gauge,
         .help = "Current gossip messages waiting for an unknown block",
-    }, if (running) waiting else 0);
+    }, waiting);
     const refusals = try w.family(.{ .name = "lodestar_gossip_validation_refusals_total", .kind = .counter, .help = "Gossip messages refused by topic and admission reason", .labels = &.{ "topic", "reason" } });
     for (snapshot.refusals, 0..) |reasons, k| for (reasons, 0..) |count, reason| {
         try refusals.sample(.{ @tagName(@as(Kind, @enumFromInt(k))), @tagName(@as(processor.GossipProcessor.Refusal, @enumFromInt(reason))) }, count);
@@ -67,7 +66,7 @@ test "processor snapshot renders occupancy, refusals and execution limits" {
     var buffer: [256 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     var encoder: prom.Encoder = .{ .writer = &writer };
-    try write(&snapshot, true, &encoder);
+    try write(&snapshot, &encoder);
     const output = writer.buffered();
     for ([_][]const u8{
         "lodestar_gossip_validation_queue_length{topic=\"beacon_attestation\"} 3\n",
@@ -79,9 +78,4 @@ test "processor snapshot renders occupancy, refusals and execution limits" {
         "lodestar_gossip_validation_concurrency_limit{topic=\"data_column_sidecar\"} 2\n",
         "lodestar_gossip_validation_execution_limit_bytes{topic=\"data_column_sidecar\"} 4096\n",
     }) |expected| try std.testing.expect(std.mem.find(u8, output, expected) != null);
-    writer = std.Io.Writer.fixed(&buffer);
-    encoder = .{ .writer = &writer };
-    try write(&snapshot, false, &encoder);
-    try std.testing.expect(std.mem.find(u8, writer.buffered(), "lodestar_gossip_validation_waiting_block_count{topic=\"beacon_attestation\"} 0\n") != null);
-    try std.testing.expect(std.mem.find(u8, writer.buffered(), "lodestar_gossip_validation_refusals_total{topic=\"data_column_sidecar\",reason=\"source_full\"} 2\n") != null);
 }

@@ -107,7 +107,6 @@ pub fn initialize(self: *Runtime) !void {
     }
     try self.owner.?.core.setHostWake(self.bridge.wake.?.read_fd);
 
-    try renderMetrics(self, try Now.read(io));
     std.log.scoped(.network_runtime).info("owner_initialized target_peers={d} max_peers={d}", .{ self.owner.?.resolved.core.peers.target_peers, self.owner.?.resolved.core.peers.max_peers });
 }
 pub fn run(self: *Runtime) void {
@@ -403,8 +402,8 @@ fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n
     self.unlock();
 }
 
-pub fn renderMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!void {
-    var context = n.metrics.Context.init(&self.owner.?.core, timestamp, true);
+pub fn renderMetrics(self: *Runtime, timestamp: n.Now) void {
+    var context = n.metrics.Context.init(&self.owner.?.core, timestamp);
     // On-demand scrapes share one buffer with JS readers; rendering holds the mutex and can delay a JS turn.
     self.lock();
     if (self.bridge.gossip) |*table| {
@@ -414,7 +413,7 @@ pub fn renderMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!
     self.captureProcessorLocked(&self.owner.?.processor_metrics);
     defer self.unlock();
     context.processor = &self.owner.?.processor_metrics;
-    try self.metrics.render(&context);
+    self.metrics.render(&context);
 }
 
 test "a command queued after wait planning executes in the turn whose poll observes the wake" {
@@ -462,7 +461,7 @@ test "a command queued after wait planning executes in the turn whose poll obser
     defer runtime.bridge.requests.?.deinit();
     var host: Host = .{ .runtime = &runtime, .io = io };
     const ingress: gossip_mod.Ingress = .{ .runtime = &runtime, .io = io };
-    // The first turns render metrics and write the health log, then only deadlines remain.
+    // The first turns write the health log, then only deadlines remain.
     for (0..4) |_| _ = (try turn(&runtime, io, &host, &ingress)).?;
 
     const SubmitAtPoll = struct {

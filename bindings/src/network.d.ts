@@ -619,7 +619,7 @@ export interface NativeNetwork {
   getGossipDiagnostics(cursor?: number): Promise<NativeGossipDiagnosticsPage>;
   /**
    * Prometheus text rendered on demand, including binding counters. Concurrent scrapes share one request;
-   * after close, returns the final owner snapshot with current binding counters.
+   * rejects with NetworkClosed once closing begins.
    */
   metrics(): Promise<string>;
   /** Selects the threshold native records are kept at from now on. */

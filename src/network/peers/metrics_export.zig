@@ -9,7 +9,7 @@ const Client = @import("client.zig").Client;
 const control = @import("control.zig");
 const discv5 = @import("discv5");
 
-pub fn writePeers(manager: *const PeerManager, population: *const Population, running: bool, w: *prom.Encoder) prom.Error!void {
+pub fn writePeers(manager: *const PeerManager, population: *const Population, w: *prom.Encoder) prom.Error!void {
     try w.scalar(.{
         .name = "libp2p_peers",
         .kind = .gauge,
@@ -23,8 +23,8 @@ pub fn writePeers(manager: *const PeerManager, population: *const Population, ru
     try w.scalar(.{
         .name = "lodestar_peers_below_target_bool",
         .kind = .gauge,
-        .help = "Connected peers below target while running",
-    }, @intFromBool(running and population.count < manager.catalog.options.target_peers));
+        .help = "Connected peers below target",
+    }, @intFromBool(population.count < manager.catalog.options.target_peers));
     const directions = try w.family(.{
         .name = "lodestar_peers_by_direction_count",
         .kind = .gauge,

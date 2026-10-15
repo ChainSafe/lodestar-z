@@ -17,10 +17,7 @@ pub fn settle(env: napi.Env, runtime: *Runtime, token: commands.Token) !void {
     if (cell.failure) |err| {
         try cell.promise.settle(env, .reject, try js.settled(env, js.errorValue(env, @errorName(err))));
     } else {
-        const value = result(env, runtime, token.index) catch |err| switch (err) {
-            error.NetworkMetricsCapacity, error.NetworkMetricsSchema => return cell.promise.settle(env, .reject, try js.settled(env, js.errorValue(env, @errorName(err)))),
-            else => return err,
-        };
+        const value = try result(env, runtime, token.index);
         try cell.promise.settle(env, .resolve, value);
     }
 }

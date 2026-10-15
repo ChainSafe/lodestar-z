@@ -252,10 +252,10 @@ pub fn failSend(self: *Engine, conn: Handle) bool {
     return true;
 }
 
-pub fn metricsSnapshot(self: *const Engine, running: bool) metrics.Snapshot {
+pub fn metricsSnapshot(self: *const Engine) metrics.Snapshot {
     var result: metrics.Snapshot = .{ .counters = self.registry.retired_metrics };
     for (self.registry.activeIndices()) |index| {
-        if (self.registry.slots[index].conn) |conn| result.observe(conn, running);
+        if (self.registry.slots[index].conn) |conn| result.observe(conn);
     }
     return result;
 }

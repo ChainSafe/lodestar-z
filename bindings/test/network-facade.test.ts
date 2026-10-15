@@ -431,7 +431,7 @@ test("promise-returning operations reject admission failures without throwing", 
   await expect(network.getDirectPeers()).rejects.toThrow("NetworkClosed");
 });
 
-test("concurrent metrics scrapes share one owner command and the final snapshot survives close", async () => {
+test("concurrent metrics scrapes share one owner command and reject after close", async () => {
   const network = createNativeNetwork(applicationConfig(), host());
   const native = runtimeOf(network);
   if (!native) throw new Error("Missing native runtime");
@@ -441,10 +441,10 @@ test("concurrent metrics scrapes share one owner command and the final snapshot 
     const second = network.metrics();
     expect(second).toBe(first);
     native.holdOperations(false);
-    expect(await first).toContain("lodestar_network_running_bool 1\n");
+    expect(await first).toContain("libp2p_peers 0\n");
     expect(await second).toBe(await first);
     await network.close();
-    expect(await network.metrics()).toContain("lodestar_network_running_bool 0\n");
+    await expect(network.metrics()).rejects.toThrow("NetworkClosed");
   } finally {
     native.holdOperations(false);
     await network.close();

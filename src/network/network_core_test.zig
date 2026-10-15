@@ -204,7 +204,7 @@ test "core metrics copy peer processing work without advancing it" {
     const peer_work = node.peer_manager.counters;
     try std.testing.expect(peer_work.catalog_deadline_rows > 0);
     const metrics = @import("metrics/export.zig");
-    const context = metrics.Context.init(&node, node.last_now, true);
+    const context = metrics.Context.init(&node, node.last_now);
     const bytes = try std.testing.allocator.alloc(u8, metrics.fixed_text_capacity);
     defer std.testing.allocator.free(bytes);
     var writer = std.Io.Writer.fixed(bytes);

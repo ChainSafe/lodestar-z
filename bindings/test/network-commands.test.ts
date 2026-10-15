@@ -74,9 +74,7 @@ test.each(commands())("%s, held unstarted at close, settle without executing", a
     )
   );
   const closed = runtime.close();
-  expect(await Promise.all(outcomes)).toEqual(
-    kinds.map(([kind]) => `${kind} ${kind === "getMetrics" ? "resolved" : "NetworkClosed"}`)
-  );
+  expect(await Promise.all(outcomes)).toEqual(kinds.map(([kind]) => `${kind} NetworkClosed`));
   expect(await closed).toEqual({reason: "requested"});
 });
 
