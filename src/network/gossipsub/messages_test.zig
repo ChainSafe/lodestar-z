@@ -25,7 +25,7 @@ test "message admission retains canonical topic bounds" {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.canonical = candidate.canonical;
             self.maximum = candidate.maximum_compressed;
-            if (!candidate.sourceRoom() or !candidate.feasible(&.{})) return false;
+            if (!candidate.sourceRoom() or !candidate.fits(&candidate.room())) return false;
             candidate.commit();
             self.handle = candidate.event.handle;
             self.id = candidate.event.id;

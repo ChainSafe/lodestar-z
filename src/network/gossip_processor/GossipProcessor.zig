@@ -59,8 +59,7 @@ sources: [peer_book.capacity]struct {
 } = @splat(.{}),
 /// The victims `admit` selects and retires within one call. Fields rather than locals so
 /// ReleaseSafe does not fill them for every admission.
-victim_tokens: [batch_max]Token = undefined,
-victim_handles: [batch_max]native.Gossipsub.ValidationHandle = undefined,
+victims: [batch_max]u32 = undefined,
 
 pub const Token = struct { index: u16, generation: u64 };
 pub const State = enum { free, needs_check, checking, waiting, queued, copying, delivered, verdict_pending };

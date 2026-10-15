@@ -23,9 +23,8 @@ pub const Admission = struct {
     committed: bool = false,
     refusal: messages.StorageRefusal = .processor_capacity,
 
-    const Usage = struct {
+    pub const Room = struct {
         available: usize,
-        records: usize,
         payload: storage.Store.Room,
         kind_pages: usize,
         kind_entries: usize,
@@ -56,63 +55,49 @@ pub const Admission = struct {
         return self.workspace.chargeWork(self.context.options, cost);
     }
 
-    pub fn victimBytes(self: *const Admission, handle: validation.Handle) usize {
-        const pending = &self.messages.validation;
-        if (handle.index >= pending.entries.len) return 0;
-        const entry = &pending.entries[handle.index];
-        if (entry.generation != handle.generation or entry.state != .pending) return 0;
-        return self.messages.store.get(entry.state.pending.message).?.len;
+    pub fn room(self: *const Admission) Room {
+        const owner = self.messages;
+        const k = @intFromEnum(self.kind());
+        return .{
+            .available = owner.validation.available_entries.len,
+            .payload = owner.store.room(),
+            .kind_pages = owner.store.pending_by_kind[k],
+            .kind_entries = owner.store.pending_entries_by_kind[k],
+        };
     }
 
-    fn usage(self: *const Admission, victims: []const validation.Handle) Usage {
+    /// Adds the room a distinct victim would release, without changing live state.
+    /// Returns the compressed bytes that retiring it must charge to the turn.
+    pub fn includeVictim(self: *const Admission, resources: *Room, handle: validation.Handle) usize {
         const owner = self.messages;
-        const pending = &owner.validation;
-        const store = &owner.store;
-        const incoming_kind = self.kind();
-        const k = @intFromEnum(incoming_kind);
-        var available = pending.available_entries.len;
-        var records = pending.free_records.len + pending.resolved_records.len;
-        var room = store.room();
-        var kind_pages = store.pending_by_kind[k];
-        var kind_entries = store.pending_entries_by_kind[k];
-        for (victims, 0..) |handle, i| {
-            for (victims[0..i]) |previous| assert(!std.meta.eql(handle, previous));
-            if (handle.index >= pending.entries.len) continue;
-            const entry = &pending.entries[handle.index];
-            if (entry.generation != handle.generation or entry.state != .pending) continue;
-            available += @intFromBool(entry.generation != std.math.maxInt(u64));
-            records += 1;
-            const payload = store.get(entry.state.pending.message).?;
-            if (payload.provisional or payload.history) continue;
-            const released = storage.Store.pagesFor(payload.len);
-            room.releaseBase(payload);
-            if (payload.kind == incoming_kind) {
-                kind_pages -= released;
-                kind_entries -= 1;
+        if (handle.index >= owner.validation.entries.len) return 0;
+        const entry = &owner.validation.entries[handle.index];
+        if (entry.generation != handle.generation or entry.state != .pending) return 0;
+        resources.available += @intFromBool(entry.generation != std.math.maxInt(u64));
+        const payload = owner.store.get(entry.state.pending.message).?;
+        if (!payload.provisional and !payload.history) {
+            resources.payload.releaseBase(payload);
+            if (payload.kind == self.kind()) {
+                resources.kind_pages -= storage.Store.pagesFor(payload.len);
+                resources.kind_entries -= 1;
             }
         }
-        return .{ .available = available, .records = records, .payload = room, .kind_pages = kind_pages, .kind_entries = kind_entries };
+        return payload.len;
     }
 
-    /// Checks compressed storage and validation capacity after retiring `victims`.
-    /// Does not release victims or retained history. Call `sourceRoom` first.
-    pub fn feasible(self: *Admission, victims: []const validation.Handle) bool {
-        // Receipt work covers constant-time admission; replacement pays for each repeated preflight.
-        if (!self.charge(victims.len * @sizeOf(Usage))) return false;
-        const resources = self.usage(victims);
+    /// Checks the incoming payload against a preflight's room. Call `sourceRoom` first.
+    pub fn fits(self: *Admission, resources: *const Room) bool {
         if (self.context.options.payload_limits) |limits| {
             const limit = limits[@intFromEnum(self.kind())];
             if (resources.kind_entries >= limit.items) return self.refuse(.kind_validations);
             if (storage.Store.pagesFor(self.compressed.len) > limit.bytes / storage.page_bytes -| resources.kind_pages) return self.refuse(.kind_payload);
         }
         const owner = self.messages;
-        const pending = &owner.validation;
-        const store = &owner.store;
-        if (resources.available == 0 or resources.records == 0) return self.refuse(.validation_capacity);
-        if (pending.index.find(self.event.id)) |index| {
-            if (pending.recent[index].reserved or pending.recent[index].state == .pending) return self.refuse(.validation_capacity);
+        if (resources.available == 0) return self.refuse(.validation_capacity);
+        if (owner.validation.index.find(self.event.id)) |index| {
+            if (owner.validation.recent[index].state == .pending) return self.refuse(.validation_capacity);
         }
-        if (!owner.history.canAdmitPayload(store, self.compressed.len, resources.payload)) return self.refuse(.payload_capacity);
+        if (!owner.history.canAdmitPayload(&owner.store, self.compressed.len, resources.payload)) return self.refuse(.payload_capacity);
         return true;
     }
 
@@ -121,20 +106,13 @@ pub const Admission = struct {
         return false;
     }
 
-    /// Ignore a victim included in the successful preflight, before committing its replacement.
-    pub fn discardVictim(self: *Admission, handle: validation.Handle) validation.Outcome {
-        assert(!self.committed);
-        return self.messages.report(self.context, handle, .ignore, self.event.admitted_ms).outcome();
-    }
-
     pub fn commit(self: *Admission) void {
         assert(!self.committed);
         const owner = self.messages;
-        const feasible_now = self.feasible(&.{});
-        assert(feasible_now);
-        var reservation = owner.validation.reserve(self.event.id).?;
+        const fits_now = self.fits(&self.room());
+        assert(fits_now);
         const payload = owner.history.admitPayload(&owner.store, self.canonical.name.kind, self.event.id, self.event.topic, self.compressed).?;
-        self.event.handle = reservation.commit(&owner.store, self.context.peers, payload, self.source.peer, self.topic_index, self.event.admitted_ms);
+        self.event.handle = owner.validation.admit(&owner.store, self.context.peers, payload, self.source.peer, self.topic_index, self.event.admitted_ms);
         owner.validation.attribution(self.event.handle).source_eligible = self.context.overlay.inMesh(self.topic_index, self.source.session.index);
         owner.store.seal(payload);
         _ = owner.seen.add(self.event.id, self.event.admitted_ms);

@@ -183,8 +183,7 @@ test "resident topics above the live limit preserve pins scores diagnostics and 
     try std.testing.expect(tx.announce(high, high_name, true, &g.sessions.control_scratch, 1));
     try std.testing.expectEqual(@as(?u16, null), tx.nextSubscription());
     const message = g.messages.store.put(g.overlay.namespace.topicAt(high).name.kind, @splat(99), high_name, "payload").?;
-    var reservation = g.messages.validation.reserve(@splat(99)).?;
-    const handle = reservation.commit(&g.messages.store, &g.peers, message, logical, high, 1);
+    const handle = g.messages.validation.admit(&g.messages.store, &g.peers, message, logical, high, 1);
     g.messages.store.seal(message);
     try std.testing.expect(g.messages.validation.retainsTopic(high));
     g.peers.scores.invalid(logical.index, high);
@@ -296,8 +295,7 @@ test "topic expiry preserves attribution announcements and backoff independently
     const peer = g.sessions.rows[session.index].logical;
     const tx = &g.sessions.rows[session.index].io.tx;
     const message = g.messages.store.put(.beacon_block, @splat(1), name, "payload").?;
-    var reservation = g.messages.validation.reserve(@splat(1)).?;
-    const handle = reservation.commit(&g.messages.store, &g.peers, message, peer, index, 0);
+    const handle = g.messages.validation.admit(&g.messages.store, &g.peers, message, peer, index, 0);
     g.messages.store.seal(message);
     g.peers.scores.invalid(peer.index, index);
     try support.unsubscribe(&g, name);

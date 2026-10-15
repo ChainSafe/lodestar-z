@@ -27,29 +27,40 @@ pub fn admit(table: *processor.GossipProcessor, candidate: *gossip.Gossipsub.Mes
         table.refuse(kind, .source_full);
         return false;
     }
-    const tokens = &table.victim_tokens;
-    const handles = &table.victim_handles;
+    const victims = preflight(table, candidate) orelse return false;
+    for (victims) |index| {
+        const cell = &table.cells[index];
+        const result = candidate.messages.report(candidate.context, cell.handle, .ignore, message.admitted_ms);
+        table.outcome(result.outcome());
+        table.retire(.{ .index = @intCast(index), .generation = cell.generation });
+    }
+    candidate.commit();
+    table.capture(message, topic, &metadata, deneb, received_at) catch unreachable;
+    return true;
+}
+
+fn preflight(table: *processor.GossipProcessor, candidate: *gossip.Gossipsub.MessageAdmission) ?[]const u32 {
+    const kind = candidate.canonical.name.kind;
+    const k = @intFromEnum(kind);
+    const limits = table.limits[k];
+    const required = storage.Store.pagesFor(candidate.event.bytes.len);
+    var free_cells = table.queues[k][@intFromEnum(processor.GossipProcessor.State.free)].len;
+    var pages = table.store.free_pages;
+    var entries = table.store.entries.len - table.store.used_entries - table.store.retired_entries;
+    var used = table.used_bytes[k];
+    var protocol = candidate.room();
     var count: usize = 0;
     var bytes: usize = 0;
     var cursor = table.expiry.head;
     var inspected: usize = 0;
     var processor_full = false;
-    while (count <= tokens.len) {
-        if (!candidate.charge(count * @sizeOf(processor.GossipProcessor.Cell))) break;
-        processor_full = !capacityAfter(table, kind, message.bytes.len, tokens[0..count]);
-        if (!processor_full and candidate.feasible(handles[0..count])) {
-            for (tokens[0..count], handles[0..count]) |token, handle| {
-                table.outcome(candidate.discardVictim(handle));
-                table.retire(token);
-            }
-            candidate.commit();
-            table.capture(message, topic, &metadata, deneb, received_at) catch unreachable;
-            return true;
-        }
-        if (count == tokens.len or !processor.limits.newestFirst(kind)) break;
+    while (count <= table.victims.len) {
+        processor_full = free_cells == 0 or entries == 0 or required > pages or
+            table.used_items[k] - count >= limits.items or required * storage.page_bytes > limits.bytes -| used;
+        if (!processor_full and candidate.fits(&protocol)) return table.victims[0..count];
+        if (count == table.victims.len or !processor.limits.newestFirst(kind)) break;
         var selected: u32 = none;
-        // This chain retains network admission order across dependency promotion
-        // and copy rollback. State and ready queues deliberately do not.
+        // Admission order survives dependency promotion and host delivery.
         while (cursor != none and inspected < table.cells.len) {
             if (!candidate.charge(@sizeOf(processor.GossipProcessor.Cell))) break;
             const index = cursor;
@@ -61,41 +72,23 @@ pub fn admit(table: *processor.GossipProcessor, candidate: *gossip.Gossipsub.Mes
             break;
         }
         if (selected == none) break;
-        const index = selected;
-        const cell = &table.cells[index];
-        const cost = cell.input.len + candidate.victimBytes(cell.handle);
+        const cell = &table.cells[selected];
+        const cost = cell.input.len + candidate.includeVictim(&protocol, cell.handle);
         if (cost > processor.GossipProcessor.batch_bytes -| bytes or !candidate.charge(cost)) break;
         bytes += cost;
-        tokens[count] = .{ .index = @intCast(index), .generation = cell.generation };
-        handles[count] = cell.handle;
-        count += 1;
-    }
-    if (processor_full) {
-        table.diag.capacityRefusals +|= 1;
-        table.refuseCapacity(kind, message.bytes.len);
-    }
-    return false;
-}
-
-fn capacityAfter(table: *const processor.GossipProcessor, kind: processor.limits.Kind, len: usize, victims: []const processor.GossipProcessor.Token) bool {
-    if (victims.len == 0) return table.hasCapacity(kind, len);
-    const k = @intFromEnum(kind);
-    var free_cells: usize = table.queues[k][@intFromEnum(processor.GossipProcessor.State.free)].len;
-    var pages = table.store.free_pages;
-    var entries = table.store.entries.len - table.store.used_entries - table.store.retired_entries;
-    var used = table.used_bytes[k];
-    for (victims) |token| {
-        const cell = &table.cells[token.index];
-        assert(cell.kind == kind and cell.input.handle != null);
         const payload = table.store.get(cell.input.handle.?).?;
-        assert(!payload.provisional and !payload.history);
+        assert(!payload.provisional and !payload.history and payload.senders == 0);
         const released = storage.Store.pagesFor(cell.input.len);
         pages += released;
         used -= released * storage.page_bytes;
         free_cells += @intFromBool(cell.generation < std.math.maxInt(u64));
         entries += @intFromBool(payload.generation < std.math.maxInt(u64));
+        table.victims[count] = selected;
+        count += 1;
     }
-    const limits = table.limits[k];
-    const required = storage.Store.pagesFor(len);
-    return free_cells > 0 and entries > 0 and required <= pages and table.used_items[k] - victims.len < limits.items and required * storage.page_bytes <= limits.bytes -| used;
+    if (processor_full) {
+        table.diag.capacityRefusals +|= 1;
+        table.refuseCapacity(kind, candidate.event.bytes.len);
+    }
+    return null;
 }

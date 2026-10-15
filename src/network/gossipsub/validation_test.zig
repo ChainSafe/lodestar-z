@@ -21,18 +21,13 @@ test "gossip validation topic pins follow attribution ownership through replacem
     var handles: [2]validation.Handle = undefined;
     for (&handles, 0..) |*handle, i| {
         const m = store.put(.beacon_block, @splat(@intCast(i)), "topic", "payload").?;
-        var r = v.reserve(store.get(m).?.id).?;
-        handle.* = r.commit(&store, &peers, m, source, 0, 0);
+        handle.* = v.admit(&store, &peers, m, source, 0, 0);
         store.seal(m);
     }
     try std.testing.expectEqual(@as(u32, 2), v.topic_counts[0]);
     v.finish(&store, &peers, handles[0], .accept, 1);
-    var cancelled = v.reserve(@splat(0)).?;
-    cancelled.cancel();
-    try std.testing.expectEqual(@as(u32, 2), v.topic_counts[0]);
     const replacement = store.put(.beacon_block, @splat(0), "other", "payload").?;
-    var r = v.reserve(@splat(0)).?;
-    const current = r.commit(&store, &peers, replacement, source, 1, 2);
+    const current = v.admit(&store, &peers, replacement, source, 1, 2);
     store.seal(replacement);
     try std.testing.expectEqual(@as(u32, 1), v.topic_counts[0]);
     try std.testing.expectEqual(@as(u32, 1), v.topic_counts[1]);
@@ -47,8 +42,7 @@ test "gossip validation topic pins follow attribution ownership through replacem
     try std.testing.expectEqual(@as(u64, 0), v.attribution_eviction_age.count);
     for (0..10) |i| {
         const m = store.put(.beacon_block, @splat(@intCast(i + 10)), "topic", "payload").?;
-        var next = v.reserve(store.get(m).?.id).?;
-        const handle = next.commit(&store, &peers, m, source, @intCast(i % 2), 32 + i);
+        const handle = v.admit(&store, &peers, m, source, @intCast(i % 2), 32 + i);
         store.seal(m);
         v.finish(&store, &peers, handle, .accept, 32 + i);
     }
@@ -56,12 +50,8 @@ test "gossip validation topic pins follow attribution ownership through replacem
     try std.testing.expectEqual(@as(u32, 4), v.topic_counts[1]);
     try std.testing.expectEqual(@as(u64, 2), v.attribution_eviction_age.count);
     try std.testing.expectEqual(@as(u128, 16), v.attribution_eviction_age.sum);
-    var uncommitted = v.reserve(@splat(99)).?;
-    uncommitted.cancel();
-    try std.testing.expectEqual(@as(u64, 2), v.attribution_eviction_age.count);
     const after_expiry = store.put(.beacon_block, @splat(99), "topic", "payload").?;
-    var after_expiry_reservation = v.reserve(@splat(99)).?;
-    _ = after_expiry_reservation.commit(&store, &peers, after_expiry, source, 0, 61);
+    _ = v.admit(&store, &peers, after_expiry, source, 0, 61);
     store.seal(after_expiry);
     try std.testing.expectEqual(@as(u64, 2), v.attribution_eviction_age.count);
     v.clear(&store, &peers);
@@ -79,8 +69,7 @@ test "gossip validation expires without pump and resolves exactly once" {
     var v = try Validation.init(std.testing.allocator, 1, 10, 20);
     defer v.deinit(std.testing.allocator, &store, &peers);
     const m = store.put(.beacon_block, [_]u8{1} ** 20, "t", "body").?;
-    var h_reservation = v.reserve(store.get(m).?.id).?;
-    const h = h_reservation.commit(&store, &peers, m, .{ .index = 0, .generation = 1 }, 0, 100);
+    const h = v.admit(&store, &peers, m, .{ .index = 0, .generation = 1 }, 0, 100);
     store.seal(m);
     try std.testing.expect(v.inspect(&store, &peers, h, 109) == null);
     try std.testing.expectEqual(Outcome.expired, v.inspect(&store, &peers, h, 110).?);
@@ -88,8 +77,7 @@ test "gossip validation expires without pump and resolves exactly once" {
     try std.testing.expectEqual(Outcome.stale_handle, v.inspect(&store, &peers, h, 130).?);
     const m2 = store.put(.beacon_block, [_]u8{2} ** 20, "t", "body").?;
     peers.rows[0].generation = 2;
-    var h2_reservation = v.reserve(store.get(m2).?.id).?;
-    const h2 = h2_reservation.commit(&store, &peers, m2, .{ .index = 0, .generation = 2 }, 0, 130);
+    const h2 = v.admit(&store, &peers, m2, .{ .index = 0, .generation = 2 }, 0, 130);
     store.seal(m2);
     try std.testing.expectEqual(Outcome.stale_handle, v.inspect(&store, &peers, h, 130).?);
     v.finish(&store, &peers, h2, .ignore, 131);
@@ -108,13 +96,11 @@ test "gossip validation readmission skips exhausted generation without hiding pe
     const id = [_]u8{1} ** 20;
     const source: PeerRef = .{ .index = 0, .generation = 1 };
     const first = store.put(.beacon_block, id, "t", "body").?;
-    var old_reservation = v.reserve(store.get(first).?.id).?;
-    const old = old_reservation.commit(&store, &peers, first, source, 0, 100);
+    const old = v.admit(&store, &peers, first, source, 0, 100);
     store.seal(first);
     v.finish(&store, &peers, old, .ignore, 101);
     const second = store.put(.beacon_block, id, "t", "body").?;
-    var current_reservation = v.reserve(store.get(second).?.id).?;
-    const current = current_reservation.commit(&store, &peers, second, source, 0, 102);
+    const current = v.admit(&store, &peers, second, source, 0, 102);
     store.seal(second);
     try std.testing.expectEqual(std.math.maxInt(u64), old.generation);
     try std.testing.expectEqual(@as(u64, 1), current.generation);
@@ -129,37 +115,6 @@ test "gossip validation readmission skips exhausted generation without hiding pe
     try std.testing.expectEqual(store.next.len, store.free_pages);
 }
 
-test "gossip validation reservation rollback preserves attribution and prior outcome" {
-    const a = std.testing.allocator;
-    var peers = try Peers.init(a, &.{ .retained_score_ms = 100, .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
-    defer peers.deinit(a);
-    peers.rows[0] = .{ .occupied = true, .generation = 1 };
-    const source: PeerRef = .{ .index = 0, .generation = 1 };
-    var store = try storage.Store.init(a, 1, storage.page_bytes);
-    defer store.deinit(a);
-    var v = try Validation.init(a, 1, 10, 20);
-    defer v.deinit(a, &store, &peers);
-    const id = [_]u8{1} ** 20;
-    const message = store.put(.beacon_block, id, "topic", "payload").?;
-    var handle_reservation = v.reserve(store.get(message).?.id).?;
-    const handle = handle_reservation.commit(&store, &peers, message, source, 0, 0);
-    store.seal(message);
-    v.finish(&store, &peers, handle, .reject, 1);
-    const indexed = v.index.find(id).?;
-    var reservation = v.reserve(id).?;
-    try std.testing.expectEqual(indexed, v.index.find(id).?);
-    try std.testing.expectEqual(Verdict.reject, v.find(id, 2).?.verdict);
-    try std.testing.expect(!v.available());
-    try std.testing.expect(v.reserve(@splat(2)) == null);
-    reservation.cancel();
-    reservation.cancel();
-    try std.testing.expect(v.available());
-    try std.testing.expectEqual(indexed, v.index.find(id).?);
-    try std.testing.expectEqual(Verdict.reject, v.find(id, 2).?.verdict);
-    try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, &peers, handle, 2).?);
-    try std.testing.expectEqual(@as(u32, 0), peers.rows[0].pins);
-}
-
 test "gossip validation destruction releases pending payloads and peer pins" {
     const a = std.testing.allocator;
     var peers = try Peers.init(a, &.{ .retained_score_ms = 100, .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
@@ -172,8 +127,7 @@ test "gossip validation destruction releases pending payloads and peer pins" {
         defer v.deinit(a, &store, &peers);
         for (0..2) |i| {
             const message = store.put(.beacon_block, @splat(@intCast(i)), "topic", "payload").?;
-            var handle_reservation = v.reserve(store.get(message).?.id).?;
-            const handle = handle_reservation.commit(&store, &peers, message, source, 0, 0);
+            const handle = v.admit(&store, &peers, message, source, 0, 0);
             store.seal(message);
             if (i == 0) v.finish(&store, &peers, handle, .accept, 1);
         }
@@ -202,9 +156,8 @@ test "gossip validation index bounds sparse lookups and follows replacement expi
     second[19] = 1;
     for ([_]topic_mod.MessageId{ first, second }) |id| {
         const message = store.put(.beacon_block, id, "topic", "payload").?;
-        var reservation = v.reserve(id).?;
         try std.testing.expect(v.index.find(id) == null);
-        const handle = reservation.commit(&store, &peers, message, source, 0, 0);
+        const handle = v.admit(&store, &peers, message, source, 0, 0);
         store.seal(message);
         v.finish(&store, &peers, handle, .reject, 1);
         try std.testing.expectEqual(@as(usize, 1), v.index.probe_limit);
@@ -213,16 +166,12 @@ test "gossip validation index bounds sparse lookups and follows replacement expi
     try std.testing.expect(v.find(first, 2) != null);
     try std.testing.expect(v.find(second, 21) == null);
     try std.testing.expect(v.index.find(second) != null);
-    var retry = v.reserve(second).?;
-    retry.cancel();
-    try std.testing.expect(v.index.find(second) != null);
     v.expire(&store, &peers, 21);
     try std.testing.expect(v.index.find(second) == null);
     try std.testing.expectEqual(@as(u32, 0), peers.rows[0].pins);
     for (0..2) |i| {
         const message = store.put(.beacon_block, first, "topic", "payload").?;
-        var reservation = v.reserve(first).?;
-        const handle = reservation.commit(&store, &peers, message, source, 0, 30);
+        const handle = v.admit(&store, &peers, message, source, 0, 30);
         store.seal(message);
         try std.testing.expectEqual(handle, v.find(first, 30).?.handle);
         if (i == 0) {

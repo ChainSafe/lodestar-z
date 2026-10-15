@@ -22,7 +22,6 @@ pub const Entry = struct {
     available_link: lists.Link = .{},
     deadline_link: lists.Link = .{},
     generation: u64 = 0,
-    reserved: bool = false,
     state: union(enum) {
         free,
         pending: struct { message: storage.Handle, delivery: u32, deadline: u64 },
@@ -33,7 +32,6 @@ pub const Entry = struct {
 
 pub const Attribution = struct {
     link: lists.Link = .{},
-    reserved: bool = false,
     handle: Handle = undefined,
     state: enum { free, pending, resolved } = .free,
     until: u64 = 0,
@@ -71,6 +69,7 @@ pub const Validation = struct {
 
     pub fn initForTopics(a: std.mem.Allocator, capacity: usize, timeout_ms: u64, tombstone_ms: u64, topics: usize) !Validation {
         if (capacity == 0 or capacity > 65535 or timeout_ms == 0 or tombstone_ms == 0 or topics == 0 or topics > topic_policy.topic_max) return error.InvalidLimits;
+        assert(attributionCapacity(capacity) > capacity);
         const topic_counts = try a.alloc(u32, topics);
         errdefer a.free(topic_counts);
         @memset(topic_counts, 0);
@@ -105,7 +104,6 @@ pub const Validation = struct {
         @memset(&self.pending_per_peer, 0);
         @memset(&self.pending_per_peer_kind, @splat(0));
         for (self.entries, 0..) |*entry, i| {
-            assert(!entry.reserved);
             if (entry.state == .pending) store.releaseValidation(entry.state.pending.message);
             entry.state = .free;
             entry.available_link = .{};
@@ -113,7 +111,6 @@ pub const Validation = struct {
             if (entry.generation < std.math.maxInt(u64)) self.available_entries.append(self.entries, "available_link", @intCast(i));
         }
         for (self.recent, 0..) |*record, i| {
-            assert(!record.reserved);
             self.releaseAttribution(record, peers);
             record.state = .free;
             record.link = .{};
@@ -144,70 +141,45 @@ pub const Validation = struct {
         return self.available_entries.len > 0;
     }
 
-    pub const Reservation = struct {
-        owner: ?*Validation,
-        index: u32,
-        record: u32,
-
-        pub fn cancel(self: *Reservation) void {
-            const owner = self.owner orelse return;
-            assert(owner.entries[self.index].reserved and owner.recent[self.record].reserved);
-            owner.entries[self.index].reserved = false;
-            owner.available_entries.prepend(owner.entries, "available_link", self.index);
-            owner.recent[self.record].reserved = false;
-            self.owner = null;
-        }
-
-        pub fn commit(self: *Reservation, store: *storage.Store, peers: *Peers, message: storage.Handle, source: PeerRef, topic: u16, now: u64) Handle {
-            const owner = self.owner.?;
-            const entry = &owner.entries[self.index];
-            const record = &owner.recent[self.record];
-            assert(entry.reserved and record.reserved);
-            const id = store.get(message).?.id;
-            if (record.state == .free) owner.free_records.remove(owner.recent, "link", self.record) else {
-                if (now < record.until and !std.mem.eql(u8, &record.id, &id))
-                    owner.attribution_eviction_age.observe(now -| (record.until -| owner.tombstone_ms));
-                owner.resolved_records.remove(owner.recent, "link", self.record);
-                owner.index.remove(record.id);
-                owner.releaseAttribution(record, peers);
-            }
-            const handle: Handle = .{ .index = self.index, .generation = entry.generation + 1 };
-            peers.retain(source);
-            owner.pending_per_peer[source.index] += 1;
-            owner.pending_per_peer_kind[source.index][@intFromEnum(store.get(message).?.kind)] += 1;
-            owner.bytes_per_peer_kind[source.index][@intFromEnum(store.get(message).?.kind)] += chargedBytes(store.get(message).?.len);
-            record.* = .{ .handle = handle, .state = .pending, .id = id, .source = source, .topic = topic, .admitted_ms = now };
-            assert(topic < owner.topic_counts.len and owner.topic_counts[topic] < owner.recent.len);
-            owner.topic_counts[topic] += 1;
-            owner.index.insert(id, self.record);
-            entry.* = .{ .generation = handle.generation, .state = .{ .pending = .{ .message = message, .delivery = self.record, .deadline = now +| owner.timeout_ms } } };
-            if (owner.pending_entries.tail != none) assert(owner.entries[owner.pending_entries.tail].state.pending.deadline <= entry.state.pending.deadline);
-            owner.pending_entries.append(owner.entries, "deadline_link", self.index);
-            store.retainValidation(message);
-            self.owner = null;
-            return handle;
-        }
-    };
-
-    /// Acquires both operation and attribution slots without discarding previous
-    /// outcomes. Cancellation leaves them intact if payload admission fails.
-    /// Commit or cancel in the same owner call, before another validation mutation.
-    pub fn reserve(self: *Validation, id: topic_mod.MessageId) ?Reservation {
+    /// Requires an available entry and no pending validation for this payload's ID.
+    pub fn admit(self: *Validation, store: *storage.Store, peers: *Peers, message: storage.Handle, source: PeerRef, topic: u16, now: u64) Handle {
+        const payload = store.get(message).?;
+        const id = payload.id;
         const previous_record = self.index.find(id);
         var selected = self.available_entries.head;
         if (previous_record) |index| {
             const record = &self.recent[index];
-            if (record.reserved or record.state == .pending) return null;
+            assert(record.state == .resolved);
             const previous = &self.entries[record.handle.index];
             if (previous.generation == record.handle.generation and previous.available_link.linked) selected = record.handle.index;
         }
-        if (selected == none) return null;
-        const record = previous_record orelse if (self.free_records.head != none) self.free_records.head else self.resolved_records.head;
-        assert(record != none and !self.recent[record].reserved);
+        assert(selected != none);
+        const record_index = previous_record orelse if (self.free_records.head != none) self.free_records.head else self.resolved_records.head;
+        assert(record_index != none);
+        const entry = &self.entries[selected];
+        const record = &self.recent[record_index];
         self.available_entries.remove(self.entries, "available_link", selected);
-        self.entries[selected].reserved = true;
-        self.recent[record].reserved = true;
-        return .{ .owner = self, .index = selected, .record = record };
+        if (record.state == .free) self.free_records.remove(self.recent, "link", record_index) else {
+            if (now < record.until and !std.mem.eql(u8, &record.id, &id))
+                self.attribution_eviction_age.observe(now -| (record.until -| self.tombstone_ms));
+            self.resolved_records.remove(self.recent, "link", record_index);
+            self.index.remove(record.id);
+            self.releaseAttribution(record, peers);
+        }
+        const handle: Handle = .{ .index = selected, .generation = entry.generation + 1 };
+        peers.retain(source);
+        self.pending_per_peer[source.index] += 1;
+        self.pending_per_peer_kind[source.index][@intFromEnum(payload.kind)] += 1;
+        self.bytes_per_peer_kind[source.index][@intFromEnum(payload.kind)] += chargedBytes(payload.len);
+        record.* = .{ .handle = handle, .state = .pending, .id = id, .source = source, .topic = topic, .admitted_ms = now };
+        assert(topic < self.topic_counts.len and self.topic_counts[topic] < self.recent.len);
+        self.topic_counts[topic] += 1;
+        self.index.insert(id, record_index);
+        entry.* = .{ .generation = handle.generation, .state = .{ .pending = .{ .message = message, .delivery = record_index, .deadline = now +| self.timeout_ms } } };
+        if (self.pending_entries.tail != none) assert(self.entries[self.pending_entries.tail].state.pending.deadline <= entry.state.pending.deadline);
+        self.pending_entries.append(self.entries, "deadline_link", selected);
+        store.retainValidation(message);
+        return handle;
     }
 
     fn removeRecord(self: *Validation, index: u32, peers: *Peers) void {

@@ -693,10 +693,10 @@ test "gossip eviction scan is work charged and leaves candidates untouched on ex
         try f.init(64);
         defer f.deinit();
         try receive(&f.g, 0, block, "older FIFO work");
-        var data: [240]u8 = undefined;
+        var data: [4097]u8 = undefined;
         for (0..4) |i| {
-            vote(&data, @intCast(i), 96);
-            _ = try f.message(@intCast(i / 2), &data);
+            vote(data[0..513], @intCast(i), 96);
+            _ = try f.message(@intCast(i / 2), data[0..513]);
         }
         const victim = oldestReplaceable(&f.table);
         const original_id = f.table.get(victim).?.id;
@@ -711,8 +711,8 @@ test "gossip eviction scan is work charged and leaves candidates untouched on ex
         const length = try snappy.raw.compress(&data, &compressed);
         var turn = Gossipsub.beginPump(&f.g, Now.fromMilliseconds(.{ .mono_ms = f.now, .unix_s = 0 }));
         var credit = turn_mod.Credits.peer(&f.g.options);
-        // Stop either after inspecting the older other-kind cell or after selecting
-        // and charging a victim, immediately before its repeated joint preflight.
+        // The newcomer needs two victims. Exhaust work either before choosing
+        // the first or after choosing one, leaving both stores untouched.
         const cost = length * 2 + data.len * 2;
         const charged = cost + @sizeOf(processor.GossipProcessor.Cell) + if (after_selection) @sizeOf(processor.GossipProcessor.Cell) + victim_cost else @as(usize, 0);
         turn.budget.work = charged + @sizeOf(processor.GossipProcessor.Cell) - 1;
