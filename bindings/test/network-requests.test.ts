@@ -163,7 +163,7 @@ stockTest(
         phase: "response",
         reason: "cancelled",
       });
-      const commands = Array.from({length: 31}, () => runtime.getIdentity());
+      const commands = Array.from({length: 31}, () => runtime.reStatusPeers([]));
       const retired = stream.return?.();
       expect(stream.throw?.(Error("ignored"))).toBe(retired);
       expect(stream.return?.()).toBe(retired);
@@ -326,7 +326,7 @@ stockTest(
       await waitFor(async () => (await peer.command("stats")).control.status >= 2);
       expect((await runtime.getPeers()).peers[0].metadata?.sequenceNumber).toBe(1n);
       await Promise.all(streams.map((stream) => stream.return?.()));
-      const commands = Array.from({length: 31}, () => runtime.getIdentity());
+      const commands = Array.from({length: 31}, () => runtime.reStatusPeers([]));
       const independent = runtime.request(id, BLOCKS, new Uint8Array(32));
       await Promise.all(commands);
       await independent.return?.();
@@ -746,7 +746,7 @@ test("close hands each unpulled request's outcome to its iterator, whose next pu
     const held = right.request(peer, BLOCKS, new Uint8Array(32));
     await takeIncoming(left);
     const refused = right.request(right.identity.peerId, BLOCKS, new Uint8Array(32));
-    await right.getIdentity();
+    await right.reStatusPeers([]);
     expect(await right.close()).toEqual({reason: "requested"});
     // No request outlives the close.
 
@@ -795,9 +795,9 @@ test("requests start in their admission order among commands", async () => {
         .next()
         .catch(() => undefined);
     const first = outcome();
-    const before = runtime.getIdentity();
+    const before = runtime.applyIntent({});
     const second = outcome();
-    const after = runtime.getIdentity();
+    const after = runtime.applyIntent({});
     // Released together, each starts in one pass that advances the owner's sequence once per operation.
     runtime.holdOperations(false);
     const [a, b] = await Promise.all([before, after]);

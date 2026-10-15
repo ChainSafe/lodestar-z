@@ -8,24 +8,39 @@ test "application admission reserves one local-state cell and at most 16 connect
     var table: Table = .{};
     for (0..16) |_| _ = try table.reserve(.connect);
     try std.testing.expectError(error.NetworkCommandFull, table.reserve(.connect));
-    for (0..15) |_| _ = try table.reserve(.getIdentity);
-    try std.testing.expectError(error.NetworkCommandFull, table.reserve(.getIdentity));
+    for (0..15) |_| _ = try table.reserve(.getMetrics);
+    try std.testing.expectError(error.NetworkCommandFull, table.reserve(.getMetrics));
     const state = try table.reserve(.applyIntent);
     try std.testing.expectError(error.NetworkCommandFull, table.reserve(.updateStatus));
     table.retire(state);
     _ = try table.reserve(.updateStatus);
 }
 
-test "typed reservations unwind and identities never wrap" {
+test "diagnostics wait for copying to finish while unrelated commands progress" {
     var table: Table = .{};
-    const first = try table.reserve(.applyIntent);
-    _ = try table.reserve(.applyIntent);
-    try std.testing.expectError(error.NetworkCommandFull, table.reserve(.applyIntent));
-    try std.testing.expectEqual(@as(u8, 2), table.occupied);
+    const first = try table.reserve(.getPeerScores);
+    const second = try table.reserve(.getGossipDiagnostics);
+    table.transition(table.get(first), .queued);
+    table.transition(table.get(second), .queued);
+    try std.testing.expectEqual(first, table.nextQueued().?);
+    table.transition(table.get(first), .executing);
+    table.transition(table.get(first), .terminal);
+    table.transition(table.get(first), .copying);
+    try std.testing.expect(table.nextQueued() == null);
+    const mutation = try table.reserve(.reStatusPeers);
+    table.transition(table.get(mutation), .queued);
+    try std.testing.expectEqual(mutation, table.nextQueued().?);
+    table.retire(mutation);
+    try std.testing.expectEqual(first.index, table.diagnostic.?);
     table.retire(first);
-    const next = try table.reserve(.applyIntent);
-    try std.testing.expectEqual(first.generation + 1, next.generation);
-    table.retire(next);
+    try std.testing.expectEqual(second, table.nextQueued().?);
+    table.transition(table.get(second), .executing);
+    table.retire(second);
+    try std.testing.expect(table.diagnostic == null);
+}
+
+test "command identities never wrap" {
+    var table: Table = .{};
     table.cells[0].generation = std.math.maxInt(u64);
     try std.testing.expectError(error.NetworkSequenceExhausted, table.reserve(.updateStatus));
     table.sequence = std.math.maxInt(u64);
@@ -46,7 +61,7 @@ test "authenticated connect completion latches before a later close in the borro
     var table: Table = .{};
     const token = try table.reserve(.connect);
     table.transition(table.get(token), .waiting);
-    table.cells[token.index].input.peer = peer;
+    table.cells[token.index].input.connect.peer = peer;
     table.cells[token.index].deadline = 2;
     try std.testing.expect(commands.latchConnects(&table, &events, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 })));
     try std.testing.expectEqual(commands.State.terminal, table.get(token).state);
@@ -58,9 +73,9 @@ test "authenticated connect completion latches before a later close in the borro
 
 test "reserved state capacity retains ordinary execution order" {
     var table: Table = .{};
-    const first = try table.reserve(.getIdentity);
+    const first = try table.reserve(.getMetrics);
     const state = try table.reserve(.applyIntent);
-    const last = try table.reserve(.getIdentity);
+    const last = try table.reserve(.getMetrics);
     for ([_]commands.Token{ first, state, last }) |token| table.transition(table.get(token), .queued);
     for ([_]commands.Token{ first, state, last }) |token| {
         try std.testing.expectEqual(token, table.nextQueued().?);

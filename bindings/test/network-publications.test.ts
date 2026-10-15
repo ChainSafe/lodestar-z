@@ -26,7 +26,7 @@ test("request capacity refusal is typed while control and publication admission 
       for (let i = 0; i < 1024; i++) streams.push(runtime.request(runtime.identity.peerId, REQUEST, new Uint8Array(0)));
     }).toThrow(expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"}));
     await Promise.all([
-      runtime.getIdentity(),
+      runtime.reStatusPeers([]),
       runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true}),
       ...streams.map((stream) => expect(stream.next()).rejects.toMatchObject({reason: "disconnected"})),
     ]);
@@ -54,7 +54,7 @@ test("publication pressure preserves urgent, control and request admission", asy
     }
     expect(refusal).toMatchObject({code: "NetworkGossipPublishFailed", reason: "admission_full"});
     const urgent = runtime.publishGossip(BLOCK, new Uint8Array(4000), options);
-    const control = runtime.getIdentity();
+    const control = runtime.reStatusPeers([]);
     const request = runtime.request(runtime.identity.peerId, REQUEST, new Uint8Array(0));
     runtime.holdOperations(false);
     const [results] = await Promise.all([
@@ -86,7 +86,7 @@ test("network admits 200 publications while control remains available", async ()
       runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true, ignoreDuplicate: true})
     );
 
-    await Promise.all([...pending, runtime.getPeers()]);
+    await Promise.all([...pending, runtime.reStatusPeers([])]);
   } finally {
     await runtime.close();
   }
@@ -176,8 +176,8 @@ test("close settles after every publication and command without exposing their c
     ...Array.from({length: 4}, (_, i) =>
       record(runtime.publishGossip(BLOCK, new Uint8Array(4000).fill(i), options), "publication")
     ),
-    record(runtime.getIdentity(), "command"),
-    record(runtime.getPeers(), "command"),
+    record(runtime.reStatusPeers([]), "command"),
+    record(runtime.reStatusPeers([]), "command"),
   ];
   const closing = record(runtime.close(), "closed");
   for (let i = 0; i < 400 && !order.includes("closed"); i++) {

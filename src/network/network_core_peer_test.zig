@@ -584,3 +584,31 @@ fn metadataUpdate(node: *const NetworkCore, metadata: *const t.Metadata) t.Local
     local.metadata = metadata.*;
     return local;
 }
+
+test "compact peer scores retain disconnected peers and match diagnostic score components" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..60) |_| try setup.step(1);
+    const core = &setup.client;
+    const scores = try std.testing.allocator.alloc(NetworkCore.PeerScore, core.peer_manager.catalog.options.capacity);
+    defer std.testing.allocator.free(scores);
+    try std.testing.expectError(error.OutputTooSmall, core.peerScores(setup.pair.now, scores[0..0]));
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = core.peer_manager.snapshots(&snapshots);
+    const peer = snapshots[0];
+    const book = &core.protocols.gossipsub.peers;
+    const ref = book.find(&peer.identity).?;
+    book.scores.rows[ref.index].behaviour = 3;
+    try std.testing.expectEqual(@as(usize, 1), try core.peerScores(setup.pair.now, scores));
+    try std.testing.expectEqual(peer.score, scores[0].score);
+    try std.testing.expectEqual(peer.score_at_ms, scores[0].score_at_ms);
+    try std.testing.expectEqual(book.snapshot(ref, setup.pair.now.millis()), scores[0].gossip_score);
+    const captured = scores[0];
+    _ = core.closePeer(&peer.identity, setup.pair.now);
+    for (0..60) |_| try setup.step(1);
+    try std.testing.expectEqual(@as(u16, 0), core.peerCounts().connected);
+    try std.testing.expectEqual(@as(usize, 1), try core.peerScores(setup.pair.now, scores));
+    try std.testing.expectEqualDeep(captured.identity, scores[0].identity);
+    try std.testing.expectEqual(book.snapshot(ref, setup.pair.now.millis()), scores[0].gossip_score);
+}

@@ -503,17 +503,17 @@ it("settles results only in an exchange and notifies once until an exchange find
     const intent = runtime.applyIntent(localIntent(config));
     const intentSettled = watch(intent);
     await vi.waitFor(() => expect(notifications).toBe(1));
-    const identity = runtime.getIdentity();
+    const query = runtime.getPeerScores();
     await delay(100);
     expect(notifications).toBe(1);
     expect(intentSettled()).toBe(false);
-    const identitySettled = watch(identity);
+    const querySettled = watch(query);
     expect(exchange(runtime, settleOnly).needsAnotherExchange).toBe(false);
     await delay(0);
-    expect([intentSettled(), identitySettled()]).toEqual([true, true]);
+    expect([intentSettled(), querySettled()]).toEqual([true, true]);
     expect(exchange(runtime, settleOnly)).toMatchObject({checks: [], gossip: null, peers: [], serving: []});
     expect((await intent).slot).toBeGreaterThanOrEqual(100n);
-    expect((await identity).peerId).toBe(runtime.identity.peerId);
+    expect((await query).peers).toEqual([]);
     const pull = runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next();
     const pullSettled = watch(pull);
     // Native notifies once its outcome is due, and the pull itself schedules nothing.

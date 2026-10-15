@@ -4,7 +4,7 @@ const d = @import("discv5");
 const napi = @import("zapi:zapi").napi;
 const Promise = @import("network_promise.zig");
 const network_metrics = @import("network_metrics.zig");
-const network_storage = @import("network_storage.zig");
+const diagnostics = @import("network_diagnostics.zig");
 const network_peer_reports = @import("network_peer_reports.zig");
 const network_budget = @import("network_budget.zig");
 pub const gossip_mod = @import("network_gossip.zig");
@@ -15,7 +15,7 @@ pub const commands = @import("network_commands.zig");
 pub const application_config = @import("network_application_config.zig");
 pub const projection = @import("network_peer_projection.zig");
 const Wake = @import("network_wake.zig").Wake;
-pub const DeliveryKind = enum { completions, peers, checks, serving, gossip };
+pub const DeliveryKind = enum { completions, identity, peers, checks, serving, gossip };
 pub const Owner = @import("network_owner.zig").Owner;
 pub const allocator = std.heap.c_allocator;
 pub const Reason = enum { requested, failed };
@@ -50,7 +50,8 @@ pub const Capacity = struct {
 /// Shared operation storage and lifecycle. Runtime lock/unlock guard state transitions; a claimed cell has one writer.
 const Bridge = struct {
     mutex: std.Io.Mutex = .init,
-    stores: ?*network_storage.Stores = null,
+    diagnostics: ?*diagnostics.Buffer = null,
+    identity: ?Identity = null,
     peer_updates: ?*projection.Lane = null,
     commands: commands.Table = .{},
     reports: network_peer_reports.Table = .{},
@@ -123,12 +124,10 @@ pub const Runtime = struct {
             table.cells = &.{};
         }
     }
-    pub fn retireStoresLocked(self: *Runtime) void {
-        if (!self.bridge.quiescent or self.bridge.commands.occupied != 0) return;
-        if (self.bridge.stores) |stores| {
-            stores.destroy();
-            self.bridge.stores = null;
-        }
+    pub fn retireDiagnosticsLocked(self: *Runtime) void {
+        if (!self.bridge.quiescent or self.bridge.commands.diagnostic != null) return;
+        if (self.bridge.diagnostics) |buffer| buffer.destroy();
+        self.bridge.diagnostics = null;
     }
     fn destroyOwner(self: *Runtime) void {
         if (self.owner) |owner| {
@@ -174,7 +173,7 @@ pub const Runtime = struct {
             self.destroyOwner();
             if (self.xray) |probe| probe.destroy(allocator);
             self.metrics.deinit();
-            if (self.bridge.stores) |stores| stores.destroy();
+            if (self.bridge.diagnostics) |buffer| buffer.destroy();
             if (self.bridge.peer_updates) |lane| allocator.destroy(lane);
             if (self.bridge.publications) |*table| table.deinit();
             if (self.bridge.requests) |*requests| requests.deinit();
@@ -212,9 +211,10 @@ pub const Runtime = struct {
     pub fn deliverableLocked(self: *Runtime, kind: DeliveryKind) bool {
         if (kind == .completions)
             return self.completionsReadyLocked() or (self.bridge.quiescent and self.closed.resolvers != null);
-        const capacity = self.bridge.capacity orelse return false;
         if (self.bridge.quiescent and self.closed.resolvers == null) return false;
+        if (kind == .identity) return self.bridge.identity != null;
         if (kind == .peers) return self.bridge.peer_updates != null and self.bridge.peer_updates.?.len > 0;
+        const capacity = self.bridge.capacity orelse return false;
         if (self.bridge.stop or self.bridge.quiescent) return false;
         return switch (kind) {
             .checks => if (self.bridge.gossip) |*table| table.readiness().checks else false,
@@ -223,7 +223,7 @@ pub const Runtime = struct {
                 const work = table.readiness();
                 break :blk work.urgent or (work.ordinary and capacity.gossip_validation == .ready);
             } else false,
-            .completions, .peers => unreachable,
+            .completions, .identity, .peers => unreachable,
         };
     }
     pub fn hasDeliveryLocked(self: *Runtime) bool {
@@ -312,7 +312,7 @@ pub const Runtime = struct {
             switch (cell.state) {
                 .queued, .executing, .waiting => {
                     // Owner shutdown rendered the final snapshot before cancelling commands.
-                    self.bridge.commands.cells[i].failure = if (cell.input.command == .getMetrics) null else self.bridge.terminal_error orelse error.NetworkClosed;
+                    self.bridge.commands.cells[i].failure = if (cell.input == .getMetrics) null else self.bridge.terminal_error orelse error.NetworkClosed;
                     self.bridge.commands.transition(cell, .terminal);
                 },
                 else => {},
@@ -341,7 +341,7 @@ pub const Runtime = struct {
         if (self.bridge.wake) |*wake| wake.deinit();
         self.bridge.wake = null;
         self.bridge.quiescent = true;
-        self.retireStoresLocked();
+        self.retireDiagnosticsLocked();
         self.retireRequestStorageLocked();
         std.log.scoped(.network_runtime).info("owner_stopped reason={s} turns={d} operational_failures={d}", .{ @tagName(self.bridge.reason), self.owner_turns, self.operational_failures });
         // Every host sees quiescence, also one whose waiting payload left it disarmed.
@@ -405,8 +405,10 @@ pub const Runtime = struct {
     }
     pub fn retireCommand(self: *Runtime, token: commands.Token) void {
         self.lock();
+        const released = self.bridge.commands.diagnostic == token.index;
         self.bridge.commands.retire(token);
-        self.retireStoresLocked();
+        self.retireDiagnosticsLocked();
+        if (released) self.wakeOwnerLocked();
         self.unlock();
         self.release();
     }

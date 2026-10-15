@@ -58,6 +58,7 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     }
     try network_owner.initialize(runtime);
     const identity = try runtime.owner.?.readIdentity();
+    runtime.owner.?.identity_revision = runtime.owner.?.core.local_revision;
 
     const env = js.env();
     const name = try env.createStringUtf8("NativeNetworkRuntime");
@@ -289,11 +290,8 @@ pub fn applyIntent(self: *@This(), intent: js.Value) !js.Value {
 pub fn updateStatus(self: *@This(), status: js.Value) !js.Value {
     return .{ .val = try command_js.submit(js.env(), try self.owner(), .updateStatus, &.{status.val}) };
 }
-pub fn getIdentity(self: *@This()) !js.Value {
-    return .{ .val = try command_js.submit(js.env(), try self.owner(), .getIdentity, &.{}) };
-}
-pub fn getPeers(self: *@This()) !js.Value {
-    return .{ .val = try command_js.submit(js.env(), try self.owner(), .getPeers, &.{}) };
+pub fn getPeerScores(self: *@This()) !js.Value {
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .getPeerScores, &.{}) };
 }
 pub fn getGossipDiagnostics(self: *@This(), cursor: js.Value) !js.Value {
     return .{ .val = try command_js.submit(js.env(), try self.owner(), .getGossipDiagnostics, &.{cursor.val}) };
@@ -312,9 +310,6 @@ pub fn addDirectPeer(self: *@This(), peer: js.Value, addresses: js.Value) !js.Va
 }
 pub fn removeDirectPeer(self: *@This(), peer: js.Value) !js.Value {
     return .{ .val = try command_js.submit(js.env(), try self.owner(), .removeDirectPeer, &.{peer.val}) };
-}
-pub fn getDirectPeers(self: *@This()) !js.Value {
-    return .{ .val = try command_js.submit(js.env(), try self.owner(), .getDirectPeers, &.{}) };
 }
 
 pub fn requestStart(self: *@This(), peer: js.Value, protocol: js.Value, data: js.Value, options: js.Value) !js.Value {

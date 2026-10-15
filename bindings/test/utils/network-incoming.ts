@@ -1,8 +1,9 @@
 import {setTimeout as delay} from "node:timers/promises";
 import type {NativeApplicationConfig} from "../../src/network.js";
-import type {NativeIncomingRequest, NativeNetworkApplicationRuntime} from "../../src/network-runtime.js";
+import type {NativeIncomingRequest} from "../../src/network-runtime.js";
 import {applicationConfig, localIntent, nextIncoming, startRuntime} from "./network.js";
 import {type PeerRuntime, startPeer} from "./network-peer.js";
+import type {NetworkTestRuntime} from "./network-runtime.js";
 
 export const BLOCKS = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
 
@@ -18,7 +19,7 @@ export async function incomingPair(
   rightConfig.identitySecretKey[31] = 2;
   configure?.(leftConfig, rightConfig);
   let left: PeerRuntime | undefined;
-  let right: NativeNetworkApplicationRuntime | undefined;
+  let right: NetworkTestRuntime | undefined;
   try {
     left = await startPeer(leftConfig);
     right = startRuntime(rightConfig, onServerWorkAvailable);
@@ -32,9 +33,7 @@ export async function incomingPair(
   }
 }
 
-export async function takeIncoming(
-  runtime: NativeNetworkApplicationRuntime | PeerRuntime
-): Promise<NativeIncomingRequest> {
+export async function takeIncoming(runtime: NetworkTestRuntime | PeerRuntime): Promise<NativeIncomingRequest> {
   for (let i = 0; i < 1000; i++) {
     const incoming = "takeIncomingRequest" in runtime ? await runtime.takeIncomingRequest() : nextIncoming(runtime);
     if (incoming) return incoming;

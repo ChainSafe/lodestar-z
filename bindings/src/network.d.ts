@@ -211,21 +211,10 @@ export interface NativeIntentResult {
   ownerSequence: bigint;
 }
 
-export interface NativeIdentitySnapshot extends NativeIdentity {
-  ownerSequence: bigint;
-}
-
-export interface NativeDirectSnapshot {
-  identities: PeerIdStr[];
-  ownerSequence: bigint;
-}
-
-export interface NativePeerSnapshot {
-  peers: NativePeerState[];
-  occupiedCount: number;
-  capacity: number;
-  counts: {connected: number; relevant: number; outboundRelevant: number};
-  ownerSequence: bigint;
+export interface NativePeerScores {
+  observedMonoMs: bigint;
+  observedUnixMs: bigint;
+  peers: {identity: PeerIdStr; score: number; gossipScore: number; scoreAtMs: bigint}[];
 }
 
 export type NativeProtocolId =
@@ -477,7 +466,6 @@ export interface NativeGossipPeerDiagnostic {
 }
 /** Each page is copied from one owner turn. Cursors traverse at most 512 retained peer slots. */
 export interface NativeGossipDiagnosticsPage {
-  ownerSequence: bigint;
   observedMonoMs: bigint;
   observedUnixMs: bigint;
   nextCursor: number | null;
@@ -640,9 +628,12 @@ export interface NativeNetwork {
   setDirectPeer(peerId: PeerIdStr, endpoints: readonly IpEndpoint[]): Promise<void>;
   setDirectPeer(peerId: PeerIdStr, endpoints: null): Promise<boolean>;
   reStatus(peerIds: readonly PeerIdStr[]): Promise<void>;
-  getIdentity(): Promise<NativeIdentitySnapshot>;
-  getPeers(): Promise<NativePeerSnapshot>;
-  getDirectPeers(): Promise<NativeDirectSnapshot>;
+  /** Latest delivered identity, initially populated during initialization. Rejects with NetworkClosed once close() begins. */
+  getIdentity(): Promise<NativeIdentity>;
+  /** Cached direct-peer membership. Rejects with NetworkClosed once close() begins. */
+  getDirectPeers(): Promise<PeerIdStr[]>;
+  /** Compact retained scores. Diagnostic commands share one result buffer and wait in the bounded command queue. */
+  getPeerScores(): Promise<NativePeerScores>;
   getGossipDiagnostics(cursor?: number): Promise<NativeGossipDiagnosticsPage>;
   /**
    * Prometheus text rendered on demand, including binding counters. Concurrent scrapes share one request;

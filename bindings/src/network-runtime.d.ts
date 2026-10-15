@@ -20,6 +20,7 @@ import type {
 
 /** One exchange's delivery, which the host owns. */
 export interface NativeExchange {
+  readonly identity: NativeIdentity | null;
   /** Updates replace the previous state of the same peer. */
   readonly peers: readonly NativePeerObservation[];
   readonly serving: readonly NativeIncomingRequest[];
@@ -46,11 +47,9 @@ export interface NativeNetworkApplicationRuntime
     | "request"
     | "applyIntent"
     | "updateStatus"
-    | "getIdentity"
     | "getGossipDiagnostics"
-    | "getPeers"
+    | "getPeerScores"
     | "disconnect"
-    | "getDirectPeers"
   > {
   drainLogs(maxRecords?: number): NativeLogBatch;
   /** Prometheus text rendered on demand by the owner. The final snapshot survives close. */

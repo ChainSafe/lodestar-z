@@ -37,6 +37,7 @@ const control = null;
 const idle: NativeExchange = {
   checks: [],
   gossip: null,
+  identity: null,
   needsAnotherExchange: false,
   peers: [],
   serving: [],

@@ -16,7 +16,7 @@ const Kind = n.gossip_processor.limits.Kind;
 const limits_mod = n.gossip_processor.limits;
 const State = n.gossip_processor.GossipProcessor.State;
 const network_wake = @import("network_wake.zig");
-const network_storage = @import("network_storage.zig");
+const diagnostics = @import("network_diagnostics.zig");
 
 const Part = enum { peers, serving, checks, gossip, completions, publication, command, closed };
 
@@ -39,6 +39,7 @@ const Host = struct {
     during_settlement: ?*const fn (*Runtime) anyerror!void = null,
 
     pub const Result = struct {
+        identity: ?r.Identity = null,
         peers: usize = 0,
         serving: [exchange.serving_max]incoming.Token = undefined,
         serving_count: usize = 0,
@@ -69,7 +70,7 @@ const Host = struct {
         if (self.failing(.serving) and selection.serving_count > 0) return self.failure_error();
         if (self.failing(.checks) and selection.checks.len > 0) return self.failure_error();
         if (self.failing(.gossip) and selection.gossip != null) return self.failure_error();
-        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .publications = self.settled.publications, .publication_count = self.settled.publication_count, .commands = self.settled.commands, .command_count = self.settled.command_count, .requests = self.settled.requests, .request_count = self.settled.request_count, .incoming = self.settled.incoming, .incoming_count = self.settled.incoming_count, .closed = self.settled.closed };
+        return .{ .identity = selection.identity, .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .publications = self.settled.publications, .publication_count = self.settled.publication_count, .commands = self.settled.commands, .command_count = self.settled.command_count, .requests = self.settled.requests, .request_count = self.settled.request_count, .incoming = self.settled.incoming, .incoming_count = self.settled.incoming_count, .closed = self.settled.closed };
     }
     pub fn settlePublication(self: *Host, token: publications.Token) !void {
         try std.testing.expectEqual(publications.State.copying, self.runtime.bridge.publications.?.get(token).?.state);
@@ -228,7 +229,7 @@ fn stopAt(part: Part) !void {
     const checked = try admit(runtime, .beacon_attestation, @splat(3), "data");
     const column = try admit(runtime, .data_column_sidecar, null, "data");
     const exit = try admit(runtime, .voluntary_exit, null, "data");
-    const completed = [_]commands.Token{ try completeCommand(runtime, .getIdentity), try completeCommand(runtime, .getIdentity) };
+    const completed = [_]commands.Token{ try completeCommand(runtime, .getMetrics), try completeCommand(runtime, .getMetrics) };
 
     var host: Host = .{ .runtime = runtime, .fail = part };
     try std.testing.expectError(error.PendingException, host.turn(deployed));
@@ -296,32 +297,32 @@ test "a contract failure terminates the process at the build site without a retr
     }.run, "native network bridge: InvalidArg");
 }
 
-test "control-only exchanges leave payload queued and arm for new completions" {
+test "paused payload delivery still drains observations and arms for new completions" {
     var fixture: Fixture = undefined;
     try fixture.init(true, 2);
     defer fixture.deinit();
     const runtime = &fixture.runtime;
     publishPeer(runtime);
     const exit = try admit(runtime, .voluntary_exit, null, "data");
-    for (0..commands.capacity - 1) |_| _ = try completeCommand(runtime, .getIdentity);
+    for (0..commands.capacity - 1) |_| _ = try completeCommand(runtime, .getMetrics);
     var host: Host = .{ .runtime = runtime };
     var batches: usize = 0;
     const demand = control;
     for (0..8) |_| {
         const result = try host.turn(demand);
         batches += 1;
-        try std.testing.expect(result.peers == 0 and result.gossip == null);
+        try std.testing.expect(result.peers == 1 and result.gossip == null);
         try std.testing.expectEqual(runtime.bridge.commands.occupied > 0, result.outcome.needs_another_exchange);
         if (!result.outcome.needs_another_exchange) break;
     }
     try std.testing.expectEqual(@as(usize, 1), batches);
-    try std.testing.expectEqual(@as(u8, 1), fixture.lane.len);
+    try std.testing.expectEqual(@as(u8, 0), fixture.lane.len);
     try std.testing.expect(runtime.bridge.notification_armed);
     const before = tsfn.notifications.load(.acquire);
-    _ = try completeCommand(runtime, .getIdentity);
+    _ = try completeCommand(runtime, .getMetrics);
     try std.testing.expectEqual(before + 1, tsfn.notifications.load(.acquire));
     const result = try host.turn(deployed);
-    try std.testing.expect(result.peers == 1 and result.gossip != null and runtime.bridge.notification_armed);
+    try std.testing.expect(result.peers == 0 and result.gossip != null and runtime.bridge.notification_armed);
     runtime.bridge.gossip.?.retire(exit);
 }
 
@@ -420,7 +421,7 @@ test "a stop ends new host work while quiescence preserves terminal delivery" {
     const request = try queueRequest(runtime);
     const checked = try admit(runtime, .beacon_attestation, @splat(3), "data");
     const exit = try admit(runtime, .voluntary_exit, null, "data");
-    const command = try runtime.reserveCommand(.getIdentity);
+    const command = try runtime.reserveCommand(.getMetrics);
     try runtime.queueCommand(command);
     runtime.bridge.stop = true;
     var host: Host = .{ .runtime = runtime };
@@ -551,30 +552,27 @@ fn completeCommand(runtime: *Runtime, command: commands.Command) !commands.Token
     const token = try runtime.reserveCommand(command);
     runtime.lock();
     defer runtime.unlock();
+    runtime.bridge.commands.transition(runtime.bridge.commands.get(token), .executing);
     runtime.bridge.commands.transition(runtime.bridge.commands.get(token), .terminal);
     runtime.notifyIfReadyLocked();
     return token;
 }
 
-test "command completions batch terminal cells while unfinished work stays admitted, and retire their typed stores" {
+test "command completions batch terminal cells while unfinished work stays admitted, and release diagnostic admission" {
     var fixture: Fixture = undefined;
     try fixture.init(false, 2);
     defer fixture.deinit();
     const runtime = &fixture.runtime;
-    var stores = try network_storage.Stores.create(std.testing.allocator, 4);
-    defer stores.destroy();
-    runtime.bridge.stores = stores;
-    defer runtime.bridge.stores = null;
-    const low = try completeCommand(runtime, .getPeers);
-    const unfinished = [_]commands.Token{ try runtime.reserveCommand(.getIdentity), try runtime.reserveCommand(.getIdentity) };
-    const high = try completeCommand(runtime, .getDirectPeers);
+    const low = try completeCommand(runtime, .getPeerScores);
+    const unfinished = [_]commands.Token{ try runtime.reserveCommand(.getMetrics), try runtime.reserveCommand(.getMetrics) };
+    const high = try completeCommand(runtime, .getMetrics);
     try std.testing.expectEqual(low.index + 3, high.index);
     var host: Host = .{ .runtime = runtime };
     const demand = control;
     var delivered: [4]commands.Token = undefined;
     for (0..3) |pass| {
-        // The lowest cell completes again whenever it was delivered, taking the freed snapshot store.
-        if (pass > 0 and runtime.bridge.commands.cells[low.index].state == .free) _ = try completeCommand(runtime, .getPeers);
+        // The lowest cell completes again whenever it was delivered, taking the freed diagnostic buffer.
+        if (pass > 0 and runtime.bridge.commands.cells[low.index].state == .free) _ = try completeCommand(runtime, .getPeerScores);
         const result = try host.turn(demand);
         try std.testing.expectEqual(@as(usize, if (pass == 0) 2 else 1), result.command_count);
         for (0..result.command_count) |i| {
@@ -584,8 +582,7 @@ test "command completions batch terminal cells while unfinished work stays admit
         }
     }
     try std.testing.expectEqualSlices(commands.Token, &.{ low, high, .{ .index = low.index, .generation = low.generation + 1 }, .{ .index = low.index, .generation = low.generation + 2 } }, &delivered);
-    // Delivery freed each snapshot store, so both remain available.
-    try std.testing.expect(!runtime.bridge.commands.stores[1][0] and !runtime.bridge.commands.stores[1][1]);
+    try std.testing.expect(runtime.bridge.commands.diagnostic == null);
     for (unfinished) |token| runtime.retireCommand(token);
 }
 
@@ -594,8 +591,8 @@ test "shutdown during command settlement keeps its snapshot alive and ends paylo
     try fixture.init(false, 2);
     defer fixture.deinit();
     const runtime = &fixture.runtime;
-    runtime.bridge.stores = try network_storage.Stores.create(std.testing.allocator, 4);
-    const token = try completeCommand(runtime, .getPeers);
+    runtime.bridge.diagnostics = try diagnostics.Buffer.create(std.testing.allocator, 4, 1);
+    const token = try completeCommand(runtime, .getPeerScores);
     _ = try queueRequest(runtime);
     _ = try admit(runtime, .beacon_attestation, @splat(3), "check");
     _ = try admit(runtime, .voluntary_exit, null, "payload");
@@ -606,8 +603,8 @@ test "shutdown during command settlement keeps its snapshot alive and ends paylo
             target.bridge.stop = true;
             target.cancelCommandsLocked();
             target.bridge.quiescent = true;
-            target.retireStoresLocked();
-            std.debug.assert(target.bridge.stores != null);
+            target.retireDiagnosticsLocked();
+            std.debug.assert(target.bridge.diagnostics != null);
             std.debug.assert(target.bridge.commands.occupied == 1);
         }
     };
@@ -615,7 +612,7 @@ test "shutdown during command settlement keeps its snapshot alive and ends paylo
     const result = try host.turn(deployed);
     try std.testing.expectEqualSlices(commands.Token, &.{token}, result.commands[0..result.command_count]);
     try std.testing.expectEqual(commands.State.free, runtime.bridge.commands.cells[token.index].state);
-    try std.testing.expect(runtime.bridge.stores == null);
+    try std.testing.expect(runtime.bridge.diagnostics == null);
     try std.testing.expectEqual(@as(u32, 1), runtime.refs.load(.monotonic));
     try std.testing.expectEqual(@as(usize, 0), result.serving_count);
     try std.testing.expectEqual(@as(usize, 0), result.checks.len);
@@ -641,7 +638,7 @@ test "one-shot settlement leaves payloads unclaimed until their delivery is buil
     _ = try queueRequest(runtime);
     _ = try admit(runtime, .beacon_attestation, @splat(3), "check");
     _ = try admit(runtime, .voluntary_exit, null, "payload");
-    _ = try completeCommand(runtime, .getIdentity);
+    _ = try completeCommand(runtime, .getMetrics);
     var host: Host = .{ .runtime = runtime, .during_settlement = expectUnselected };
     const result = try host.turn(deployed);
     try std.testing.expectEqual(@as(usize, 1), result.command_count);
@@ -650,7 +647,7 @@ test "one-shot settlement leaves payloads unclaimed until their delivery is buil
     try std.testing.expectEqual(@as(usize, 1), result.gossip.?.len);
 }
 
-test "a failed command settlement releases its store without replaying an earlier publication" {
+test "a failed command settlement releases diagnostic admission without replaying an earlier publication" {
     inline for ([_]exchange.Failure{ .stopped, .contract }) |failure| {
         var fixture: Fixture = undefined;
         try fixture.init(false, 2);
@@ -659,7 +656,7 @@ test "a failed command settlement releases its store without replaying an earlie
         runtime.bridge.publications = try publications.Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget);
         defer runtime.bridge.publications.?.deinit();
         const published = try completePublication(runtime);
-        const command = try completeCommand(runtime, .getPeers);
+        const command = try completeCommand(runtime, .getPeerScores);
         const payload = try admit(runtime, .voluntary_exit, null, "payload");
         var host: Host = .{ .runtime = runtime, .fail = .command, .failure = failure, .during_settlement = expectUnselected };
         try std.testing.expectError(host.failure_error(), host.turn(deployed));
@@ -668,7 +665,7 @@ test "a failed command settlement releases its store without replaying an earlie
         try std.testing.expectEqual(failure == .contract, host.terminated);
         try std.testing.expect(runtime.bridge.publications.?.get(published) == null);
         try std.testing.expectEqual(commands.State.free, runtime.bridge.commands.cells[command.index].state);
-        try std.testing.expect(!runtime.bridge.commands.stores[1][0]);
+        try std.testing.expect(runtime.bridge.commands.diagnostic == null);
         try std.testing.expectEqual(State.queued, runtime.bridge.gossip.?.get(payload).?.state);
         try std.testing.expectEqual(@as(u32, 1), runtime.refs.load(.monotonic));
         host.fail = null;
@@ -967,7 +964,7 @@ test "close follows the last settlement and a stopped close is not retried" {
     try fixture.init(false, 2);
     defer fixture.deinit();
     const runtime = &fixture.runtime;
-    _ = try completeCommand(runtime, .getIdentity);
+    _ = try completeCommand(runtime, .getMetrics);
     runtime.lock();
     runtime.bridge.stop = true;
     runtime.failLocked(error.NetworkWakeFailed);
@@ -1069,4 +1066,36 @@ fn completePublication(runtime: *Runtime) !publications.Token {
     runtime.bridge.publications.?.transition(runtime.bridge.publications.?.get(token).?, .terminal);
     runtime.notifyIfReadyLocked();
     return token;
+}
+
+test "identity coalesces independently of a full peer lane and survives publication during copying" {
+    var fixture: Fixture = undefined;
+    try fixture.init(true, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    for (0..64) |_| publishPeer(runtime);
+    var identity = std.mem.zeroes(r.Identity);
+    identity.metadata.seq_number = 1;
+    runtime.bridge.identity = identity;
+    identity.metadata.seq_number = 2;
+    runtime.bridge.identity = identity;
+    const Publish = struct {
+        fn during(target: *Runtime) void {
+            var next = std.mem.zeroes(r.Identity);
+            next.metadata.seq_number = 3;
+            target.lock();
+            defer target.unlock();
+            target.bridge.identity = next;
+        }
+    };
+    var host: Host = .{ .runtime = runtime, .during = Publish.during };
+    const first = try host.turn(control);
+    try std.testing.expectEqual(@as(u64, 2), first.identity.?.metadata.seq_number);
+    try std.testing.expectEqual(exchange.peers_max, first.peers);
+    try std.testing.expect(first.outcome.needs_another_exchange);
+    host.during = null;
+    const second = try host.turn(control);
+    try std.testing.expectEqual(@as(u64, 3), second.identity.?.metadata.seq_number);
+    try std.testing.expect(!second.outcome.needs_another_exchange);
+    try std.testing.expect((try host.turn(control)).identity == null);
 }

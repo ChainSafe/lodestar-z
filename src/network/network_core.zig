@@ -110,6 +110,7 @@ pub const NetworkCore = struct {
         readiness_failures: u64 = 0,
     };
 
+    local_revision: u64 = 0,
     allocations: CountingAllocator,
     allocator: std.mem.Allocator,
     transport: Transport,
@@ -350,10 +351,31 @@ pub const NetworkCore = struct {
     pub fn reportValidation(self: *NetworkCore, handle: gossip.Gossipsub.ValidationHandle, verdict: gossip.Gossipsub.Verdict, now: Now) gossip.Gossipsub.ReportOutcome {
         return self.protocols.gossipsub.report(handle, verdict, now);
     }
-    pub fn completeSnapshots(self: *const NetworkCore, out: []t.Snapshot) error{OutputTooSmall}!usize {
-        if (out.len < self.peer_manager.catalog.options.capacity) return error.OutputTooSmall;
-        return self.peer_manager.snapshots(out);
+    pub const PeerScore = struct {
+        identity: t.PeerId,
+        score: f64,
+        score_at_ms: u64,
+        gossip_score: f64,
+    };
+
+    pub fn peerScores(self: *const NetworkCore, now: Now, out: []PeerScore) error{OutputTooSmall}!usize {
+        const catalog = &self.peer_manager.catalog;
+        if (out.len < catalog.options.capacity) return error.OutputTooSmall;
+        var count: usize = 0;
+        for (catalog.rows, 0..) |*row, index| {
+            const peer = catalog.get(.{ .index = @intCast(index), .generation = row.generation }) orelse continue;
+            const book = &self.protocols.gossipsub.peers;
+            out[count] = .{
+                .identity = peer.identity,
+                .score = peer.score,
+                .score_at_ms = peer.score_at_ms,
+                .gossip_score = if (book.find(&peer.identity)) |ref| book.snapshot(ref, now.millis()) else 0,
+            };
+            count += 1;
+        }
+        return count;
     }
+
     /// Refreshes the remembered records of connections that qualify now and copies every
     /// unexpired record for a caller-owned checkpoint.
     pub fn rememberedPeers(self: *NetworkCore, now: Now, out: []peers.remembered.Record) error{OutputTooSmall}!usize {
@@ -456,6 +478,7 @@ pub const NetworkCore = struct {
 
     fn commitLocal(self: *NetworkCore, prepared: *const PreparedLocal, now: Now) void {
         std.debug.assert(prepared.changed);
+        self.local_revision +%= 1;
         if (self.discovery) |owned| {
             owned.commitLocal(prepared.endpoints.?, &prepared.local.fork);
         }

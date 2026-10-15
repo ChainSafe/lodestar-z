@@ -33,6 +33,7 @@ pub const Owner = struct {
     processor_metrics: processor_metrics.Snapshot = .{},
     checkpoint: ?n.peers.RememberedCheckpoint = null,
     remembered_due_ms: u64 = 0,
+    identity_revision: u64 = 0,
 
     pub fn readIdentity(self: *const Owner) !r.Identity {
         var identity: r.Identity = undefined;
@@ -231,6 +232,7 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
     const tick = result.transport.now;
     try requests_mod.capture(self, self.owner.?.application_outputs[0..result.counts.application], tick);
     commands.completeConnects(self, result.transport_events, tick);
+    publishIdentity(self);
     publishTurn(self, &result, tick, sequence);
     return result;
 }
@@ -312,8 +314,8 @@ fn applyReports(self: *Runtime, tick: n.Now) bool {
     return self.bridge.reports.pending != 0;
 }
 
-/// Executes queued commands, publications and requests in admission order under their per-turn
-/// caps. Returns whether a cap stopped it with work left.
+/// Executes ready commands, publications and requests in admission order under their per-turn caps.
+/// Diagnostics wait for the shared result buffer. Returns whether a cap stopped work that can continue.
 fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
     var controls: usize = 0;
     var requests: usize = 0;
@@ -379,6 +381,20 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
         }
     }
     return true;
+}
+
+pub fn publishIdentity(self: *Runtime) void {
+    const owner = self.owner.?;
+    if (owner.identity_revision == owner.core.local_revision) return;
+    const identity = owner.readIdentity() catch |err| {
+        std.log.scoped(.network_runtime).warn("identity_publish_failed reason={s}", .{@errorName(err)});
+        return;
+    };
+    self.lock();
+    defer self.unlock();
+    self.bridge.identity = identity;
+    owner.identity_revision = owner.core.local_revision;
+    self.notifyIfReadyLocked();
 }
 
 fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n.Now, sequence: u64) void {
@@ -472,10 +488,11 @@ test "a command queued after wait planning executes in the turn whose poll obser
             // The native wait checks cancellation after planning and before polling.
             if (target) |pending| {
                 target = null;
-                token = pending.reserveCommand(.getIdentity) catch |err| {
+                token = pending.reserveCommand(.reStatusPeers) catch |err| {
                     failure = err;
                     return error.Canceled;
                 };
+                pending.bridge.commands.get(token.?).input.reStatusPeers.count = 0;
                 pending.queueCommand(token.?) catch |err| {
                     failure = err;
                     return error.Canceled;
@@ -508,7 +525,8 @@ test "a command queued after wait planning executes in the turn whose poll obser
     _ = try applyWork(&runtime, io, first_slot);
     runtime.health_log_due_ms = first_slot.millis() + 30000;
     try std.testing.expectEqual(first_slot.millis() + 1000, try hostDeadline(&runtime, first_slot));
-    const next_slot = n.Now.fromMilliseconds(.{ .mono_ms = first_slot.millis() + 12000, .unix_s = 1012 });
+    const duration = beacon.chain.SLOT_DURATION_MS;
+    const next_slot = n.Now.fromMilliseconds(.{ .mono_ms = first_slot.millis() + duration, .unix_s = 1000 + @as(i64, @intCast(duration / 1000)) });
     try std.testing.expectEqual(next_slot.millis(), try hostDeadline(&runtime, next_slot));
     _ = try applyWork(&runtime, io, next_slot);
     try std.testing.expectEqual(1, try owner.core.clock.read(next_slot));
@@ -577,10 +595,10 @@ test "queued request and disconnect share the protocol turn clock while latency 
     const connect = try runtime.bridge.commands.reserve(.connect);
     defer runtime.bridge.commands.retire(connect);
     const command = runtime.bridge.commands.get(connect);
-    command.input.peer = n.PeerId.fromPublicKey(&peer_key.publicKey());
-    command.input.addresses[0] = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9000 } };
-    command.input.address_count = 1;
-    command.input.timeout_ms = 1000;
+    command.input.connect.peer = n.PeerId.fromPublicKey(&peer_key.publicKey());
+    command.input.connect.addresses[0] = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9000 } };
+    command.input.connect.address_count = 1;
+    command.input.connect.timeout_ms = 1000;
     runtime.bridge.commands.transition(command, .queued);
 
     const publication = try runtime.bridge.publications.?.reserve(.beacon_block, 0);
@@ -606,7 +624,7 @@ test "queued request and disconnect share the protocol turn clock while latency 
 
     const disconnect = try runtime.bridge.commands.reserve(.disconnect);
     defer runtime.bridge.commands.retire(disconnect);
-    runtime.bridge.commands.get(disconnect).input.peer = remote_id;
+    runtime.bridge.commands.get(disconnect).input.disconnect = remote_id;
     runtime.bridge.commands.transition(runtime.bridge.commands.get(disconnect), .queued);
     try std.testing.expect(!try executeWork(&runtime, io, tick));
     try std.testing.expect(command.failure == null);

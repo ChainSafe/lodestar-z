@@ -59,7 +59,7 @@ async function closeRace(random: () => number): Promise<void> {
           ignoreDuplicate: true,
         })
       ),
-    () => settlements.watch(() => (random() < 0.5 ? runtime.getIdentity() : runtime.getPeers())),
+    () => settlements.watch(() => (random() < 0.5 ? runtime.reStatusPeers([]) : runtime.getPeerScores())),
     () => settlements.watch(() => runtime.connect(...unreachableConnect())),
     () =>
       settlements.watch(() => {

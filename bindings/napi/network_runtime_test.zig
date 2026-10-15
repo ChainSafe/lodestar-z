@@ -15,9 +15,9 @@ const network_wake = @import("network_wake.zig");
 
 test "stop preserves latched success and cancels accepted nonterminal commands" {
     var runtime: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false, .env_alive = false } };
-    const success = try runtime.bridge.commands.reserve(.getIdentity);
+    const success = try runtime.bridge.commands.reserve(.disconnect);
     const waiting = try runtime.bridge.commands.reserve(.connect);
-    const queued = try runtime.bridge.commands.reserve(.getIdentity);
+    const queued = try runtime.bridge.commands.reserve(.disconnect);
     const metrics = try runtime.bridge.commands.reserve(.getMetrics);
     const preparing = try runtime.bridge.commands.reserve(.applyIntent);
     runtime.bridge.commands.transition(runtime.bridge.commands.get(success), .terminal);
@@ -39,7 +39,7 @@ test "terminal cleanup releases pending Promise references without running JavaS
     var runtime: Runtime = .{ .env = undefined, .refs = .init(2), .bridge = .{ .env_alive = false, .notify_live = false } };
     runtime.bridge.publications = try publications_mod.Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget);
     defer runtime.bridge.publications.?.deinit();
-    const command = try runtime.reserveCommand(.getIdentity);
+    const command = try runtime.reserveCommand(.disconnect);
     const publication = try runtime.reservePublication(.beacon_block, 0);
     const command_cell = runtime.bridge.commands.get(command);
     const publication_cell = runtime.bridge.publications.?.get(publication).?;
@@ -155,7 +155,7 @@ test "a requested stop removes queued gossip from host delivery" {
 test "an owner completion notifies once while armed and leaves settlement to the exchange" {
     var runtime: Runtime = .{ .env = undefined };
     const before = support.notifications.load(.acquire);
-    const token = try runtime.bridge.commands.reserve(.getIdentity);
+    const token = try runtime.bridge.commands.reserve(.disconnect);
     runtime.bridge.commands.transition(runtime.bridge.commands.get(token), .terminal);
     runtime.lock();
     runtime.notifyIfReadyLocked();
@@ -164,7 +164,7 @@ test "an owner completion notifies once while armed and leaves settlement to the
     try std.testing.expect(!runtime.bridge.notification_armed);
     try std.testing.expectEqual(commands.State.terminal, runtime.bridge.commands.get(token).state);
     // Disarmed, a second completion does not send another notification.
-    const second = try runtime.bridge.commands.reserve(.getIdentity);
+    const second = try runtime.bridge.commands.reserve(.disconnect);
     runtime.lock();
     runtime.bridge.commands.transition(runtime.bridge.commands.get(second), .terminal);
     runtime.notifyIfReadyLocked();
@@ -389,7 +389,7 @@ test "the O(1) completion-ready state matches a full scan across state transitio
 
     // Commands: queued, executing, waiting and terminal through the owner's transitions.
     const connect = try runtime.bridge.commands.reserve(.connect);
-    const identity = try runtime.bridge.commands.reserve(.getIdentity);
+    const identity = try runtime.bridge.commands.reserve(.disconnect);
     try runtime.queueCommand(connect);
     try runtime.queueCommand(identity);
     runtime.bridge.commands.transition(runtime.bridge.commands.get(connect), .waiting);

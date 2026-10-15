@@ -3,7 +3,8 @@ import {once} from "node:events";
 import {setTimeout as delay} from "node:timers/promises";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
-import {expect, test} from "vitest";
+import {expect, test, vi} from "vitest";
+import type {NativePeerObservation} from "../src/network.js";
 import {
   applicationConfig,
   childTestTimeout,
@@ -101,28 +102,23 @@ test("Status-only validation uses the active fork and leaves rejected updates un
   }
 });
 
-test("identity metadata belongs to its owner snapshot across queued intent updates", async () => {
+test("identity observations coalesce queued updates and callers own the returned bytes", async () => {
   const config = applicationConfig();
-  const runtime = startRuntime(config, () => undefined);
+  const runtime = startRuntime(config);
   try {
-    const ready = await runtime.identity;
-    const first = {...localIntent(config), syncCommittees: [{subnet: 0, untilSlot: 200}]};
-    const second = {...localIntent(config), syncCommittees: [{subnet: 1, untilSlot: 200}]};
-    const operations = [
-      runtime.applyIntent(first),
-      runtime.getIdentity(),
-      runtime.applyIntent(second),
-      runtime.getIdentity(),
-    ] as const;
-    const [appliedFirst, identityFirst, appliedSecond, identitySecond] = await Promise.all(operations);
-    expect(identityFirst.metadata.syncnets).toBe(1);
-    expect(identityFirst.metadata.sequenceNumber).toBe(ready.metadata.sequenceNumber + 1n);
-    expect(identitySecond.metadata.syncnets).toBe(3);
-    expect(identitySecond.metadata.sequenceNumber).toBe(ready.metadata.sequenceNumber + 2n);
-    expect(identityFirst.ownerSequence).toBeGreaterThan(appliedFirst.ownerSequence);
-    expect(identityFirst.ownerSequence).toBeLessThan(appliedSecond.ownerSequence);
-    identityFirst.metadata.attnets.fill(255);
-    expect((await runtime.getIdentity()).metadata).toEqual(identitySecond.metadata);
+    const initial = await runtime.getIdentity();
+    runtime.holdOperations(true);
+    const first = runtime.applyIntent({...localIntent(config), syncCommittees: [{subnet: 0, untilSlot: 200}]});
+    const second = runtime.applyIntent({...localIntent(config), syncCommittees: [{subnet: 1, untilSlot: 200}]});
+    expect(await runtime.getIdentity()).toEqual(initial);
+    runtime.holdOperations(false);
+    await Promise.all([first, second]);
+    const latest = await runtime.getIdentity();
+    expect(latest.metadata.syncnets).toBe(3);
+    expect(latest.metadata.sequenceNumber).toBe(initial.metadata.sequenceNumber + 2n);
+    initial.metadata.attnets.fill(255);
+    latest.metadata.attnets.fill(255);
+    expect((await runtime.getIdentity()).metadata.attnets).not.toEqual(latest.metadata.attnets);
   } finally {
     await runtime.close();
   }
@@ -148,12 +144,10 @@ test("complete getters, membership and command results survive a throwing notifi
     await runtime.applyIntent(localIntent(config));
     const snapshot = await runtime.getPeers();
     expect(snapshot).toMatchObject({
-      capacity: 64,
-      counts: {connected: 0, outboundRelevant: 0, relevant: 0},
-      occupiedCount: 0,
+      counts: {connected: 0, relevant: 0},
       peers: [],
     });
-    expect((await runtime.getDirectPeers()).identities).toEqual([]);
+    expect(await runtime.getDirectPeers()).toEqual([]);
     expect(await runtime.removeDirectPeer(ready.peerId)).toBe(false);
     await runtime.disconnect(ready.peerId);
     await runtime.reStatusPeers([]);
@@ -175,15 +169,15 @@ test("complete getters, membership and command results survive a throwing notifi
   }
 }, 15000);
 
-test("bounded typed stores refuse the third intent and unwind malformed input", async () => {
+test("inline command inputs share cell capacity and unwind malformed input", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;
     const one = runtime.applyIntent(localIntent(config));
     const two = runtime.applyIntent(localIntent(config));
-    await expect(runtime.applyIntent(localIntent(config))).rejects.toThrow("NetworkCommandFull");
-    await Promise.all([one, two]);
+    const three = runtime.applyIntent(localIntent(config));
+    await Promise.all([one, two, three]);
     for (const malformed of [
       {coreTopics: 1},
       {attesters: new Array(129).fill({aggregators: 1n, slot: 100, subnets: 1n})},
@@ -192,8 +186,8 @@ test("bounded typed stores refuse the third intent and unwind malformed input", 
       await expect(runtime.applyIntent(malformed)).rejects.toThrow();
     }
     await runtime.applyIntent(localIntent(config));
-    const pending = Array.from({length: 31}, () => runtime.getIdentity());
-    expect(() => runtime.getIdentity()).toThrow("NetworkCommandFull");
+    const pending = Array.from({length: 31}, () => runtime.getMetrics());
+    expect(() => runtime.getMetrics()).toThrow("NetworkCommandFull");
     await Promise.all(pending);
   } finally {
     await runtime.close();
@@ -213,8 +207,6 @@ test("actual 200/210 resources resolve and publish complete capacity", async () 
   try {
     await runtime.identity;
     await runtime.applyIntent(localIntent(config));
-    expect((await runtime.getPeers()).capacity).toBe(420);
-
     expect(runtime.limits.peerCapacity).toBe(Math.max(64, 2 * config.resources.maxPeers));
   } finally {
     await runtime.close();
@@ -225,7 +217,12 @@ test("real authenticated connect, direct membership and generation-preserving im
   const config = applicationConfig();
   const other = applicationConfig();
   other.identitySecretKey[31] = 2;
-  const a = startRuntime(config, () => undefined);
+  const events: NativePeerObservation[] = [];
+  const a = startRuntime(
+    config,
+    () => undefined,
+    (batch) => events.push(...batch)
+  );
   let b: PeerRuntime | undefined;
   try {
     b = await startPeer(other);
@@ -234,18 +231,19 @@ test("real authenticated connect, direct membership and generation-preserving im
     await a.connect(identityB.peerId, [identityB.localEndpoint], 5000n);
     await a.connect(identityB.peerId, [identityB.localEndpoint], 5000n);
     await a.addDirectPeer(identityB.peerId, [identityB.localEndpoint]);
-    expect((await a.getDirectPeers()).identities).toEqual([identityB.peerId]);
+    expect(await a.getDirectPeers()).toEqual([identityB.peerId]);
     await a.reStatusPeers([identityB.peerId]);
+    await vi.waitFor(async () => expect((await a.getPeers()).counts.connected).toBe(1));
     const before = await a.getPeers();
     expect(before.counts.connected).toBe(1);
     expect(before.peers[0].connection).not.toBeNull();
     expect(before.peers[0].redialUntilMs).toBe(0n);
     expect(before.peers[0].goodbyeUntilMs).toBe(0n);
     await a.disconnect(identityB.peerId);
-    expect((await a.getDirectPeers()).identities).toEqual([identityB.peerId]);
+    expect(await a.getDirectPeers()).toEqual([identityB.peerId]);
     expect(await a.removeDirectPeer(identityB.peerId)).toBe(true);
     expect(await a.removeDirectPeer(identityB.peerId)).toBe(false);
-    const events = exchange(a, {...gossipAll}).peers;
+    await vi.waitFor(() => expect(events.some((event) => event.type === "closed")).toBe(true));
     const closed = events.filter((event) => event.type === "closed");
     expect(closed).toHaveLength(1);
     expect(closed[0].connection).toEqual(before.peers[0].connection);
@@ -269,7 +267,7 @@ test("connect timeout retains independently wanted direct membership", async () 
     await a.applyIntent(localIntent(config));
     await a.addDirectPeer(identity.peerId, [identity.localEndpoint]);
     await expect(a.connect(identity.peerId, [identity.localEndpoint], 30n)).rejects.toThrow("NetworkConnectTimeout");
-    expect((await a.getDirectPeers()).identities).toEqual([identity.peerId]);
+    expect(await a.getDirectPeers()).toEqual([identity.peerId]);
   } finally {
     await Promise.all([a.close(), b.close()]);
   }
@@ -286,11 +284,12 @@ test("peer penalties accumulate while the command lane is full", async () => {
     const [, remote] = await Promise.all([a.identity, b.identity]);
     await Promise.all([a.applyIntent(localIntent(first)), b.applyIntent(localIntent(second))]);
     await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
+    await vi.waitFor(async () => expect((await a.getPeers()).counts.connected).toBe(1));
     const observed = (await a.getPeers()).peers.find((peer) => peer.identity === remote.peerId);
     if (!observed?.connection) throw Error("Missing connected peer");
     const origin = {connection: observed.connection, endpoint: observed.endpoint};
-    const pending = Array.from({length: 31}, () => a.getIdentity());
-    expect(() => a.getIdentity()).toThrow("NetworkCommandFull");
+    const pending = Array.from({length: 31}, () => a.getMetrics());
+    expect(() => a.getMetrics()).toThrow("NetworkCommandFull");
     exchange(a, settleOnly, [
       {
         action: "high_tolerance",
@@ -303,7 +302,7 @@ test("peer penalties accumulate while the command lane is full", async () => {
     await Promise.all(pending);
     let score = 0;
     for (let i = 0; i < 100; i++) {
-      score = (await a.getPeers()).peers[0].score;
+      score = (await a.getPeerScores()).peers[0].score;
       if (score < -2.9) break;
       await delay(10);
     }
@@ -323,12 +322,12 @@ test("peer penalties accumulate while the command lane is full", async () => {
       },
     ]);
     for (let i = 0; i < 100; i++) {
-      const retained = (await a.getPeers()).peers.find((peer) => peer.identity === remote.peerId);
+      const retained = (await a.getPeerScores()).peers.find((peer) => peer.identity === remote.peerId);
       if (retained && retained.score < -12.9) break;
       await delay(10);
     }
-    const retained = (await a.getPeers()).peers.find((peer) => peer.identity === remote.peerId);
-    expect(retained?.connection).toBeNull();
+    const retained = (await a.getPeerScores()).peers.find((peer) => peer.identity === remote.peerId);
+    expect((await a.getPeers()).peers.some((peer) => peer.identity === remote.peerId)).toBe(false);
     expect(retained?.score).toBeLessThan(-12.9);
   } finally {
     await Promise.all([a.close(), b?.stop()]);
@@ -351,15 +350,15 @@ test("disconnect cancels pending one-shot connects and releases their dial inten
     expect(await pending).toContain("NetworkConnectCancelled");
     await b.applyIntent(localIntent(other));
     await a.connect(identity.peerId, [identity.localEndpoint], 5000n);
-    expect((await a.getPeers()).counts.connected).toBe(1);
+    await vi.waitFor(async () => expect((await a.getPeers()).counts.connected).toBe(1));
     await a.disconnect(identity.peerId);
-    expect((await a.getPeers()).counts.connected).toBe(0);
+    await vi.waitFor(async () => expect((await a.getPeers()).counts.connected).toBe(0));
   } finally {
     await Promise.all([a.close(), b?.stop()]);
   }
 }, 15000);
 
-test("all typed stores and the connect allowance reject without partial admission", async () => {
+test("diagnostics share one buffer and the connect allowance rejects without partial admission", async () => {
   const config = applicationConfig();
   const remoteConfig = applicationConfig();
   remoteConfig.identitySecretKey[31] = 9;
@@ -369,12 +368,10 @@ test("all typed stores and the connect allowance reject without partial admissio
     await runtime.identity;
     const identity = await remote.identity;
     await runtime.applyIntent(localIntent(config));
-    const snapshots = [runtime.getPeers(), runtime.getPeers()];
-    expect(() => runtime.getPeers()).toThrow("NetworkCommandFull");
-    await Promise.all(snapshots);
-    const targets = [runtime.reStatusPeers([]), runtime.reStatusPeers([])];
-    expect(() => runtime.reStatusPeers([])).toThrow("NetworkCommandFull");
-    await Promise.all(targets);
+    const diagnostic = runtime.getPeerScores();
+    const gossip = runtime.getGossipDiagnostics();
+    await Promise.all([diagnostic, gossip]);
+    await Promise.all([runtime.reStatusPeers([]), runtime.reStatusPeers([]), runtime.reStatusPeers([])]);
     const connections = Array.from({length: 16}, () =>
       runtime.connect(identity.peerId, [identity.localEndpoint], 60000n).catch((error: Error) => error.message)
     );

@@ -1,4 +1,4 @@
-//! Native-owned command promises. Result construction borrows the cell's typed store until settlement finishes.
+//! Native-owned command promises. Diagnostic result construction borrows the shared buffer until settlement finishes.
 const network_metrics = @import("network_metrics.zig");
 const decode = @import("network_js_input.zig");
 const napi = @import("zapi:zapi").napi;
@@ -27,44 +27,39 @@ pub fn settle(env: napi.Env, runtime: *Runtime, token: commands.Token) !void {
 
 fn result(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     const operation = &runtime.bridge.commands.cells[index];
-    const store = runtime.bridge.commands.cells[index].store;
-    const object = switch (operation.input.command) {
+    const object = switch (operation.input) {
         .getMetrics => return network_metrics.value(runtime),
-        .getGossipDiagnostics => try network_gossip_diagnostics.copy(env, &runtime.bridge.stores.?.gossip_diagnostics[store.?]),
-        .getIdentity => try identity(env, &operation.identity),
-        .applyIntent, .getPeers, .getDirectPeers => try env.createObject(),
+        .getGossipDiagnostics => return network_gossip_diagnostics.copy(env, &runtime.bridge.diagnostics.?.gossip),
+        .getPeerScores => return peerScores(env, runtime),
+        .applyIntent => try env.createObject(),
         .removeDirectPeer => return env.getBoolean(operation.boolean),
         else => return env.getUndefined(),
     };
     try object.setNamedProperty("ownerSequence", try env.createBigintUint64(operation.sequence));
-    switch (operation.input.command) {
-        .applyIntent => {
-            try object.setNamedProperty("changed", try env.getBoolean(operation.boolean));
-            try object.setNamedProperty("slot", try env.createBigintUint64(operation.applied_slot));
-        },
-        .getPeers => {
-            const peers = try env.createArrayWithLength(operation.count);
-            for (runtime.bridge.stores.?.snapshots[store.?][0..operation.count], 0..) |*row, i| try peers.setElement(@intCast(i), try projection.state(env, row));
-            try object.setNamedProperty("peers", peers);
-            try object.setNamedProperty("occupiedCount", try env.createDouble(@floatFromInt(operation.count)));
-            try object.setNamedProperty("capacity", try env.createUint32(runtime.peer_capacity));
-            const counts = try env.createObject();
-            try counts.setNamedProperty("connected", try env.createUint32(operation.counts.connected));
-            try counts.setNamedProperty("relevant", try env.createUint32(operation.counts.relevant));
-            try counts.setNamedProperty("outboundRelevant", try env.createUint32(operation.counts.outbound_relevant));
-            try object.setNamedProperty("counts", counts);
-        },
-        .getDirectPeers => {
-            const identities = try env.createArrayWithLength(operation.count);
-            for (runtime.bridge.stores.?.direct[store.?][0..operation.count], 0..) |*peer, i| try identities.setElement(@intCast(i), try js.peerIdValue(env, peer));
-            try object.setNamedProperty("identities", identities);
-        },
-        else => {},
-    }
+    try object.setNamedProperty("changed", try env.getBoolean(operation.boolean));
+    try object.setNamedProperty("slot", try env.createBigintUint64(operation.applied_slot));
     return object;
 }
 
-/// A runtime identity snapshot, as initialization and getIdentity return it.
+fn peerScores(env: napi.Env, runtime: *Runtime) !Value {
+    const buffer = runtime.bridge.diagnostics.?;
+    const object = try env.createObject();
+    try object.setNamedProperty("observedMonoMs", try env.createBigintUint64(buffer.observed.millis()));
+    try object.setNamedProperty("observedUnixMs", try env.createBigintInt64(buffer.observed.unixSeconds() *| 1000));
+    const peers = try env.createArrayWithLength(buffer.count);
+    for (buffer.scores[0..buffer.count], 0..) |*score, i| {
+        const value = try env.createObject();
+        try value.setNamedProperty("identity", try js.peerIdValue(env, &score.identity));
+        try value.setNamedProperty("score", try env.createDouble(score.score));
+        try value.setNamedProperty("gossipScore", try env.createDouble(score.gossip_score));
+        try value.setNamedProperty("scoreAtMs", try env.createBigintUint64(score.score_at_ms));
+        try peers.setElement(@intCast(i), value);
+    }
+    try object.setNamedProperty("peers", peers);
+    return object;
+}
+
+/// The initial identity or the latest coalesced identity observation.
 pub fn identity(env: napi.Env, value: *const r.Identity) !Value {
     const object = try env.createObject();
     try object.setNamedProperty("peerId", try js.peerIdValue(env, &value.peer));
@@ -82,7 +77,7 @@ pub fn identity(env: napi.Env, value: *const r.Identity) !Value {
     return object;
 }
 
-fn parseAddresses(value: Value, input: *commands.Input) !void {
+fn parseAddresses(value: Value, input: *commands.Dial) !void {
     input.address_count = @intCast(try decode.array(value, 2));
     if (input.address_count == 0) return error.InvalidNetworkConfig;
     for (input.addresses[0..input.address_count], 0..) |*address, i| {
@@ -98,29 +93,29 @@ pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Comma
     const token = try runtime.reserveCommand(command);
     errdefer runtime.retireCommand(token);
     const operation = &runtime.bridge.commands.cells[token.index];
-    const store = runtime.bridge.commands.cells[token.index].store;
     switch (command) {
-        .applyIntent => {
-            try application_cfg.parseIntent(args[0], &runtime.bridge.stores.?.intents[store.?]);
-        },
-        .updateStatus => try cfg.parseStatus(args[0], &operation.input.status),
-        .getIdentity, .getPeers, .getDirectPeers, .getMetrics => {},
-        .getGossipDiagnostics => operation.input.diagnostics_cursor = @intCast(try decode.integer(args[0], 512)),
+        .applyIntent => try application_cfg.parseIntent(args[0], &operation.input.applyIntent),
+        .updateStatus => try cfg.parseStatus(args[0], &operation.input.updateStatus),
+        .getPeerScores, .getMetrics => {},
+        .getGossipDiagnostics => operation.input.getGossipDiagnostics = @intCast(try decode.integer(args[0], 512)),
         .reStatusPeers => {
-            operation.input.target_count = @intCast(try decode.array(args[0], 256));
-            for (runtime.bridge.stores.?.targets[store.?][0..operation.input.target_count], 0..) |*peer, i| {
+            const targets = &operation.input.reStatusPeers;
+            targets.count = @intCast(try decode.array(args[0], targets.peers.len));
+            for (targets.peers[0..targets.count], 0..) |*peer, i| {
                 peer.* = try decode.peerIdFrom(try args[0].getElement(@intCast(i)));
-                for (runtime.bridge.stores.?.targets[store.?][0..i]) |*prior| if (peer.eql(prior)) return error.InvalidNetworkConfig;
+                for (targets.peers[0..i]) |*prior| if (peer.eql(prior)) return error.InvalidNetworkConfig;
             }
         },
-        else => {
-            operation.input.peer = try decode.peerIdFrom(args[0]);
-            if (command == .connect or command == .addDirectPeer) try parseAddresses(args[1], &operation.input);
+        .connect, .addDirectPeer => {
+            const dial = &@field(operation.input, @tagName(command));
+            dial.peer = try decode.peerIdFrom(args[0]);
+            try parseAddresses(args[1], dial);
             if (command == .connect) {
-                operation.input.timeout_ms = try decode.bigint(args[2]);
-                if (operation.input.timeout_ms == 0 or operation.input.timeout_ms > 60_000) return error.InvalidNetworkInteger;
+                dial.timeout_ms = try decode.bigint(args[2]);
+                if (dial.timeout_ms == 0 or dial.timeout_ms > 60_000) return error.InvalidNetworkInteger;
             }
         },
+        .disconnect, .removeDirectPeer => @field(operation.input, @tagName(command)) = try decode.peerIdFrom(args[0]),
     }
     const promise = try operation.promise.init(env);
     try runtime.queueCommand(token);

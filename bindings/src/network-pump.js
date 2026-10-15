@@ -95,12 +95,16 @@ export class NativePump {
   #burst = {buckets: new Array(BURST_BUCKETS.length).fill(0), count: 0, sum: 0};
   /** @type {LogDelivery | null} */
   #logs = null;
+  /** @type {(identity: import("./network.js").NativeIdentity) => void} */
+  #onIdentity;
 
   /**
    * @param {Host} host
+   * @param {(identity: import("./network.js").NativeIdentity) => void} [onIdentity]
    */
-  constructor(host) {
+  constructor(host, onIdentity = () => undefined) {
     this.#host = host;
+    this.#onIdentity = onIdentity;
   }
 
   /**
@@ -256,6 +260,7 @@ export class NativePump {
     try {
       this.#runtime.setCapacity(demand);
       result = this.#runtime.exchange();
+      if (result.identity) this.#onIdentity(result.identity);
     } catch (error) {
       this.#arbitrate(error);
       this.#fail();

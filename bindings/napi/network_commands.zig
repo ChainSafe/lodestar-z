@@ -7,7 +7,6 @@ const network_owner = @import("network_owner.zig");
 pub const capacity = 32;
 pub const connect_max = 16;
 pub const turn_max = 4;
-pub const Kind = enum { small, connect, intent, snapshot, targets };
 pub const State = enum { free, preparing, queued, executing, waiting, terminal, copying };
 pub const Token = struct { index: u8, generation: u64 };
 pub const Cell = struct {
@@ -15,18 +14,13 @@ pub const Cell = struct {
     /// Only the JavaScript thread creates or settles this promise; the owner records its outcome.
     promise: Promise = .{},
     generation: u64 = 0,
-    kind: Kind = .small,
-    store: ?u8 = null,
     order: u64 = 0,
-    input: Input = .{ .command = .getIdentity },
+    input: Input = .getMetrics,
     failure: ?anyerror = null,
     sequence: u64 = 0,
     boolean: bool = false,
     applied_slot: u64 = 0,
     deadline: u64 = 0,
-    identity: network_runtime.Identity = undefined,
-    count: usize = 0,
-    counts: n.PeerManager.PeerCounts = undefined,
 };
 pub const Table = struct {
     cells: [capacity]Cell = @splat(.{}),
@@ -34,7 +28,7 @@ pub const Table = struct {
     terminal: std.StaticBitSet(capacity) = .empty,
     /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
     completion_cursor: usize = 0,
-    stores: [3][2]bool = @splat(@splat(false)),
+    diagnostic: ?u8 = null,
     connects: u8 = 0,
     occupied: u8 = 0,
     sequence: u64 = 0,
@@ -49,34 +43,18 @@ pub const Table = struct {
         self.admission_sequence += 1;
         return self.admission_sequence;
     }
-    fn storeKind(kind: Kind) ?usize {
-        return switch (kind) {
-            .intent => 0,
-            .snapshot => 1,
-            .targets => 2,
-            else => null,
-        };
-    }
     pub fn reserve(self: *Table, command: Command) !Token {
-        const kind = storageKind(command);
-        if (kind == .connect and self.connects == connect_max) return error.NetworkCommandFull;
-        var store: ?u8 = null;
-        if (storeKind(kind)) |which| {
-            for (self.stores[which], 0..) |used, i| if (!used) {
-                store = @intCast(i);
-                break;
-            };
-            if (store == null) return error.NetworkCommandFull;
-        }
+        if (command == .connect and self.connects == connect_max) return error.NetworkCommandFull;
         // A single producer of local state can always submit despite unrelated command pressure.
         const start: usize = if (command == .applyIntent or command == .updateStatus) 0 else 1;
         for (self.cells[start..], start..) |*cell, i| {
             if (cell.state != .free) continue;
             const generation = std.math.add(u64, cell.generation, 1) catch return error.NetworkSequenceExhausted;
             const order = try self.nextOrder();
-            cell.* = .{ .state = .preparing, .generation = generation, .kind = kind, .store = store, .order = order, .input = .{ .command = command } };
-            if (storeKind(kind)) |which| self.stores[which][store.?] = true;
-            self.connects += @intFromBool(kind == .connect);
+            cell.* = .{ .state = .preparing, .generation = generation, .order = order, .input = switch (command) {
+                inline else => |tag| @unionInit(Input, @tagName(tag), undefined),
+            } };
+            self.connects += @intFromBool(command == .connect);
             self.occupied += 1;
             return .{ .index = @intCast(i), .generation = generation };
         }
@@ -86,6 +64,7 @@ pub const Table = struct {
         var selected: ?Token = null;
         var order: u64 = std.math.maxInt(u64);
         for (&self.cells, 0..) |*cell, i| {
+            if (isDiagnostic(cell.input) and self.diagnostic != null) continue;
             if (cell.state == .queued and (selected == null or cell.order < order)) {
                 selected = .{ .index = @intCast(i), .generation = cell.generation };
                 order = cell.order;
@@ -100,8 +79,8 @@ pub const Table = struct {
     }
     pub fn retire(self: *Table, token: Token) void {
         const cell = self.get(token);
-        if (storeKind(cell.kind)) |which| self.stores[which][cell.store.?] = false;
-        self.connects -= @intFromBool(cell.kind == .connect);
+        if (self.diagnostic == token.index) self.diagnostic = null;
+        self.connects -= @intFromBool(cell.input == .connect);
         self.occupied -= 1;
         self.transition(cell, .free);
         cell.promise.deinit();
@@ -110,6 +89,10 @@ pub const Table = struct {
     pub fn transition(self: *Table, cell: *Cell, state: State) void {
         const index = (@intFromPtr(cell) - @intFromPtr(&self.cells)) / @sizeOf(Cell);
         std.debug.assert(&self.cells[index] == cell);
+        if (state == .executing and isDiagnostic(cell.input)) {
+            std.debug.assert(self.diagnostic == null);
+            self.diagnostic = @intCast(index);
+        }
         cell.state = state;
         self.terminal.setValue(index, state == .terminal);
     }
@@ -127,34 +110,37 @@ pub const Table = struct {
 };
 
 const n = @import("network");
-pub const Command = enum { applyIntent, updateStatus, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, getMetrics };
-fn storageKind(command: Command) Kind {
-    return switch (command) {
-        .applyIntent => .intent,
-        .getPeers, .getDirectPeers, .getGossipDiagnostics => .snapshot,
-        .connect => .connect,
-        .reStatusPeers => .targets,
-        else => .small,
-    };
+pub const Command = std.meta.Tag(Input);
+fn isDiagnostic(command: Command) bool {
+    return command == .getPeerScores or command == .getGossipDiagnostics;
 }
-pub const Input = struct {
-    command: Command,
-    status: n.peers.types.Status = undefined,
-    peer: n.PeerId = undefined,
-    addresses: [2]n.Address = undefined,
-    address_count: u8 = 0,
-    timeout_ms: u64 = 0,
-    target_count: u16 = 0,
-    diagnostics_cursor: u16 = 0,
+pub const Dial = struct {
+    peer: n.PeerId,
+    addresses: [2]n.Address,
+    address_count: u8,
+    timeout_ms: u64,
+};
+pub const Input = union(enum) {
+    applyIntent: n.application_state.Update,
+    updateStatus: n.peers.types.Status,
+    getPeerScores,
+    getGossipDiagnostics: u16,
+    connect: Dial,
+    disconnect: n.PeerId,
+    reStatusPeers: struct { peers: [256]n.PeerId, count: u16 },
+    addDirectPeer: Dial,
+    removeDirectPeer: n.PeerId,
+    getMetrics,
 };
 
 const Runtime = @import("network_runtime.zig").Runtime;
 pub fn execute(self: *Runtime, token: Token, timestamp: n.Now) void {
     const cell = self.bridge.commands.get(token);
     executeOne(self, token.index, timestamp) catch |err| {
-        std.log.scoped(.network_bridge).debug("command_failed command={s} operation={d}:{d} reason={s}", .{ @tagName(cell.input.command), token.index, token.generation, @errorName(err) });
+        std.log.scoped(.network_bridge).debug("command_failed command={s} operation={d}:{d} reason={s}", .{ @tagName(cell.input), token.index, token.generation, @errorName(err) });
         cell.failure = err;
     };
+    network_owner.publishIdentity(self);
     self.lock();
     defer self.unlock();
     if (cell.state == .executing) {
@@ -167,15 +153,14 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
     const operation = &self.bridge.commands.cells[index];
     const input = &operation.input;
     const core = &self.owner.?.core;
-    const store = self.bridge.commands.cells[index].store;
-    switch (input.command) {
+    switch (input.*) {
         .applyIntent => {
-            const intent = &self.bridge.stores.?.intents[store.?];
+            const intent = &input.applyIntent;
             operation.boolean = try self.owner.?.state.?.apply(core, &self.owner.?.config.chain, intent, timestamp);
             operation.applied_slot = @intCast(@max(0, self.owner.?.state.?.applied_slot.?));
         },
         .updateStatus => {
-            var status = input.status;
+            var status = input.updateStatus;
             if (self.owner.?.config.chain.fulu_scheduled and status.earliest_available_slot == null) return error.MissingAvailability;
             status.fork_digest = core.localState().status.fork_digest;
             try core.updateStatus(&status);
@@ -184,35 +169,30 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             error.WriteFailed, error.MetricCapacity => error.NetworkMetricsCapacity,
             error.DuplicateMetric => error.NetworkMetricsSchema,
         },
-        .getIdentity => operation.identity = try self.owner.?.readIdentity(),
-        .getPeers => {
-            operation.count = try core.completeSnapshots(self.bridge.stores.?.snapshots[store.?]);
-            operation.counts = core.peerCounts();
-        },
-        .getGossipDiagnostics => try n.gossipsub.diagnostics.capture(core.protocols.gossipsub, input.diagnostics_cursor, timestamp, &self.bridge.stores.?.gossip_diagnostics[store.?]),
-        .getDirectPeers => operation.count = try core.directPeers(&self.bridge.stores.?.direct[store.?]),
-        .removeDirectPeer => operation.boolean = core.removeDirectPeer(&input.peer),
-        .addDirectPeer => try core.addDirectPeer(&input.peer, input.addresses[0..input.address_count], timestamp),
-        .connect => {
-            if (core.isConnected(&input.peer)) return;
-            operation.deadline = timestamp.millis() +| input.timeout_ms;
-            try core.connectUntil(&input.peer, input.addresses[0..input.address_count], timestamp, n.time.milliseconds(operation.deadline));
+        .getPeerScores => try self.bridge.diagnostics.?.captureScores(core, timestamp),
+        .getGossipDiagnostics => |cursor| try n.gossipsub.diagnostics.capture(core.protocols.gossipsub, cursor, timestamp, &self.bridge.diagnostics.?.gossip),
+        .removeDirectPeer => |*peer| operation.boolean = core.removeDirectPeer(peer),
+        .addDirectPeer => |*dial| try core.addDirectPeer(&dial.peer, dial.addresses[0..dial.address_count], timestamp),
+        .connect => |*dial| {
+            if (core.isConnected(&dial.peer)) return;
+            operation.deadline = timestamp.millis() +| dial.timeout_ms;
+            try core.connectUntil(&dial.peer, dial.addresses[0..dial.address_count], timestamp, n.time.milliseconds(operation.deadline));
             self.lock();
             self.bridge.commands.transition(operation, .waiting);
             self.unlock();
         },
-        .disconnect => {
-            core.cancelConnect(&input.peer, timestamp);
+        .disconnect => |*peer| {
+            core.cancelConnect(peer, timestamp);
             self.lock();
             for (&self.bridge.commands.cells, 0..) |*cell, i| {
-                if (cell.state != .waiting or !self.bridge.commands.cells[i].input.peer.eql(&input.peer)) continue;
+                if (cell.state != .waiting or !self.bridge.commands.cells[i].input.connect.peer.eql(peer)) continue;
                 self.bridge.commands.cells[i].failure = error.NetworkConnectCancelled;
                 self.bridge.commands.transition(cell, .terminal);
             }
             self.unlock();
-            _ = core.closePeer(&input.peer, timestamp);
+            _ = core.closePeer(peer, timestamp);
         },
-        .reStatusPeers => for (self.bridge.stores.?.targets[store.?][0..input.target_count]) |*identity| {
+        .reStatusPeers => |*targets| for (targets.peers[0..targets.count]) |*identity| {
             _ = core.reStatusPeer(identity, timestamp);
         },
     }
@@ -230,7 +210,7 @@ pub fn latchConnects(table: *Table, events: []const n.Event, timestamp: n.Now) b
         if (cell.state != .waiting) continue;
         const operation = &table.cells[i];
         var connected = false;
-        for (events) |event| if (event == .connected and event.connected.peer_id.eql(&operation.input.peer)) {
+        for (events) |event| if (event == .connected and event.connected.peer_id.eql(&operation.input.connect.peer)) {
             connected = true;
             break;
         };

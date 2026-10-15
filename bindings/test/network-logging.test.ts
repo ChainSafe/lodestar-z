@@ -1,12 +1,12 @@
 import {expect, test} from "vitest";
 import type {NativeLogRecord} from "../src/network.js";
-import type {NativeNetworkApplicationRuntime} from "../src/network-runtime.js";
 import {applicationConfig, startRuntime} from "./utils/network.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
+import type {NetworkTestRuntime} from "./utils/network-runtime.js";
 
 async function drain(
-  runtime: Pick<NativeNetworkApplicationRuntime, "drainLogs"> | Pick<PeerRuntime, "drainLogs">
+  runtime: Pick<NetworkTestRuntime, "drainLogs"> | Pick<PeerRuntime, "drainLogs">
 ): Promise<NativeLogRecord[]> {
   const records: NativeLogRecord[] = [];
   for (let i = 0; i < 8; i++) {

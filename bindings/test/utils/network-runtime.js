@@ -8,11 +8,18 @@ const live = new Set();
 class NativeRuntime {
   #native;
   #closed;
+  #latestIdentity;
+  #peers = new Map();
+  #directPeers = new Set();
+  #stopping = false;
+  #onPeers;
 
-  constructor(config, onWorkAvailable) {
+  constructor(config, onWorkAvailable, onPeers) {
+    this.#onPeers = onPeers;
     this.#native = new bindings.NativeNetworkRuntime();
     const initialized = this.#native.initialize(config, onWorkAvailable);
-    this.identity = initialized.identity;
+    this.identity = structuredClone(initialized.identity);
+    this.#latestIdentity = initialized.identity;
     this.limits = initialized.limits;
     this.#closed = initialized.closed;
     live.add(this);
@@ -38,10 +45,16 @@ class NativeRuntime {
     return this.#native.updateStatus(status);
   }
   getIdentity() {
-    return this.#native.getIdentity();
+    if (this.#stopping) throw new Error("NetworkClosed");
+    return Promise.resolve(structuredClone(this.#latestIdentity));
   }
   getPeers() {
-    return this.#native.getPeers();
+    if (this.#stopping) throw new Error("NetworkClosed");
+    const peers = [...this.#peers.values()];
+    return Promise.resolve({peers, counts: {connected: peers.length, relevant: peers.filter((peer) => peer.relevant).length}});
+  }
+  getPeerScores() {
+    return this.#native.getPeerScores();
   }
   getGossipDiagnostics(cursor = 0) {
     return this.#native.getGossipDiagnostics(cursor);
@@ -56,17 +69,25 @@ class NativeRuntime {
     return this.#native.reStatusPeers(peerIds);
   }
   addDirectPeer(peerId, addresses) {
-    return this.#native.addDirectPeer(peerId, addresses);
+    return this.#native.addDirectPeer(peerId, addresses).then(() => { this.#directPeers.add(peerId); });
   }
   removeDirectPeer(peerId) {
-    return this.#native.removeDirectPeer(peerId);
+    return this.#native.removeDirectPeer(peerId).then((removed) => { this.#directPeers.delete(peerId); return removed; });
   }
   getDirectPeers() {
-    return this.#native.getDirectPeers();
+    if (this.#stopping) throw new Error("NetworkClosed");
+    return Promise.resolve([...this.#directPeers]);
   }
 
   exchange() {
     const result = this.#native.exchange();
+    if (result.identity) this.#latestIdentity = structuredClone(result.identity);
+    this.#onPeers?.(result.peers);
+    for (const event of result.peers) {
+      if (event.type === "closed") this.#peers.delete(event.identity);
+      else if (event.state.connection) this.#peers.set(event.state.identity, event.state);
+      else this.#peers.delete(event.state.identity);
+    }
     const serving = result.serving;
     if (serving.length === 0) return result;
     for (let i = 0; i < serving.length; i++) {
@@ -109,14 +130,15 @@ class NativeRuntime {
     return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options));
   }
   close() {
+    this.#stopping = true;
     this.#native.close();
     return this.#closed;
   }
 }
 
 /** A low-level runtime, which its host drains through `exchange`. Private: for binding ownership tests. */
-export function initializeNativeNetworkRuntime(config, onWorkAvailable) {
-  return new NativeRuntime(config, onWorkAvailable);
+export function initializeNativeNetworkRuntime(config, onWorkAvailable, onPeers) {
+  return new NativeRuntime(config, onWorkAvailable, onPeers);
 }
 
 export {createNetwork as createNativeNetwork};

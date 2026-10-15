@@ -16,6 +16,7 @@ const methods = new Set([
   "getIdentity",
   "getPeers",
   "getGossipDiagnostics",
+  "getPeerScores",
   "connect",
   "disconnect",
   "reStatusPeers",

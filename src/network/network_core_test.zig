@@ -849,14 +849,12 @@ test "application transport borrow authenticates while remote Status remains una
     try std.testing.expect(authenticated);
     try std.testing.expectEqual(@as(u16, 1), a.peerCounts().connected);
     try std.testing.expectEqual(@as(u16, 0), a.peerCounts().relevant);
-    var snapshots: [4]t.Snapshot = undefined;
-    try std.testing.expectEqual(@as(usize, 1), try a.completeSnapshots(&snapshots));
-    try std.testing.expect(snapshots[0].connection != null);
-    try std.testing.expect(snapshots[0].status == null);
-    try std.testing.expectError(error.OutputTooSmall, a.completeSnapshots(snapshots[0..1]));
+    const peer = a.peer_manager.catalog.get(a.peer_manager.catalog.find(&b.peerId()).?).?;
+    try std.testing.expect(peer.connection != null);
+    try std.testing.expect(peer.status == null);
 }
 
-test "application complete snapshot includes all 512 occupied disconnected rows" {
+test "compact peer scores include all 512 occupied disconnected rows" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var opts = options(&key);
     opts.resolved.core.peers.capacity = 512;
@@ -878,15 +876,17 @@ test "application complete snapshot includes all 512 occupied disconnected rows"
         try std.testing.expect(node.peer_manager.catalog.disconnect(peer, handle, .host, .{}, Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 })));
         _ = node.peer_manager.catalog.pollEvents(&events);
     }
-    const snapshots = try std.testing.allocator.alloc(t.Snapshot, 512);
-    defer std.testing.allocator.free(snapshots);
-    try std.testing.expectEqual(@as(usize, 512), try node.completeSnapshots(snapshots));
+    const scores = try std.testing.allocator.alloc(NetworkCore.PeerScore, 512);
+    defer std.testing.allocator.free(scores);
+    try std.testing.expectEqual(@as(usize, 512), try node.peerScores(node.last_now, scores));
     try std.testing.expectEqual(@as(u16, 0), node.peerCounts().connected);
-    for (snapshots, 0..) |row, i| {
+    for (scores, 0..) |score, i| {
+        const row = node.peer_manager.catalog.get(node.peer_manager.catalog.find(&score.identity).?).?;
         try std.testing.expectEqual(@as(u16, @intCast(i)), row.peer.index);
         try std.testing.expect(row.connection == null and row.ban_until_ms > 0);
+        try std.testing.expectEqual(row.score, score.score);
     }
-    try std.testing.expectError(error.OutputTooSmall, node.completeSnapshots(snapshots[0..511]));
+    try std.testing.expectError(error.OutputTooSmall, node.peerScores(node.last_now, scores[0..511]));
 }
 
 test "dual-stack runtime signs both bound discovery and QUIC endpoints" {
@@ -909,7 +909,7 @@ test "dual-stack runtime signs both bound discovery and QUIC endpoints" {
     try std.testing.expectEqualSlices(u8, &quic[1].?.ip6.octets, &record.ip6.?);
 }
 
-test "core candidate identities do not expose admitted APIs or enlarge snapshot capacity" {
+test "core candidate identities do not expose admitted APIs or enlarge score capacity" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{31}));
     const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{32}));
     var node: NetworkCore = undefined;
@@ -925,8 +925,8 @@ test "core candidate identities do not expose admitted APIs or enlarge snapshot 
     try std.testing.expect(!node.reStatusPeer(&peer, now));
     try std.testing.expect(node.reportPeer(&.{ .identity = peer, .action = .fatal }, now) == null);
     try std.testing.expectError(error.StalePeer, node.sendReqRespRequest(&peer, .ping_v1, &.{}, &.{}, .{}, now));
-    var snapshots: [4]t.Snapshot = undefined;
-    try std.testing.expectEqual(@as(usize, 0), try node.completeSnapshots(&snapshots));
+    var scores: [4]NetworkCore.PeerScore = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try node.peerScores(now, &scores));
 }
 
 test "core discovery config bounds session capacity and idle lifetime" {

@@ -20,6 +20,7 @@ const CheckView = struct { root: [32]u8, slot: u64, identity: n.PeerId, topic: [
 
 /// What one exchange pinned. Pinned cells stay in place: the owner never retires a copying cell.
 pub const Selection = struct {
+    identity: ?r.Identity = null,
     peers: [peers_max]projection.Entry = undefined,
     peer_count: usize = 0,
     serving: [serving_max]incoming.Token = undefined,
@@ -39,8 +40,12 @@ pub const Outcome = struct { needs_another_exchange: bool = false };
 pub const Failure = enum { stopped, contract };
 
 fn selectLocked(runtime: *Runtime, now: u64, selection: *Selection) void {
-    const capacity = runtime.bridge.capacity orelse return;
+    if (runtime.deliverableLocked(.identity)) {
+        selection.identity = runtime.bridge.identity;
+        runtime.bridge.identity = null;
+    }
     if (runtime.deliverableLocked(.peers)) selection.peer_count = runtime.bridge.peer_updates.?.peek(&selection.peers);
+    const capacity = runtime.bridge.capacity orelse return;
     if (runtime.deliverableLocked(.serving)) selectServing(runtime, serving_max, selection);
     if (runtime.deliverableLocked(.checks)) {
         const table = &runtime.bridge.gossip.?;

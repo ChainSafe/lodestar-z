@@ -5,7 +5,6 @@ import type {
   NativeGossipHandle,
   NativeGossipMessage,
   NativeGossipVerdict,
-  NativeNetworkApplicationRuntime,
 } from "../src/network-runtime.js";
 import type {Feedback} from "./utils/network.js";
 import {
@@ -21,6 +20,7 @@ import {
   waitForGossipReady,
 } from "./utils/network.js";
 import {incomingPair} from "./utils/network-incoming.js";
+import type {NetworkTestRuntime} from "./utils/network-runtime.js";
 
 const BLOCK = topicName();
 const ATTESTATION = topicName("beacon_attestation_0");
@@ -85,7 +85,7 @@ test("direct feedback validates roots, handles and verdicts, and stale handles a
   }
 });
 
-async function checks(runtime: NativeNetworkApplicationRuntime, count: number) {
+async function checks(runtime: NetworkTestRuntime, count: number) {
   const result: NativeGossipDependencyCheck[] = [];
   for (let i = 0; i < 1000 && result.length < count; i++) {
     const delivery = exchange(runtime, gossipUrgent);

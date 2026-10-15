@@ -5,18 +5,15 @@ import type {
   NativeRequestOptions,
   NativeResponseChunk,
 } from "../../src/network.js";
-import type {
-  NativeIncomingRequest,
-  NativeNetworkApplicationRuntime,
-  NativeRuntimeCloseResult,
-} from "../../src/network-runtime.js";
+import type {NativeIncomingRequest, NativeRuntimeCloseResult} from "../../src/network-runtime.js";
 import {configuredChain} from "./network.js";
+import type {NetworkTestRuntime} from "./network-runtime.js";
 
 type AsyncMethods<T> = {
   [K in keyof T]: T[K] extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : T[K];
 };
-export type PeerRuntime = Omit<AsyncMethods<NativeNetworkApplicationRuntime>, "request" | "takeIncomingRequest"> & {
-  request: NativeNetworkApplicationRuntime["request"];
+export type PeerRuntime = Omit<AsyncMethods<NetworkTestRuntime>, "request" | "takeIncomingRequest"> & {
+  request: NetworkTestRuntime["request"];
   takeIncomingRequest(): Promise<NativeIncomingRequest | null>;
   /** Closes the runtime and waits for the child process to exit. */
   stop(): Promise<void>;

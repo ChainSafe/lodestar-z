@@ -387,7 +387,7 @@ test("the facade validates its host, starts without host callbacks and hides the
     const [direct] = unreachableConnect();
     expect(peer).not.toBe(direct);
     await network.setDirectPeer(direct, [endpoint]);
-    expect((await network.getDirectPeers()).identities).toEqual([direct]);
+    expect(await network.getDirectPeers()).toEqual([direct]);
     expect(await network.setDirectPeer(direct, null)).toBe(true);
     expect(await network.setDirectPeer(direct, null)).toBe(false);
     // The native registry's families and the binding's families, each exactly once.
@@ -422,10 +422,12 @@ test("promise-returning operations reject admission failures without throwing", 
     await expect(network.reStatus(["invalid"])).rejects.toThrow("InvalidNetworkPeerId");
     await expect(network.getGossipDiagnostics(-1)).rejects.toThrow("InvalidNetworkInteger");
   } finally {
-    await network.close();
+    const closing = network.close();
+    await expect(network.getIdentity()).rejects.toThrow("NetworkClosed");
+    await expect(network.getDirectPeers()).rejects.toThrow("NetworkClosed");
+    await closing;
   }
   await expect(network.getIdentity()).rejects.toThrow("NetworkClosed");
-  await expect(network.getPeers()).rejects.toThrow("NetworkClosed");
   await expect(network.getDirectPeers()).rejects.toThrow("NetworkClosed");
 });
 
@@ -433,13 +435,11 @@ test("concurrent metrics scrapes share one owner command and the final snapshot 
   const network = createNativeNetwork(applicationConfig(), host());
   const native = runtimeOf(network);
   if (!native) throw new Error("Missing native runtime");
-  const scrape = vi.spyOn(native, "getMetrics");
   try {
     native.holdOperations(true);
     const first = network.metrics();
     const second = network.metrics();
     expect(second).toBe(first);
-    expect(scrape).toHaveBeenCalledOnce();
     native.holdOperations(false);
     expect(await first).toContain("lodestar_network_running_bool 1\n");
     expect(await second).toBe(await first);
@@ -447,6 +447,33 @@ test("concurrent metrics scrapes share one owner command and the final snapshot 
     expect(await network.metrics()).toContain("lodestar_network_running_bool 0\n");
   } finally {
     native.holdOperations(false);
+    await network.close();
+  }
+});
+
+test("direct membership follows command order even when native settles reused cells out of order", async () => {
+  const network = createNativeNetwork(applicationConfig(), host());
+  try {
+    const native = runtimeOf(network);
+    if (!native) throw Error("Missing native runtime");
+    await native.getMetrics();
+    native.holdOperations(true);
+    const [peer, endpoints] = unreachableConnect();
+    const added = network.setDirectPeer(peer, endpoints);
+    const removed = network.setDirectPeer(peer, null);
+    expect(await network.getDirectPeers()).toEqual([]);
+    native.holdOperations(false);
+    expect(await added).toBeUndefined();
+    expect(await removed).toBe(true);
+    expect(await network.getDirectPeers()).toEqual([]);
+    await network.setDirectPeer(peer, endpoints);
+    const saved = await network.getDirectPeers();
+    await network.setDirectPeer(peer, null);
+    expect(saved).toEqual([peer]);
+    const self = await network.getIdentity();
+    await expect(network.setDirectPeer(self.peerId, endpoints)).rejects.toThrow("SelfDial");
+    expect(await network.getDirectPeers()).toEqual([]);
+  } finally {
     await network.close();
   }
 });

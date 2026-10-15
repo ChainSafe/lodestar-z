@@ -1,9 +1,9 @@
 import {createHook} from "node:async_hooks";
-import {expect, test} from "vitest";
-import type {NativeNetworkApplicationRuntime} from "../src/network-runtime.js";
+import {expect, test, vi} from "vitest";
 import {applicationConfig, localIntent, startRuntime, topicName, unreachableConnect} from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
 import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
+import type {NetworkTestRuntime} from "./utils/network-runtime.js";
 
 const PUBLISH = {allowZeroPeers: true, ignoreDuplicate: true};
 
@@ -24,24 +24,21 @@ test("every command kind completes with its typed result", async () => {
       slot: 100n,
     });
     expect(await runtime.updateStatus(config.local.status)).toBeUndefined();
-    expect(await runtime.getIdentity()).toMatchObject({...runtime.identity, ownerSequence: sequence});
+    expect(await runtime.getIdentity()).toMatchObject(runtime.identity);
     expect(await runtime.connect(peer.peerId, [peer.localEndpoint], 5000n)).toBeUndefined();
+    await vi.waitFor(async () => expect((await runtime.getPeers()).counts.connected).toBe(1));
     expect(await runtime.getPeers()).toMatchObject({
-      capacity: expect.any(Number),
       counts: {connected: 1},
-      occupiedCount: 1,
-      ownerSequence: sequence,
       peers: [expect.objectContaining({identity: peer.peerId})],
     });
     expect(await runtime.getGossipDiagnostics(0)).toMatchObject({
       observedMonoMs: sequence,
-      ownerSequence: sequence,
       peers: expect.any(Array),
       topics: expect.any(Array),
     });
     expect(await runtime.reStatusPeers([peer.peerId])).toBeUndefined();
     expect(await runtime.addDirectPeer(peer.peerId, [peer.localEndpoint])).toBeUndefined();
-    expect(await runtime.getDirectPeers()).toEqual({identities: [peer.peerId], ownerSequence: sequence});
+    expect(await runtime.getDirectPeers()).toEqual([peer.peerId]);
     expect(await runtime.removeDirectPeer(peer.peerId)).toBe(true);
     expect(await runtime.disconnect(peer.peerId)).toBeUndefined();
   } finally {
@@ -49,21 +46,19 @@ test("every command kind completes with its typed result", async () => {
   }
 }, 20000);
 
-type Command = (runtime: NativeNetworkApplicationRuntime) => Promise<unknown>;
+type Command = (runtime: NetworkTestRuntime) => Promise<unknown>;
 
-/** Each command kind with valid input, split so the snapshot kinds fit the two snapshot stores. */
+/** Diagnostics share one result buffer, so exercise the two query kinds separately. */
 function commands(): [string, [string, Command][]][] {
   const config = applicationConfig();
   const [peer, endpoints] = unreachableConnect();
   return [
     [
-      "eleven kinds",
+      "mutations and gossip diagnostics",
       [
         ["applyIntent", (runtime) => runtime.applyIntent(localIntent(config))],
         ["updateStatus", (runtime) => runtime.updateStatus(config.local.status)],
-        ["getIdentity", (runtime) => runtime.getIdentity()],
         ["getMetrics", (runtime) => runtime.getMetrics()],
-        ["getPeers", (runtime) => runtime.getPeers()],
         ["getGossipDiagnostics", (runtime) => runtime.getGossipDiagnostics(0)],
         ["connect", (runtime) => runtime.connect(peer, endpoints, 60000n)],
         ["disconnect", (runtime) => runtime.disconnect(peer)],
@@ -72,7 +67,7 @@ function commands(): [string, [string, Command][]][] {
         ["removeDirectPeer", (runtime) => runtime.removeDirectPeer(peer)],
       ],
     ],
-    ["the remaining snapshot kind", [["getDirectPeers", (runtime) => runtime.getDirectPeers()]]],
+    ["peer score diagnostics", [["getPeerScores", (runtime) => runtime.getPeerScores()]]],
   ];
 }
 
@@ -97,8 +92,8 @@ test("ordinary command pressure preserves one local-state admission", async () =
   const config = applicationConfig();
   const runtime = startRuntime(config);
   try {
-    const admitted = Array.from({length: 31}, () => runtime.getIdentity());
-    expect(() => runtime.getIdentity()).toThrow("NetworkCommandFull");
+    const admitted = Array.from({length: 31}, () => runtime.getMetrics());
+    expect(() => runtime.getMetrics()).toThrow("NetworkCommandFull");
     const state = runtime.applyIntent(localIntent(config));
     const refused = expect(runtime.applyIntent(localIntent(config))).rejects.toThrow("NetworkCommandFull");
 
@@ -110,7 +105,7 @@ test("ordinary command pressure preserves one local-state admission", async () =
   }
 });
 
-test("a delivered snapshot keeps its contents while its cell and store serve the next command", async () => {
+test("a direct peer list remains independent of later membership changes", async () => {
   const runtime = startRuntime(applicationConfig());
   try {
     const [peer, endpoints] = unreachableConnect();
@@ -118,9 +113,8 @@ test("a delivered snapshot keeps its contents while its cell and store serve the
     const first = await runtime.getDirectPeers();
     expect(await runtime.removeDirectPeer(peer)).toBe(true);
     const second = await runtime.getDirectPeers();
-    expect(first.identities).toEqual([peer]);
-    expect(second.identities).toEqual([]);
-    expect(second.ownerSequence).toBeGreaterThan(first.ownerSequence);
+    expect(first).toEqual([peer]);
+    expect(second).toEqual([]);
   } finally {
     await runtime.close();
   }
@@ -138,7 +132,7 @@ test("close during native Promise creation refuses admission without leaving an 
   });
   try {
     hook.enable();
-    expect(() => runtime.getIdentity()).toThrow("NetworkClosed");
+    expect(() => runtime.reStatusPeers([])).toThrow("NetworkClosed");
   } finally {
     hook.disable();
     expect(await runtime.close()).toEqual({reason: "requested"});
@@ -150,15 +144,15 @@ test("the owner starts commands, publications and requests in their admission or
   const runtime = startRuntime(applicationConfig());
   try {
     runtime.holdOperations(true);
-    const first = runtime.getIdentity();
+    const first = runtime.applyIntent({});
     const publication = runtime.publishGossip(topicName(), new Uint8Array(4000), PUBLISH);
-    const second = runtime.getIdentity();
+    const second = runtime.applyIntent({});
     // Handled now: native can reject the request, and an exchange settle it, before the commands below complete.
     const request = runtime
       .request(runtime.identity.peerId, BLOCKS, new Uint8Array(32))
       .next()
       .catch(() => undefined);
-    const third = runtime.getIdentity();
+    const third = runtime.applyIntent({});
     // Released together, they start in one pass that advances the owner's sequence once per operation.
     runtime.holdOperations(false);
     const [a, b, c] = await Promise.all([first, second, third]);

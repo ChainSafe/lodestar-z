@@ -64,7 +64,7 @@ if (mode === "open") {
   const unsettled = settlements.unsettledAtClose(runtime.closed);
   await runtime.applyIntent(localIntent(config));
   settlements.watch(() => runtime.connect(...unreachableConnect()));
-  settlements.watch(() => runtime.getIdentity());
+  settlements.watch(() => runtime.reStatusPeers([]));
   for (let i = 0; i < 4; i++)
     settlements.watch(() =>
       runtime.publishGossip(topicName(), new Uint8Array(4000).fill(i), {allowZeroPeers: true, ignoreDuplicate: true})
@@ -199,7 +199,7 @@ if (mode === "open") {
       settlements.watch(() => stream.next());
     }
   }, {code: "NetworkRequestRejected", reason: "slots_exhausted"});
-  for (let i = 0; i < 16; i++) settlements.watch(() => right.getIdentity());
+  for (let i = 0; i < 16; i++) settlements.watch(() => right.reStatusPeers([]));
   for (let i = 0; i < 8; i++) settlements.watch(() => right.connect(...unreachableConnect()));
   for (let i = 0; i < 16; i++)
     settlements.watch(() =>
@@ -232,7 +232,7 @@ if (mode === "open") {
     settlements.watch(() =>
       runtime.publishGossip(topicName(), new Uint8Array(4000).fill(i), {allowZeroPeers: true, ignoreDuplicate: true})
     );
-  for (let i = 0; i < 20; i++) settlements.watch(() => runtime.getIdentity());
+  for (let i = 0; i < 20; i++) settlements.watch(() => runtime.reStatusPeers([]));
   const closing = runtime.close();
   // The owner stops and releases the notifier, which finalizes while every completion waits for an exchange.
   let stopped = false;

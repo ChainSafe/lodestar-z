@@ -21,21 +21,31 @@ class NativeNetwork {
   #native;
   #pump;
   #metricsPending = null;
+  #identity;
+  #directPeers = new Set();
+  #directPending = Promise.resolve();
+  #closing = false;
 
   constructor(config, host) {
     for (const name of HOST_METHODS)
       if (typeof host?.[name] !== "function") throw new TypeError(`NativeHost.${name} must be a function`);
-    const pump = new NativePump(host);
+    const pump = new NativePump(host, (identity) => {
+      this.#identity = identity;
+    });
     const native = new bindings.NativeNetworkRuntime();
     const initialized = native.initialize(config, pump.request);
     this.#native = native;
+    this.#identity = initialized.identity;
     Object.defineProperty(this, NATIVE, {value: native});
     pump.attach(native, initialized.closed);
     this.#pump = pump;
     this.limits = Object.freeze({...initialized.limits});
     this.closed = initialized.closed;
     openNetworks.add(this);
-    void this.closed.then(() => openNetworks.delete(this));
+    void this.closed.then(() => {
+      this.#closing = true;
+      openNetworks.delete(this);
+    });
   }
 
   async applyIntent(intent) {
@@ -69,19 +79,39 @@ class NativeNetwork {
     return this.#native.disconnect(peerId);
   }
   async setDirectPeer(peerId, endpoints) {
-    return endpoints === null ? this.#native.removeDirectPeer(peerId) : this.#native.addDirectPeer(peerId, endpoints);
+    const operation =
+      endpoints === null ? this.#native.removeDirectPeer(peerId) : this.#native.addDirectPeer(peerId, endpoints);
+    // Native completions need not settle in submission order. Apply membership changes in that order.
+    const outcome = operation.then(
+      (value) => ({value}),
+      (error) => ({error})
+    );
+    const applied = this.#directPending.then(async () => {
+      const result = await outcome;
+      if ("error" in result) throw result.error;
+      if (endpoints === null) this.#directPeers.delete(peerId);
+      else this.#directPeers.add(peerId);
+      return result.value;
+    });
+    this.#directPending = applied.then(
+      () => undefined,
+      () => undefined
+    );
+    return applied;
   }
   async reStatus(peerIds) {
     return this.#native.reStatusPeers(peerIds);
   }
   async getIdentity() {
-    return this.#native.getIdentity();
-  }
-  async getPeers() {
-    return this.#native.getPeers();
+    this.#checkOpen();
+    return structuredClone(this.#identity);
   }
   async getDirectPeers() {
-    return this.#native.getDirectPeers();
+    this.#checkOpen();
+    return [...this.#directPeers];
+  }
+  async getPeerScores() {
+    return this.#native.getPeerScores();
   }
   async getGossipDiagnostics(cursor = 0) {
     return this.#native.getGossipDiagnostics(cursor);
@@ -99,7 +129,11 @@ class NativeNetwork {
   setLogLevel(level) {
     this.#native.setLogLevel(level);
   }
+  #checkOpen() {
+    if (this.#closing) throw Object.assign(new Error("NetworkClosed"), {code: "NetworkClosed"});
+  }
   close() {
+    this.#closing = true;
     this.#pump.stopDelivery();
     this.#native.close();
     return this.closed;

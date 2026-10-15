@@ -1,4 +1,5 @@
 import {expect, test, vi} from "vitest";
+import type {NativePeerObservation} from "../src/network.js";
 import {
   applicationConfig,
   exchange,
@@ -15,6 +16,7 @@ import {
   waitForGossipReady,
 } from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
+import type {NetworkTestRuntime} from "./utils/network-runtime.js";
 
 test("gossip drain and stale verdict on an activated application", async () => {
   const config = applicationConfig();
@@ -31,12 +33,7 @@ test("gossip drain and stale verdict on an activated application", async () => {
 
 import {setTimeout as delay} from "node:timers/promises";
 import type {NativeApplicationConfig} from "../src/network.js";
-import type {
-  NativeGossipHandle,
-  NativeGossipMessage,
-  NativeGossipVerdict,
-  NativeNetworkApplicationRuntime,
-} from "../src/network-runtime.js";
+import type {NativeGossipHandle, NativeGossipMessage, NativeGossipVerdict} from "../src/network-runtime.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 const TOPIC = topicName();
@@ -47,12 +44,12 @@ function blockPayload(size: number, byte = 0): Uint8Array {
   return bytes;
 }
 
-function report(runtime: NativeNetworkApplicationRuntime, handle: NativeGossipHandle, value: NativeGossipVerdict) {
+function report(runtime: NetworkTestRuntime, handle: NativeGossipHandle, value: NativeGossipVerdict) {
   exchange(runtime, settleOnly, [{handle, type: "verdict", verdict: value}]);
 }
 
 /** Claims the next gossip block, which queues without a dependency check. */
-async function nextGossip(runtime: NativeNetworkApplicationRuntime): Promise<NativeGossipMessage> {
+async function nextGossip(runtime: NetworkTestRuntime): Promise<NativeGossipMessage> {
   for (let i = 0; i < 1000; i++) {
     const {checks, gossip} = exchange(runtime, gossipAll);
     expect(checks).toEqual([]);
@@ -253,7 +250,7 @@ test.each([
       expect(receivedTrace).toEqual([]);
     }
     const page = await pair.right.getGossipDiagnostics();
-    expect(page.ownerSequence).toBeGreaterThan(0n);
+    expect(page.observedMonoMs).toBeGreaterThan(0n);
     expect(page.observedUnixMs).toBeGreaterThanOrEqual(BigInt(before - 1000));
     expect(page.observedMonoMs).toBeGreaterThan(0n);
     expect(page.nextCursor).toBeNull();
@@ -290,14 +287,14 @@ test("gossip delivery and direct verdict reports progress with a full command ta
   try {
     holdSettling(pair.right, true);
     pair.right.holdOperations(true);
-    commands = Promise.allSettled(Array.from({length: 31}, () => pair.right.getIdentity()));
-    expect(() => pair.right.getIdentity()).toThrow("NetworkCommandFull");
+    commands = Promise.allSettled(Array.from({length: 31}, () => pair.right.getMetrics()));
+    expect(() => pair.right.getMetrics()).toThrow("NetworkCommandFull");
 
     await pair.left.publishGossip(TOPIC, blockPayload(4000, 4), {allowZeroPeers: false});
     const message = await nextGossip(pair.right);
-    expect(() => pair.right.getIdentity()).toThrow("NetworkCommandFull");
+    expect(() => pair.right.getMetrics()).toThrow("NetworkCommandFull");
     pair.right.reportGossip(message.handle, "accept");
-    expect(() => pair.right.getIdentity()).toThrow("NetworkCommandFull");
+    expect(() => pair.right.getMetrics()).toThrow("NetworkCommandFull");
 
     pair.right.holdOperations(false);
     holdSettling(pair.right, false);
@@ -384,7 +381,7 @@ for (const hoodi of [false, true]) {
         HOODI ?? "",
         "gossip",
       ]);
-      let runtime: NativeNetworkApplicationRuntime | undefined;
+      let runtime: NetworkTestRuntime | undefined;
       try {
         const info = await peer.command("ready");
         const config = applicationConfig();
@@ -494,18 +491,26 @@ test("closed runtime rejects a retained verdict", async () => {
   }
 }, 15000);
 
-test("gossip diagnostics validate cursors and share bounded snapshot admission", async () => {
+test("gossip diagnostics validate cursors and share one diagnostic buffer", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;
-    await runtime.applyIntent(localIntent(config));
+    await runtime.applyIntent({...localIntent(config), coreTopics: true});
     for (const cursor of [-1, 0.5, 513, Number.NaN]) {
       expect(() => runtime.getGossipDiagnostics(cursor)).toThrow();
     }
-    const snapshots = [runtime.getGossipDiagnostics(), runtime.getPeers()];
-    expect(() => runtime.getGossipDiagnostics()).toThrow("NetworkCommandFull");
-    const [page] = await Promise.all(snapshots);
+    const snapshot = runtime.getGossipDiagnostics();
+    const scores = runtime.getPeerScores();
+    const changed = runtime.applyIntent({coreTopics: false});
+    const following = runtime.getGossipDiagnostics();
+    const page = await snapshot;
+    expect((await scores).peers).toEqual([]);
+    const later = await following;
+    await changed;
+    expect(later.peers).toEqual(page.peers);
+    expect(page.topics.find((topic) => topic.topic === topicName())?.subscribed).toBe(true);
+    expect(later.topics.find((topic) => topic.topic === topicName())?.subscribed ?? false).toBe(false);
     expect(page).toMatchObject({nextCursor: null, peers: []});
     await expect(runtime.getGossipDiagnostics(512)).rejects.toThrow("InvalidDiagnosticsCursor");
   } finally {
@@ -514,9 +519,14 @@ test("gossip diagnostics validate cursors and share bounded snapshot admission",
   expect(() => runtime.getGossipDiagnostics()).toThrow("NetworkClosed");
 });
 
-test("gossip diagnostics paginate retained peers and peer drains expose remaining events", async () => {
+test("gossip diagnostics paginate retained peers while observations remove disconnected peers", async () => {
   const config = applicationConfig();
-  const runtime = startRuntime(config, () => undefined);
+  const observations: NativePeerObservation[] = [];
+  const runtime = startRuntime(
+    config,
+    () => undefined,
+    (events) => observations.push(...events)
+  );
   const identities = new Set<string>();
   try {
     await runtime.identity;
@@ -549,15 +559,13 @@ test("gossip diagnostics paginate retained peers and peer drains expose remainin
     const second = await runtime.getGossipDiagnostics(first.nextCursor ?? 0);
     expect(second.peers).toHaveLength(1);
     expect(second.nextCursor).toBeNull();
-    expect(second.ownerSequence).toBeGreaterThanOrEqual(first.ownerSequence);
+    expect(second.observedMonoMs).toBeGreaterThanOrEqual(first.observedMonoMs);
     expect(new Set([...first.peers, ...second.peers].map((peer) => peer.identity))).toEqual(identities);
     expect([...first.peers, ...second.peers].every((peer) => !peer.connected)).toBe(true);
-    const head = exchange(runtime, {...gossipAll});
-    expect(head.peers.length).toBeLessThanOrEqual(32);
-    expect(head.peers.length).toBeGreaterThan(0);
-    const remaining = exchange(runtime, {...gossipAll}).peers;
-    expect(head.needsAnotherExchange).toBe(remaining.length > 0);
-    const closed = [...head.peers, ...remaining].filter((event) => event.type === "closed");
+    await vi.waitFor(() =>
+      expect(observations.filter((event) => event.type === "closed")).toHaveLength(identities.size)
+    );
+    const closed = observations.filter((event) => event.type === "closed");
     expect(closed).toHaveLength(identities.size);
     expect(new Set(closed.map((event) => event.identity))).toEqual(identities);
     expect(closed.every((event) => event.reason === "host")).toBe(true);

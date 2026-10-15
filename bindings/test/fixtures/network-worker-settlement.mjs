@@ -41,7 +41,7 @@ if (isMainThread) {
   const pending = [];
   for (let i = 0; i < 16; i++) {
     pending.push(runtime.publishGossip(topicName(), payload, {allowZeroPeers: true, ignoreDuplicate: true}));
-    pending.push(runtime.getIdentity());
+    pending.push(runtime.reStatusPeers([]));
   }
   void Promise.allSettled(pending);
   parentPort.postMessage({

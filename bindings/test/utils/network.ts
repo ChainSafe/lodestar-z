@@ -5,6 +5,7 @@ import {setTimeout as delay} from "node:timers/promises";
 import {publicKeyFromProtobuf} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {testChain} from "../../../test/interop/network_chain.mjs";
+import type {NetworkTestRuntime} from "./network-runtime.js";
 import {initializeNativeNetworkRuntime} from "./network-runtime.js";
 export {testChain};
 
@@ -19,6 +20,7 @@ import type {
   NativeLocalIntent,
   NativeNetwork,
   NativePeerAction,
+  NativePeerObservation,
   NativePeerReportContext,
   NativeRuntimeConfig,
   NativeTopicKind,
@@ -28,7 +30,6 @@ import type {
   NativeGossipHandle,
   NativeGossipVerdict,
   NativeIncomingRequest,
-  NativeNetworkApplicationRuntime,
 } from "../../src/network-runtime.js";
 
 const MIB = 1024 * 1024;
@@ -45,12 +46,9 @@ export type Feedback =
   | {type: "dropQueued"}
   | {type: "reportPeer"; peerId: string; action: NativePeerAction; count: number; context?: NativePeerReportContext};
 
-type ExchangeRuntime = Pick<NativeNetworkApplicationRuntime, "exchange" | "setCapacity">;
+type ExchangeRuntime = Pick<NetworkTestRuntime, "exchange" | "setCapacity">;
 type FeedbackRuntime = ExchangeRuntime &
-  Pick<
-    NativeNetworkApplicationRuntime,
-    "reportGossip" | "classifyGossip" | "notifyBlock" | "dropQueuedGossip" | "reportPeer"
-  >;
+  Pick<NetworkTestRuntime, "reportGossip" | "classifyGossip" | "notifyBlock" | "dropQueuedGossip" | "reportPeer">;
 
 export function exchange(runtime: ExchangeRuntime, capacity: HostCapacity | null): NativeExchange;
 export function exchange(
@@ -212,7 +210,7 @@ export function setSlot(config: NativeApplicationConfig, slot: bigint, slotDurat
 
 /**
  * The least a host does: each notification schedules settle-only exchanges in later macrotasks while they report
- * pending completions. Peers, serving starts and gossip stay
+ * pending completions and observations. Serving starts and gossip stay
  * with the test, which can also hold the host to take every exchange's results itself.
  */
 function settlingHost(onWorkAvailable: () => void = () => undefined) {
@@ -230,7 +228,7 @@ function settlingHost(onWorkAvailable: () => void = () => undefined) {
     setImmediate(drain);
   };
   return {
-    attach(value: ExchangeRuntime & Pick<NativeNetworkApplicationRuntime, "closed">) {
+    attach(value: ExchangeRuntime & Pick<NetworkTestRuntime, "closed">) {
       runtime = value;
       void value.closed.then(() => {
         runtime = undefined;
@@ -250,9 +248,13 @@ function settlingHost(onWorkAvailable: () => void = () => undefined) {
 
 const settlingHosts = new WeakMap<object, ReturnType<typeof settlingHost>>();
 
-export function startRuntime(config: NativeApplicationConfig, onWorkAvailable: () => void = () => undefined) {
+export function startRuntime(
+  config: NativeApplicationConfig,
+  onWorkAvailable: () => void = () => undefined,
+  onPeers?: (events: readonly NativePeerObservation[]) => void
+) {
   const host = settlingHost(onWorkAvailable);
-  const runtime = initializeNativeNetworkRuntime(config, host.onWorkAvailable);
+  const runtime = initializeNativeNetworkRuntime(config, host.onWorkAvailable, onPeers);
   host.attach(runtime);
   settlingHosts.set(runtime, host);
   return runtime;
@@ -469,7 +471,7 @@ export async function waitForGossipReady(
   throw new Error(`Gossip readiness deadline: ${waiting}`);
 }
 
-export function ownerStopped(runtime: Pick<NativeNetworkApplicationRuntime, "drainLogs">): boolean {
+export function ownerStopped(runtime: Pick<NetworkTestRuntime, "drainLogs">): boolean {
   return runtime
     .drainLogs()
     .records.some((record) => record.scope === "network_runtime" && record.message.startsWith("owner_stopped "));

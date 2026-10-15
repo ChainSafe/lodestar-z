@@ -482,8 +482,8 @@ test("a response held in native borrow while its stream is cancelled and the net
     const order = settlementOrder(incoming.closed, held);
     // Each command runs in a later owner turn than the one before it, so the second follows the turn that started the
     // write.
-    await pair.right.getIdentity();
-    await pair.right.getIdentity();
+    await pair.right.reStatusPeers([]);
+    await pair.right.reStatusPeers([]);
 
     expect(order).toEqual([]);
     const cancelled = incoming.cancel();

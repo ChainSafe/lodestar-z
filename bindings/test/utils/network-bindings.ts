@@ -6,11 +6,8 @@ import type {
   NativeRequestProtocolId,
   NativeResponseChunk,
 } from "../../src/network.js";
-import type {
-  NativeDelivery,
-  NativeNetworkApplicationRuntime,
-  NativeRuntimeCloseResult,
-} from "../../src/network-runtime.js";
+import type {NativeDelivery, NativeRuntimeCloseResult} from "../../src/network-runtime.js";
+import type {NetworkTestRuntime} from "./network-runtime.js";
 
 interface RequestHandle {
   generation: bigint;
@@ -19,8 +16,8 @@ interface RequestHandle {
 
 interface NativeBridge {
   /** Operations return native-owned Promises, settled by completion draining. */
-  applyIntent: NativeNetworkApplicationRuntime["applyIntent"];
-  connect: NativeNetworkApplicationRuntime["connect"];
+  applyIntent: NetworkTestRuntime["applyIntent"];
+  connect: NetworkTestRuntime["connect"];
   exchange(): NativeDelivery;
   setCapacity(capacity: HostCapacity | null): void;
 
