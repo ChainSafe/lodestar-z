@@ -46,7 +46,6 @@ pub const identify = @import("identify/root.zig");
 pub const capabilities = @import("capabilities.zig");
 pub const peer_manager = @import("peer_manager.zig");
 pub const PeerManager = peer_manager.PeerManager;
-pub const wake_sources = @import("wake_sources.zig");
 pub const NetworkCore = @import("network_core.zig").NetworkCore;
 pub const transport_driver = @import("transport_driver.zig");
 pub const driver = @import("driver.zig");

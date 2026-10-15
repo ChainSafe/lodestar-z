@@ -10,7 +10,7 @@ const peers = @import("peers/root.zig");
 const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
-const wake_sources = @import("wake_sources.zig");
+const Schedule = @import("schedule.zig").Schedule;
 const local_state = @import("local_state.zig");
 const advertisement = @import("advertisement.zig");
 const KeyPair = @import("wire/keys.zig").KeyPair;
@@ -32,6 +32,16 @@ const SlotClock = @import("slot_clock.zig").SlotClock;
 /// Initialize at its final address. Serialize every call, including reads and teardown.
 pub const NetworkCore = struct {
     pub const wait = @import("wait.zig");
+
+    /// Discovery may run alone when no other owner has work due.
+    pub const Wakeups = struct {
+        discovery: Schedule = .{},
+        other: Schedule = .{},
+
+        pub fn schedule(self: Wakeups) Schedule {
+            return self.discovery.merge(self.other);
+        }
+    };
 
     pub const controls_per_turn = 32;
     pub const identify_per_turn = 8;
@@ -423,7 +433,7 @@ pub const NetworkCore = struct {
         endpoints: ?advertisement.Endpoints,
         capabilities: capabilities_mod.Directional,
         identify: identify_mod.Local,
-        announcement: ?peers.enr.LocalAdvertisement = null,
+        record: ?d.identity.enr.Record = null,
         changed: bool,
     };
 
@@ -456,17 +466,15 @@ pub const NetworkCore = struct {
         if (prepared.changed) if (self.discovery) |owned| {
             const announced = advertisementFor(&local, schedule, endpoints.?);
             const previous = advertisementFor(&self.peer_manager.local, self.schedule, owned.endpoints);
-            if (!std.meta.eql(announced, previous)) {
-                prepared.announcement = announced;
-            }
+            prepared.record = try owned.prepareAdvertisement(if (!std.meta.eql(announced, previous)) &announced else null, endpoints.?, &local.fork);
         };
         return prepared;
     }
 
-    fn installLocal(self: *NetworkCore, prepared: *const PreparedLocal, now: Now) !void {
+    fn installLocal(self: *NetworkCore, prepared: *const PreparedLocal, now: Now) void {
         std.debug.assert(prepared.changed);
         if (self.discovery) |owned| {
-            try owned.advertise(if (prepared.announcement) |*value| value else null, prepared.endpoints.?, &prepared.local.fork);
+            owned.advertise(if (prepared.record) |*value| value else null, prepared.endpoints.?, &prepared.local.fork);
         }
         self.local_revision +%= 1;
         self.protocols.identify.local = prepared.identify;
@@ -487,7 +495,7 @@ pub const NetworkCore = struct {
     fn applyLocal(self: *NetworkCore, update: *const local_state.LocalUpdate, now: Now) !bool {
         const prepared = try self.prepareLocal(update);
         if (!prepared.changed) return false;
-        try self.installLocal(&prepared, now);
+        self.installLocal(&prepared, now);
         return true;
     }
 
@@ -500,7 +508,7 @@ pub const NetworkCore = struct {
         const topics_changed = try self.protocols.gossipsub.prepareSubscriptions(intent.subscriptions, self.local_intent_workspace, now, slot);
         const demand_changed = !std.meta.eql(demand, self.peer_manager.demand);
         const changed = prepared.changed or topics_changed or demand_changed;
-        if (prepared.changed) try self.installLocal(&prepared, now);
+        if (prepared.changed) self.installLocal(&prepared, now);
         self.protocols.gossipsub.commitSubscriptions(self.local_intent_workspace);
         if (demand_changed) self.peer_manager.commitDemand(&demand);
         if (changed) std.log.scoped(.network_core).debug("intent_applied local_changed={any} topics_changed={any} demand_changed={any} subscriptions={d} fork={s} digest={x}", .{ prepared.changed, topics_changed, demand_changed, intent.subscriptions.len, @tagName(prepared.local.fork.fork), prepared.local.fork.digest });
@@ -524,9 +532,9 @@ pub const NetworkCore = struct {
     }
 
     /// Scheduling is a snapshot for the supplied output capacities; recompute after mutation.
-    pub fn wakeups(self: *const NetworkCore, now: Now, outputs: Outputs) wake_sources.Wakeups {
+    pub fn wakeups(self: *const NetworkCore, now: Now, outputs: Outputs) Wakeups {
         std.debug.assert(self.phase() != .stopped);
-        var result: wake_sources.Wakeups = .{};
+        var result: Wakeups = .{};
         const pm = &self.peer_manager;
         result.other = pm.schedule(self.protocols.gossipsub, now, .{ .peers = outputs.peers.len, .dials = dials_per_turn });
         result.other = result.other.merge(self.protocols.schedule(.{ .application = outputs.application.len, .control = controls_per_turn, .identify = identify_per_turn }));

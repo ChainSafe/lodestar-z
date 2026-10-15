@@ -165,18 +165,20 @@ pub const Discovery = struct {
         return self.transport.engine.localRecord();
     }
 
-    /// Pass null only when advertised fields are unchanged. Call after other owners finish preparation;
-    /// validation and signing complete before any live state changes.
-    pub fn advertise(self: *Discovery, announcement: ?*const adapter.LocalAdvertisement, endpoints: advertisement.Endpoints, context: *const types.ForkContext) Error!void {
+    /// The caller has validated the endpoints and fork context. Null keeps the current ENR.
+    pub fn prepareAdvertisement(self: *const Discovery, announcement: ?*const adapter.LocalAdvertisement, endpoints: advertisement.Endpoints, context: *const types.ForkContext) Error!?d.identity.enr.Record {
         if (self.stopped) return error.Stopped;
-        try context.validate();
-        try advertisement.validate(endpoints);
         try validateEndpointFamilies(endpoints, self.quic_bound, &self.transport.sockets);
-        const record = if (announcement) |local|
+        return if (announcement) |local|
             try adapter.build(&self.transport.engine.channel.local_key, try adapter.nextSequence(self.localRecord().sequence), local, context)
         else
             null;
-        if (record) |*value| self.transport.engine.updateLocalRecord(value) catch unreachable;
+    }
+
+    /// Install only a record prepared by this owner without intervening state changes.
+    pub fn advertise(self: *Discovery, record: ?*const d.identity.enr.Record, endpoints: advertisement.Endpoints, context: *const types.ForkContext) void {
+        std.debug.assert(!self.stopped);
+        if (record) |value| self.transport.engine.updateLocalRecord(value) catch unreachable;
         self.endpoints = endpoints;
         if (!std.mem.eql(u8, &self.context.digest, &context.digest)) self.cancelForeground();
         self.context = context.*;
