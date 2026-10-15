@@ -8,7 +8,6 @@ const identity_index = @import("identity_index.zig");
 const dial_history = @import("dial_history.zig");
 const remembered = @import("remembered.zig");
 const Now = @import("../types.zig").Now;
-const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
 const identify_mod = @import("../identify/root.zig");
 const limits = @import("../quic/limits.zig");
@@ -155,21 +154,7 @@ pub const Catalog = struct {
     event_count: u16 = 0,
     /// Snapshots report reputation decayed to the last owner clock.
     clock_ms: u64 = 0,
-    dial: DialIndex,
-
-    /// Intent deadlines, in ms. Dialing owns the keys; the catalog marks a row in `dirty` when an
-    /// input of its keys changes, and Dialing rekeys marked rows before reading the heaps.
-    pub const DialIndex = struct {
-        /// Manual intent expiry and attempt lease, per row.
-        expiries: DeadlineHeap,
-        /// When a dialable row may next be dialed: its backoff, cooldowns and ban.
-        eligible: DeadlineHeap,
-        dirty: std.DynamicBitSetUnmanaged,
-        dirty_masks: []usize,
-        dirty_count: u32 = 0,
-        /// Rows one expire or poll takes from a heap.
-        scratch: []u32,
-    };
+    dial_schedule_dirty: bool = true,
 
     pub fn init(a: std.mem.Allocator, options: Options, connections_max: u16, seed: u64) !Catalog {
         return initWithIntents(a, options, 0, connections_max, seed);
@@ -196,21 +181,12 @@ pub const Catalog = struct {
         errdefer a.free(history);
         const event_masks = try a.alloc(usize, intent_masks.len);
         errdefer a.free(event_masks);
-        const dirty_masks = try a.alloc(usize, intent_masks.len);
-        errdefer a.free(dirty_masks);
-        var expiries = try DeadlineHeap.init(a, @intCast(rows.len));
-        errdefer expiries.deinit(a);
-        var eligible = try DeadlineHeap.init(a, @intCast(rows.len));
-        errdefer eligible.deinit(a);
-        const scratch = try a.alloc(u32, rows.len);
-        errdefer a.free(scratch);
         var memory = try remembered.Memory.init(a);
         errdefer memory.deinit(a);
 
         @memset(history, .{});
         @memset(intent_masks, 0);
         @memset(event_masks, 0);
-        @memset(dirty_masks, 0);
         @memset(established, null);
         @memset(rows, .{});
         @memset(slots, identity_index.empty);
@@ -229,13 +205,6 @@ pub const Catalog = struct {
             .by_connection = connections,
             .events = .{ .bit_length = rows.len, .masks = event_masks.ptr },
             .event_masks = event_masks,
-            .dial = .{
-                .expiries = expiries,
-                .eligible = eligible,
-                .dirty = .{ .bit_length = rows.len, .masks = dirty_masks.ptr },
-                .dirty_masks = dirty_masks,
-                .scratch = scratch,
-            },
         };
         for (0..rows.len) |index| result.free.append(rows, "free_link", @intCast(index));
         return result;
@@ -243,10 +212,6 @@ pub const Catalog = struct {
 
     pub fn deinit(self: *Catalog, a: std.mem.Allocator) void {
         self.remembered.deinit(a);
-        a.free(self.dial.scratch);
-        self.dial.eligible.deinit(a);
-        self.dial.expiries.deinit(a);
-        a.free(self.dial.dirty_masks);
         a.free(self.event_masks);
         a.free(self.history.entries);
         a.free(self.intent_masks);
@@ -396,10 +361,8 @@ pub const Catalog = struct {
         return if (row.occupied and row.generation == ref.generation) row else null;
     }
 
-    /// Borrows mutable row state and invalidates its dial deadlines. End the mutation before refreshing Dialing.
     pub fn edit(self: *Catalog, ref: t.PeerRef) ?*Row {
         if (self.rowFor(ref) == null) return null;
-        self.markDial(ref.index);
         return &self.rows[ref.index];
     }
 
@@ -489,6 +452,7 @@ pub const Catalog = struct {
             self.by_connection[conn.index] = ref.index;
             self.selection_dirty = true;
             self.intents_dirty = true;
+            self.dial_schedule_dirty = true;
             self.syncEvent(ref.index);
             return .{ .admitted = .{ .peer = ref, .displaced = displaced, .fresh = fresh } };
         }
@@ -504,6 +468,7 @@ pub const Catalog = struct {
         self.by_connection[conn.index] = ref.index;
         self.selection_dirty = true;
         self.intents_dirty = true;
+        self.dial_schedule_dirty = true;
         self.syncEvent(ref.index);
         return .{ .admitted = .{ .peer = ref, .fresh = true } };
     }
@@ -539,7 +504,7 @@ pub const Catalog = struct {
         self.intents.set(peer.index);
         self.intent_count += 1;
         self.intents_dirty = true;
-        self.markDial(peer.index);
+        self.dial_schedule_dirty = true;
         return peer;
     }
 
@@ -551,6 +516,7 @@ pub const Catalog = struct {
             self.intents.unset(peer.index);
             self.intent_count -= 1;
             self.intents_dirty = true;
+            self.dial_schedule_dirty = true;
         }
         if (row.established_slot == null) {
             self.forget(peer);
@@ -571,6 +537,7 @@ pub const Catalog = struct {
             self.intents.unset(peer.index);
             self.intent_count -= 1;
             self.intents_dirty = true;
+            self.dial_schedule_dirty = true;
         }
         assert(!self.events.isSet(peer.index));
         row.* = .{ .generation = row.generation };
@@ -665,13 +632,6 @@ pub const Catalog = struct {
         assert(count == self.event_count);
     }
 
-    /// Marks the row for Dialing to rekey its intent deadlines.
-    pub fn markDial(self: *Catalog, index: usize) void {
-        if (self.dial.dirty.isSet(index)) return;
-        self.dial.dirty.set(index);
-        self.dial.dirty_count += 1;
-    }
-
     pub fn connectedCount(self: *const Catalog) u16 {
         return self.connected_count;
     }
@@ -702,6 +662,7 @@ pub const Catalog = struct {
         self.by_connection[conn.index] = null;
         self.connected_count -= 1;
         self.intents_dirty = true;
+        self.dial_schedule_dirty = true;
         row.connection = null;
         row.custody_work = null;
         row.custody_context = null;
@@ -909,6 +870,7 @@ pub const Catalog = struct {
         if (row.direct != direct) {
             self.selection_dirty = true;
             self.intents_dirty = true;
+            self.dial_schedule_dirty = true;
             if (direct) self.direct_count += 1 else self.direct_count -= 1;
         }
         row.direct = direct;
@@ -924,6 +886,7 @@ pub const Catalog = struct {
         const row = self.edit(ref) orelse return null;
         if (row.established_slot == null) return null;
         self.selection_dirty = true;
+        self.dial_schedule_dirty = true;
         const decision = row.reputation.apply(action, now_ms);
         // A local ban forgets the peer whether or not a connection is left to close.
         if (decision == .ban) self.remembered.forget(&row.identity);
@@ -934,6 +897,7 @@ pub const Catalog = struct {
         const row = self.edit(ref) orelse return false;
         if (row.established_slot == null) return false;
         const before = row.reputation.score;
+        self.dial_schedule_dirty = true;
         row.reputation.nonCompletion(now_ms);
         if (before != row.reputation.score) self.selection_dirty = true;
         return true;
@@ -948,6 +912,7 @@ pub const Catalog = struct {
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         self.selection_dirty = true;
+        self.dial_schedule_dirty = true;
         row.reputation.cooldown(now_ms, duration_ms);
         return true;
     }
@@ -965,6 +930,7 @@ pub const Catalog = struct {
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         self.selection_dirty = true;
+        self.dial_schedule_dirty = true;
         row.reputation.deferRedial(now_ms, duration_ms);
         return true;
     }

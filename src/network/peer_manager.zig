@@ -539,7 +539,7 @@ pub const PeerManager = struct {
         self.transportProgress(engine);
         const count = self.dialing.poll(&self.catalog, now.millis(), out[0..@min(out.len, self.dialRoom())]);
         // Replay refills the remembered candidates waiting for a paced first attempt after poll
-        // started some, so their eligibility keys wake the owner for the next.
+        // started some, so their eligibility deadline wakes the owner for the next.
         if (self.discovery_need.general) _ = self.dialing.replayRemembered(&self.catalog, &self.local.fork, &self.selection.deficits.missing, now);
         if (count > 0 and self.selection.retained_count >= self.catalog.options.target_peers and self.selection.deficits.outbound == 0) {
             self.replacement_after_ms = now.millis() +| replacement_interval_ms;

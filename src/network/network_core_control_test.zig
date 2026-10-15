@@ -1300,24 +1300,21 @@ test "core idle connected peers cost no control or dial visits" {
     defer setup.deinit();
     for (0..80) |_| try setup.step(0);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().relevant);
-    // A manual intent backing off after a failed dial keeps a dial deadline on the heap.
+    // A manual intent backing off after a failed dial keeps its retry deadline.
     const absent: t.PeerId = .{ .bytes = @splat(7) };
     try setup.client.peer_manager.connectUntil(&absent, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, setup.pair.now, setup.pair.now.millis() + 60_000);
     var intents: [4]SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     try std.testing.expect(setup.client.peer_manager.dialFailed(intents[0].token, setup.pair.now));
     var control_visits: u64 = 0;
-    var dial_visits: u64 = 0;
     for (0..33) |turn| {
         if (turn == 1) {
             control_visits = setup.client.peer_manager.control.visits;
-            dial_visits = setup.client.peer_manager.dialing.visits;
         }
         try setup.step(0);
         try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     }
     try std.testing.expectEqual(control_visits, setup.client.peer_manager.control.visits);
-    try std.testing.expectEqual(dial_visits, setup.client.peer_manager.dialing.visits);
 }
 
 test "core control starts a due ping or Status on the turn its deadline passes" {

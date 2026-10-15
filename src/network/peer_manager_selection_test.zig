@@ -135,12 +135,10 @@ test "peer manager wakeups preserve dial bookkeeping and expiry without output c
     const blocked: PeerManager.Capacities = .{ .peers = 0, .dials = 0 };
     const first = fixture.schedule(now, blocked);
     try std.testing.expect(first.runnable);
-    const dirty = owner.catalog.dial.dirty_count;
-    const visits = owner.dialing.visits;
+    const dirty = owner.catalog.dial_schedule_dirty;
     const counters = owner.counters;
     for (0..3) |_| try std.testing.expectEqualDeep(first, fixture.schedule(now, blocked));
-    try std.testing.expectEqual(dirty, owner.catalog.dial.dirty_count);
-    try std.testing.expectEqual(visits, owner.dialing.visits);
+    try std.testing.expectEqual(dirty, owner.catalog.dial_schedule_dirty);
     try std.testing.expectEqualDeep(counters, owner.counters);
 
     owner.reconcile(&fixture.gossip, now);

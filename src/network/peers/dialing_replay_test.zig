@@ -226,7 +226,7 @@ test "replay paces remembered first attempts as they start while direct and fres
             started += 1;
         }
         _ = d.replayRemembered(&c, &.{}, &.{}, at(now));
-        // At most a burst waits, and the eligibility heap wakes poll for the next paced start.
+        // At most a burst waits, and the eligibility deadline wakes poll for the next paced start.
         var waiting: usize = 0;
         var it = c.intents.iterator(.{});
         while (it.next()) |index| waiting += @intFromBool(c.rows[index].dial.replay == .untried);

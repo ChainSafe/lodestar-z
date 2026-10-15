@@ -156,11 +156,9 @@ test "core clock failure preserves dial intent without starting a connection" {
     const core = &setup.client;
     try core.connectUntil(&setup.server.peerId(), &.{setup.server.transport.localAddress()}, setup.pair.now, time.milliseconds(setup.pair.now.millis() + 10_000));
     const pending = core.waitPlan(setup.pair.now, .{}, .{});
-    const dirty = core.peer_manager.catalog.dial.dirty_count;
-    const visits = core.peer_manager.dialing.visits;
+    const dirty = core.peer_manager.catalog.dial_schedule_dirty;
     try std.testing.expectEqualDeep(pending, core.waitPlan(setup.pair.now, .{}, .{}));
-    try std.testing.expectEqual(dirty, core.peer_manager.catalog.dial.dirty_count);
-    try std.testing.expectEqual(visits, core.peer_manager.dialing.visits);
+    try std.testing.expectEqual(dirty, core.peer_manager.catalog.dial_schedule_dirty);
     const failed = core.advance(setup.pair.io(), .{ .now = setup.pair.now, .clock_failure = error.ClockOutOfRange }, .{}, .{});
     try std.testing.expectEqual(error.ClockOutOfRange, failed.failure.?);
     try std.testing.expectEqual(@as(u8, 0), failed.dial_started);

@@ -262,7 +262,6 @@ const Visits = struct {
     negotiation: u64,
     gossip: u64,
     control: u64,
-    dial: u64,
 
     fn capture(node: *const NetworkCore) Visits {
         const engine = node.transport.engine.visits;
@@ -274,7 +273,6 @@ const Visits = struct {
             .negotiation = node.protocols.router.negotiator.visits,
             .gossip = node.protocols.gossipsub.sessions.visits,
             .control = node.peer_manager.control.visits,
-            .dial = node.peer_manager.dialing.visits,
         };
     }
 };

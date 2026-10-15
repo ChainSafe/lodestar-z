@@ -10,7 +10,6 @@ const remembered = @import("remembered.zig");
 const Engine = @import("../quic/Engine.zig");
 const Now = @import("../types.zig").Now;
 const Schedule = @import("../types.zig").Schedule;
-const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
 const histogram = @import("../metrics/histogram.zig");
 
@@ -66,8 +65,8 @@ pub const Dialing = struct {
     refused: struct { endpoint: u64 = 0, identity: [std.meta.fields(t.Rejection).len]u64 = @splat(0) } = .{},
     /// Attempts held, and those not yet started on a connection.
     held: Attempts = .{},
-    /// Intent rows rekeyed or taken from the deadline heaps. An idle catalog visits none.
-    visits: u64 = 0,
+    next_eligible_ms: ?u64 = null,
+    manual_expiry_ms: ?u64 = null,
 
     pub fn validateOptions(options: Options) error{InvalidOptions}!void {
         if (options.capacity == 0 or options.capacity > candidates_max or options.concurrent_max == 0 or
@@ -115,6 +114,7 @@ pub const Dialing = struct {
         if (direct) _ = catalog.setDirect(ref, true);
         if (!direct) row.dial.manual_until_ms = @max(row.dial.manual_until_ms, deadline_ms);
         catalog.intents_dirty = true;
+        catalog.dial_schedule_dirty = true;
         if (row.connection) |conn| self.accepted(catalog, ref, conn, now_ms);
     }
 
@@ -137,6 +137,7 @@ pub const Dialing = struct {
                     if (catalog.intents.isSet(ref.index) or (row.connection != null and row.dial.automatic)) {
                         row.dial.hints_at_ms = now_ms;
                         catalog.intents_dirty = true;
+                        catalog.dial_schedule_dirty = true;
                         return;
                     }
                 }
@@ -156,6 +157,7 @@ pub const Dialing = struct {
             if (row.dial.automatic) applyAddresses(&row.dial, &admitted);
             Catalog.prepareCandidateCustody(row, context);
             catalog.intents_dirty = true;
+            catalog.dial_schedule_dirty = true;
             return;
         }
         const admitted = admittedAddresses(catalog, &candidate.peer, candidate.addresses[0..candidate.address_count], candidate.hints.sequence, now_ms);
@@ -169,6 +171,7 @@ pub const Dialing = struct {
         row.custody_work = incoming.custody_work;
         row.custody_context = incoming.custody_context;
         catalog.intents_dirty = true;
+        catalog.dial_schedule_dirty = true;
     }
     fn refuse(self: *Dialing, admitted: *const Admitted) error{ RecentlyFailed, RecentlyRejected } {
         const kind = admitted.rejection orelse {
@@ -180,7 +183,7 @@ pub const Dialing = struct {
     }
     /// Queues loaded remembered records as automatic candidates until a burst of them waits for a
     /// first attempt, and returns how many it queued. Poll starts those attempts as the replay
-    /// pacer allows, and the eligibility heap wakes it for them.
+    /// pacer allows, and the cached eligibility deadline wakes it for them.
     pub fn replayRemembered(self: *Dialing, catalog: *Catalog, context: *const t.ForkContext, wanted: *const t.Coverage, now: Now) usize {
         const memory = &catalog.remembered;
         var queued: usize = 0;
@@ -222,6 +225,7 @@ pub const Dialing = struct {
         row.dial.replacement_after_ms = @max(row.dial.replacement_after_ms, now_ms +| replacement_grace_ms);
         applyAddresses(&row.dial, &admitted);
         catalog.intents_dirty = true;
+        catalog.dial_schedule_dirty = true;
         return .queued;
     }
     fn retainCandidate(catalog: *Catalog, incoming: *const Row, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) error{Capacity}!t.PeerRef {
@@ -304,6 +308,8 @@ pub const Dialing = struct {
     pub fn configureSelection(self: *Dialing, catalog: *Catalog, wanted: *const t.Coverage, general: bool, context: *const t.ForkContext, now_ms: u64) void {
         self.selection_deadline = null;
         self.host_demand = 0;
+        self.next_eligible_ms = null;
+        self.manual_expiry_ms = null;
         var it = catalog.intents.iterator(.{});
         while (it.next()) |index| {
             const row = catalog.edit(catalog.reference(index)).?;
@@ -315,8 +321,10 @@ pub const Dialing = struct {
                 hints.validFor(context) and (general or row.dial.priority > 0)
             else
                 general and row.dial.replay != .none;
+            self.includeDeadlines(catalog, row, now_ms);
         }
         catalog.intents_dirty = false;
+        catalog.dial_schedule_dirty = false;
     }
     pub const Attempts = struct { total: u16 = 0, unstarted: u16 = 0 };
     pub fn attempts(self: *const Dialing) Attempts {
@@ -373,6 +381,7 @@ pub const Dialing = struct {
         if (row.dial.replay == .untried) row.dial.replay = .tried;
         row.dial.manual_until_ms = 0;
         catalog.intents_dirty = true;
+        catalog.dial_schedule_dirty = true;
         if (row.attempt) |index| {
             const attempt = &self.active[index];
             if (attempt.connection) |current| {
@@ -394,6 +403,7 @@ pub const Dialing = struct {
         var close: ?t.Handle = null;
         row.dial.manual_until_ms = 0;
         catalog.intents_dirty = true;
+        catalog.dial_schedule_dirty = true;
         if (row.attempt) |index| {
             close = self.active[index].connection;
             self.retire(catalog, index, .cancelled, now_ms);
@@ -444,6 +454,7 @@ pub const Dialing = struct {
         const row = catalog.edit(peer).?;
         std.debug.assert(row.attempt == index);
         row.attempt = null;
+        catalog.dial_schedule_dirty = true;
         self.held.total -= 1;
         if (attempt.connection == null) self.held.unstarted -= 1;
         self.durations[@intFromEnum(outcome)].observe(now_ms -| attempt.selected_ms);
@@ -512,90 +523,56 @@ pub const Dialing = struct {
         if (!catalog.intents.isSet(peer.index)) return;
         releaseUnused(catalog, peer);
     }
-    /// Expires the manual intents and attempt leases whose deadline passed. It takes only the due
-    /// rows from the heap, and acts on them in the order a scan of every intent and attempt would.
     /// Close the returned connections before delivering transport events or selecting more dials.
     pub fn expire(self: *Dialing, catalog: *Catalog, now_ms: u64, close: *[attempts_max]t.Handle) usize {
         var count: usize = 0;
         self.refresh(catalog, now_ms);
-        const due = self.takeDue(catalog, &catalog.dial.expiries, now_ms);
-        if (due.len == 0) return 0;
-        if (due.len > 1) std.sort.pdq(u32, due, {}, std.sort.asc(u32));
-        for (due) |index| {
-            const row = catalog.edit(catalog.reference(index)).?;
-            if (!catalog.intents.isSet(index)) continue;
-            if (row.dial.manual_until_ms == 0 or now_ms < row.dial.manual_until_ms) continue;
-            const peer = catalog.reference(index);
-            if (!row.dial.automatic and !row.direct) if (row.attempt) |slot| {
-                if (self.active[slot].connection) |conn| {
-                    close[count] = conn;
-                    count += 1;
-                }
-                self.retire(catalog, slot, .cancelled, now_ms);
-            };
-            row.dial.manual_until_ms = 0;
-            catalog.intents_dirty = true;
-            releaseUnused(catalog, peer);
+        if (self.manual_expiry_ms != null and now_ms >= self.manual_expiry_ms.?) {
+            var it = catalog.intents.iterator(.{});
+            while (it.next()) |index| {
+                const row = &catalog.rows[index];
+                if (row.dial.manual_until_ms == 0 or now_ms < row.dial.manual_until_ms) continue;
+                const peer = catalog.reference(index);
+                if (!row.dial.automatic and !row.direct) if (row.attempt) |slot| {
+                    if (self.active[slot].connection) |conn| {
+                        close[count] = conn;
+                        count += 1;
+                    }
+                    self.retire(catalog, slot, .cancelled, now_ms);
+                };
+                row.dial.manual_until_ms = 0;
+                catalog.intents_dirty = true;
+                catalog.dial_schedule_dirty = true;
+                releaseUnused(catalog, peer);
+            }
         }
-        var leases: u64 = 0;
-        for (due) |index| {
-            const slot = catalog.rows[index].attempt orelse continue;
-            if (now_ms >= self.active[slot].lease_until_ms) leases |= @as(u64, 1) << @intCast(slot);
-        }
-        // Attempts expire in slot order; each iteration clears the lowest set bit.
-        while (leases != 0) : (leases &= leases - 1) {
-            const index: u8 = @intCast(@ctz(leases));
-            const attempt = self.active[index];
+        for (self.active, 0..) |attempt, index| {
             if (attempt.peer == null or now_ms < attempt.lease_until_ms) continue;
             if (attempt.connection) |conn| {
                 close[count] = conn;
                 count += 1;
             }
-            self.failed(catalog, index, now_ms, .expired, false);
+            self.failed(catalog, @intCast(index), now_ms, .expired, false);
         }
         self.refresh(catalog, now_ms);
         return count;
     }
-    /// Takes every row whose key in `heap` is due and marks it for rekeying.
-    fn takeDue(self: *Dialing, catalog: *Catalog, heap: *DeadlineHeap, now_ms: u64) []u32 {
-        var count: usize = 0;
-        // Each row holds at most one key, so the heap empties within rows.len pops.
-        while (heap.popDue(now_ms)) |index| {
-            catalog.dial.scratch[count] = index;
-            count += 1;
-            catalog.markDial(index);
-        }
-        self.visits +|= count;
-        return catalog.dial.scratch[0..count];
-    }
-    /// Applies pending intent changes to the deadline heaps before the next selection.
+    /// Candidate scans follow policy changes or due eligibility, never unrelated network turns.
     pub fn refresh(self: *Dialing, catalog: *Catalog, now_ms: u64) void {
-        if (catalog.dial.dirty_count == 0) return;
-        var it = catalog.dial.dirty.iterator(.{});
-        while (it.next()) |index| self.rekey(catalog, index, now_ms);
-        self.visits +|= catalog.dial.dirty_count;
-        @memset(catalog.dial.dirty_masks, 0);
-        catalog.dial.dirty_count = 0;
-        if (@import("builtin").is_test) self.checkIntents(catalog, now_ms);
+        if (!catalog.dial_schedule_dirty) return;
+        self.next_eligible_ms = null;
+        self.manual_expiry_ms = null;
+        var it = catalog.intents.iterator(.{});
+        while (it.next()) |index| self.includeDeadlines(catalog, &catalog.rows[index], now_ms);
+        catalog.dial_schedule_dirty = false;
     }
-    fn rekey(self: *const Dialing, catalog: *Catalog, index: usize, now_ms: u64) void {
-        const row = &catalog.rows[index];
-        const key: u32 = @intCast(index);
-        if (self.expiryOf(catalog, index)) |at| catalog.dial.expiries.set(key, at) else catalog.dial.expiries.clear(key);
-        if (catalog.intents.isSet(index) and dialable(row, now_ms))
-            catalog.dial.eligible.set(key, eligibleAt(catalog, row, now_ms))
-        else
-            catalog.dial.eligible.clear(key);
-    }
-    /// The earlier of a manual intent's expiry and its attempt's lease.
-    fn expiryOf(self: *const Dialing, catalog: *const Catalog, index: usize) ?u64 {
-        const row = &catalog.rows[index];
-        var expiry: ?u64 = if (catalog.intents.isSet(index) and row.dial.manual_until_ms != 0) row.dial.manual_until_ms else null;
-        if (row.attempt) |slot| {
-            const lease = self.active[slot].lease_until_ms;
-            expiry = @min(expiry orelse lease, lease);
+    fn includeDeadlines(self: *Dialing, catalog: *const Catalog, row: *const Row, now_ms: u64) void {
+        const expiry = row.dial.manual_until_ms;
+        if (expiry != 0) self.manual_expiry_ms = @min(self.manual_expiry_ms orelse expiry, expiry);
+        if (dialable(row, now_ms)) {
+            const eligible = eligibleAt(catalog, row, now_ms);
+            self.next_eligible_ms = @min(self.next_eligible_ms orelse eligible, eligible);
         }
-        return expiry;
     }
     fn freeAttempt(self: *const Dialing) ?u8 {
         for (self.active[0..self.options.concurrent_max], 0..) |attempt, index| {
@@ -603,21 +580,22 @@ pub const Dialing = struct {
         }
         return null;
     }
-    /// Starts attempts for the preferred eligible intents. The candidates are the rows whose
-    /// eligibility key is due, the same set a scan of every intent would accept.
+    /// Starts attempts for the preferred eligible intents.
     /// Call `expire` and close its returned connections before selecting attempts at this time.
     pub fn poll(self: *Dialing, catalog: *Catalog, now_ms: u64, out: []SelectedDial) usize {
         self.refresh(catalog, now_ms);
         if (out.len == 0 or self.freeAttempt() == null) return 0;
-        const due = self.takeDue(catalog, &catalog.dial.eligible, now_ms);
+        if (now_ms < (self.next_eligible_ms orelse return 0)) return 0;
+        var indices: [candidates_max]u16 = undefined;
         var candidates: usize = 0;
-        for (due) |index| {
+        var it = catalog.intents.iterator(.{});
+        while (it.next()) |index| {
             const row = &catalog.rows[index];
-            if (!catalog.intents.isSet(index) or !dialable(row, now_ms) or now_ms < eligibleAt(catalog, row, now_ms)) continue;
-            due[candidates] = index;
+            if (!dialable(row, now_ms) or now_ms < eligibleAt(catalog, row, now_ms)) continue;
+            indices[candidates] = @intCast(index);
             candidates += 1;
         }
-        const pool = due[0..candidates];
+        const pool = indices[0..candidates];
         var count: usize = 0;
         for (0..self.options.concurrent_max) |_| {
             if (count == out.len) break;
@@ -654,6 +632,7 @@ pub const Dialing = struct {
             out[count] = .{ .token = .{ .index = slot, .generation = attempt.generation }, .peer = row.identity, .address = attempt.address };
             count += 1;
         }
+        catalog.dial_schedule_dirty = true;
         self.refresh(catalog, now_ms);
         return count;
     }
@@ -673,9 +652,7 @@ pub const Dialing = struct {
         return (index + catalog.rows.len - self.cursor) % catalog.rows.len < (best + catalog.rows.len - self.cursor) % catalog.rows.len;
     }
     /// Only a live manual intent dials through the identity's rejection block; discovery and direct
-    /// retries wait for it. A key computed from a block the history later forgets keeps the row
-    /// waiting until that block's end. A remembered first attempt also waits for the replay pacer,
-    /// whose due time only moves later.
+    /// retries wait for it. A remembered first attempt also waits for the replay pacer.
     fn eligibleAt(catalog: *const Catalog, row: *const Row, now_ms: u64) u64 {
         var rep = row.reputation;
         rep.decay(now_ms);
@@ -686,48 +663,17 @@ pub const Dialing = struct {
         if (row.dial.replay == .untried) due = @max(due, catalog.remembered.replayDue());
         return due;
     }
-    /// Dirty intents need one refresh even when output capacity prevents starting a dial.
     pub fn schedule(self: *const Dialing, catalog: *const Catalog, output_capacity: usize) Schedule {
         var result: Schedule = .{
-            .runnable = catalog.dial.dirty_count != 0,
-            .deadline = time.optionalMilliseconds(if (catalog.dial.expiries.peek()) |top| top.deadline else null),
+            .runnable = catalog.dial_schedule_dirty,
+            .deadline = time.optionalMilliseconds(self.manual_expiry_ms),
         };
-        if (output_capacity != 0 and self.freeAttempt() != null) if (catalog.dial.eligible.peek()) |top| {
-            result = result.merge(.{ .deadline = time.optionalMilliseconds(top.deadline) });
+        for (self.active) |attempt| if (attempt.peer != null) {
+            result = result.merge(.{ .deadline = time.milliseconds(attempt.lease_until_ms) });
         };
+        if (output_capacity != 0 and self.freeAttempt() != null)
+            result = result.merge(.{ .deadline = time.optionalMilliseconds(self.next_eligible_ms) });
         return result;
-    }
-    /// Test builds check that the heaps hold every key a scan of every intent and attempt would
-    /// compute, that a dialable row due now is due on the heap unless it waits out a forgotten
-    /// rejection block, that the counts match the table, and that each outcome's dial times count
-    /// every attempt it retired.
-    fn checkIntents(self: *const Dialing, catalog: *const Catalog, now_ms: u64) void {
-        assert(catalog.dial.dirty_count == 0);
-        var held: Attempts = .{};
-        for (self.active, 0..) |attempt, slot| if (attempt.peer) |peer| {
-            held.total += 1;
-            held.unstarted += @intFromBool(attempt.connection == null);
-            assert(catalog.rowFor(peer).?.attempt.? == slot);
-            assert(catalog.intents.isSet(peer.index));
-        };
-        assert(std.meta.eql(held, self.held));
-        for (self.outcomes, self.durations) |count, duration| assert(duration.count == count);
-        for (catalog.rows, 0..) |*row, index| {
-            const retained = catalog.intents.isSet(index);
-            assert(catalog.dial.expiries.get(@intCast(index)) == self.expiryOf(catalog, index));
-            const key = catalog.dial.eligible.get(@intCast(index));
-            if (retained and dialable(row, now_ms)) {
-                // A key computed earlier may stand before a fresh one, which costs a wake. It stands
-                // after a due one only when the history forgot the rejection block it waits for, an
-                // eviction or a colliding clear, and then no longer than that block could run.
-                const due = @max(now_ms, eligibleAt(catalog, row, now_ms)) +| 1;
-                const forgotten = catalog.history.rejectedUntil(catalog.history.identityKey(&row.identity), now_ms) == 0;
-                assert(key != null and (key.? <= due or (forgotten and key.? <= now_ms +| dial_history.rejection_block_max_ms)));
-            } else {
-                // A lapsed manual intent keeps its key until expire clears it.
-                assert(key == null or (row.dial.manual_until_ms != 0 and now_ms >= row.dial.manual_until_ms));
-            }
-        }
     }
     pub fn shutdown(self: *Dialing, catalog: *Catalog, now_ms: u64, close: *[attempts_max]t.Handle) usize {
         var count: usize = 0;

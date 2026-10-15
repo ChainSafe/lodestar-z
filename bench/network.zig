@@ -45,7 +45,6 @@ const Samples = struct {
     negotiation_visits_start: u64 = 0,
     gossip_visits_start: u64 = 0,
     control_visits_start: u64 = 0,
-    dial_visits_start: u64 = 0,
     /// Due-now turns under a transport source whose previous turn hit no per-turn cap.
     uncapped_backlog: u64 = 0,
     uncapped_events: u64 = 0,
@@ -59,7 +58,6 @@ const Samples = struct {
             .negotiation_visits_start = node.protocols.router.negotiator.visits,
             .gossip_visits_start = node.protocols.gossipsub.sessions.visits,
             .control_visits_start = node.peer_manager.control.visits,
-            .dial_visits_start = node.peer_manager.dialing.visits,
         };
     }
 
@@ -83,7 +81,7 @@ const Samples = struct {
         std.mem.sort(u64, &self.ns, {}, std.sort.asc(u64));
         const visits = node.transport.engine.visits;
         std.debug.print("case={s} turns={} wait_max_ms=0 p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} backlog_turns={} immediate_deadlines={} visits_timer={} visits_advance={} visits_flush={} uncapped_backlog_due={} uncapped_events_due={}\n", .{ name, turns, self.ns[turns / 2], self.ns[turns * 95 / 100], self.ns[turns * 99 / 100], self.ns[turns - 1], self.received, self.sent, self.backlog, self.immediate, visits.timer - self.visits_start.timer, visits.advance - self.visits_start.advance, visits.flush - self.visits_start.flush, self.uncapped_backlog, self.uncapped_events });
-        std.debug.print("case={s} visits_reqresp={} visits_negotiation={} visits_gossip={} visits_control={} visits_dial={}\n", .{ name, node.protocols.reqresp.visits - self.reqresp_visits_start, node.protocols.router.negotiator.visits - self.negotiation_visits_start, node.protocols.gossipsub.sessions.visits - self.gossip_visits_start, node.peer_manager.control.visits - self.control_visits_start, node.peer_manager.dialing.visits - self.dial_visits_start });
+        std.debug.print("case={s} visits_reqresp={} visits_negotiation={} visits_gossip={} visits_control={}\n", .{ name, node.protocols.reqresp.visits - self.reqresp_visits_start, node.protocols.router.negotiator.visits - self.negotiation_visits_start, node.protocols.gossipsub.sessions.visits - self.gossip_visits_start, node.peer_manager.control.visits - self.control_visits_start });
         std.debug.print("case={s} due_now", .{name});
         inline for (std.meta.fields(Source)) |field| {
             std.debug.print(" {s}={}", .{ field.name, self.due[field.value] });
@@ -96,8 +94,7 @@ const Samples = struct {
         const visits = node.transport.engine.visits;
         return (visits.timer - self.visits_start.timer) + (visits.advance - self.visits_start.advance) + (visits.flush - self.visits_start.flush) +
             (node.protocols.reqresp.visits - self.reqresp_visits_start) + (node.protocols.router.negotiator.visits - self.negotiation_visits_start) +
-            (node.protocols.gossipsub.sessions.visits - self.gossip_visits_start) + (node.peer_manager.control.visits - self.control_visits_start) +
-            (node.peer_manager.dialing.visits - self.dial_visits_start);
+            (node.protocols.gossipsub.sessions.visits - self.gossip_visits_start) + (node.peer_manager.control.visits - self.control_visits_start);
     }
 };
 

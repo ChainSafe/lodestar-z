@@ -477,7 +477,7 @@ test "peer dial admission reserve counts only answered attempts" {
     try std.testing.expectEqual(@as(u16, 0), q.answeredPeers(&catalog, &out[0].peer));
 }
 
-test "peer dial lease expiry and backoff fire from the intent heaps" {
+test "peer dial lease expiry and backoff preserve their deadlines" {
     var q = try mod.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
     var catalog = try initCatalog(a, q.options);
     defer catalog.deinit(a);
@@ -488,26 +488,21 @@ test "peer dial lease expiry and backoff fire from the intent heaps" {
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
     // An unstarted attempt holds its lease; nothing else is due before it.
     try std.testing.expectEqual(@as(?u64, 10_000), support.refreshAndWakeup(&q, &catalog, 0, 1));
-    var visits = q.visits;
     for ([_]u64{ 1, 5_000, 9_999 }) |now| {
         try expire(&q, &catalog, now);
         try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, now, &out));
         try std.testing.expectEqual(@as(?u64, 10_000), support.refreshAndWakeup(&q, &catalog, now, 1));
     }
-    try std.testing.expectEqual(visits, q.visits);
     try expire(&q, &catalog, 10_000);
-    try std.testing.expect(q.visits > visits);
     try std.testing.expectEqual(@as(u64, 1), q.outcomes[@intFromEnum(t.DialOutcome.expired)]);
     try std.testing.expectEqual(@as(?u8, null), row.attempt);
-    // The expired lease backs the intent off; its eligibility is the next deadline on the heap.
+    // The expired lease backs the intent off; its eligibility is the next deadline.
     const eligible = row.dial.eligible_at_ms;
     try std.testing.expect(eligible > 10_000 and eligible < mod.Dialing.connect_timeout_ms);
     try std.testing.expectEqual(@as(?u64, eligible), support.refreshAndWakeup(&q, &catalog, 10_000, 1));
     // Without dial room only the manual expiry remains.
     try std.testing.expectEqual(@as(?u64, mod.Dialing.connect_timeout_ms), support.refreshAndWakeup(&q, &catalog, 10_000, 0));
-    visits = q.visits;
     try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, eligible - 1, &out));
-    try std.testing.expectEqual(visits, q.visits);
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, eligible, &out));
     try std.testing.expect(out[0].peer.eql(&peer));
     // The second lease ends at the manual deadline, which releases the intent.
@@ -526,18 +521,16 @@ test "peer dial scheduling observes dirty intents without applying them" {
     defer catalog.deinit(a);
     const peer: t.PeerId = .{ .bytes = @splat(1) };
     try queue.enqueue(&catalog, &peer, &.{address}, true, 100);
-    const dirty = catalog.dial.dirty_count;
-    const visits = queue.visits;
-    try std.testing.expect(dirty > 0);
+    const dirty = catalog.dial_schedule_dirty;
+    try std.testing.expect(dirty);
     const first = queue.schedule(&catalog, 0);
     try std.testing.expect(first.runnable);
     for (0..3) |_| {
         try std.testing.expectEqualDeep(first, queue.schedule(&catalog, 0));
-        try std.testing.expectEqual(dirty, catalog.dial.dirty_count);
-        try std.testing.expectEqual(visits, queue.visits);
+        try std.testing.expectEqual(dirty, catalog.dial_schedule_dirty);
     }
     queue.refresh(&catalog, 100);
-    try std.testing.expectEqual(@as(u32, 0), catalog.dial.dirty_count);
+    try std.testing.expect(!catalog.dial_schedule_dirty);
     try std.testing.expect(!queue.schedule(&catalog, 0).runnable);
     try std.testing.expect(queue.schedule(&catalog, 1).due(time.milliseconds(100)));
     const ref = catalog.find(&peer).?;
@@ -545,10 +538,37 @@ test "peer dial scheduling observes dirty intents without applying them" {
     try std.testing.expect(catalog.rowFor(ref) != null);
     try std.testing.expect(!queue.schedule(&catalog, 0).runnable);
     catalog.edit(ref).?.dial.deferUntil(200);
-    try std.testing.expect(queue.schedule(&catalog, 0).runnable);
+    try std.testing.expect(!queue.schedule(&catalog, 0).runnable);
+    queue.configureSelection(&catalog, &.{}, false, &.{}, 100);
+    try std.testing.expectEqual(@as(?u64, 200), support.refreshAndWakeup(&queue, &catalog, 100, 1));
     var selected: [1]mod.Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 0), queue.poll(&catalog, 199, &selected));
     try std.testing.expect(!queue.schedule(&catalog, 0).runnable);
     try std.testing.expectEqual(@as(usize, 1), queue.poll(&catalog, 200, &selected));
     try std.testing.expect(selected[0].peer.eql(&peer));
+}
+
+test "peer dial scans select and expire every candidate at maximum capacity" {
+    var q = try mod.Dialing.init(.{ .capacity = 4096, .concurrent_max = mod.Dialing.attempts_max, .seed = 4 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    for (0..q.options.capacity) |index| {
+        var peer: t.PeerId = .{ .bytes = @splat(0) };
+        std.mem.writeInt(u16, peer.bytes[0..2], @intCast(index), .little);
+        try q.enqueueUntil(&catalog, &peer, &.{address}, false, 0, 5000);
+    }
+    var out: [mod.Dialing.attempts_max]mod.Dialing.SelectedDial = undefined;
+    for (0..q.options.capacity / mod.Dialing.attempts_max) |batch| {
+        try std.testing.expectEqual(out.len, q.poll(&catalog, 0, &out));
+        for (out, 0..) |selected, offset| {
+            try std.testing.expectEqual(@as(u16, @intCast(batch * out.len + offset)), std.mem.readInt(u16, selected.peer.bytes[0..2], .little));
+            try std.testing.expect(q.dialDeferred(&catalog, selected.token, 0));
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, 999, &out));
+    try std.testing.expectEqual(@as(?u64, 1000), support.refreshAndWakeup(&q, &catalog, 999, 1));
+    try std.testing.expectEqual(@as(?u64, 5000), support.refreshAndWakeup(&q, &catalog, 999, 0));
+    try expire(&q, &catalog, 5000);
+    try std.testing.expectEqual(@as(u16, 0), catalog.intent_count);
+    try std.testing.expectEqual(@as(?u64, null), support.refreshAndWakeup(&q, &catalog, 5000, 1));
 }
