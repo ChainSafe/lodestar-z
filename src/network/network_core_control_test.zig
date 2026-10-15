@@ -1295,7 +1295,6 @@ test "core request terminal scores captured identity without a JavaScript consum
 }
 
 test "core idle connected peers cost no control or dial visits" {
-    const Source = @import("wake_sources.zig").Source;
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -1310,23 +1309,15 @@ test "core idle connected peers cost no control or dial visits" {
     var control_visits: u64 = 0;
     var dial_visits: u64 = 0;
     var refresh_visits: u64 = 0;
-    // Every harness turn waits zero, so a source due at the start of a turn counts there.
-    const due_now = &setup.client.due_now_turns;
-    var control_due: u64 = 0;
-    var dial_due: u64 = 0;
     for (0..33) |turn| {
         if (turn == 1) {
             control_visits = setup.client.peer_manager.control.visits;
             dial_visits = setup.client.peer_manager.dialing.visits;
             refresh_visits = setup.client.peer_manager.catalog.refresh_visits;
-            control_due = due_now[@intFromEnum(Source.control)];
-            dial_due = due_now[@intFromEnum(Source.dial)];
         }
         try setup.step(0);
         try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     }
-    try std.testing.expectEqual(control_due, due_now[@intFromEnum(Source.control)]);
-    try std.testing.expectEqual(dial_due, due_now[@intFromEnum(Source.dial)]);
     try std.testing.expectEqual(control_visits, setup.client.peer_manager.control.visits);
     try std.testing.expectEqual(dial_visits, setup.client.peer_manager.dialing.visits);
     try std.testing.expectEqual(refresh_visits, setup.client.peer_manager.catalog.refresh_visits);

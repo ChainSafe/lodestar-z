@@ -14,8 +14,24 @@ const network_scores = @import("network_scores.zig");
 /// The gossip_burst case runs dozens of nodes; their startup info lines would bury its report.
 pub const std_options: std.Options = .{ .log_level = .warn };
 
-const Source = network.wake_sources.Source;
-const source_count = network.wake_sources.source_count;
+const Source = enum { transport_backlog, transport_events, transport_timer, gossip, reqresp, identify, negotiation, peers, discovery, host };
+const source_count = std.meta.fields(Source).len;
+
+fn dueSources(node: *const network.NetworkCore, now: network.Now, outputs: network.NetworkCore.Outputs, host_deadline: ?std.Io.Clock.Timestamp) [source_count]bool {
+    var due: [source_count]bool = @splat(false);
+    const engine = &node.transport.engine;
+    due[@intFromEnum(Source.transport_backlog)] = engine.backlog();
+    due[@intFromEnum(Source.transport_events)] = engine.eventsPending() or engine.releasesPending();
+    due[@intFromEnum(Source.transport_timer)] = if (engine.nextDeadlineNs()) |deadline| deadline <= now.monotonic.raw.nanoseconds else false;
+    due[@intFromEnum(Source.gossip)] = node.protocols.applications_open and node.protocols.gossipsub.schedule().due(now.monotonic);
+    due[@intFromEnum(Source.reqresp)] = node.protocols.reqresp.schedule(.{ .application = outputs.application.len, .control = network.NetworkCore.controls_per_turn }).due(now.monotonic);
+    due[@intFromEnum(Source.identify)] = node.protocols.identify.schedule(network.NetworkCore.identify_per_turn).due(now.monotonic);
+    due[@intFromEnum(Source.negotiation)] = node.protocols.router.schedule(network.Router.outcomes_per_pump).due(now.monotonic);
+    due[@intFromEnum(Source.peers)] = node.peer_manager.schedule(node.protocols.gossipsub, now, .{ .peers = outputs.peers.len, .dials = network.NetworkCore.dials_per_turn }).due(now.monotonic);
+    due[@intFromEnum(Source.discovery)] = node.wakeups(now, outputs).discovery.due(now.monotonic);
+    due[@intFromEnum(Source.host)] = node.host_runnable or if (host_deadline) |deadline| deadline.compare(.lte, now.monotonic) else false;
+    return due;
+}
 
 const Samples = struct {
     ns: [turns]u64 = undefined,
@@ -23,7 +39,7 @@ const Samples = struct {
     sent: u64 = 0,
     backlog: u64 = 0,
     immediate: usize = 0,
-    due_start: [source_count]u64 = @splat(0),
+    due: [source_count]u64 = @splat(0),
     visits_start: network.quic.Engine.Visits = .{},
     reqresp_visits_start: u64 = 0,
     negotiation_visits_start: u64 = 0,
@@ -38,7 +54,6 @@ const Samples = struct {
 
     fn begin(node: *const network.NetworkCore) Samples {
         return .{
-            .due_start = node.due_now_turns,
             .visits_start = node.transport.engine.visits,
             .reqresp_visits_start = node.protocols.reqresp.visits,
             .negotiation_visits_start = node.protocols.router.negotiator.visits,
@@ -48,15 +63,16 @@ const Samples = struct {
         };
     }
 
-    fn record(self: *Samples, node: *const network.NetworkCore, index: usize, elapsed: u64, due_before: [source_count]u64, result: network.NetworkCore.Result, immediate: bool) !void {
+    fn record(self: *Samples, index: usize, elapsed: u64, due: [source_count]bool, result: network.NetworkCore.Result, immediate: bool) !void {
         if (result.failure) |err| return err;
         self.ns[index] = elapsed;
         self.received += result.transport.datagrams_received;
         self.sent += result.transport.datagrams_sent;
         self.backlog += @intFromBool(result.transport.backlog);
         self.immediate += @intFromBool(immediate);
-        const backlog_due = node.due_now_turns[@intFromEnum(Source.transport_backlog)] > due_before[@intFromEnum(Source.transport_backlog)];
-        const events_due = node.due_now_turns[@intFromEnum(Source.transport_events)] > due_before[@intFromEnum(Source.transport_events)];
+        for (due, &self.due) |ready, *count| count.* += @intFromBool(ready);
+        const backlog_due = due[@intFromEnum(Source.transport_backlog)];
+        const events_due = due[@intFromEnum(Source.transport_events)];
         self.uncapped_backlog += @intFromBool(backlog_due and !self.previous_backlog);
         self.uncapped_events += @intFromBool(events_due and !self.previous_events);
         self.previous_backlog = result.transport.backlog;
@@ -70,7 +86,7 @@ const Samples = struct {
         std.debug.print("case={s} visits_reqresp={} visits_negotiation={} visits_gossip={} visits_control={} visits_dial={}\n", .{ name, node.protocols.reqresp.visits - self.reqresp_visits_start, node.protocols.router.negotiator.visits - self.negotiation_visits_start, node.protocols.gossipsub.sessions.visits - self.gossip_visits_start, node.peer_manager.control.visits - self.control_visits_start, node.peer_manager.dialing.visits - self.dial_visits_start });
         std.debug.print("case={s} due_now", .{name});
         inline for (std.meta.fields(Source)) |field| {
-            std.debug.print(" {s}={}", .{ field.name, node.due_now_turns[field.value] - self.due_start[field.value] });
+            std.debug.print(" {s}={}", .{ field.name, self.due[field.value] });
         }
         std.debug.print("\n", .{});
     }
@@ -159,10 +175,10 @@ pub fn main(init: std.process.Init) !void {
     for (0..turns) |i| {
         const now = try network.Now.read(io);
         const immediate = a.wakeups(now, .{}).schedule().due(now.monotonic);
-        const due_before = a.due_now_turns;
+        const due_before = dueSources(a, now, .{}, now.monotonic);
         const start = timestamp(io);
         const result = try turn(a, io, .{});
-        try samples.record(a, i, timestamp(io) - start, due_before, result, immediate);
+        try samples.record(i, timestamp(io) - start, due_before, result, immediate);
     }
     samples.print(a, "idle");
     std.debug.print("case=idle turn_allocation_calls={}\n", .{backing_a.allocations - idle_allocations});
@@ -290,10 +306,10 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
         peak_validations = @max(peak_validations, receiver.pending_validations);
         const now = try network.Now.read(io);
         const immediate = a.wakeups(now, .{}).schedule().due(now.monotonic);
-        const due_before = a.due_now_turns;
+        const due_before = dueSources(a, now, .{}, now.monotonic);
         const start = timestamp(io);
         const result = try turn(a, io, .{});
-        try samples.record(a, i, timestamp(io) - start, due_before, result, immediate);
+        try samples.record(i, timestamp(io) - start, due_before, result, immediate);
     }
     samples.print(a, "connected_slow_application_control");
     std.debug.print("gossip_attempted_bytes={} queued={} pressured={} peak_descriptors={} peak_pending_validations={}\n", .{ 256 * payload.len, gossip_queued, gossip_pressured, peak_descriptors, peak_validations });
@@ -409,11 +425,13 @@ fn idleWait(init: std.process.Init) !void {
     var count: u32 = 0;
     var immediate: u32 = 0;
     var elapsed_turns: u64 = 0;
+    var due: [source_count]u64 = @splat(0);
     for (0..10_000) |_| {
         const before = timestamp(io);
         if (before - start >= 1_000_000_000) break;
         const now = try network.Now.read(io);
         immediate += @intFromBool(node.wakeups(now, .{}).schedule().due(now.monotonic));
+        for (dueSources(node, now, .{}, network.time.optionalMilliseconds(window_end_ms)), &due) |ready, *total| total.* += @intFromBool(ready);
         const result = network.driver.step(node, io, now, .{}, .{ .handler = .{ .context = &host, .apply = IdleHost.apply }, .deadline = network.time.optionalMilliseconds(window_end_ms) });
         if (result.failure) |err| return err;
         elapsed_turns += timestamp(io) - before;
@@ -423,7 +441,7 @@ fn idleWait(init: std.process.Init) !void {
     if (elapsed < 1_000_000_000) return error.TurnLimit;
     std.debug.print("case=idle_wait window_ms=1000 elapsed_ns={} turns={} host_applies={} immediate_deadlines={} turn_elapsed_ns={} turn_allocation_calls={} turns_max={}\n", .{ elapsed, count, host.applies, immediate, elapsed_turns, backing.allocations - calls, idle_wait_turns_max });
     std.debug.print("case=idle_wait due_now", .{});
-    inline for (std.meta.fields(Source)) |field| std.debug.print(" {s}={}", .{ field.name, node.due_now_turns[field.value] });
+    inline for (std.meta.fields(Source)) |field| std.debug.print(" {s}={}", .{ field.name, due[field.value] });
     std.debug.print("\n", .{});
     if (count > idle_wait_turns_max) return error.IdleWaitTurns;
 }
@@ -614,10 +632,10 @@ fn idleConnections(init: std.process.Init) !void {
     for (0..turns) |i| {
         const now = try network.Now.read(io);
         const immediate = hub.wakeups(now, outputs).schedule().due(now.monotonic);
-        const due_before = hub.due_now_turns;
+        const due_before = dueSources(hub, now, outputs, now.monotonic);
         const start = timestamp(io);
         const result = try turn(hub, io, outputs);
-        try samples.record(hub, i, timestamp(io) - start, due_before, result, immediate);
+        try samples.record(i, timestamp(io) - start, due_before, result, immediate);
     }
     const window_ms = (timestamp(io) - admitted_at) / std.time.ns_per_ms;
     samples.print(hub, "idle_connections");

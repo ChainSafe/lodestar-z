@@ -255,8 +255,6 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
         _ = try stepAfter(&node, 1);
     }
     try std.testing.expect(node.protocols.router.negotiator.active() > 0);
-    const Source = @import("wake_sources.zig").Source;
-    const due = node.due_now_turns;
     const visits = .{ node.protocols.reqresp.visits, node.protocols.router.negotiator.visits };
     for (0..64) |_| {
         const now = try Now.read(std.testing.io);
@@ -264,8 +262,6 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
         try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.protocols.router.schedule(1), now.millis()).? > now.millis());
         try std.testing.expect(driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis()))).failure == null);
     }
-    try std.testing.expectEqual(due[@intFromEnum(Source.reqresp)], node.due_now_turns[@intFromEnum(Source.reqresp)]);
-    try std.testing.expectEqual(due[@intFromEnum(Source.negotiation)], node.due_now_turns[@intFromEnum(Source.negotiation)]);
     try std.testing.expectEqual(visits[0], node.protocols.reqresp.visits);
     try std.testing.expectEqual(visits[1], node.protocols.router.negotiator.visits);
     try std.testing.expect(node.protocols.router.negotiator.active() > 0);

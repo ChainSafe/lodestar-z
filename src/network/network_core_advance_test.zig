@@ -1,6 +1,5 @@
 const std = @import("std");
 const Setup = @import("network_core_test_support.zig").Setup;
-const Source = @import("wake_sources.zig").Source;
 const types = @import("types.zig");
 const Dialing = @import("peers/dialing.zig").Dialing;
 const time = @import("time.zig");
@@ -44,16 +43,12 @@ test "core advance uses supplied time after immediate application shutdown" {
     const core = &setup.client;
     core.beginGracefulClose(setup.pair.now);
     try std.testing.expect(!core.protocols.applications_open);
-    const before = core.wakeups(setup.pair.now, .{});
-    try std.testing.expect(!before.sources[@intFromEnum(Source.gossip)].runnable);
     var tick = setup.pair.now;
     tick.monotonic = time.milliseconds(tick.millis() + 1);
     const result = core.advance(setup.pair.io(), .{ .now = tick, .readiness = .{} }, .{}, .{});
     try std.testing.expect(result.failure == null);
     try std.testing.expectEqual(tick, result.transport.now);
     try std.testing.expect(!core.protocols.applications_open);
-    const after = core.wakeups(tick, .{});
-    try std.testing.expect(!after.sources[@intFromEnum(Source.gossip)].runnable);
 }
 
 test "core peer close delivery schedules transport retirement" {
@@ -75,7 +70,7 @@ test "core peer close delivery schedules transport retirement" {
     try std.testing.expect(core.transport.engine.releasesPending());
     try std.testing.expectEqual(@as(u16, 1), core.transport.engine.resourceSnapshot().active);
     const pending = core.wakeups(now, .{});
-    try std.testing.expect(pending.sources[@intFromEnum(Source.transport_events)].runnable);
+    try std.testing.expect(pending.other.runnable);
     const retired = core.advance(setup.pair.io(), .{ .now = now, .readiness = .{} }, .{}, .{});
     try std.testing.expect(retired.failure == null);
     try std.testing.expectEqual(@as(usize, 0), retired.transport_events.len);

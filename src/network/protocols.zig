@@ -6,7 +6,6 @@ const reqresp_mod = @import("reqresp/root.zig");
 const gossip_mod = @import("gossipsub/root.zig");
 
 const identify_mod = @import("identify/root.zig");
-const wake_sources = @import("wake_sources.zig");
 
 pub const Protocols = struct {
     identify: identify_mod.Handler,
@@ -103,12 +102,14 @@ pub const Protocols = struct {
         );
     }
 
-    pub fn collectWakeups(self: *const Protocols, capacities: Capacities, wakeups: *wake_sources.Wakeups) void {
+    pub fn schedule(self: *const Protocols, capacities: Capacities) types.Schedule {
         std.debug.assert(!self.stopped);
-        wakeups.note(.reqresp, self.reqresp.schedule(.{ .application = capacities.application, .control = capacities.control }));
-        if (self.applications_open) wakeups.note(.gossip, self.gossipsub.schedule());
-        wakeups.note(.identify, self.identify.schedule(capacities.identify));
-        wakeups.note(.negotiation, self.router.schedule(Router.outcomes_per_pump));
+        var result: types.Schedule = .{};
+        result = result.merge(self.reqresp.schedule(.{ .application = capacities.application, .control = capacities.control }));
+        if (self.applications_open) result = result.merge(self.gossipsub.schedule());
+        result = result.merge(self.identify.schedule(capacities.identify));
+        result = result.merge(self.router.schedule(Router.outcomes_per_pump));
+        return result;
     }
 
     /// Delivers one turn of engine events, then pumps each owner's ready work and due deadlines.

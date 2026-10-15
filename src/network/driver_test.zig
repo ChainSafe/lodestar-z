@@ -5,7 +5,6 @@ const NetworkCore = @import("network_core.zig").NetworkCore;
 const keys = @import("wire/keys.zig");
 const options = @import("network_core_test_support.zig").networkOptions;
 const Now = @import("types.zig").Now;
-const Source = @import("wake_sources.zig").Source;
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
 const transport = @import("transport.zig");
 const time = @import("time.zig");
@@ -208,7 +207,6 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
         const now = try currentTime();
         _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
     }
-    const host_source = @intFromEnum(Source.host);
 
     // A turn woken by a QUIC datagram, with the host deadline in the future, leaves the host alone.
     const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
@@ -237,11 +235,11 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
     const capped = driver.step(&node, std.testing.io, now, .{}, host.seam(now.millis() +| 5_000));
     try std.testing.expect(capped.readiness.host);
     try std.testing.expectEqual(applied + 1, host.applies);
-    const due = node.due_now_turns[host_source];
+    try std.testing.expect(node.wakeups(now, .{}).other.runnable);
     now = try currentTime();
     const carried = driver.step(&node, std.testing.io, now, .{}, host.seam(now.millis() +| 5_000));
     try std.testing.expect(!carried.readiness.host);
-    try std.testing.expectEqual(due + 1, node.due_now_turns[host_source]);
+    try std.testing.expect(!node.host_runnable);
     try std.testing.expectEqual(applied + 2, host.applies);
 
     // A submission that lands after the drain wakes the next poll.
@@ -358,40 +356,17 @@ fn initOwner(node: *NetworkCore) !void {
     });
 }
 
-test "owner zero-wait turns count under every due source until the owner settles" {
+test "an idle owner waits until the host deadline" {
     const node = try std.testing.allocator.create(NetworkCore);
     defer std.testing.allocator.destroy(node);
     try initOwner(node);
     defer node.deinit(std.testing.io);
     const now = try Now.read(std.testing.io);
     for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis()))).failure == null);
-    const host = @intFromEnum(Source.host);
-    try std.testing.expectEqual(@as(u64, 8), node.due_now_turns[host]);
-    try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(now, .{}).schedule(), now.millis()).? > now.millis());
-    const settled = node.due_now_turns;
-    try std.testing.expect(driver.step(node, std.testing.io, node.last_now, .{}, .deadlineOnly(time.optionalMilliseconds(node.last_now.millis() +| 2))).failure == null);
-    try std.testing.expectEqualDeep(settled, node.due_now_turns);
-}
-
-test "owner zero-wait turn counts once under each of its two due sources" {
-    const node = try std.testing.allocator.create(NetworkCore);
-    defer std.testing.allocator.destroy(node);
-    try initOwner(node);
-    defer node.deinit(std.testing.io);
-    const now = try Now.read(std.testing.io);
-    for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis()))).failure == null);
-    try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(now, .{}).schedule(), now.millis()).? > now.millis());
-    const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{95}));
-    const remote_key = remote.publicKey();
-    const peer = PeerId.fromPublicKey(&remote_key);
-    // The node binds IPv4 only, so this dial fails before sending a datagram.
-    try node.connectUntil(&peer, &.{.{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } }}, now, time.milliseconds(now.millis() + 60_000));
-    const before = node.due_now_turns;
-    try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 100))).failure == null);
-    for (before, node.due_now_turns, 0..) |previous, current, index| {
-        const due = index == @intFromEnum(Source.dial) or index == @intFromEnum(Source.peer_policy);
-        try std.testing.expectEqual(previous + @intFromBool(due), current);
-    }
+    const settled = node.last_now;
+    try std.testing.expect(!node.wakeups(settled, .{}).schedule().due(settled.monotonic));
+    const plan = node.waitPlan(settled, .{}, .deadlineOnly(time.optionalMilliseconds(settled.millis() + 2)));
+    try std.testing.expectEqualDeep(time.milliseconds(settled.millis() + 2), plan.timeout.deadline);
 }
 
 test "a continuous QUIC flood on both families shares each receive quota and leaves the host progressing" {

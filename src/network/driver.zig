@@ -13,7 +13,6 @@ pub fn step(core: *NetworkCore, io: std.Io, now: Now, outputs: NetworkCore.Outpu
         clock_failure = err;
         break :blk plan.now;
     };
-    core.observeWait(&plan);
     const tick = read.floor(plan.now);
     return core.advance(io, .{ .now = tick, .readiness = readiness, .clock_failure = clock_failure }, outputs, host);
 }

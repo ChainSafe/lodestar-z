@@ -1,7 +1,6 @@
 const std = @import("std");
 const Schedule = @import("schedule.zig").Schedule;
 const Protocols = @import("protocols.zig").Protocols;
-const wake_sources = @import("wake_sources.zig");
 const time = @import("time.zig");
 
 pub fn wakeupMilliseconds(schedule: Schedule, now_ms: u64) ?u64 {
@@ -17,7 +16,5 @@ pub fn waitMilliseconds(schedule: Schedule, now_ms: u64, maximum_ms: u32) u32 {
 }
 
 pub fn protocolsSchedule(protocols: *const Protocols, capacities: Protocols.Capacities) Schedule {
-    var wakeups: wake_sources.Wakeups = .{};
-    protocols.collectWakeups(capacities, &wakeups);
-    return wakeups.schedule();
+    return protocols.schedule(capacities);
 }

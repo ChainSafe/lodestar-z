@@ -124,7 +124,6 @@ pub const NetworkCore = struct {
     turn_timing: TurnTiming = .{},
     /// Zero-wait turns, counted under every source already due; readiness tests and the idle
     /// benchmarks read them to show an idle owner does not spin.
-    due_now_turns: [wake_sources.source_count]u64 = @splat(0),
     last_now: Now,
     initialized: bool = false,
     host_wake: ?i32 = null,
@@ -154,7 +153,6 @@ pub const NetworkCore = struct {
         self.counters = .{};
         self.step_duration = .{};
         self.turn_timing = .{};
-        self.due_now_turns = @splat(0);
         self.host_wake = null;
         self.clock = startup.clock;
         self.host_runnable = false;
@@ -530,14 +528,16 @@ pub const NetworkCore = struct {
         std.debug.assert(self.phase() != .stopped);
         var result: wake_sources.Wakeups = .{};
         const pm = &self.peer_manager;
-        pm.collectWakeups(self.protocols.gossipsub, now, .{ .peers = outputs.peers.len, .dials = dials_per_turn }, &result);
-        self.protocols.collectWakeups(.{ .application = outputs.application.len, .control = controls_per_turn, .identify = identify_per_turn }, &result);
+        result.other = pm.schedule(self.protocols.gossipsub, now, .{ .peers = outputs.peers.len, .dials = dials_per_turn });
+        result.other = result.other.merge(self.protocols.schedule(.{ .application = outputs.application.len, .control = controls_per_turn, .identify = identify_per_turn }));
         const quic = &self.transport.engine;
-        result.note(.transport_backlog, .{ .runnable = quic.backlog() });
-        result.note(.transport_events, .{ .runnable = quic.eventsPending() or quic.releasesPending() });
-        result.note(.transport_timer, .{ .deadline = if (quic.nextDeadlineNs()) |deadline| .{ .clock = .awake, .raw = .fromNanoseconds(deadline) } else null });
-        if (pm.phase == .running) if (self.discovery) |owned| result.note(.discovery, owned.schedule(now.millis()));
-        result.note(.host, .{ .runnable = self.host_runnable });
+        result.other = result.other.merge(.{ .runnable = quic.backlog() });
+        result.other = result.other.merge(.{ .runnable = quic.eventsPending() or quic.releasesPending() });
+        result.other = result.other.merge(.{ .deadline = if (quic.nextDeadlineNs()) |deadline| .{ .clock = .awake, .raw = .fromNanoseconds(deadline) } else null });
+        if (pm.phase == .running) if (self.discovery) |owned| {
+            result.discovery = owned.schedule(now.millis());
+        };
+        result.other = result.other.merge(.{ .runnable = self.host_runnable });
         return result;
     }
 
@@ -545,15 +545,14 @@ pub const NetworkCore = struct {
         now: Now,
         sources: wait.Sources,
         timeout: std.Io.Timeout,
-        due: [wake_sources.source_count]bool,
     };
 
     /// Borrows descriptors until the next owner mutation. Waiting does not consume events.
     pub fn waitPlan(self: *const NetworkCore, observed: Now, outputs: Outputs, host: Host) WaitPlan {
         const now = observed.floor(self.last_now);
         var pending = self.wakeups(now, outputs);
-        pending.note(.host, .{ .deadline = host.deadline });
-        var plan: WaitPlan = .{
+        pending.other = pending.other.merge(.{ .deadline = host.deadline });
+        return .{
             .now = now,
             .sources = .{
                 .quic = self.transport.sockets.handles(),
@@ -564,15 +563,7 @@ pub const NetworkCore = struct {
                 .host = self.host_wake,
             },
             .timeout = pending.schedule().timeout(now.monotonic, .fromMilliseconds(wait.native_wait_max_ms)),
-            .due = undefined,
         };
-        for (pending.sources, &plan.due) |source, *due| due.* = source.due(now.monotonic);
-        return plan;
-    }
-
-    /// Records driver observations separately from the read-only scheduling snapshot.
-    pub fn observeWait(self: *NetworkCore, plan: *const WaitPlan) void {
-        for (plan.due, &self.due_now_turns) |due, *turns| turns.* +|= @intFromBool(due);
     }
 
     pub const Input = struct {
@@ -798,12 +789,10 @@ pub const NetworkCore = struct {
         if (readiness.quicReady() or readiness.host or readiness.failure != null) return false;
         if (self.discovery == null or self.peer_manager.phase != .running) return false;
         var pending = self.wakeups(tick, outputs);
-        pending.note(.host, .{ .deadline = host.deadline });
-        const discovery_slot = &pending.sources[@intFromEnum(wake_sources.Source.discovery)];
-        const discovery_due = discovery_slot.due(tick.monotonic);
+        pending.other = pending.other.merge(.{ .deadline = host.deadline });
+        const discovery_due = pending.discovery.due(tick.monotonic);
         if (!readiness.discoveryReady() and !discovery_due) return false;
-        discovery_slot.* = .{};
-        return !pending.schedule().due(tick.monotonic);
+        return !pending.other.due(tick.monotonic);
     }
 
     /// Each response may verify several ENRs; return to polling between datagrams.

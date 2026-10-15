@@ -12,7 +12,6 @@ const local_state = @import("local_state.zig");
 const logging = @import("logging.zig");
 const ReqResp = @import("reqresp/root.zig").ReqResp;
 const types = @import("types.zig");
-const wake_sources = @import("wake_sources.zig");
 
 pub const coverage_reconcile_interval_ms = 1_000;
 pub const replacement_interval_ms = 5_000;
@@ -284,16 +283,18 @@ pub const PeerManager = struct {
     }
 
     /// Observes scheduling without applying pending work. Recompute after owner mutation.
-    pub fn collectWakeups(self: *const PeerManager, gossipsub: *const gossip.Gossipsub, now: Now, capacities: Capacities, wakeups: *wake_sources.Wakeups) void {
+    pub fn schedule(self: *const PeerManager, gossipsub: *const gossip.Gossipsub, now: Now, capacities: Capacities) types.Schedule {
         std.debug.assert(self.phase != .stopped);
-        wakeups.note(.peer_events, .{ .runnable = capacities.peers > 0 and self.catalog.eventsPending() });
-        wakeups.note(.control, self.control.schedule(&self.catalog, now));
-        if (self.phase != .running) return;
-        wakeups.note(.dial, self.dialing.schedule(&self.catalog, @min(capacities.dials, self.dialRoom())));
-        wakeups.note(.dial, .{ .runnable = self.dialing.selectionNeeded(&self.catalog), .deadline = time.optionalMilliseconds(self.dialing.selection_deadline) });
-        wakeups.note(.peer_policy, self.policySchedule(gossipsub));
-        wakeups.note(.peer_policy, .{ .deadline = time.optionalMilliseconds(self.reconciliation_deadline) });
-        wakeups.note(.peer_policy, .{ .deadline = time.optionalMilliseconds(if (self.custody_pending) now.millis() +| 1 else null) });
+        var result: types.Schedule = .{};
+        result = result.merge(.{ .runnable = capacities.peers > 0 and self.catalog.eventsPending() });
+        result = result.merge(self.control.schedule(&self.catalog, now));
+        if (self.phase != .running) return result;
+        result = result.merge(self.dialing.schedule(&self.catalog, @min(capacities.dials, self.dialRoom())));
+        result = result.merge(.{ .runnable = self.dialing.selectionNeeded(&self.catalog), .deadline = time.optionalMilliseconds(self.dialing.selection_deadline) });
+        result = result.merge(self.policySchedule(gossipsub));
+        result = result.merge(.{ .deadline = time.optionalMilliseconds(self.reconciliation_deadline) });
+        result = result.merge(.{ .deadline = time.optionalMilliseconds(if (self.custody_pending) now.millis() +| 1 else null) });
+        return result;
     }
     /// Requires demand validated against the local fork before publication.
     pub fn commitDemand(self: *PeerManager, demand: *const t.Demand) void {
