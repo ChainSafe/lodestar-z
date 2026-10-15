@@ -10,12 +10,6 @@ const gossip = @import("network_gossip.zig");
 const projection = @import("network_peer_projection.zig");
 const network_metrics = @import("network_metrics.zig");
 
-/// A remembered peers snapshot and the network it belongs to.
-const RememberedPage = struct {
-    genesis_root: [32]u8,
-    records: [n.peers.remembered.capacity]n.peers.remembered.Record,
-};
-
 pub const Stores = struct {
     backing: std.mem.Allocator,
     intents: [2]application_cfg.Intent = undefined,
@@ -23,7 +17,6 @@ pub const Stores = struct {
     gossip_diagnostics: [2]n.gossipsub.diagnostics.Page = undefined,
     direct: [2][256]n.PeerId = undefined,
     targets: [2][256]n.PeerId = undefined,
-    remembered: [2]RememberedPage = undefined,
     pub fn create(backing: std.mem.Allocator, capacity: usize) !*Stores {
         return createForTopics(backing, capacity, n.gossipsub.constants.topics_cap);
     }

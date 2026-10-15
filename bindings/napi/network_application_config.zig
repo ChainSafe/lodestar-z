@@ -16,10 +16,9 @@ pub const Config = struct {
     agent_len: u16,
     version: [64]u8,
     version_len: u8,
-    /// The network identity remembered peers are checked against, and snapshots carry.
     genesis_root: [32]u8,
-    remembered: [n.peers.remembered.capacity]n.peers.remembered.Record,
-    remembered_count: u16,
+    peer_store_dir: [1024]u8 = undefined,
+    peer_store_dir_len: u16 = 0,
     /// The threshold native records are kept at, or null for none, until the host selects another.
     log_level: ?std.log.Level,
 
@@ -72,8 +71,7 @@ const resource_maxima = .{
 const required = .{ "beaconConfig", "activeValidatorCount", "identitySecretKey", "bind", "local", "discovery", "genesisTime", "resources", "identify", "serveLightClients", "logLevel" };
 
 pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out: *Config) !void {
-    const remembered = try value.hasNamedProperty("rememberedPeers");
-    try decode.object(value, &(required ++ .{ "gossipPolicy", "subscriptions", "rememberedPeers", "transport", "traceGossip", "traceTurns", "xray" }));
+    try decode.object(value, &(required ++ .{ "gossipPolicy", "subscriptions", "peerStoreDir", "transport", "traceGossip", "traceTurns", "xray" }));
     inline for (required) |name| _ = try decode.get(value, name);
     out.trace_gossip = if (try value.hasNamedProperty("traceGossip")) try decode.boolean(try decode.get(value, "traceGossip")) else false;
     out.trace_turns = if (try value.hasNamedProperty("traceTurns")) try decode.boolean(try decode.get(value, "traceTurns")) else false;
@@ -124,36 +122,11 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out
     out.version_len = @intCast(try decode.text(try decode.get(identify, "protocolVersion"), &out.version));
     out.genesis_root = beacon.genesis_validator_root;
     out.log_level = try network_logs.level(try decode.get(value, "logLevel"));
-    out.remembered_count = 0;
-    if (remembered) try parseRemembered(try decode.get(value, "rememberedPeers"), out);
-}
-
-/// Copies the host's remembered peers. Null or undefined means none. A container from another
-/// network, more than `capacity` peers, or a malformed peer rejects the configuration; the network
-/// owner drops expired and duplicate peers.
-fn parseRemembered(value: Value, out: *Config) !void {
-    const kind = try value.typeof();
-    if (kind == .null or kind == .undefined) return;
-    try decode.completeObject(value, &.{ "genesisValidatorsRoot", "peers" });
-    const root = try decode.fixed(32, try decode.get(value, "genesisValidatorsRoot"));
-    if (!std.mem.eql(u8, &root, &out.genesis_root)) return error.InvalidRememberedPeersNetwork;
-    const peers = try decode.get(value, "peers");
-    const count = try decode.array(peers, n.peers.remembered.capacity);
-    for (out.remembered[0..count], 0..) |*record, i| {
-        const entry = try peers.getElement(@intCast(i));
-        try decode.completeObject(entry, &.{ "peerId", "endpoint", "qualifiedAtUnixS" });
-        const address: n.Address = switch (try decode.endpoint(try decode.get(entry, "endpoint"))) {
-            .ip4 => |ip| .{ .ip4 = .{ .octets = ip.bytes, .port = ip.port } },
-            .ip6 => |ip| .{ .ip6 = .{ .octets = ip.bytes, .port = ip.port } },
-        };
-        if (!address.isUsable()) return error.InvalidNetworkConfig;
-        record.* = .{
-            .peer = try decode.peerIdFrom(try decode.get(entry, "peerId")),
-            .address = address,
-            .qualified_at_s = try decode.integer(try decode.get(entry, "qualifiedAtUnixS"), 9007199254740991),
-        };
+    out.peer_store_dir_len = 0;
+    if (try value.hasNamedProperty("peerStoreDir")) {
+        out.peer_store_dir_len = @intCast(try decode.text(try decode.get(value, "peerStoreDir"), &out.peer_store_dir));
+        if (out.peer_store_dir_len == 0 or std.mem.findScalar(u8, out.peer_store_dir[0..out.peer_store_dir_len], 0) != null) return error.InvalidNetworkConfig;
     }
-    out.remembered_count = @intCast(count);
 }
 
 pub const Intent = n.application_state.Update;

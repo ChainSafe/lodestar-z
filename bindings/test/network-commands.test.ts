@@ -43,11 +43,6 @@ test("every command kind completes with its typed result", async () => {
     expect(await runtime.addDirectPeer(peer.peerId, [peer.localEndpoint])).toBeUndefined();
     expect(await runtime.getDirectPeers()).toEqual({identities: [peer.peerId], ownerSequence: sequence});
     expect(await runtime.removeDirectPeer(peer.peerId)).toBe(true);
-    expect(await runtime.getRememberedPeers()).toMatchObject({
-      genesisValidatorsRoot: expect.any(Uint8Array),
-      ownerSequence: sequence,
-      peers: expect.any(Array),
-    });
     expect(await runtime.disconnect(peer.peerId)).toBeUndefined();
   } finally {
     await Promise.all([runtime.close(), remote?.stop()]);
@@ -77,13 +72,7 @@ function commands(): [string, [string, Command][]][] {
         ["removeDirectPeer", (runtime) => runtime.removeDirectPeer(peer)],
       ],
     ],
-    [
-      "the other two snapshot kinds",
-      [
-        ["getDirectPeers", (runtime) => runtime.getDirectPeers()],
-        ["getRememberedPeers", (runtime) => runtime.getRememberedPeers()],
-      ],
-    ],
+    ["the remaining snapshot kind", [["getDirectPeers", (runtime) => runtime.getDirectPeers()]]],
   ];
 }
 

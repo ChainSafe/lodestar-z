@@ -31,6 +31,8 @@ pub const Owner = struct {
     application: application_config.Config = undefined,
     state: ?n.application_state.State = null,
     processor_metrics: processor_metrics.Snapshot = .{},
+    checkpoint: ?n.peers.RememberedCheckpoint = null,
+    remembered_due_ms: u64 = 0,
 
     pub fn readIdentity(self: *const Owner) !r.Identity {
         var identity: r.Identity = undefined;
@@ -49,7 +51,8 @@ pub const Owner = struct {
 };
 
 pub fn prepareConfiguration(self: *Runtime) !void {
-    self.owner.?.threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
+    // The sole concurrency slot belongs to remembered-peer checkpoints.
+    self.owner.?.threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing, .concurrent_limit = .limited(1) });
     self.owner.?.threaded_live = true;
     const io = self.owner.?.threaded.io();
     var seed: u64 = undefined;
@@ -73,7 +76,9 @@ pub fn initialize(self: *Runtime) !void {
     for (0..self.owner.?.config.bootstrap_count) |i| {
         self.owner.?.records[i] = try d.identity.enr.Record.init(self.owner.?.config.bootstrap[i].bytes[0..self.owner.?.config.bootstrap[i].len]);
     }
+    const seeds = loadRemembered(self, io);
     const now = try Now.read(io);
+    self.owner.?.remembered_due_ms = now.millis() +| n.peers.RememberedCheckpoint.interval_ms;
     var clock = self.owner.?.config.clock;
     const slot: u64 = @intCast(@max(0, try clock.read(now)));
     const update = try self.owner.?.config.chain.update(self.owner.?.config.local, null, slot);
@@ -85,7 +90,7 @@ pub fn initialize(self: *Runtime) !void {
         .local = update.local,
         .schedule = update.schedule,
         .clock = clock,
-        .remembered = self.owner.?.application.remembered[0..self.owner.?.application.remembered_count],
+        .remembered = seeds,
         .discovery = if (self.owner.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.owner.?.config.discovery_sequence, .advertisement = self.owner.?.config.advertisement, .fixed = self.owner.?.config.fixed, .bootstrap = self.owner.?.records[0..self.owner.?.config.bootstrap_count] } else null,
     });
     self.owner.?.core_live = true;
@@ -112,7 +117,62 @@ pub fn run(self: *Runtime) void {
         serve(self) catch |err| break :blk err;
         break :blk null;
     };
+    finishCheckpoint(self, failure == null);
     self.finishOwner(failure);
+}
+
+fn loadRemembered(self: *Runtime, io: std.Io) []const n.peers.remembered.Record {
+    const owner = self.owner.?;
+    const app = &owner.application;
+    if (app.peer_store_dir_len == 0) return &.{};
+    owner.checkpoint = n.peers.RememberedCheckpoint.init(io, app.peer_store_dir[0..app.peer_store_dir_len], &app.genesis_root) catch |err| {
+        std.log.scoped(.network_peers).warn("remembered_persistence_disabled reason={s}", .{@errorName(err)});
+        return &.{};
+    };
+    const checkpoint = &owner.checkpoint.?;
+    const loaded = n.peers.remembered_file.read(io, checkpoint.dir, &checkpoint.root, &checkpoint.records) catch |err| {
+        if (err != error.FileNotFound) std.log.scoped(.network_peers).info("remembered_file_ignored reason={s}", .{@errorName(err)});
+        return &.{};
+    };
+    std.log.scoped(.network_peers).info("remembered_file_loaded records={d} skipped={d}", .{ loaded.count, loaded.skipped });
+    return checkpoint.records[0..loaded.count];
+}
+
+fn collectCheckpoint(self: *Runtime, io: std.Io) void {
+    if (self.owner.?.checkpoint) |*checkpoint| {
+        _ = checkpoint.collect(io) catch |err| {
+            std.log.scoped(.network_peers).warn("remembered_checkpoint_failed reason={s}", .{@errorName(err)});
+        };
+    }
+}
+
+fn startCheckpoint(self: *Runtime, io: std.Io, now: n.Now) void {
+    const checkpoint = if (self.owner.?.checkpoint) |*value| value else return;
+    if (checkpoint.future != null) {
+        std.log.scoped(.network_peers).debug("remembered_checkpoint_skipped reason=busy", .{});
+        return;
+    }
+    var records: [n.peers.remembered.capacity]n.peers.remembered.Record = undefined;
+    const count = self.owner.?.core.rememberedPeers(now, &records) catch unreachable;
+    _ = checkpoint.start(io, records[0..count]) catch |err| {
+        std.log.scoped(.network_peers).warn("remembered_checkpoint_skipped reason={s}", .{@errorName(err)});
+    };
+}
+
+fn finishCheckpoint(self: *Runtime, succeeded: bool) void {
+    const owner = self.owner.?;
+    if (owner.checkpoint) |*checkpoint| {
+        const io = owner.threaded.io();
+        self.lock();
+        const graceful = succeeded and self.bridge.graceful and self.bridge.reason == .requested and self.bridge.env_alive;
+        self.unlock();
+        // Join outside the runtime mutex. A stalled filesystem may outlast the Goodbye deadline.
+        checkpoint.finish(io, if (graceful) n.time.optionalMilliseconds(self.closing_deadline) else null) catch |err| {
+            if (err != error.Canceled) std.log.scoped(.network_peers).warn("remembered_checkpoint_failed reason={s}", .{@errorName(err)});
+        };
+        checkpoint.deinit(io);
+        owner.checkpoint = null;
+    }
 }
 
 fn serve(self: *Runtime) !void {
@@ -138,6 +198,7 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
     self.unlock();
     if (stop and !graceful) return null;
     const timestamp = try Now.read(io);
+    collectCheckpoint(self, io);
     if (stop) {
         if (self.closing_deadline == null) {
             std.log.scoped(.network_runtime).info("owner_stopping mode=graceful peers={d}", .{self.owner.?.core.peerCounts().connected});
@@ -147,9 +208,13 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
             self.notifyIfReadyLocked();
             self.unlock();
             self.closing_deadline = timestamp.millis() +| 2000;
+            startCheckpoint(self, io, timestamp);
             self.owner.?.core.beginGracefulClose(timestamp);
         }
         if (timestamp.millis() >= self.closing_deadline.? or self.owner.?.core.peerCounts().connected == 0) return null;
+    } else if (self.owner.?.checkpoint != null and timestamp.millis() >= self.owner.?.remembered_due_ms) {
+        self.owner.?.remembered_due_ms = timestamp.millis() +| n.peers.RememberedCheckpoint.interval_ms;
+        startCheckpoint(self, io, timestamp);
     }
     self.lock();
     const peer_room: usize = if (self.bridge.peer_updates) |lane| 64 - @as(usize, lane.len) else self.owner.?.outputs.len;
@@ -171,11 +236,12 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
 }
 
 /// The earliest host-owned deadline, read under the lock: the health log,
-/// slot clock, connect timeouts, the graceful close and the gossip processor's groups and expiry. Host work
+/// slot clock, peer checkpoint, connect timeouts, graceful close and gossip processor expiry. Host work
 /// found by the previous turn's event capture is due now.
 fn hostDeadline(self: *Runtime, timestamp: n.Now) !u64 {
     if (self.host_due) return timestamp.millis();
     var deadline = self.health_log_due_ms;
+    if (!self.bridge.stop and self.owner.?.checkpoint != null) deadline = @min(deadline, self.owner.?.remembered_due_ms);
     if (!self.bridge.stop) if (self.owner.?.state) |*state| {
         if (try self.owner.?.core.clock.read(timestamp) != state.applied_slot) return timestamp.millis();
         deadline = @min(deadline, n.time.ceilMilliseconds(try self.owner.?.core.clock.deadline(timestamp)));

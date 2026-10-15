@@ -316,9 +316,7 @@ pub fn removeDirectPeer(self: *@This(), peer: js.Value) !js.Value {
 pub fn getDirectPeers(self: *@This()) !js.Value {
     return .{ .val = try command_js.submit(js.env(), try self.owner(), .getDirectPeers, &.{}) };
 }
-pub fn getRememberedPeers(self: *@This()) !js.Value {
-    return .{ .val = try command_js.submit(js.env(), try self.owner(), .getRememberedPeers, &.{}) };
-}
+
 pub fn requestStart(self: *@This(), peer: js.Value, protocol: js.Value, data: js.Value, options: js.Value) !js.Value {
     return .{ .val = try request_js.start(try self.owner(), peer.val, protocol.val, data.val, options.val) };
 }

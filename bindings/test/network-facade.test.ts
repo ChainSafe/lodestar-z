@@ -274,8 +274,8 @@ test.each([
   const networkHost = host({
     failed(error) {
       expect(error).toBe(failure);
-      // Settlement continues, so the final remembered-peer snapshot still succeeds before the host closes.
-      if (mode === "after the host's cleanup") cleanup = network?.getRememberedPeers().finally(() => network?.close());
+      // Settlement continues while the host finishes cleanup.
+      if (mode === "after the host's cleanup") cleanup = network?.getIdentity().finally(() => network?.close());
     },
     peers() {
       if (mode === "racing a requested close") void network?.close();
@@ -291,7 +291,7 @@ test.each([
     // The connection's first peer event reaches the throwing handler.
     await peer.connect(remote.peerId, [remote.localEndpoint], 5000n).catch(() => undefined);
     expect(await network.closed).toEqual({error: failure, reason: "failed"});
-    if (mode === "after the host's cleanup") await expect(cleanup).resolves.toMatchObject({peers: expect.any(Array)});
+    if (mode === "after the host's cleanup") await expect(cleanup).resolves.toMatchObject({peerId: remote.peerId});
   } finally {
     await Promise.allSettled([network?.close(), peer.stop()]);
   }
@@ -427,7 +427,6 @@ test("promise-returning operations reject admission failures without throwing", 
   await expect(network.getIdentity()).rejects.toThrow("NetworkClosed");
   await expect(network.getPeers()).rejects.toThrow("NetworkClosed");
   await expect(network.getDirectPeers()).rejects.toThrow("NetworkClosed");
-  await expect(network.getRememberedPeers()).rejects.toThrow("NetworkClosed");
 });
 
 test("concurrent metrics scrapes share one owner command and the final snapshot survives close", async () => {

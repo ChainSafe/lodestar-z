@@ -32,7 +32,7 @@ fn result(env: napi.Env, runtime: *Runtime, index: usize) !Value {
         .getMetrics => return network_metrics.value(runtime),
         .getGossipDiagnostics => try network_gossip_diagnostics.copy(env, &runtime.bridge.stores.?.gossip_diagnostics[store.?]),
         .getIdentity => try identity(env, &operation.identity),
-        .applyIntent, .getPeers, .getDirectPeers, .getRememberedPeers => try env.createObject(),
+        .applyIntent, .getPeers, .getDirectPeers => try env.createObject(),
         .removeDirectPeer => return env.getBoolean(operation.boolean),
         else => return env.getUndefined(),
     };
@@ -58,19 +58,6 @@ fn result(env: napi.Env, runtime: *Runtime, index: usize) !Value {
             const identities = try env.createArrayWithLength(operation.count);
             for (runtime.bridge.stores.?.direct[store.?][0..operation.count], 0..) |*peer, i| try identities.setElement(@intCast(i), try js.peerIdValue(env, peer));
             try object.setNamedProperty("identities", identities);
-        },
-        .getRememberedPeers => {
-            const page = &runtime.bridge.stores.?.remembered[store.?];
-            try object.setNamedProperty("genesisValidatorsRoot", try js.bytes(env, &page.genesis_root));
-            const peers = try env.createArrayWithLength(operation.count);
-            for (page.records[0..operation.count], 0..) |*record, i| {
-                const entry = try env.createObject();
-                try entry.setNamedProperty("peerId", try js.peerIdValue(env, &record.peer));
-                try entry.setNamedProperty("endpoint", try js.endpoint(env, record.address));
-                try entry.setNamedProperty("qualifiedAtUnixS", try env.createDouble(@floatFromInt(record.qualified_at_s)));
-                try peers.setElement(@intCast(i), entry);
-            }
-            try object.setNamedProperty("peers", peers);
         },
         else => {},
     }
@@ -117,7 +104,7 @@ pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Comma
             try application_cfg.parseIntent(args[0], &runtime.bridge.stores.?.intents[store.?]);
         },
         .updateStatus => try cfg.parseStatus(args[0], &operation.input.status),
-        .getIdentity, .getPeers, .getDirectPeers, .getRememberedPeers, .getMetrics => {},
+        .getIdentity, .getPeers, .getDirectPeers, .getMetrics => {},
         .getGossipDiagnostics => operation.input.diagnostics_cursor = @intCast(try decode.integer(args[0], 512)),
         .reStatusPeers => {
             operation.input.target_count = @intCast(try decode.array(args[0], 256));

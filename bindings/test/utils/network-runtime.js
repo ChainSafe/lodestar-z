@@ -64,9 +64,7 @@ class NativeRuntime {
   getDirectPeers() {
     return this.#native.getDirectPeers();
   }
-  getRememberedPeers() {
-    return this.#native.getRememberedPeers();
-  }
+
   exchange() {
     const result = this.#native.exchange();
     const serving = result.serving;

@@ -132,6 +132,8 @@ pub const Runtime = struct {
     }
     fn destroyOwner(self: *Runtime) void {
         if (self.owner) |owner| {
+            // Startup failure has no task; the owner joins running checkpoints before taking this lock.
+            if (owner.checkpoint) |*checkpoint| checkpoint.deinit(owner.threaded.io());
             if (owner.core_live) {
                 owner.core.shutdown((n.Now.read(owner.threaded.io()) catch owner.core.last_now).floor(owner.core.last_now));
                 if (self.metrics.allocatedBytes() > 0) {

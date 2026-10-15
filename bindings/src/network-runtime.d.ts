@@ -51,7 +51,6 @@ export interface NativeNetworkApplicationRuntime
     | "getPeers"
     | "disconnect"
     | "getDirectPeers"
-    | "getRememberedPeers"
   > {
   drainLogs(maxRecords?: number): NativeLogBatch;
   /** Prometheus text rendered on demand by the owner. The final snapshot survives close. */

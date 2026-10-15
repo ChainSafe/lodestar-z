@@ -160,26 +160,6 @@ export interface NativeResources {
   bridgeBudgetBytes?: number;
 }
 
-/** A peer that served a connection native dialed, remembered so a restart can redial it. */
-export interface NativeRememberedPeer {
-  peerId: PeerIdStr;
-  /** The QUIC endpoint native dialed, never an inbound source. */
-  endpoint: IpEndpoint;
-  /** Unix time in seconds at which the peer last qualified. */
-  qualifiedAtUnixS: number;
-}
-
-/** At most 256 peers of the network with `genesisValidatorsRoot`. */
-export interface NativeRememberedPeers {
-  genesisValidatorsRoot: Uint8Array;
-  peers: readonly NativeRememberedPeer[];
-}
-
-export interface NativeRememberedPeersSnapshot extends NativeRememberedPeers {
-  peers: NativeRememberedPeer[];
-  ownerSequence: bigint;
-}
-
 export interface NativeApplicationConfig extends NativeRuntimeConfig {
   /** Bounded lifecycle logs for blocks and a stable 1/64 column sample. Defaults to false. */
   traceGossip?: boolean;
@@ -206,10 +186,10 @@ export interface NativeApplicationConfig extends NativeRuntimeConfig {
   /** The threshold native records are kept at from initialization, until setLogLevel selects another. */
   logLevel: NativeLogLevel;
   /**
-   * Peers an earlier run remembered, replayed as paced automatic candidates. Another network's root, more than 256
-   * peers or a malformed peer rejects the configuration; native drops expired and duplicate peers.
+   * Native peer cache directory, 1 to 1024 UTF-8 bytes. The caller must prevent concurrent modification by other runtimes
+   * or processes. Missing or invalid cache files give a cold start. Omit to disable persistence.
    */
-  rememberedPeers?: NativeRememberedPeers | null;
+  peerStoreDir?: string;
 }
 
 /** Sparse local changes; native derives fork subscriptions, metadata and peer demand. */
@@ -603,7 +583,7 @@ export interface NativeHost {
   peers(events: readonly NativePeerObservation[]): void;
   /**
    * A host capacity or peer callback failed the network with `error`, which the close result reports first. Payload delivery
-   * has stopped and settlement continues: finish bounded cleanup, such as the final remembered-peer snapshot, then
+   * has stopped and settlement continues: finish bounded cleanup, such as outstanding request handlers, then
    * close the network. A throw closes it at once.
    * An owner failure arrives through `closed` with reason `failed`.
    */
@@ -664,8 +644,6 @@ export interface NativeNetwork {
   getPeers(): Promise<NativePeerSnapshot>;
   getDirectPeers(): Promise<NativeDirectSnapshot>;
   getGossipDiagnostics(cursor?: number): Promise<NativeGossipDiagnosticsPage>;
-  /** Remembered peers for the host to persist. Take the final snapshot before close, which refuses it. */
-  getRememberedPeers(): Promise<NativeRememberedPeersSnapshot>;
   /**
    * Prometheus text rendered on demand, including binding counters. Concurrent scrapes share one request;
    * after close, returns the final owner snapshot with current binding counters.

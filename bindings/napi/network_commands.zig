@@ -127,11 +127,11 @@ pub const Table = struct {
 };
 
 const n = @import("network");
-pub const Command = enum { applyIntent, updateStatus, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, getRememberedPeers, getMetrics };
+pub const Command = enum { applyIntent, updateStatus, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, getMetrics };
 fn storageKind(command: Command) Kind {
     return switch (command) {
         .applyIntent => .intent,
-        .getPeers, .getDirectPeers, .getGossipDiagnostics, .getRememberedPeers => .snapshot,
+        .getPeers, .getDirectPeers, .getGossipDiagnostics => .snapshot,
         .connect => .connect,
         .reStatusPeers => .targets,
         else => .small,
@@ -191,11 +191,6 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
         },
         .getGossipDiagnostics => try n.gossipsub.diagnostics.capture(core.protocols.gossipsub, input.diagnostics_cursor, timestamp, &self.bridge.stores.?.gossip_diagnostics[store.?]),
         .getDirectPeers => operation.count = try core.directPeers(&self.bridge.stores.?.direct[store.?]),
-        .getRememberedPeers => {
-            const page = &self.bridge.stores.?.remembered[store.?];
-            page.genesis_root = self.owner.?.application.genesis_root;
-            operation.count = try core.rememberedPeers(timestamp, &page.records);
-        },
         .removeDirectPeer => operation.boolean = core.removeDirectPeer(&input.peer),
         .addDirectPeer => try core.addDirectPeer(&input.peer, input.addresses[0..input.address_count], timestamp),
         .connect => {

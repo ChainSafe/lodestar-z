@@ -1,6 +1,6 @@
 //! Remembered peers: outbound peers that served us, each with the QUIC endpoint we dialed, so a
-//! restart can redial them. The host keeps the records across restarts and passes them back at
-//! startup. Native decides what qualifies, replays loaded records once as paced automatic
+//! restart can redial them. The caller loads records at startup and checkpoints snapshots.
+//! Native decides what qualifies, replays loaded records once as paced automatic
 //! candidates, and forgets a record when health, rejection or identity evidence invalidates it.
 //! Records carry wall-clock seconds so they outlive the process; the replay pacer runs on the
 //! monotonic clock.
@@ -73,7 +73,7 @@ pub const Memory = struct {
         self.* = undefined;
     }
 
-    /// Loads the host's seeds once, before any record qualifies. Drops records that expired, name
+    /// Loads seeds once, before any record qualifies. Drops records that expired, name
     /// an unusable endpoint or the local identity, and merges duplicate identities into the newest.
     /// A record dated after now counts from now. Replay visits the rest in a shuffled order that
     /// takes one record per address prefix in turn.

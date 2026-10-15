@@ -1,6 +1,6 @@
 import {expect, it} from "vitest";
 import bindings from "../src/index.js";
-import {applicationConfig, configureChain, discoveryConfig, setSlot, startRuntime, testChain} from "./utils/network.js";
+import {applicationConfig, configureChain, discoveryConfig, setSlot, startRuntime} from "./utils/network.js";
 
 const cases: readonly [string, (config: ReturnType<typeof applicationConfig>) => void, string][] = [
   [
@@ -368,21 +368,6 @@ it("selects its BeaconConfig independently of later configurations", async () =>
   expect(() => startRuntime(other)).toThrow("MissingAvailability");
   const runtime = startRuntime(config);
   await runtime.close();
-});
-
-it("copies the genesis root from its BeaconConfig", async () => {
-  const config = applicationConfig();
-  const root = new Uint8Array(32).fill(42);
-  config.beaconConfig = new bindings.BeaconConfig(testChain, root);
-  const runtime = startRuntime(config);
-  try {
-    config.beaconConfig = applicationConfig().beaconConfig;
-    root.fill(0);
-    global.gc?.();
-    expect((await runtime.getRememberedPeers()).genesisValidatorsRoot).toEqual(new Uint8Array(32).fill(42));
-  } finally {
-    await runtime.close();
-  }
 });
 
 it.each([

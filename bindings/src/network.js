@@ -86,9 +86,7 @@ class NativeNetwork {
   async getGossipDiagnostics(cursor = 0) {
     return this.#native.getGossipDiagnostics(cursor);
   }
-  async getRememberedPeers() {
-    return this.#native.getRememberedPeers();
-  }
+
   metrics() {
     this.#metricsPending ??= this.#collectMetrics().finally(() => {
       this.#metricsPending = null;

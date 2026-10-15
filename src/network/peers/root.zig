@@ -8,6 +8,8 @@ pub const Control = @import("control.zig").Control;
 pub const Dialing = @import("dialing.zig").Dialing;
 pub const types = @import("types.zig");
 pub const remembered = @import("remembered.zig");
+pub const remembered_file = @import("remembered_file.zig");
+pub const RememberedCheckpoint = @import("remembered_checkpoint.zig");
 pub const identity_index = @import("identity_index.zig");
 pub const reputation = @import("reputation.zig");
 pub const Catalog = @import("catalog.zig").Catalog;
@@ -37,4 +39,6 @@ test {
     _ = @import("coverage.zig");
     _ = @import("dial_history.zig");
     _ = @import("remembered.zig");
+    _ = remembered_file;
+    _ = RememberedCheckpoint;
 }

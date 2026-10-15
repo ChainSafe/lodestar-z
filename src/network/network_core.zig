@@ -355,7 +355,7 @@ pub const NetworkCore = struct {
         return self.peer_manager.snapshots(out);
     }
     /// Refreshes the remembered records of connections that qualify now and copies every
-    /// unexpired record. The host persists them for the next start.
+    /// unexpired record for a caller-owned checkpoint.
     pub fn rememberedPeers(self: *NetworkCore, now: Now, out: []peers.remembered.Record) error{OutputTooSmall}!usize {
         if (out.len < peers.remembered.capacity) return error.OutputTooSmall;
         return self.peer_manager.rememberedPeers(now, out);
