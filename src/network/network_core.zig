@@ -28,6 +28,7 @@ const ForkEntry = @import("types.zig").ForkEntry;
 const capabilities_mod = @import("capabilities.zig");
 const codec = @import("identify/codec.zig");
 const logging = @import("logging.zig");
+const SlotClock = @import("slot_clock.zig").SlotClock;
 
 /// Initialize at its final address. Serialize every call, including reads and teardown.
 pub const NetworkCore = struct {
@@ -40,17 +41,15 @@ pub const NetworkCore = struct {
         update: local_state.LocalUpdate,
         demand: peers.Demand,
         subscriptions: []const gossip.local_intent.Boundary,
-        slot: u64 = 0,
     };
     pub const DiscoveryOptions = peers.Discovery.Config;
     pub const Startup = struct {
         host: *const KeyPair,
         bind: Sockets.Bindings,
         local: t.LocalState,
+        clock: SlotClock,
         schedule: local_state.ForkSchedule = .{},
         discovery: ?DiscoveryOptions = null,
-        /// The host's wall-clock slot until its first intent.
-        slot: u64 = 0,
         /// Peers an earlier run remembered, at most `peers.remembered.capacity`, replayed as paced
         /// automatic candidates. Native drops expired, unusable and duplicate records.
         remembered: []const peers.remembered.Record = &.{},
@@ -130,8 +129,7 @@ pub const NetworkCore = struct {
     last_now: Now,
     initialized: bool = false,
     host_wake: ?i32 = null,
-    /// The host's wall-clock slot for status validation. Intents only advance it.
-    current_slot: u64 = 0,
+    clock: SlotClock,
     /// The last host apply stopped at a per-turn cap.
     host_runnable: bool = false,
     /// The Protocols's control events and Identify results that `process` consumes within its turn.
@@ -159,7 +157,7 @@ pub const NetworkCore = struct {
         self.turn_timing = .{};
         self.due_now_turns = @splat(0);
         self.host_wake = null;
-        self.current_slot = startup.slot;
+        self.clock = startup.clock;
         self.host_runnable = false;
         self.discovery = null;
         self.last_now = try Now.read(io);
@@ -485,19 +483,18 @@ pub const NetworkCore = struct {
     }
 
     /// Applies a complete copied subscription union in this serialized call without ending event borrows.
-    /// Records the intent's slot as the current slot unless it would move backwards.
     pub fn applyIntent(self: *NetworkCore, intent: *const LocalIntent, now: Now) !bool {
         const prepared = try self.prepareLocal(&intent.update);
         const demand = intent.demand;
         try demand.validate(&prepared.local.fork, self.peer_manager.catalog.options.max_peers);
-        const topics_changed = try self.protocols.gossipsub.prepareSubscriptions(intent.subscriptions, self.local_intent_workspace, now, intent.slot);
+        const slot: u64 = @intCast(@max(0, try self.clock.read(now)));
+        const topics_changed = try self.protocols.gossipsub.prepareSubscriptions(intent.subscriptions, self.local_intent_workspace, now, slot);
         const demand_changed = !std.meta.eql(demand, self.peer_manager.demand);
         const changed = prepared.changed or topics_changed or demand_changed;
         try self.publishLocal(&prepared);
         if (prepared.changed) self.commitLocal(&prepared, now);
         self.protocols.gossipsub.commitSubscriptions(self.local_intent_workspace);
         if (demand_changed) self.peer_manager.commitDemand(&demand);
-        self.current_slot = @max(self.current_slot, intent.slot);
         if (changed) std.log.scoped(.network_core).debug("intent_applied local_changed={any} topics_changed={any} demand_changed={any} subscriptions={d} fork={s} digest={x}", .{ prepared.changed, topics_changed, demand_changed, intent.subscriptions.len, @tagName(prepared.local.fork.fork), prepared.local.fork.digest });
         return changed;
     }
@@ -603,6 +600,11 @@ pub const NetworkCore = struct {
             self.step_duration.observe(end -| start);
             self.turn_timing.finish(end, result.transport.datagrams_received, result.transport.datagrams_sent);
         }
+        const slot: u64 = @intCast(@max(0, self.clock.read(tick) catch |err| {
+            self.counters.transport_failures +|= 1;
+            result.failure = result.failure orelse err;
+            return result;
+        }));
         if (!result.cancelled and self.discoveryOnly(&result.readiness, tick, outputs, host)) {
             result.discovery_only = true;
             self.discover(io, tick, &result);
@@ -632,7 +634,7 @@ pub const NetworkCore = struct {
             } else self.host_runnable = false;
         }
         self.turn_timing.mark(io, .host);
-        result.counts = self.process(self.native_events[0..result.transport.events], tick, outputs);
+        result.counts = self.process(self.native_events[0..result.transport.events], tick, slot, outputs);
         self.turn_timing.mark(io, .protocols);
         if (self.peer_manager.phase == .running and !result.cancelled) {
             // This turn's coverage selection already ran, without a second protocol pump.
@@ -687,7 +689,7 @@ pub const NetworkCore = struct {
     /// Delivers the turn's transport events, runs the one Protocols pass, applies its faults and
     /// control results, runs due control maintenance, then advances custody and selection.
     /// Payload borrows end at their documented delivery or acknowledgment boundary.
-    fn process(self: *NetworkCore, events: []const Engine.Event, now: Now, outputs: Outputs) Counts {
+    fn process(self: *NetworkCore, events: []const Engine.Event, now: Now, slot: u64, outputs: Outputs) Counts {
         std.debug.assert(events.len <= limits.events_per_turn_max);
         const pm = &self.peer_manager;
         const quic = &self.transport.engine;
@@ -709,7 +711,7 @@ pub const NetworkCore = struct {
             _ = pm.reportPeer(&.{ .identity = report.identity, .origin = report.origin, .action = .low_tolerance, .reason = .gossip_receive_timeout }, now);
         };
         pm.identified(identify_results[0..counts.identify]);
-        self.controlEvents(controls[0..counts.control], now);
+        self.controlEvents(controls[0..counts.control], now, slot);
         self.maintainControl(now);
         if (pm.phase == .quiescing) return .{ .peers = pm.pollEvents(outputs.peers), .application = counts.application };
         pm.advanceCustody(now);
@@ -774,13 +776,13 @@ pub const NetworkCore = struct {
     /// Routes one turn's control events. Peer control applies each request or reply before the
     /// control protocol answers, consumes or retires it. Each observed result settles before
     /// another policy evaluation.
-    fn controlEvents(self: *NetworkCore, batch: []const rr.ReqResp.Event, now: Now) void {
+    fn controlEvents(self: *NetworkCore, batch: []const rr.ReqResp.Event, now: Now, slot: u64) void {
         const pm = &self.peer_manager;
         const requests = &self.control_protocol;
         const reqresp = &self.protocols.reqresp;
         for (batch) |*event| switch (event.*) {
             .request => |*request| {
-                const peer = pm.controlRequested(request, now, self.current_slot) orelse {
+                const peer = pm.controlRequested(request, now, slot) orelse {
                     _ = reqresp.cancel(&self.transport.engine, &self.protocols.router, request.request, now);
                     continue;
                 };
@@ -788,7 +790,7 @@ pub const NetworkCore = struct {
             },
             else => {
                 const result = requests.result(reqresp, event.*, now) orelse continue;
-                pm.controlReplied(&result.reply, event.*, now, self.current_slot);
+                pm.controlReplied(&result.reply, event.*, now, slot);
                 requests.settle(reqresp, &self.protocols.router, &self.transport.engine, result.index, event.*, now);
             },
         };

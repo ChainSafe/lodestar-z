@@ -120,12 +120,14 @@ pub fn main(init: std.process.Init) !void {
         .gossip = .{ .topic_policy = &gossip_topics, .receive_arena_bytes = 16 * 1024 * 1024 },
         .admission_policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&config.mainnet.config, &blob_schedule),
     });
+    const unix_s: u64 = @intCast((try network.Now.read(init.io)).unixSeconds());
+    const clock = try network.SlotClock.init(&config.mainnet.chain_config, unix_s - local.status.head_slot * config.mainnet.chain_config.SECONDS_PER_SLOT);
     try peer.node.init(a, init.io, &resolved, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = local,
         .schedule = .{ .fulu_scheduled = fork.gte(.fulu) },
-        .slot = 0x08070605,
+        .clock = clock,
     });
     defer peer.node.deinit(init.io);
     try control.run(peer);

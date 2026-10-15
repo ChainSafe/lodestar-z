@@ -19,10 +19,12 @@ pub const Execution = struct {
 
 pub fn gossip(chain: *const ChainConfig, validators: u64) !gossip_options.Options {
     const slot_ms = chain.SLOT_DURATION_MS;
-    if (slot_ms == 0 or slot_ms > 86_400_000 or validators == 0 or validators > 9007199254740991) return error.InvalidNetworkConfig;
+    if (validators == 0 or validators > 9007199254740991) return error.InvalidNetworkConfig;
+    for ([_]u64{ slot_ms, chain.SLOT_DURATION_MS_HEZE }) |duration| {
+        if (duration == 0 or duration > 86_400_000) return error.InvalidNetworkConfig;
+    }
     var max_slot_ms = slot_ms;
     if (chain.HEZE_FORK_EPOCH != std.math.maxInt(u64)) {
-        if (chain.SLOT_DURATION_MS_HEZE == 0 or chain.SLOT_DURATION_MS_HEZE > 86_400_000) return error.InvalidNetworkConfig;
         max_slot_ms = @max(max_slot_ms, chain.SLOT_DURATION_MS_HEZE);
     }
     const epoch_ms = slot_ms * p.SLOTS_PER_EPOCH;

@@ -40,7 +40,7 @@ pub fn maintain(runtime: *Runtime, io: std.Io, tick: n.Now) !bool {
     const table = if (runtime.bridge.gossip) |*table| table else return false;
     const core = &runtime.owner.?.core;
     const clock = try sample(io);
-    table.maintain(clock.millis(), core.current_slot);
+    table.maintain(clock.millis(), @intCast(@max(0, try core.clock.read(tick))));
     var retired_bytes: usize = 0;
     for (0..if (runtime.bridge.verdicts_held) 0 else batch_max) |_| {
         const token = table.nextVerdict() orelse break;
@@ -91,7 +91,7 @@ pub const Ingress = struct {
         defer runtime.unlock();
         if (runtime.bridge.stop or self.failure != null) return false;
         const core = &runtime.owner.?.core;
-        const accepted = runtime.bridge.gossip.?.admit(candidate, candidate.event.admitted_ms, received_at, core.current_slot);
+        const accepted = runtime.bridge.gossip.?.admit(candidate, candidate.event.admitted_ms, received_at, @intCast(@max(0, try core.clock.read(core.last_now))));
         runtime.notifyIfReadyLocked();
         return accepted;
     }

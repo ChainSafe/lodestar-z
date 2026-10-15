@@ -6,6 +6,7 @@ const Now = @import("time.zig").Now;
 
 pub const SlotClock = struct {
     config: clock.ClockConfig,
+    observed_slot: i64 = std.math.minInt(i64),
 
     pub fn init(chain: *const ChainConfig, genesis_time: u64) !SlotClock {
         const maximum = std.math.maxInt(i64);
@@ -40,6 +41,12 @@ pub const SlotClock = struct {
     pub fn slotAt(self: *const SlotClock, unix_ms: u64) i64 {
         if (clock.slot_math.slotAtMs(self.config, unix_ms)) |slot| return @intCast(slot);
         return -@as(i64, @intCast(std.math.divCeil(u64, self.config.genesis_time_sec * 1000 - unix_ms, self.config.slot_duration_ms) catch unreachable));
+    }
+
+    /// Wall-clock corrections never reverse network slot progression.
+    pub fn read(self: *SlotClock, now: Now) error{ClockOutOfRange}!i64 {
+        self.observed_slot = @max(self.observed_slot, self.slotAt(try unixMilliseconds(now)));
+        return self.observed_slot;
     }
 
     /// Recheck wall time at least once a second, including before genesis and after clock corrections.

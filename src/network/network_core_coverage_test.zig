@@ -242,7 +242,7 @@ test "core coverage demand copies persists across slots and keeps general discov
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 1), setup.client.peer_manager.discoveryNeed().syncnets);
-    try core_test.advanceSlot(&setup.client, 10_000, setup.pair.now);
+    setup.pair.now.wall.raw.nanoseconds += 10_000 * 12 * std.time.ns_per_s;
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 1), setup.client.peer_manager.discoveryNeed().syncnets);

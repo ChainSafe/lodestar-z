@@ -21,11 +21,15 @@ const test_support = @import("gossipsub/test_support.zig");
 const time = @import("time.zig");
 const schedule_test_support = @import("schedule_test_support.zig");
 const driver = @import("driver.zig");
+const SlotClock = @import("slot_clock.zig").SlotClock;
+const preset = @import("preset");
 const ReqResp = @import("reqresp/ReqResp.zig");
 
 const Event = Engine.Event;
 const Now = Engine.Now;
 const net = std.Io.net;
+
+pub const slot_clock: SlotClock = .{ .config = .{ .genesis_time_sec = support.now_unix - 1200, .slot_duration_ms = 12000, .slots_per_epoch = preset.preset.SLOTS_PER_EPOCH } };
 
 pub fn localState(overrides: t.LocalState) t.LocalState {
     var local = overrides;
@@ -109,15 +113,6 @@ pub fn updateLocalDemand(node: *NetworkCore, local: *const t.LocalState, demand:
     desired.update.local = local.*;
     desired.demand = demand.*;
     _ = try node.applyIntent(&desired, now);
-}
-
-/// Moves the owner's wall-clock slot forward through the intent path, changing nothing else.
-pub fn advanceSlot(node: *NetworkCore, slot: u64, now: Now) !void {
-    var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
-    var desired = intent(node, try test_support.subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
-    desired.slot = slot;
-    _ = try node.applyIntent(&desired, now);
-    std.debug.assert(node.current_slot == slot);
 }
 
 /// A datagram a core's flush sent, waiting for the next pump.
@@ -356,11 +351,11 @@ pub const Setup = struct {
         resolved.core.protocols.reqresp.forks = self.forks[0..count];
         const io = self.pair.io();
         const client_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{1}));
-        try self.client.init(std.testing.allocator, io, &resolved, .{ .host = &client_key, .bind = .{ .ip4 = .loopback(0) }, .local = local, .slot = 100, .discovery = self.client_discovery });
+        try self.client.init(std.testing.allocator, io, &resolved, .{ .host = &client_key, .bind = .{ .ip4 = .loopback(0) }, .local = local, .clock = slot_clock, .discovery = self.client_discovery });
         self.initialized[0] = true;
         self.client_inbox.attach(self.client.protocols.gossipsub);
         const server_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{2}));
-        try self.server.init(std.testing.allocator, io, &resolved, .{ .host = &server_key, .bind = .{ .ip4 = .loopback(0) }, .local = local, .slot = 100 });
+        try self.server.init(std.testing.allocator, io, &resolved, .{ .host = &server_key, .bind = .{ .ip4 = .loopback(0) }, .local = local, .clock = slot_clock });
         self.initialized[1] = true;
         self.server_inbox.attach(self.server.protocols.gossipsub);
         self.pair.client = &self.client.transport.engine;
@@ -419,7 +414,7 @@ pub fn networkOptions(key: *const keys.KeyPair) NetworkOptions {
             .host = key,
             .bind = .{ .ip4 = .loopback(0) },
             .local = localState(.{}),
-            .slot = 100,
+            .clock = slot_clock,
         },
     };
 }
@@ -434,7 +429,6 @@ pub fn intent(node: *const NetworkCore, subscriptions: []const local_intent.Boun
         },
         .demand = node.peer_manager.demand,
         .subscriptions = subscriptions,
-        .slot = node.protocols.gossipsub.overlay.slot,
     };
 }
 

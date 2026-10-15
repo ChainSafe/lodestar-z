@@ -5,7 +5,6 @@ const preset = @import("preset");
 const p = preset.preset;
 const constants = @import("constants");
 const shuffle = @import("swap_or_not_shuffle");
-const SlotClock = @import("slot_clock.zig").SlotClock;
 const chain_mod = @import("chain.zig");
 const local_state = @import("local_state.zig");
 const custody = @import("peers/custody.zig");
@@ -33,17 +32,15 @@ pub const Options = struct {
     target_group_peers: u16 = 6,
 };
 pub const Config = struct {
-    clock: SlotClock,
     subnets_per_node: u8,
     subnet_subscription_epochs: u64,
     options: Options,
 
-    pub fn init(chain: *const config.ChainConfig, genesis_time: u64, options: Options) !Config {
+    pub fn init(chain: *const config.ChainConfig, options: Options) !Config {
         if (chain.SUBNETS_PER_NODE > constants.ATTESTATION_SUBNET_COUNT or chain.EPOCHS_PER_SUBNET_SUBSCRIPTION == 0 or
             chain.EPOCHS_PER_SUBNET_SUBSCRIPTION > 9007199254740991 or options.aggregator_lead_slots > 2 * p.SLOTS_PER_EPOCH or
             options.target_group_peers == 0 or options.target_group_peers > 256) return error.InvalidNetworkConfig;
         return .{
-            .clock = try SlotClock.init(chain, genesis_time),
             .subnets_per_node = @intCast(chain.SUBNETS_PER_NODE),
             .subnet_subscription_epochs = chain.EPOCHS_PER_SUBNET_SUBSCRIPTION,
             .options = options,
@@ -54,6 +51,7 @@ pub const Config = struct {
 pub const State = struct {
     config: Config,
     node_id: [32]u8,
+    /// Last successfully applied subscription state, which may lag the clock after a refused update.
     applied_slot: ?i64 = null,
     core_topics: bool = false,
     custody_topics: bool = false,
@@ -81,21 +79,16 @@ pub const State = struct {
         unreachable;
     }
 
-    pub fn slot(self: *const State, now: Now) !i64 {
-        const current = self.config.clock.slotAt(try SlotClock.unixMilliseconds(now));
-        return if (self.applied_slot) |prior| @max(prior, current) else current;
-    }
-
     /// Clock corrections never undo a committed fork or revive expired duties. Stalls skip to current state.
     pub fn advance(self: *State, core: *NetworkCore, chain: *const chain_mod.Config, now: Now) !void {
-        if (try self.slot(now) == self.applied_slot) return;
+        if (try core.clock.read(now) == self.applied_slot) return;
         _ = try self.apply(core, chain, &.{}, now);
     }
 
     pub fn apply(self: *State, core: *NetworkCore, chain: *const chain_mod.Config, update: *const Update, now: Now) !bool {
         var next = self.*;
-        const current = if (core.current_slot > 0) @max(try next.slot(now), @as(i64, @intCast(core.current_slot))) else try next.slot(now);
-        try next.merge(chain, update, current, now);
+        const current = try core.clock.read(now);
+        try next.merge(chain, update, current, try core.clock.futureSlot(now));
         var local = core.localState();
         if (update.status) |status| local.status = status;
         if (chain.fulu_scheduled and local.status.earliest_available_slot == null) return error.MissingAvailability;
@@ -107,9 +100,9 @@ pub const State = struct {
         return changed;
     }
 
-    fn merge(self: *State, chain: *const chain_mod.Config, update: *const Update, signed_slot: i64, now: Now) !void {
+    fn merge(self: *State, chain: *const chain_mod.Config, update: *const Update, signed_slot: i64, future_slot: u64) !void {
         const current: u64 = @intCast(@max(0, signed_slot));
-        const latest = (@max(current, try self.config.clock.futureSlot(now)) / p.SLOTS_PER_EPOCH + 2) * p.SLOTS_PER_EPOCH - 1;
+        const latest = (@max(current, future_slot) / p.SLOTS_PER_EPOCH + 2) * p.SLOTS_PER_EPOCH - 1;
         std.debug.assert(update.attester_count <= duty_batch_max);
         if (update.core_topics) |enabled| self.core_topics = enabled;
         if (update.custody_group_count) |count| {
@@ -191,7 +184,7 @@ pub const State = struct {
             }
             count += 1;
         }
-        return .{ .update = update, .demand = demand, .subscriptions = subscriptions[0..count], .slot = current };
+        return .{ .update = update, .demand = demand, .subscriptions = subscriptions[0..count] };
     }
 
     fn columnSubnet(self: *const State, chain: *const chain_mod.Config, subnet: u16, subnet_count: u16) bool {

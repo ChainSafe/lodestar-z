@@ -307,6 +307,7 @@ test "core BPO same-fork digest transition updates status and advertisement" {
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &resolved, .{
         .host = &key,
+        .clock = core_test.slot_clock,
         .bind = .{ .ip4 = .loopback(0) },
         .local = .{
             .fork = .{ .digest = first.digest, .fork = first.fork },
@@ -871,7 +872,10 @@ test "local intent failing at ENR sequence exhaustion preserves control state re
     const identify = node.protocols.identify.local;
     const capabilities = node.protocols.router.capabilities();
     const record = node.localRecord().?.*;
-    const slot = node.current_slot;
+    const applied_slot = node.protocols.gossipsub.overlay.slot;
+    const slot: u64 = @intCast(try node.clock.read(setup.pair.now));
+    var later = setup.pair.now;
+    later.wall.raw.nanoseconds += 10 * 12 * std.time.ns_per_s;
     var before: [topic_policy.boundary_max]local_intent.Boundary = undefined;
     const subscribed = try gossip_test.subscriptionUpdate(node.protocols.gossipsub, null, false, &before);
     var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
@@ -880,8 +884,7 @@ test "local intent failing at ENR sequence exhaustion preserves control state re
     desired.update.local.status.fork_digest = @splat(1);
     desired.update.local.metadata.attnets[0] = 1;
     desired.demand = .{ .syncnets = 1 };
-    desired.slot = slot + 10;
-    try std.testing.expectError(error.SequenceExhausted, node.applyIntent(&desired, setup.pair.now));
+    try std.testing.expectError(error.SequenceExhausted, node.applyIntent(&desired, later));
     try std.testing.expectEqualDeep(schedule, manager.control.connections[peer.peer.index]);
     try std.testing.expectEqual(key, manager.control.deadlines.get(peer.peer.index));
     try std.testing.expectEqual(probe_request, probe.request.?);
@@ -893,16 +896,16 @@ test "local intent failing at ENR sequence exhaustion preserves control state re
     try std.testing.expectEqualDeep(identify, node.protocols.identify.local);
     try std.testing.expectEqualDeep(capabilities, node.protocols.router.capabilities());
     try std.testing.expectEqualSlices(u8, record.slice(), node.localRecord().?.slice());
-    try std.testing.expectEqual(slot, node.current_slot);
+    try std.testing.expectEqual(applied_slot, node.protocols.gossipsub.overlay.slot);
     var after: [topic_policy.boundary_max]local_intent.Boundary = undefined;
     try std.testing.expectEqualDeep(subscribed, try gossip_test.subscriptionUpdate(node.protocols.gossipsub, null, false, &after));
     // The same intent without the advertisement change commits every participant.
     desired.update.local.metadata.attnets[0] = local.metadata.attnets[0];
     desired.update.local.fork = local.fork;
     desired.update.local.status.fork_digest = local.status.fork_digest;
-    try std.testing.expect(try node.applyIntent(&desired, setup.pair.now));
+    try std.testing.expect(try node.applyIntent(&desired, later));
     try std.testing.expectEqualDeep(desired.demand, manager.demand);
-    try std.testing.expectEqual(slot + 10, node.current_slot);
+    try std.testing.expectEqual(slot + 10, node.protocols.gossipsub.overlay.slot);
     try std.testing.expect(!std.meta.eql(subscribed, try gossip_test.subscriptionUpdate(node.protocols.gossipsub, null, false, &after)));
 }
 
@@ -946,7 +949,7 @@ test "local intent refuses sampling demand beyond its fork atomically and a vali
     try std.testing.expectEqual(@as(u16, 1), manager.coverageDeficits().groups);
     _ = try setup.turn(node, .{});
     try std.testing.expectEqual(@as(u16, 1), manager.coverageDeficits().groups);
-    try owner.advanceSlot(node, 10_000, setup.pair.now);
+    setup.pair.now.wall.raw.nanoseconds += 10_000 * 12 * std.time.ns_per_s;
     _ = try setup.turn(node, .{});
     try std.testing.expectEqual(@as(u16, 1), manager.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 1), manager.coverageDeficits().custody_groups);

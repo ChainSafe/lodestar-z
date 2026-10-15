@@ -231,9 +231,10 @@ const Chain = struct {
     update: network.local_state.LocalUpdate,
     boundary: usize,
     slot: u64,
+    clock: network.SlotClock,
     attestation_bytes: usize,
 
-    fn init(options: *const Options) !Chain {
+    fn init(options: *const Options, io: std.Io) !Chain {
         const network_config = try network.chain.Config.init(chain_config, false);
         const boundary: usize = network_config.boundary_count - 1;
         const slot = network_config.boundaries[boundary].epoch * preset.preset.SLOTS_PER_EPOCH;
@@ -245,7 +246,9 @@ const Chain = struct {
             const column = rules[@intFromEnum(Kind.data_column_sidecar)];
             if (column.count < options.topics or options.column_bytes < column.ssz_min or options.column_bytes > column.ssz_max) return error.InvalidColumnSize;
         }
-        return .{ .network_config = network_config, .update = try network_config.update(local, null, slot), .boundary = boundary, .slot = slot, .attestation_bytes = attestation.ssz_min };
+        const unix_s: u64 = @intCast((try Now.read(io)).unixSeconds());
+        const clock = try network.SlotClock.init(&chain_config.chain, unix_s - slot * chain_config.chain.SECONDS_PER_SLOT);
+        return .{ .network_config = network_config, .update = try network_config.update(local, null, slot), .boundary = boundary, .slot = slot, .clock = clock, .attestation_bytes = attestation.ssz_min };
     }
 
     fn digest(self: *const Chain) [4]u8 {
@@ -272,7 +275,6 @@ const Chain = struct {
             .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
             .demand = node.peer_manager.demand,
             .subscriptions = &.{boundary},
-            .slot = self.slot,
         };
         _ = try node.applyIntent(&intent, now);
     }
@@ -485,7 +487,7 @@ const Spoke = struct {
         var secret: [32]u8 = @splat(0);
         std.mem.writeInt(u16, secret[30..32], 3_000 + self.index, .big);
         const key = try network.KeyPair.fromSecretKey(&secret);
-        try self.core.init(shared.allocator, io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = shared.chain.update.local, .schedule = shared.chain.update.schedule, .slot = shared.chain.slot });
+        try self.core.init(shared.allocator, io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = shared.chain.update.local, .schedule = shared.chain.update.schedule, .clock = shared.chain.clock });
         defer self.core.deinit(io);
         const payload = try shared.allocator.alloc(u8, @max(shared.chain.attestation_bytes, options.column_bytes));
         defer shared.allocator.free(payload);
@@ -680,7 +682,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const allocator = init.gpa;
     const chain = try allocator.create(Chain);
     defer allocator.destroy(chain);
-    chain.* = try Chain.init(options);
+    chain.* = try Chain.init(options, io);
     var schedule = try Schedule.init(allocator, options);
     defer schedule.deinit(allocator);
     const hub_resolved = try hubResolved(chain, options);
@@ -696,7 +698,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         .bind = .{ .ip4 = .loopback(0) },
         .local = chain.update.local,
         .schedule = chain.update.schedule,
-        .slot = chain.slot,
+        .clock = chain.clock,
     });
     defer hub.deinit(io);
     var host: Host = .{ .ring = try allocator.alloc(Host.Pending, Host.ring_len), .delay_ms = options.delay_ms, .exchange_ms = options.exchange_ms, .batch = options.batch };

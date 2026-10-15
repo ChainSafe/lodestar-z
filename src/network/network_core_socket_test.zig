@@ -222,7 +222,7 @@ test "core beacon idle scans do not manufacture immediate deadlines" {
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = network_core_test_support.localState(.{}),
-        .slot = 100,
+        .clock = network_core_test_support.slot_clock,
     });
     defer node.deinit(std.testing.io);
     const now = try Now.read(std.testing.io);

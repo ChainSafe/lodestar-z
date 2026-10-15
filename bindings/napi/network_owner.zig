@@ -14,6 +14,7 @@ const requests_mod = @import("network_requests.zig");
 const publications = @import("network_publications.zig");
 const processor_metrics = n.metrics.processor;
 const network_wake = @import("network_wake.zig");
+const config = @import("config");
 const test_support = @import("network_test_support.zig");
 
 pub const Owner = struct {
@@ -72,18 +73,24 @@ pub fn initialize(self: *Runtime) !void {
     for (0..self.owner.?.config.bootstrap_count) |i| {
         self.owner.?.records[i] = try d.identity.enr.Record.init(self.owner.?.config.bootstrap[i].bytes[0..self.owner.?.config.bootstrap[i].len]);
     }
+    const now = try Now.read(io);
+    var clock = self.owner.?.config.clock;
+    const slot: u64 = @intCast(@max(0, try clock.read(now)));
+    const update = try self.owner.?.config.chain.update(self.owner.?.config.local, null, slot);
+    self.owner.?.resolved.core.protocols.router.capabilities = update.capabilities;
+    self.owner.?.resolved.core.protocols.gossipsub.initial_slot = slot;
     try self.owner.?.core.init(allocator, io, &self.owner.?.resolved, .{
         .host = &self.owner.?.key,
         .bind = self.owner.?.config.bind,
-        .local = self.owner.?.config.local,
-        .schedule = self.owner.?.config.schedule,
-        .slot = self.owner.?.config.slot,
+        .local = update.local,
+        .schedule = update.schedule,
+        .clock = clock,
         .remembered = self.owner.?.application.remembered[0..self.owner.?.application.remembered_count],
         .discovery = if (self.owner.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.owner.?.config.discovery_sequence, .advertisement = self.owner.?.config.advertisement, .fixed = self.owner.?.config.fixed, .bootstrap = self.owner.?.records[0..self.owner.?.config.bootstrap_count] } else null,
     });
     self.owner.?.core_live = true;
     self.owner.?.state = try n.application_state.State.init(&self.owner.?.config.state, &self.owner.?.config.chain, &self.owner.?.core.peerId(), &self.owner.?.config.local);
-    try self.owner.?.state.?.advance(&self.owner.?.core, &self.owner.?.config.chain, try Now.read(io));
+    try self.owner.?.state.?.advance(&self.owner.?.core, &self.owner.?.config.chain, now);
     self.owner.?.core.turn_timing.enabled = self.owner.?.application.trace_turns;
     self.owner.?.core.protocols.gossipsub.trace_gossip = self.owner.?.application.trace_gossip;
     if (self.owner.?.application.xray) |*options| {
@@ -170,8 +177,8 @@ fn hostDeadline(self: *Runtime, timestamp: n.Now) !u64 {
     if (self.host_due) return timestamp.millis();
     var deadline = self.health_log_due_ms;
     if (!self.bridge.stop) if (self.owner.?.state) |*state| {
-        if (try state.slot(timestamp) != state.applied_slot) return timestamp.millis();
-        deadline = @min(deadline, n.time.ceilMilliseconds(try state.config.clock.deadline(timestamp)));
+        if (try self.owner.?.core.clock.read(timestamp) != state.applied_slot) return timestamp.millis();
+        deadline = @min(deadline, n.time.ceilMilliseconds(try self.owner.?.core.clock.deadline(timestamp)));
     };
     if (commands.connectDeadline(&self.bridge.commands)) |value| deadline = @min(deadline, value);
     if (self.closing_deadline) |value| deadline = @min(deadline, value);
@@ -369,6 +376,7 @@ test "a command queued after wait planning executes in the turn whose poll obser
         .admission_policy = .{ .deneb_start_slot = 0, .blocks_pre_deneb = 1024, .blocks_deneb = 128, .blob_identifiers_deneb = 768, .blob_identifiers_electra = 1152, .number_of_columns = 128, .column_chunks = 16384, .blob_schedule = &.{.{ .start_slot = 0, .max_blobs = 6 }} },
     });
     try owner.core.init(testing, io, &resolved, .{
+        .clock = try n.SlotClock.init(&beacon.chain, 1000),
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = initial.local,
@@ -427,7 +435,8 @@ test "a command queued after wait planning executes in the turn whose poll obser
     try std.testing.expectEqual(.terminal, runtime.bridge.commands.get(token).state);
     try std.testing.expect(runtime.bridge.commands.get(token).failure == null);
     runtime.retireCommand(token);
-    const state_config = try n.application_state.Config.init(&beacon.chain, 1000, .{});
+    const state_config = try n.application_state.Config.init(&beacon.chain, .{});
+    owner.core.clock = try n.SlotClock.init(&beacon.chain, 1000);
     owner.state = try n.application_state.State.init(&state_config, &owner.config.chain, &owner.core.peerId(), &initial.local);
     const first_slot = n.Now.fromMilliseconds(.{ .mono_ms = result.transport.now.millis() + 1, .unix_s = 1000 });
     _ = try applyWork(&runtime, io, first_slot);
@@ -436,7 +445,7 @@ test "a command queued after wait planning executes in the turn whose poll obser
     const next_slot = n.Now.fromMilliseconds(.{ .mono_ms = first_slot.millis() + 12000, .unix_s = 1012 });
     try std.testing.expectEqual(next_slot.millis(), try hostDeadline(&runtime, next_slot));
     _ = try applyWork(&runtime, io, next_slot);
-    try std.testing.expectEqual(1, owner.core.current_slot);
+    try std.testing.expectEqual(1, try owner.core.clock.read(next_slot));
     try std.testing.expectEqual(1, owner.state.?.applied_slot.?);
     runtime.owner = null;
 }
@@ -456,6 +465,7 @@ test "queued request and disconnect share the protocol turn clock while latency 
         .admission_policy = .{ .deneb_start_slot = 0, .blocks_pre_deneb = 1024, .blocks_deneb = 128, .blob_identifiers_deneb = 768, .blob_identifiers_electra = 1152, .number_of_columns = 128, .column_chunks = 16384, .blob_schedule = &.{.{ .start_slot = 0, .max_blobs = 6 }} },
     });
     try owner.core.init(testing, std.testing.io, &resolved, .{
+        .clock = try n.SlotClock.init(&config.mainnet.chain_config, 0),
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = .{ .metadata = .{ .custody_group_count = 1 }, .status = .{ .earliest_available_slot = 0 } },

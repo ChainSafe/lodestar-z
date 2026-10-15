@@ -172,7 +172,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
         .applyIntent => {
             const intent = &self.bridge.stores.?.intents[store.?];
             operation.boolean = try self.owner.?.state.?.apply(core, &self.owner.?.config.chain, intent, timestamp);
-            operation.applied_slot = core.current_slot;
+            operation.applied_slot = @intCast(@max(0, self.owner.?.state.?.applied_slot.?));
         },
         .updateStatus => {
             var status = input.status;

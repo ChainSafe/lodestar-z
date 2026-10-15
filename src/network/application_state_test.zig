@@ -8,6 +8,7 @@ const configuration = @import("configuration.zig");
 const NetworkCore = @import("network_core.zig").NetworkCore;
 const support = @import("network_core_test_support.zig");
 const KeyPair = @import("wire/keys.zig").KeyPair;
+const SlotClock = @import("slot_clock.zig").SlotClock;
 const Now = @import("time.zig").Now;
 const topic_mod = @import("gossipsub/topic.zig");
 const Kind = topic_mod.Kind;
@@ -46,9 +47,9 @@ const Fixture = struct {
         opts.router.capabilities = initial.capabilities;
         const resolved = try configuration.resolve(opts);
         const key = try KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{secret}));
-        try self.core.init(a, std.testing.io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = initial.local, .schedule = initial.schedule });
+        try self.core.init(a, std.testing.io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = initial.local, .schedule = initial.schedule, .clock = try SlotClock.init(&beacon.chain, 1_000_000) });
         errdefer self.core.deinit(std.testing.io);
-        const cfg = try application.Config.init(&beacon.chain, 1_000_000, options);
+        const cfg = try application.Config.init(&beacon.chain, options);
         self.state = try application.State.init(&cfg, &self.chain, &self.core.peerId(), &local);
         return self;
     }
@@ -94,7 +95,7 @@ test "application clock expires duties and preserves committed state through wal
     try f.advance(p.SLOTS_PER_EPOCH);
     try std.testing.expectEqual(0, f.core.localState().metadata.syncnets);
     try f.advance(0);
-    try std.testing.expectEqual(p.SLOTS_PER_EPOCH, f.core.current_slot);
+    try std.testing.expectEqual(p.SLOTS_PER_EPOCH, try f.core.clock.read(now(0)));
     try std.testing.expect(!f.subscribed(0, .sync_committee, 1));
     const before = f.core.localState();
     update.custody_group_count = 0;
@@ -188,8 +189,8 @@ test "application subscriptions match Lodestar across identities and long-lived 
 }
 
 test "application admission allows next-epoch duties at the clock-disparity boundary" {
-    _ = try application.Config.init(&config.mainnet.chain_config, 0, .{ .aggregator_lead_slots = 2 * p.SLOTS_PER_EPOCH });
-    try std.testing.expectError(error.InvalidNetworkConfig, application.Config.init(&config.mainnet.chain_config, 0, .{ .aggregator_lead_slots = 2 * p.SLOTS_PER_EPOCH + 1 }));
+    _ = try application.Config.init(&config.mainnet.chain_config, .{ .aggregator_lead_slots = 2 * p.SLOTS_PER_EPOCH });
+    try std.testing.expectError(error.InvalidNetworkConfig, application.Config.init(&config.mainnet.chain_config, .{ .aggregator_lead_slots = 2 * p.SLOTS_PER_EPOCH + 1 }));
     const f = try Fixture.create(.{});
     defer f.destroy();
     var update: application.Update = .{ .attester_count = 1 };
@@ -210,4 +211,22 @@ test "application initialization cannot reverse a fork already installed in the 
     try f.advance(0);
     try std.testing.expectEqual(.fulu, f.core.localState().fork.fork);
     try std.testing.expectEqual(4 * p.SLOTS_PER_EPOCH, f.state.applied_slot.?);
+}
+
+test "application retries unapplied slot state after a rejected host update" {
+    const f = try Fixture.create(.{});
+    defer f.destroy();
+    try f.advance(0);
+    const subnet: u6 = @intCast(@ctz(~f.state.long_lived));
+    const bit = @as(u64, 1) << subnet;
+    var update: application.Update = .{ .attester_count = 1 };
+    update.attesters[0] = .{ .slot = 2, .subnets = bit, .aggregators = bit };
+    try f.apply(&update, 0);
+    try std.testing.expect(f.subscribed(0, .beacon_attestation, subnet));
+    try std.testing.expectError(error.InvalidCustodyCount, f.apply(&.{ .custody_group_count = 0 }, 4));
+    try std.testing.expectEqual(0, f.state.applied_slot.?);
+    try f.advance(0);
+    try std.testing.expectEqual(4, f.state.applied_slot.?);
+    try std.testing.expect(!f.subscribed(0, .beacon_attestation, subnet));
+    try std.testing.expectEqual(0, f.core.peer_manager.demand.attnets & bit);
 }

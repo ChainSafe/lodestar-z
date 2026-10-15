@@ -14,7 +14,7 @@ pub const Config = struct {
     secret: [32]u8,
     bind: n.udp.Sockets.Bindings,
     local: t.LocalState,
-    schedule: n.local_state.ForkSchedule,
+    clock: n.SlotClock,
     chain: n.chain.Config,
     state: n.application_state.Config,
     discovery_bind: ?n.udp.Sockets.Bindings,
@@ -23,7 +23,6 @@ pub const Config = struct {
     fixed: n.advertisement.Endpoints,
     bootstrap: [bootstrap_max]struct { bytes: [enr_max]u8, len: u16 },
     bootstrap_count: u8,
-    slot: u64,
     gossip: n.gossipsub.Gossipsub.Options,
     processor_limits: n.gossip_processor.limits.Limits = undefined,
     execution_limits: ?n.gossip_processor.limits.Limits = null,
@@ -57,7 +56,7 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
         .secret = @splat(0),
         .bind = undefined,
         .local = .{},
-        .schedule = .{},
+        .clock = undefined,
         .chain = undefined,
         .state = undefined,
         .discovery_bind = null,
@@ -66,7 +65,6 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
         .fixed = .{},
         .bootstrap = undefined,
         .bootstrap_count = 0,
-        .slot = 0,
         .gossip = undefined,
         .allowlist = undefined,
         .allowlist_count = 0,
@@ -84,15 +82,11 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
             .target_group_peers = @intCast(try decode.integer(try decode.get(subscriptions, "targetGroupPeers"), 256)),
         };
     }
-    out.state = try n.application_state.Config.init(&beacon.chain, try decode.bigint(try decode.get(value, "genesisTime")), subscription_options);
-    const now = try n.Now.read(std.Io.Threaded.global_single_threaded.io());
-    out.slot = @intCast(@max(0, out.state.clock.slotAt(try n.SlotClock.unixMilliseconds(now))));
+    out.clock = try n.SlotClock.init(&beacon.chain, try decode.bigint(try decode.get(value, "genesisTime")));
+    out.state = try n.application_state.Config.init(&beacon.chain, subscription_options);
     try parseLocal(try decode.get(value, "local"), &out.local);
     out.chain = try n.chain.Config.init(beacon, try decode.boolean(try decode.get(value, "serveLightClients")));
     if (out.chain.fulu_scheduled and out.local.status.earliest_available_slot == null) return error.MissingAvailability;
-    const update = try out.chain.update(out.local, null, out.slot);
-    out.local = update.local;
-    out.schedule = update.schedule;
     const discovery = try decode.get(value, "discovery");
     if (try discovery.typeof() != .null) {
         try decode.object(discovery, &.{ "bind", "sequenceNumber", "bootstrapEnrs", "advertisement", "fixed" });
@@ -124,7 +118,6 @@ fn parseGossip(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
     const validators = try decode.integer(try decode.get(value, "activeValidatorCount"), 9007199254740991);
     out.gossip = try n.application_policy.gossip(&beacon.chain, validators);
     out.gossip.message_id_policy = .{ .phase0_digest = out.chain.phase0_digest };
-    out.gossip.initial_slot = out.slot;
     const boundaries = out.chain.topics[0..out.chain.boundary_count];
     out.processor_limits = try n.application_policy.processor(boundaries, validators);
     try out.gossip.setPayloadLimits(&out.processor_limits);

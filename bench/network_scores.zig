@@ -36,9 +36,11 @@ pub fn run(init: std.process.Init) !void {
         .gossip = .{ .topic_policy = network_config.topics[0..network_config.boundary_count], .message_id_policy = .{ .phase0_digest = network_config.phase0_digest }, .score_params = .{ .ip_colocation_weight = -53, .ip_colocation_threshold = 3 } },
     });
     const key = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{13}));
+    const unix_s: u64 = @intCast((try Now.read(io)).unixSeconds());
+    const clock = try network.SlotClock.init(&chain_config.chain, unix_s - 100 * chain_config.chain.SECONDS_PER_SLOT);
     const node = try allocator.create(network.NetworkCore);
     defer allocator.destroy(node);
-    try node.init(allocator, io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = update.local, .schedule = update.schedule, .slot = 100 });
+    try node.init(allocator, io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = update.local, .schedule = update.schedule, .clock = clock });
     defer node.deinit(io);
     const g = node.protocols.gossipsub;
     const topics_cap = g.overlay.rows.len;

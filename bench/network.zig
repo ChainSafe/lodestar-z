@@ -186,6 +186,11 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("turn_allocation_calls_a={} turn_allocation_calls_b={} process_rss=external_time_maximum_resident_set_kbytes\n", .{ backing_a.allocations - allocations_a, backing_b.allocations - allocations_b });
 }
 
+fn slotClock(io: std.Io) !network.SlotClock {
+    const now: u64 = @intCast((try network.Now.read(io)).unixSeconds());
+    return network.SlotClock.init(&chain_config.chain, now - 100 * chain_config.chain.SECONDS_PER_SLOT);
+}
+
 fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key: *const network.KeyPair, network_config: *const network.chain.Config) !void {
     const update = try network_config.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
     const resolved = try network.configuration.resolve(.{
@@ -200,7 +205,7 @@ fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key:
         .bind = .{ .ip4 = .loopback(0) },
         .local = update.local,
         .schedule = update.schedule,
-        .slot = 100,
+        .clock = try slotClock(io),
     });
 }
 
@@ -227,7 +232,6 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
             .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
             .demand = node.peer_manager.demand,
             .subscriptions = &.{subscription},
-            .slot = 100,
         };
         _ = try node.applyIntent(&intent, try network.Now.read(io));
     }
@@ -548,7 +552,7 @@ fn idleConnections(init: std.process.Init) !void {
     const hub_key = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{14}));
     const hub = try allocator.create(network.NetworkCore);
     defer allocator.destroy(hub);
-    try hub.init(allocator, io, &resolved, .{ .host = &hub_key, .bind = .{ .ip4 = .loopback(0) }, .local = update.local, .schedule = update.schedule, .slot = 100 });
+    try hub.init(allocator, io, &resolved, .{ .host = &hub_key, .bind = .{ .ip4 = .loopback(0) }, .local = update.local, .schedule = update.schedule, .clock = try slotClock(io) });
     defer hub.deinit(io);
     const spokes = try allocator.alloc(network.Transport, idle_connections_spokes);
     defer allocator.free(spokes);

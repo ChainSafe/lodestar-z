@@ -31,9 +31,11 @@ test "application seen retention covers the longest scheduled slot duration" {
             try std.testing.expectEqual(12_000, gossip.score_params.decay_interval_ms);
         }
     }
-    for ([_]u64{ 0, 86_400_001, std.math.maxInt(u64) }) |duration_ms| {
-        const invalid = config.mainnet.config.chain.merge(.{ .HEZE_FORK_EPOCH = 20, .SLOT_DURATION_MS_HEZE = duration_ms });
-        try std.testing.expectError(error.InvalidNetworkConfig, policy.gossip(&invalid, 16));
+    for ([_]u64{ 0, 20, std.math.maxInt(u64) }) |epoch| {
+        for ([_]u64{ 0, 86_400_001, std.math.maxInt(u64) }) |duration_ms| {
+            const invalid = config.mainnet.config.chain.merge(.{ .HEZE_FORK_EPOCH = epoch, .SLOT_DURATION_MS_HEZE = duration_ms });
+            try std.testing.expectError(error.InvalidNetworkConfig, policy.gossip(&invalid, 16));
+        }
     }
 }
 

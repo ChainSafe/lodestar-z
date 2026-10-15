@@ -70,7 +70,7 @@ test "core peer admission refuses new identities while limiter debt fills the ta
 fn reply(node: *NetworkCore, op: *const control_protocol.Operation, event: rr.ReqResp.Event, now: Now) void {
     const manager = &node.peer_manager;
     const observed = op.reply();
-    manager.controlReplied(&observed, event, now, node.current_slot);
+    manager.controlReplied(&observed, event, now, @intCast(@max(0, node.clock.read(now) catch unreachable)));
 }
 
 test "core fork revalidation protects retention but old replies never restore application relevance" {
@@ -319,6 +319,31 @@ test "core local head and metadata updates preserve periodic status scheduling" 
     for (0..40) |_| try setup.step(1);
     try std.testing.expectEqual(started + 1, setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
     try std.testing.expect(setup.client.peer_manager.control.connections[peer.index].status_due_ms > due);
+}
+
+test "core status validation follows its clock without host intents" {
+    var setup: Setup = .{};
+    try setup.init(&.{ .status = .{ .head_slot = 100 } });
+    defer setup.deinit();
+    for (0..80) |_| try setup.step(1);
+    try std.testing.expectEqual(1, setup.client.peerCounts().relevant);
+
+    setup.pair.now.wall.raw.nanoseconds += 100 * 12 * std.time.ns_per_s;
+    var status = setup.server.localState().status;
+    status.head_slot = 200;
+    try setup.server.updateStatus(&status);
+    setup.client.peer_manager.reStatusPeers(setup.pair.now);
+    for (0..80) |_| try setup.step(1);
+    var peers: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(1, setup.client.peer_manager.snapshots(&peers));
+    try std.testing.expect(peers[0].relevant);
+    try std.testing.expectEqual(200, peers[0].status.?.head_slot);
+
+    status.head_slot = 202;
+    try setup.server.updateStatus(&status);
+    setup.client.peer_manager.reStatusPeers(setup.pair.now);
+    for (0..80) |_| try setup.step(1);
+    try std.testing.expectEqual(0, setup.client.peerCounts().relevant);
 }
 
 test "core stale metadata finishes one refresh while periodic Status and later changes progress" {

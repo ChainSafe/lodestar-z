@@ -354,7 +354,7 @@ fn initOwner(node: *NetworkCore) !void {
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = network_core_test_support.localState(.{}),
-        .slot = 100,
+        .clock = network_core_test_support.slot_clock,
     });
 }
 
