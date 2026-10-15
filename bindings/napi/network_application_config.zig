@@ -27,7 +27,6 @@ pub const Config = struct {
         const capture_bytes = if (self.xray != null) n.xray.Probe.allocatedBytesFor(r.connectionCapacity) else 0;
         if (r.nativeBudgetBytes <= @sizeOf(n.NetworkCore) + capture_bytes) return error.NetworkNativeBudgetExceeded;
         var gossip_options = common.gossip;
-        gossip_options.ip_allowlist = common.allowlist[0..common.allowlist_count];
         gossip_options.topic_policy = common.chain.topics[0..common.chain.boundary_count];
         return .{
             .seed = seed,
@@ -87,11 +86,13 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out
         };
     }
     out.transport = .{};
-    if (try value.hasNamedProperty("transport")) {
-        const transport = try decode.get(value, "transport");
-        try decode.completeObject(transport, &.{ "initialCongestionWindowPackets", "receiveDatagramsPerTurn" });
-        out.transport.initialCongestionWindowPackets = @intCast(try decode.integer(try decode.get(transport, "initialCongestionWindowPackets"), 64));
-        out.transport.receiveDatagramsPerTurn = @intCast(try decode.integer(try decode.get(transport, "receiveDatagramsPerTurn"), n.Transport.receive_per_turn_max));
+    const transport = try decode.get(value, "transport");
+    if (try transport.typeof() != .undefined) {
+        try decode.object(transport, &.{ "initialCongestionWindowPackets", "receiveDatagramsPerTurn" });
+        inline for (.{ .{ "initialCongestionWindowPackets", 64 }, .{ "receiveDatagramsPerTurn", n.Transport.receive_per_turn_max } }) |field| {
+            const override = try decode.get(transport, field[0]);
+            if (try override.typeof() != .undefined) @field(out.transport, field[0]) = @intCast(try decode.integer(override, field[1]));
+        }
     }
     try cfg.parse(value, beacon, common);
     errdefer common.wipe();
@@ -113,7 +114,8 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out
         .bridgeBudgetBytes = 512 * 1024 * 1024,
     };
     inline for (.{ "receiveBudgetBytes", "nativeBudgetBytes", "bridgeBudgetBytes" }) |field| {
-        if (try resources.hasNamedProperty(field)) @field(out.resources, field) = @intCast(try decode.integer(try decode.get(resources, field), @field(resource_maxima, field)));
+        const override = try decode.get(resources, field);
+        if (try override.typeof() != .undefined) @field(out.resources, field) = @intCast(try decode.integer(override, @field(resource_maxima, field)));
     }
     if (out.resources.nativeBudgetBytes == 0 or out.resources.bridgeBudgetBytes == 0) return error.InvalidNetworkInteger;
     const identify = try decode.get(value, "identify");

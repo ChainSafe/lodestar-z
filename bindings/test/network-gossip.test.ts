@@ -61,9 +61,8 @@ async function nextGossip(runtime: NetworkTestRuntime): Promise<NativeGossipMess
   }
   throw Error("Gossip delivery deadline");
 }
-async function gossipPair(timeoutMs = 30000n, budget?: number, configure?: (config: NativeApplicationConfig) => void) {
+async function gossipPair(budget?: number, configure?: (config: NativeApplicationConfig) => void) {
   const pair = await incomingPair(budget, undefined, (left, right) => {
-    right.gossipPolicy = {...right.gossipPolicy, validationTimeoutMs: timeoutMs};
     configure?.(left);
     configure?.(right);
   });
@@ -168,7 +167,7 @@ test.each([
   "reject",
   "ignore",
 ] as const)("real gossip %s preserves wire identity and exact-once verdict admission", async (verdict) => {
-  const pair = await gossipPair(30000n, undefined, (config) => {
+  const pair = await gossipPair(undefined, (config) => {
     config.traceGossip = verdict === "accept";
   });
   try {
@@ -320,7 +319,7 @@ test("gossip payload credit retires on close while descriptors remain held", asy
   }
 }, 15000);
 test("gossip and both request directions retain independent payload capacity", async () => {
-  const pair = await gossipPair(30000n, 192 * 1024 * 1024);
+  const pair = await gossipPair(192 * 1024 * 1024);
   try {
     const outgoing = pair.right.request(pair.identity.peerId, BLOCKS, new Uint8Array(32));
     const outboundPull = outgoing.next();

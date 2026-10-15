@@ -61,18 +61,11 @@ export interface NativeDiscoveryConfig {
 }
 
 export interface NativeGossipStartupPolicy {
-  /** Total host execution allowance. Defaults to 4096 items and 64 MiB. */
+  /** Total host execution allowance. Uses the native default when omitted. */
   hostItems?: number;
   hostBytes?: number;
   /** Maximum simultaneous messages per kind, further bounded by its resource share. */
   topicConcurrency?: number;
-  heartbeatIntervalMs?: bigint;
-  iwantFollowupMs?: bigint;
-  idontwantMinDataSize?: number;
-  validationTimeoutMs?: bigint;
-  validationTombstoneMs?: bigint;
-  pressureTimeoutMs?: bigint;
-  txTimeoutMs?: bigint;
   /** Absolute active-frame lifetime. Large payloads share their first recipient's deadline; progress never extends it. */
   activeSendTimeoutMs?: bigint;
   /** Distinct large payloads per kind, shared across recipients. */
@@ -81,11 +74,6 @@ export interface NativeGossipStartupPolicy {
   largeFrameTimeoutMs?: bigint;
   /** Shared pool capacity, in multiples of 4096. Frames consume pages only as bytes arrive. */
   receiveBufferBytes?: number;
-  seenTtlMs?: bigint;
-  retainedScoreMs?: bigint;
-  opportunisticGraftIntervalMs?: bigint;
-  gossipFactor?: number;
-  ipAllowlist?: readonly Uint8Array[];
 }
 
 export type NativeTopicKind =
@@ -152,11 +140,11 @@ export interface NativeResources {
   /** Steady peer target, strictly below maxPeers to admit locally selected trials. */
   targetPeers: number;
   maxPeers: number;
-  /** Defaults to 512 MiB. */
+  /** Uses the native default when omitted. */
   receiveBudgetBytes?: number;
-  /** Defaults to 2 GiB. */
+  /** Uses the native default when omitted. */
   nativeBudgetBytes?: number;
-  /** Defaults to 512 MiB. */
+  /** Uses the native default when omitted. */
   bridgeBudgetBytes?: number;
 }
 
@@ -176,10 +164,10 @@ export interface NativeApplicationConfig extends NativeRuntimeConfig {
   beaconConfig: BeaconConfig;
   resources: NativeResources;
   transport?: {
-    /** Initial congestion window, 1 to 64 packets. Defaults to 10. */
-    initialCongestionWindowPackets: number;
-    /** Maximum received datagrams per owner turn, 1 to 256. Defaults to 32. */
-    receiveDatagramsPerTurn: number;
+    /** Initial congestion window, 1 to 64 packets. Uses the native default when omitted. */
+    initialCongestionWindowPackets?: number;
+    /** Maximum received datagrams per owner turn, 1 to 256. Uses the native default when omitted. */
+    receiveDatagramsPerTurn?: number;
   };
   identify: {agentVersion: string; protocolVersion: string};
   serveLightClients: boolean;

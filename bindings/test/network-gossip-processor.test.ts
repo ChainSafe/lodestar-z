@@ -1,11 +1,6 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test} from "vitest";
-import type {
-  NativeGossipDependencyCheck,
-  NativeGossipHandle,
-  NativeGossipMessage,
-  NativeGossipVerdict,
-} from "../src/network-runtime.js";
+import type {NativeGossipDependencyCheck, NativeGossipHandle, NativeGossipVerdict} from "../src/network-runtime.js";
 import type {Feedback} from "./utils/network.js";
 import {
   applicationConfig,
@@ -213,50 +208,3 @@ test("native processor retains dependencies, protects blocks, batches ready work
     await Promise.allSettled([pair.left.stop(), pair.right.close()]);
   }
 }, 30000);
-
-test("expired validation execution remains visible until late host completion", async () => {
-  const pair = await incomingPair(undefined, undefined, (left, right) => {
-    for (const config of [left, right]) {
-      config.gossipPolicy = {...config.gossipPolicy, validationTimeoutMs: 2000n};
-    }
-  });
-  try {
-    for (const [runtime, config] of [
-      [pair.left, pair.leftConfig],
-      [pair.right, pair.rightConfig],
-    ] as const) {
-      const intent = localIntent(config);
-      intent.coreTopics = true;
-      await runtime.applyIntent(intent);
-    }
-    await Promise.all([
-      pair.left.addDirectPeer(pair.remote.peerId, [pair.remote.localEndpoint]),
-      pair.right.addDirectPeer(pair.identity.peerId, [pair.identity.localEndpoint]),
-    ]);
-    await Promise.all([
-      waitForGossipReady(pair.left, [pair.remote.peerId], [BLOCK], () => pair.left.getMetrics()),
-      waitForGossipReady(pair.right, [pair.identity.peerId], [BLOCK], () => pair.right.getMetrics()),
-    ]);
-    const block = new Uint8Array(4000);
-    new DataView(block.buffer).setBigUint64(100, 100n, true);
-    await pair.left.publishGossip(BLOCK, block);
-    let message: NativeGossipMessage | undefined;
-    for (let i = 0; i < 1000 && !message; i++) {
-      message = exchange(pair.right, gossipAll).gossip?.messages[0];
-      if (!message) await delay(5);
-    }
-    if (!message) throw Error("Block dispatch deadline");
-
-    const expiredSample = "lodestar_gossip_validation_expired_executing_count 1\n";
-    for (let i = 0; i < 1000 && !(await pair.right.getMetrics()).includes(expiredSample); i++) await delay(5);
-    expect(await pair.right.getMetrics()).toContain(expiredSample);
-
-    // A late verdict retires the message without applying it.
-    exchange(pair.right, settleOnly, [verdict(message.handle, "accept"), verdict(message.handle, "reject")]);
-
-    for (let i = 0; i < 1000 && (await pair.right.getMetrics()).includes(expiredSample); i++) await delay(5);
-    expect(await pair.right.getMetrics()).toContain("lodestar_gossip_validation_expired_executing_count 0\n");
-  } finally {
-    await Promise.all([pair.left.stop(), pair.right.close()]);
-  }
-}, 20000);

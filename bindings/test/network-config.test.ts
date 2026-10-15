@@ -1,5 +1,6 @@
 import {expect, it} from "vitest";
 import bindings from "../src/index.js";
+import type {NativeApplicationConfig} from "../src/network.js";
 import {applicationConfig, configureChain, discoveryConfig, setSlot, startRuntime} from "./utils/network.js";
 
 const cases: readonly [string, (config: ReturnType<typeof applicationConfig>) => void, string][] = [
@@ -185,13 +186,6 @@ const cases: readonly [string, (config: ReturnType<typeof applicationConfig>) =>
     "InvalidNetworkInteger",
   ],
   [
-    "NaN gossip factor",
-    (c) => {
-      c.gossipPolicy.gossipFactor = Number.NaN;
-    },
-    "InvalidNetworkConfig",
-  ],
-  [
     "zero validators",
     (c) => {
       c.activeValidatorCount = 0;
@@ -199,16 +193,9 @@ const cases: readonly [string, (config: ReturnType<typeof applicationConfig>) =>
     "InvalidNetworkConfig",
   ],
   [
-    "zero heartbeat",
-    (c) => {
-      c.gossipPolicy.heartbeatIntervalMs = 0n;
-    },
-    "InvalidNetworkConfig",
-  ],
-  [
     "oversized duration",
     (c) => {
-      c.gossipPolicy.txTimeoutMs = 86400001n;
+      c.gossipPolicy.activeSendTimeoutMs = 86400001n;
     },
     "InvalidNetworkConfig",
   ],
@@ -239,20 +226,6 @@ const cases: readonly [string, (config: ReturnType<typeof applicationConfig>) =>
       c.local.metadata.custodyGroupCount = 129n;
     },
     "InvalidCustodyCount",
-  ],
-  [
-    "oversized IP allowlist",
-    (c) => {
-      c.gossipPolicy.ipAllowlist = Array.from({length: 33}, () => new Uint8Array(16));
-    },
-    "InvalidNetworkConfig",
-  ],
-  [
-    "short allowlist address",
-    (c) => {
-      c.gossipPolicy.ipAllowlist = [new Uint8Array(4)];
-    },
-    "InvalidNetworkBytes",
   ],
   [
     "too many bootstraps",
@@ -290,9 +263,11 @@ it("rejects a noncanonical bootstrap encoding during ordinary owner startup", as
   expect(() => startRuntime(config, () => undefined)).toThrow("InvalidRecord");
 });
 
-it("accepts explicit host wire policy and zero IDONTWANT threshold", async () => {
-  const config = applicationConfig();
-  Object.assign(config.gossipPolicy, {idontwantMinDataSize: 0, iwantFollowupMs: 12000n});
+it("accepts sparse operator policy with native defaults", async () => {
+  const config: NativeApplicationConfig = applicationConfig();
+  config.gossipPolicy = {activeSendTimeoutMs: 4000n, hostItems: undefined};
+  config.transport = {receiveDatagramsPerTurn: 64};
+  config.resources.nativeBudgetBytes = undefined;
   config.subscriptions = {slotsToSubscribeBeforeAggregatorDuty: 64, subscribeAllSubnets: false, targetGroupPeers: 6};
   const runtime = startRuntime(config, () => undefined);
   try {
@@ -304,15 +279,15 @@ it("accepts explicit host wire policy and zero IDONTWANT threshold", async () =>
 
 it.each([
   ["unknown wire field", {iwantDeadline: 12000n}, "InvalidNetworkConfig"],
-  ["numeric interval", {iwantFollowupMs: 12000}, "InvalidNetworkInteger"],
-  ["zero interval", {iwantFollowupMs: 0n}, "InvalidNetworkConfig"],
-  ["large interval", {iwantFollowupMs: 86400001n}, "InvalidNetworkConfig"],
-  ["negative interval", {iwantFollowupMs: -1n}, "InvalidNetworkInteger"],
-  ["bigint threshold", {idontwantMinDataSize: 128n}, "InvalidNetworkInteger"],
-  ["fractional threshold", {idontwantMinDataSize: 1.5}, "InvalidNetworkInteger"],
-  ["unsafe threshold", {idontwantMinDataSize: Number.MAX_SAFE_INTEGER + 1}, "InvalidNetworkInteger"],
-  ["negative threshold", {idontwantMinDataSize: -1}, "InvalidNetworkInteger"],
-  ["large threshold", {idontwantMinDataSize: 20 * 1024 * 1024}, "InvalidNetworkInteger"],
+  ["numeric interval", {activeSendTimeoutMs: 12000}, "InvalidNetworkInteger"],
+  ["zero interval", {activeSendTimeoutMs: 0n}, "InvalidNetworkConfig"],
+  ["large interval", {activeSendTimeoutMs: 86400001n}, "InvalidNetworkConfig"],
+  ["negative interval", {activeSendTimeoutMs: -1n}, "InvalidNetworkInteger"],
+  ["bigint receive bytes", {receiveBufferBytes: 128n}, "InvalidNetworkInteger"],
+  ["fractional receive bytes", {receiveBufferBytes: 1.5}, "InvalidNetworkInteger"],
+  ["unsafe receive bytes", {receiveBufferBytes: Number.MAX_SAFE_INTEGER + 1}, "InvalidNetworkInteger"],
+  ["negative receive bytes", {receiveBufferBytes: -1}, "InvalidNetworkInteger"],
+  ["large receive bytes", {receiveBufferBytes: 2 * 1024 * 1024 * 1024}, "InvalidNetworkInteger"],
 ] as const)("rejects %s wire policy before startup", (_name, fields, code) => {
   const config = applicationConfig();
   Object.assign(config.gossipPolicy, fields);

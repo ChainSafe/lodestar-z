@@ -1099,3 +1099,22 @@ test "identity coalesces independently of a full peer lane and survives publicat
     try std.testing.expect(!second.outcome.needs_another_exchange);
     try std.testing.expect((try host.turn(control)).identity == null);
 }
+
+test "delivered expired gossip remains charged until the host reports completion" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    const token = try admit(runtime, .voluntary_exit, null, "data");
+    var host: Host = .{ .runtime = runtime };
+    const delivered = try host.turn(deployed);
+    try std.testing.expectEqual(token, delivered.gossip.?.tokens[0]);
+    const table = &runtime.bridge.gossip.?;
+    table.expire(100);
+    try std.testing.expectEqual(@as(usize, 1), table.snapshot(101).expiredExecuting);
+    try std.testing.expectEqual(@as(u64, 1), table.snapshot(101).oldestExpiredExecutionAgeMs);
+    try std.testing.expect(!table.report(token, .accept, 101));
+    try std.testing.expectEqual(@as(usize, 0), table.snapshot(101).occupied);
+    try std.testing.expect(!table.report(token, .reject, 102));
+    try std.testing.expectEqual(@as(usize, 0), table.snapshot(102).expiredExecuting);
+}

@@ -26,8 +26,6 @@ pub const Config = struct {
     gossip: n.gossipsub.Gossipsub.Options,
     processor_limits: n.gossip_processor.limits.Limits = undefined,
     execution_limits: ?n.gossip_processor.limits.Limits = null,
-    allowlist: [32][16]u8,
-    allowlist_count: u8,
 
     pub fn wipe(self: *Config) void {
         std.crypto.secureZero(u8, &self.secret);
@@ -66,8 +64,6 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
         .bootstrap = undefined,
         .bootstrap_count = 0,
         .gossip = undefined,
-        .allowlist = undefined,
-        .allowlist_count = 0,
     };
     errdefer out.wipe();
     out.secret = try decode.fixed(32, try decode.get(value, "identitySecretKey"));
@@ -126,41 +122,32 @@ fn parseGossip(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
         out.execution_limits = try n.application_policy.execution(boundaries, &out.processor_limits, .{});
         return;
     }
-    try decode.object(policy, &.{ "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "activeSendTimeoutMs", "activeSendItems", "largeFrameTimeoutMs", "receiveBufferBytes", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "hostItems", "hostBytes", "topicConcurrency" });
+    try decode.object(policy, &.{ "activeSendTimeoutMs", "activeSendItems", "largeFrameTimeoutMs", "receiveBufferBytes", "hostItems", "hostBytes", "topicConcurrency" });
     var budget: n.application_policy.Execution = .{};
-    if (try policy.hasNamedProperty("hostItems")) budget.items = @intCast(try decode.integer(try decode.get(policy, "hostItems"), 16384));
-    if (try policy.hasNamedProperty("hostBytes")) budget.bytes = @intCast(try decode.integer(try decode.get(policy, "hostBytes"), 1024 * 1024 * 1024));
-    if (try policy.hasNamedProperty("topicConcurrency")) budget.concurrency = @intCast(try decode.integer(try decode.get(policy, "topicConcurrency"), 16384));
+    inline for (.{
+        .{ "hostItems", "items", 16384 },
+        .{ "hostBytes", "bytes", 1024 * 1024 * 1024 },
+        .{ "topicConcurrency", "concurrency", 16384 },
+    }) |field| {
+        const override = try decode.get(policy, field[0]);
+        if (try override.typeof() != .undefined) @field(budget, field[1]) = @intCast(try decode.integer(override, field[2]));
+    }
     out.execution_limits = try n.application_policy.execution(boundaries, &out.processor_limits, budget);
     inline for (.{
-        .{ "iwantFollowupMs", "iwant_followup_ms" },
-        .{ "heartbeatIntervalMs", "heartbeat_interval_ms" },
-        .{ "validationTimeoutMs", "validation_timeout_ms" },
-        .{ "validationTombstoneMs", "validation_tombstone_ms" },
-        .{ "pressureTimeoutMs", "pressure_timeout_ms" },
-        .{ "txTimeoutMs", "tx_timeout_ms" },
         .{ "activeSendTimeoutMs", "active_send_timeout_ms" },
         .{ "largeFrameTimeoutMs", "large_frame_timeout_ms" },
-        .{ "seenTtlMs", "seen_ttl_ms" },
-        .{ "retainedScoreMs", "retained_score_ms" },
-        .{ "opportunisticGraftIntervalMs", "opportunistic_graft_interval_ms" },
     }) |field| {
-        if (try policy.hasNamedProperty(field[0])) @field(out.gossip, field[1]) = try decode.bigint(try decode.get(policy, field[0]));
+        const override = try decode.get(policy, field[0]);
+        if (try override.typeof() != .undefined) @field(out.gossip, field[1]) = try decode.bigint(override);
     }
-    if (try policy.hasNamedProperty("idontwantMinDataSize")) out.gossip.idontwant_min_data_size = @intCast(try decode.integer(try decode.get(policy, "idontwantMinDataSize"), n.gossipsub.constants.GOSSIP_MAX_SIZE));
-    if (try policy.hasNamedProperty("receiveBufferBytes")) out.gossip.receive_arena_bytes = @intCast(try decode.integer(try decode.get(policy, "receiveBufferBytes"), 1024 * 1024 * 1024));
-    if (try policy.hasNamedProperty("gossipFactor")) out.gossip.gossip_factor = try decode.number(try decode.get(policy, "gossipFactor"));
+    const receive = try decode.get(policy, "receiveBufferBytes");
+    if (try receive.typeof() != .undefined) out.gossip.receive_arena_bytes = @intCast(try decode.integer(receive, 1024 * 1024 * 1024));
     if (try (try decode.get(policy, "activeSendItems")).typeof() != .undefined) {
         const active_items = try decode.get(policy, "activeSendItems");
         try decode.object(active_items, &topic_kind_names);
         inline for (std.meta.fields(n.gossipsub.topic.Kind), 0..) |field, index| {
             if (try active_items.hasNamedProperty(field.name)) out.gossip.active_send_items[index] = @intCast(try decode.integer(try decode.get(active_items, field.name), n.gossipsub.constants.peers_cap));
         }
-    }
-    if (try policy.hasNamedProperty("ipAllowlist")) {
-        const allowlist = try decode.get(policy, "ipAllowlist");
-        out.allowlist_count = @intCast(try decode.array(allowlist, out.allowlist.len));
-        for (0..out.allowlist_count) |i| out.allowlist[i] = try decode.fixed(16, try allowlist.getElement(@intCast(i)));
     }
 }
 
