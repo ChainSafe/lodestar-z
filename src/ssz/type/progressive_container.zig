@@ -152,10 +152,22 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         }
 
         /// Creates a new `FixedProgressiveContainerType` and clones all underlying fields in the container.
+        /// `out` points to any type that contains all fields of `Type`.
         ///
         /// Caller owns the memory.
-        pub fn clone(value: *const Type, out: *Type) !void {
-            out.* = value.*;
+        pub fn clone(value: *const Type, out: anytype) !void {
+            const OutType = @TypeOf(out.*);
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out));
+                std.debug.assert(OutInfo == .pointer);
+            }
+            if (OutType == Type) {
+                out.* = value.*;
+            } else {
+                inline for (fields) |field| {
+                    @field(out, field.name) = @field(value, field.name);
+                }
+            }
         }
 
         pub fn serializedSize(_: *const Type) usize {
@@ -364,6 +376,15 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             }
         }
 
+        pub fn hasField(comptime name: []const u8) bool {
+            inline for (fields) |field| {
+                if (std.mem.eql(u8, name, field.name)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         pub fn getFieldType(comptime name: []const u8) type {
             inline for (fields) |field| {
                 if (std.mem.eql(u8, name, field.name)) {
@@ -410,6 +431,7 @@ pub fn StructProgressiveContainerType(comptime ST: type, comptime active_fields:
         pub const serializeIntoJson = FixedCT.serializeIntoJson;
         pub const deserializeFromJson = FixedCT.deserializeFromJson;
         pub const getFieldIndex = FixedCT.getFieldIndex;
+        pub const hasField = FixedCT.hasField;
         pub const getFieldType = FixedCT.getFieldType;
         pub const getFieldGindex = FixedCT.getFieldGindex;
 
@@ -596,16 +618,26 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             hashOne(out, &content_root, &active_fields_packed);
         }
 
-        /// Creates a new `VariableProgressiveContainerType` and clones all underlying fields in the container.
-        ///
-        /// Caller owns the memory.
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or
+        /// error.
         pub fn clone(
             allocator: std.mem.Allocator,
             value: *const Type,
             out: *Type,
         ) !void {
-            var replacement = default_value;
-            errdefer deinit(allocator, &replacement);
+            return cloneInto(@This(), allocator, value, out);
+        }
+
+        /// Initialize `out` with `DestinationST.default_value`; the caller deinitializes it after
+        /// success or error.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
+            var replacement = DestinationST.default_value;
+            errdefer DestinationST.deinit(allocator, &replacement);
             inline for (fields) |field| {
                 if (comptime isFixedType(field.type)) {
                     try field.type.clone(
@@ -613,13 +645,15 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                         &@field(replacement, field.name),
                     );
                 } else {
-                    try field.type.clone(
+                    try field.type.cloneInto(
+                        DestinationST.getFieldType(field.name),
                         allocator,
                         &@field(value, field.name),
                         &@field(replacement, field.name),
                     );
                 }
             }
+
             out.* = replacement;
         }
 
@@ -689,6 +723,15 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             } else {
                 @compileError("field does not exist");
             }
+        }
+
+        pub fn hasField(comptime name: []const u8) bool {
+            inline for (fields) |field| {
+                if (std.mem.eql(u8, name, field.name)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         pub fn getFieldType(comptime name: []const u8) type {

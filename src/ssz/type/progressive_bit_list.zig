@@ -56,10 +56,20 @@ pub fn ProgressiveBitListType() type {
             mixInLength(value.bit_len, out);
         }
 
-        /// Clones the underlying `ArrayList` in `data`.
-        ///
-        /// Caller owns the memory.
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or
+        /// error.
         pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
+            return cloneInto(@This(), allocator, value, out);
+        }
+
+        /// Initialize `out` with `DestinationST.default_value`; the caller deinitializes it after
+        /// success or error.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
             out.data = try value.data.clone(allocator);
             out.bit_len = value.bit_len;
         }

@@ -6,6 +6,7 @@ const proof = @import("persistent_merkle_tree").proof;
 const BoolType = @import("bool.zig").BoolType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedProgressiveListType = @import("progressive_list.zig").FixedProgressiveListType;
+const ProgressiveBitListType = @import("progressive_bit_list.zig").ProgressiveBitListType;
 const FixedContainerType = @import("container.zig").FixedContainerType;
 const StructContainerType = @import("container.zig").StructContainerType;
 const UintType = @import("uint.zig").UintType;
@@ -274,6 +275,79 @@ test "memory_safety: variable progressive container clone preserves out on OOM" 
             try std.testing.expect(Container.equals(input, &out));
         }
     }.run, .{&value});
+}
+
+test "variable progressive container cloneInto should fill a container with more fields" {
+    const allocator = std.testing.allocator;
+    const Bits = ProgressiveBitListType();
+    const Balances = FixedProgressiveListType(UintType(64), .{});
+    const Checkpoint = FixedProgressiveContainerType(struct {
+        epoch: UintType(64),
+    }, &.{1});
+    const WideCheckpoint = FixedProgressiveContainerType(struct {
+        epoch: UintType(64),
+        root: ByteVectorType(32),
+    }, &.{ 1, 1 });
+    const Inner = VariableProgressiveContainerType(struct {
+        balances: Balances,
+    }, &.{1});
+    const WideInner = VariableProgressiveContainerType(struct {
+        balances: Balances,
+        extra: Balances,
+    }, &.{ 1, 1 });
+    const Source = VariableProgressiveContainerType(struct {
+        slot: UintType(64),
+        checkpoint: Checkpoint,
+        bits: Bits,
+        inner: Inner,
+    }, &.{ 1, 1, 1, 1 });
+    const Destination = VariableProgressiveContainerType(struct {
+        slot: UintType(64),
+        checkpoint: WideCheckpoint,
+        bits: Bits,
+        inner: WideInner,
+        extra: Balances,
+    }, &.{ 1, 1, 1, 1, 1 });
+
+    var value = Source.default_value;
+    defer Source.deinit(allocator, &value);
+    value.slot = 7;
+    value.checkpoint.epoch = 3;
+    value.bits = try Bits.Type.fromBitLen(allocator, 10);
+    value.bits.setAssumeCapacity(9, true);
+    try value.inner.balances.appendSlice(allocator, &.{ 32, 64 });
+
+    var upgraded = Destination.default_value;
+    defer Destination.deinit(allocator, &upgraded);
+    try Source.cloneInto(Destination, allocator, &value, &upgraded);
+    try std.testing.expectEqual(7, upgraded.slot);
+    try std.testing.expectEqual(3, upgraded.checkpoint.epoch);
+    try std.testing.expectEqual([_]u8{0} ** 32, upgraded.checkpoint.root);
+    try std.testing.expect(Bits.equals(&value.bits, &upgraded.bits));
+    try std.testing.expectEqualSlices(u64, &.{ 32, 64 }, upgraded.inner.balances.items);
+    try std.testing.expectEqual(0, upgraded.inner.extra.items.len);
+    try std.testing.expectEqual(0, upgraded.extra.items.len);
+}
+
+test "progressive containers should report their fields" {
+    const Fields = struct {
+        a: UintType(8),
+        b: UintType(16),
+    };
+    const Variable = VariableProgressiveContainerType(struct {
+        a: UintType(8),
+        items: FixedProgressiveListType(UintType(8), .{}),
+    }, &.{ 1, 1 });
+
+    inline for (.{
+        FixedProgressiveContainerType(Fields, &.{ 1, 0, 1 }),
+        StructProgressiveContainerType(Fields, &.{ 1, 0, 1 }),
+    }) |Container| {
+        try std.testing.expect(Container.hasField("b"));
+        try std.testing.expect(!Container.hasField("c"));
+    }
+    try std.testing.expect(Variable.hasField("items"));
+    try std.testing.expect(!Variable.hasField("b"));
 }
 
 test "memory_safety: fixed progressive container byte deserialization preserves out on malformed input" {

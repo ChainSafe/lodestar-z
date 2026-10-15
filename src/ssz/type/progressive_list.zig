@@ -47,6 +47,31 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
             value.deinit(allocator);
         }
 
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or
+        /// error.
+        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
+            return cloneInto(@This(), allocator, value, out);
+        }
+
+        /// Initialize `out` with `DestinationST.default_value`; the caller deinitializes it after
+        /// success or error.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
+            var replacement = DestinationST.default_value;
+            errdefer DestinationST.deinit(allocator, &replacement);
+            try replacement.ensureTotalCapacity(allocator, value.items.len);
+            for (value.items) |*element| {
+                replacement.appendAssumeCapacity(DestinationST.Element.default_value);
+                try Element.clone(element, &replacement.items[replacement.items.len - 1]);
+            }
+
+            out.* = replacement;
+        }
+
         pub fn chunkCount(value: *const Type) usize {
             return chunkCountForLength(value.items.len);
         }
@@ -420,6 +445,36 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
                 Element.deinit(allocator, element);
             }
             value.deinit(allocator);
+        }
+
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or
+        /// error.
+        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
+            return cloneInto(@This(), allocator, value, out);
+        }
+
+        /// Initialize `out` with `DestinationST.default_value`; the caller deinitializes it after
+        /// success or error.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
+            var replacement = DestinationST.default_value;
+            errdefer DestinationST.deinit(allocator, &replacement);
+            try replacement.ensureTotalCapacity(allocator, value.items.len);
+            for (value.items) |*element| {
+                replacement.appendAssumeCapacity(DestinationST.Element.default_value);
+                try Element.cloneInto(
+                    DestinationST.Element,
+                    allocator,
+                    element,
+                    &replacement.items[replacement.items.len - 1],
+                );
+            }
+
+            out.* = replacement;
         }
 
         pub fn chunkCount(value: *const Type) usize {

@@ -10,6 +10,7 @@ const VariableProgressiveListType = @import("progressive_list.zig").VariableProg
 const UintType = @import("uint.zig").UintType;
 const FixedContainerType = @import("container.zig").FixedContainerType;
 const StructContainerType = @import("container.zig").StructContainerType;
+const FixedProgressiveContainerType = @import("progressive_container.zig").FixedProgressiveContainerType;
 
 test "chunked progressive type should round-trip subtree and payload boundaries" {
     const allocator = std.testing.allocator;
@@ -828,4 +829,92 @@ test "progressive tree reads validate terminators before publishing values" {
         var bytes: [16]u8 = undefined;
         try std.testing.expectError(error.InvalidTerminatorNode, List.tree.serializeIntoBytes(bad, &pool, &bytes));
     }
+}
+
+test "fixed progressive list should clone into its own and a wider list type" {
+    const allocator = std.testing.allocator;
+    const Pair = FixedProgressiveContainerType(struct {
+        a: UintType(8),
+        b: UintType(64),
+    }, &.{ 1, 1 });
+    const WidePair = FixedProgressiveContainerType(struct {
+        a: UintType(8),
+        b: UintType(64),
+        c: UintType(16),
+    }, &.{ 1, 1, 1 });
+    const List = FixedProgressiveListType(Pair, .{});
+    const WideList = FixedProgressiveListType(WidePair, .{});
+
+    var list = List.default_value;
+    defer List.deinit(allocator, &list);
+    try list.appendSlice(allocator, &.{ .{ .a = 1, .b = 2 }, .{ .a = 3, .b = 4 } });
+
+    var cloned = List.default_value;
+    defer List.deinit(allocator, &cloned);
+    try List.clone(allocator, &list, &cloned);
+    try std.testing.expect(cloned.items.ptr != list.items.ptr);
+    try std.testing.expect(List.equals(&list, &cloned));
+
+    var wide = WideList.default_value;
+    defer WideList.deinit(allocator, &wide);
+    try List.cloneInto(WideList, allocator, &list, &wide);
+    try std.testing.expectEqual(2, wide.items.len);
+    try std.testing.expectEqual(3, wide.items[1].a);
+    try std.testing.expectEqual(4, wide.items[1].b);
+    try std.testing.expectEqual(0, wide.items[1].c);
+}
+
+test "variable progressive list cloneInto should widen nested elements" {
+    const allocator = std.testing.allocator;
+    const Pair = FixedContainerType(struct {
+        a: UintType(8),
+        b: UintType(64),
+    });
+    const WidePair = FixedContainerType(struct {
+        a: UintType(8),
+        b: UintType(64),
+        c: UintType(16),
+    });
+    const Inner = FixedProgressiveListType(Pair, .{});
+    const List = VariableProgressiveListType(Inner);
+    const WideList = VariableProgressiveListType(FixedProgressiveListType(WidePair, .{}));
+
+    var list = List.default_value;
+    defer List.deinit(allocator, &list);
+    try list.append(allocator, Inner.default_value);
+    try list.items[0].appendSlice(allocator, &.{ .{ .a = 1, .b = 2 }, .{ .a = 3, .b = 4 } });
+    try list.append(allocator, Inner.default_value);
+
+    var wide = WideList.default_value;
+    defer WideList.deinit(allocator, &wide);
+    try List.cloneInto(WideList, allocator, &list, &wide);
+    try std.testing.expectEqual(2, wide.items.len);
+    try std.testing.expectEqual(2, wide.items[0].items.len);
+    try std.testing.expectEqual(4, wide.items[0].items[1].b);
+    try std.testing.expectEqual(0, wide.items[0].items[1].c);
+    try std.testing.expectEqual(0, wide.items[1].items.len);
+}
+
+test "memory_safety: variable progressive list clone should preserve out on OOM" {
+    const Inner = FixedProgressiveListType(UintType(16), .{});
+    const List = VariableProgressiveListType(Inner);
+
+    var value = List.default_value;
+    defer List.deinit(std.testing.allocator, &value);
+    for (0..3) |i| {
+        try value.append(std.testing.allocator, Inner.default_value);
+        try value.items[i].append(std.testing.allocator, @intCast(i));
+    }
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, input: *const List.Type) !void {
+            var out = List.default_value;
+            defer List.deinit(allocator, &out);
+            List.clone(allocator, input, &out) catch |err| {
+                try std.testing.expectEqual(0, out.items.len);
+                return err;
+            };
+            try std.testing.expect(List.equals(input, &out));
+        }
+    }.run, .{&value});
 }
