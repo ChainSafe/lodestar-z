@@ -4,8 +4,8 @@ name: Fuzz image
 # publishes it to GHCR for the ChainSafe fuzz platform.
 #
 # When an image is built:
-#   - manual run on main (Actions tab)              -> build, test, publish
-#   - manual run on any other branch                -> build and test only
+#   - manual run on main (Actions tab)              -> build, test, publish `main`
+#   - manual run on any other branch                -> build, test, publish `branch-<name>`
 #   - pull request touching code the targets compile -> build and test only
 # Publishing is deliberately manual: the fuzz platform follows the `main` tag
 # and restarts campaigns on every publish, so run this once enough good
@@ -13,11 +13,13 @@ name: Fuzz image
 # so a broken Dockerfile.fuzz is caught before the next publish.
 #
 # Two jobs: `build and test` runs for every event with read-only permissions;
-# `publish` runs only on a manual run on main, holds the only write token, and
-# pushes the exact image the build job tested.
+# `publish` runs only on a manual run, holds the only write token, and pushes
+# the exact image the build job tested.
 #
-# Tags: `main` is what the fuzz platform runs; `sha-<short>` names each build's
-# source commit, also recorded as the org.opencontainers.image.revision label.
+# Tags: `main` is what the fuzz platform runs, and only a run on main moves it.
+# A run on another branch publishes `branch-<name>` instead, for trying a branch
+# on the platform before it merges. `sha-<short>` names each build's source
+# commit, also recorded as the org.opencontainers.image.revision label.
 # Old versions beyond the newest 20 are deleted.
 
 on:
@@ -111,11 +113,11 @@ jobs:
       # Hand the tested image itself to the publish job, so what is published is
       # exactly what passed above -- no second build.
       - name: Save the tested image
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/')
         run: docker save lodestar-z-fuzz:ci -o /tmp/lodestar-z-fuzz.tar
 
       - name: Upload the tested image
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lodestar-z-fuzz-image
@@ -125,8 +127,8 @@ jobs:
   publish:
     name: publish
     needs: build
-    # Manual runs on main only; see the header comment.
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    # Manual runs on a branch only; see the header comment.
+    if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -148,21 +150,29 @@ jobs:
       - name: Push
         id: push
         run: |
+          # main moves `main`; any other branch gets its own tag, sanitized to
+          # Docker's tag charset and length.
+          if [ "$GITHUB_REF_NAME" = main ]; then
+            tag=main
+          else
+            tag="branch-$(printf '%s' "$GITHUB_REF_NAME" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9._-' '-' | cut -c1-100)"
+          fi
           docker load -i /tmp/lodestar-z-fuzz.tar
           docker tag lodestar-z-fuzz:ci "${IMAGE}:sha-${GITHUB_SHA::7}"
-          docker tag lodestar-z-fuzz:ci "${IMAGE}:main"
+          docker tag lodestar-z-fuzz:ci "${IMAGE}:${tag}"
           docker push "${IMAGE}:sha-${GITHUB_SHA::7}"
-          docker push "${IMAGE}:main"
-          echo "digest=$(docker image inspect -f '{{index .RepoDigests 0}}' "${IMAGE}:main" | sed 's/.*@//')" >> "$GITHUB_OUTPUT"
+          docker push "${IMAGE}:${tag}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "digest=$(docker image inspect -f '{{index .RepoDigests 0}}' "${IMAGE}:${tag}" | sed 's/.*@//')" >> "$GITHUB_OUTPUT"
 
       - name: Summary
         run: |
           {
             echo "### Fuzz image published"
             echo
-            echo "\`${IMAGE}:main\` now points at \`${{ steps.push.outputs.digest }}\`,"
-            echo "built from \`${GITHUB_SHA}\`. The fuzz platform follows this tag and"
-            echo "restarts campaigns on the new image; their corpora carry over."
+            echo "\`${IMAGE}:${{ steps.push.outputs.tag }}\` now points at \`${{ steps.push.outputs.digest }}\`,"
+            echo "built from \`${GITHUB_SHA}\`. Fuzz platform targets following this tag"
+            echo "restart on the new image; their corpora carry over."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Without provenance or SBOM attestations, each publish is exactly one

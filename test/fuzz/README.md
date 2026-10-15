@@ -206,8 +206,8 @@ target a container runs.
 
 | Event | Result |
 |---|---|
-| Manual run on `main` (Actions → Fuzz image → Run workflow) | build, test, **publish** |
-| Manual run on any other branch | build and test only |
+| Manual run on `main` (Actions → Fuzz image → Run workflow) | build, test, **publish** `main` |
+| Manual run on any other branch | build, test, **publish** `branch-<name>` |
 | Pull request touching `src/`, `pkg/`, `test/fuzz/`, `build.zig*` or the Dockerfile | build and test only |
 
 Publishing is manual on purpose. The fuzz platform follows the `main` tag and
@@ -218,6 +218,11 @@ build and test, so a broken `Dockerfile.fuzz` is caught before the next publish.
 Each publish is tagged `main` and `sha-<short commit>`; the full commit is also
 in the `org.opencontainers.image.revision` label. Only the newest 20 versions are
 kept.
+
+A run on another branch publishes `branch-<name>` (lowercased, other characters
+turned into `-`) instead of `main`, to try a branch on the platform before it
+merges: point a target at that tag, then back at `main` once merged. Only a run
+on `main` moves `main`.
 
 ### Running it on the fuzz platform
 
