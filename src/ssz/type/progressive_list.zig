@@ -348,8 +348,7 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
                 builder: *progressive.TreeBuilder,
                 items: []const Element.Type,
             ) !void {
-                // A native bool is one byte holding 0 or 1, already its SSZ encoding.
-                if (comptime canMemcpySsz(Element) or Element.kind == .bool) {
+                if (comptime canMemcpySsz(Element)) {
                     return appendPackedBytes(builder, std.mem.sliceAsBytes(items));
                 }
                 var bytes: [ChunkedLeaf.K * 32]u8 = undefined;
