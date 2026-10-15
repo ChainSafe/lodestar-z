@@ -32,7 +32,7 @@ pub const Discovery = struct {
         engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
         coordinator: Options = .{},
     };
-    pub const Error = d.Transport.Error || d.Maintenance.Error || d.Lookup.Error || adapter.Error || std.mem.Allocator.Error || error{ Stopped, InvalidOptions, InvalidDemand, InvalidBootstrap, TooManyBootstraps };
+    pub const Error = d.Transport.Error || d.Maintenance.Error || d.Lookup.Error || adapter.Error || std.mem.Allocator.Error || error{ Stopped, InvalidOptions, InvalidDemand, InvalidAdvertisement, InvalidBootstrap, TooManyBootstraps };
     pub const bootstrap_max: usize = 64;
     pub const queries_max = 128;
     pub const candidates_per_step = d.types.findnode_result_max + 1;
@@ -165,35 +165,21 @@ pub const Discovery = struct {
         return self.transport.engine.localRecord();
     }
 
-    /// An immutable value returned by prepareAdvertisement, valid for its originating owner
-    /// while previous_sequence is current. Installation rejects foreign or superseded values.
-    pub const PreparedAdvertisement = struct {
-        record: d.identity.enr.Record,
-        previous_sequence: u64,
-    };
-
-    /// Preparation never mutates the live record. Install only after all other owners prepare.
-    pub fn prepareAdvertisement(self: *const Discovery, local: *const adapter.LocalAdvertisement, context: *const types.ForkContext) Error!PreparedAdvertisement {
+    /// Pass null only when advertised fields are unchanged. Call after other owners finish preparation;
+    /// validation and signing complete before any live state changes.
+    pub fn advertise(self: *Discovery, announcement: ?*const adapter.LocalAdvertisement, endpoints: advertisement.Endpoints, context: *const types.ForkContext) Error!void {
         if (self.stopped) return error.Stopped;
-        const previous = self.localRecord().sequence;
-        return .{ .record = try adapter.build(&self.transport.engine.channel.local_key, try adapter.nextSequence(previous), local, context), .previous_sequence = previous };
-    }
-
-    pub fn installAdvertisement(self: *Discovery, prepared: *const PreparedAdvertisement) Error!void {
-        if (self.stopped) return error.Stopped;
-        if (self.localRecord().sequence != prepared.previous_sequence) return error.StaleLocalRecord;
-        try self.transport.engine.updateLocalRecord(&prepared.record);
-    }
-
-    pub fn validateEndpoints(self: *const Discovery, endpoints: advertisement.Endpoints) error{InvalidAdvertisement}!void {
+        try context.validate();
         try advertisement.validate(endpoints);
         try validateEndpointFamilies(endpoints, self.quic_bound, &self.transport.sockets);
-    }
-
-    /// Completes the already prepared and published local-state transaction.
-    pub fn commitLocal(self: *Discovery, endpoints: advertisement.Endpoints, context: *const types.ForkContext) void {
+        const record = if (announcement) |local|
+            try adapter.build(&self.transport.engine.channel.local_key, try adapter.nextSequence(self.localRecord().sequence), local, context)
+        else
+            null;
+        if (record) |*value| self.transport.engine.updateLocalRecord(value) catch unreachable;
         self.endpoints = endpoints;
-        self.updateFork(context) catch unreachable;
+        if (!std.mem.eql(u8, &self.context.digest, &context.digest)) self.cancelForeground();
+        self.context = context.*;
     }
 
     pub fn learnedEndpoints(self: *const Discovery, learned: [2]?d.types.Address) advertisement.Endpoints {
@@ -218,13 +204,6 @@ pub const Discovery = struct {
         if (demand.syncnets & 0xf0 != 0 or demand.expires_ms < now_ms) return error.InvalidDemand;
         self.demand = demand;
         self.expireForeground(now_ms);
-    }
-
-    pub fn updateFork(self: *Discovery, context: *const types.ForkContext) Error!void {
-        if (self.stopped) return error.Stopped;
-        try context.validate();
-        if (!std.mem.eql(u8, &self.context.digest, &context.digest)) self.cancelForeground();
-        self.context = context.*;
     }
 
     pub fn schedule(self: *const Discovery, now_ms: u64) types_mod.Schedule {

@@ -844,10 +844,6 @@ test "core local intent three boundaries fit and all-column overlap refuses atom
 
 test "local intent failing at ENR sequence exhaustion preserves control state request fork subscriptions and demand" {
     var setup: Setup = .{};
-    // The client's ENR sits at its last sequence, so an intent that changes what it advertises
-    // fails while the owner prepares it: building the record exhausts the sequence before the
-    // subscriptions are staged. Once a record is built, installing it cannot fail, so no
-    // publication-only failure is reachable.
     setup.client_discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
     try setup.init(&.{});
     defer setup.deinit();

@@ -102,8 +102,7 @@ pub const LocalAdvertisement = struct {
     custody_group_count: ?u64 = null,
 };
 
-/// Prepares a complete signed value. Committing it and synchronizing local Metadata belongs
-/// to the runtime transaction, which must call nextSequence before preparing a changed record.
+/// Builds a signed record. The owner advances the sequence when advertised fields change.
 /// The trusted caller enforces scheduling: once Fulu is scheduled, supply cgc and nfd, using
 /// zero nfd when no later fork is scheduled. ForkContext alone does not describe that schedule.
 pub fn build(key: *const d.identity.crypto.KeyPair, sequence: u64, local: *const LocalAdvertisement, context: *const types.ForkContext) Error!Record {

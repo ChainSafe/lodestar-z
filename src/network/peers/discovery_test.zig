@@ -1,3 +1,4 @@
+const advertisement = @import("../advertisement.zig");
 const std = @import("std");
 const schedule_test_support = @import("../schedule_test_support.zig");
 const d = @import("discv5");
@@ -732,8 +733,8 @@ test "peer discovery coalesced demand retains query deadline" {
     try std.testing.expectEqual(next, schedule_test_support.wakeupMilliseconds(controller.schedule(0), 0));
     var invalid = context;
     invalid.custody_groups = 0;
-    try std.testing.expectError(error.InvalidForkContext, controller.updateFork(&invalid));
-    try controller.updateFork(&context);
+    try std.testing.expectError(error.InvalidForkContext, controller.advertise(null, controller.endpoints, &invalid));
+    try controller.advertise(null, controller.endpoints, &context);
 }
 
 test "peer discovery foreground retains authenticated IPv6 source over alternate signed IPv4" {
@@ -844,29 +845,29 @@ test "peer discovery validates complete bootstrap list before taking sockets" {
     try std.testing.expectError(error.TooManyBootstraps, owner.initBound(std.testing.allocator, sockets, &key, &record, &context, &excess, 0, .{}, .{}));
 }
 
-test "peer discovery prepared advertisements reject stale and foreign installation without mutation" {
+test "peer discovery advertisement validates before replacing local state" {
     var network: Network = .{};
-    const io = network.io();
     var node: Node = undefined;
-    try node.init(io, 111, 9011, &.{});
+    try node.init(network.io(), 111, 9011, &.{});
     defer node.deinit();
     const initial = node.owner.localRecord().*;
+    node.owner.quic_bound[0] = true;
+    const endpoints: advertisement.Endpoints = .{ .ip4 = initial.ip4, .udp = initial.udp, .quic = 9012 };
     var announced: adapter.LocalAdvertisement = .{ .fork = .{ .digest = context.digest, .next_version = @splat(0), .next_epoch = 0 }, .ip4 = initial.ip4, .udp = initial.udp, .quic = 9012 };
-    const first = try node.owner.prepareAdvertisement(&announced, &context);
+    announced.custody_group_count = 0;
+    try std.testing.expectError(error.InvalidField, node.owner.advertise(&announced, endpoints, &context));
     try std.testing.expectEqualDeep(initial, node.owner.localRecord().*);
-    try std.testing.expectEqualDeep(first.record, try d.identity.enr.Record.init(first.record.slice()));
-    announced.quic = 9013;
-    const stale = try node.owner.prepareAdvertisement(&announced, &context);
-    try node.owner.installAdvertisement(&first);
-    try std.testing.expectError(error.StaleLocalRecord, node.owner.installAdvertisement(&stale));
-    try std.testing.expectEqualDeep(first.record, node.owner.localRecord().*);
-    const foreign = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{112}));
-    const foreign_record: discovery.Discovery.PreparedAdvertisement = .{ .record = try adapter.build(&foreign, first.record.sequence + 1, &announced, &context), .previous_sequence = first.record.sequence };
-    try std.testing.expectError(error.InvalidLocalRecord, node.owner.installAdvertisement(&foreign_record));
-    try std.testing.expectEqualDeep(first.record, node.owner.localRecord().*);
+    try std.testing.expectEqualDeep(advertisement.Endpoints{}, node.owner.endpoints);
+    announced.custody_group_count = null;
+    try node.owner.advertise(&announced, endpoints, &context);
+    const installed = node.owner.localRecord().*;
+    try std.testing.expectEqual(initial.sequence + 1, installed.sequence);
+    try std.testing.expectEqualDeep(installed, try d.identity.enr.Record.init(installed.slice()));
+    try std.testing.expectEqualDeep(endpoints, node.owner.endpoints);
+    try node.owner.advertise(null, endpoints, &context);
+    try std.testing.expectEqualDeep(installed, node.owner.localRecord().*);
     node.owner.shutdown();
-    try std.testing.expectError(error.Stopped, node.owner.prepareAdvertisement(&announced, &context));
-    try std.testing.expectError(error.Stopped, node.owner.installAdvertisement(&first));
+    try std.testing.expectError(error.Stopped, node.owner.advertise(&announced, endpoints, &context));
 }
 
 test "discovery keeps the refill failure when receive then cancels" {

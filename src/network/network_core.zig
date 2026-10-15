@@ -288,6 +288,7 @@ pub const NetworkCore = struct {
     pub fn reportPeer(self: *NetworkCore, report: *const t.PeerReport, now: Now) ?t.ReputationDecision {
         return self.peer_manager.reportPeer(report, now);
     }
+    /// Status does not change the advertised identity or its revision.
     pub fn updateStatus(self: *NetworkCore, status: *const t.Status) !void {
         if (self.peer_manager.phase != .running) return error.Stopped;
         try self.peer_manager.updateStatus(self.protocols.router.capabilities().receive, status);
@@ -424,7 +425,7 @@ pub const NetworkCore = struct {
         endpoints: ?advertisement.Endpoints,
         capabilities: capabilities_mod.Directional,
         identify: identify_mod.Local,
-        record: ?peers.Discovery.PreparedAdvertisement = null,
+        announcement: ?peers.enr.LocalAdvertisement = null,
         changed: bool,
     };
 
@@ -435,9 +436,7 @@ pub const NetworkCore = struct {
         const capabilities = update.capabilities;
         try self.protocols.router.validateCapabilities(capabilities);
         if ((endpoints == null) != (self.discovery == null)) return error.InvalidAdvertisement;
-        if (endpoints) |value| {
-            try self.discovery.?.validateEndpoints(value);
-        }
+        if (endpoints) |value| try advertisement.validate(value);
         var local = update.local;
         local.metadata.seq_number = self.peer_manager.local.metadata.seq_number;
         try local_state.copyServingLocal(&local, &local, capabilities.receive);
@@ -460,22 +459,18 @@ pub const NetworkCore = struct {
             const announced = advertisementFor(&local, schedule, endpoints.?);
             const previous = advertisementFor(&self.peer_manager.local, self.schedule, owned.endpoints);
             if (!std.meta.eql(announced, previous)) {
-                prepared.record = try owned.prepareAdvertisement(&announced, &local.fork);
+                prepared.announcement = announced;
             }
         };
         return prepared;
     }
 
-    fn publishLocal(self: *NetworkCore, prepared: *const PreparedLocal) !void {
-        if (prepared.record) |*record| try self.discovery.?.installAdvertisement(record);
-    }
-
-    fn commitLocal(self: *NetworkCore, prepared: *const PreparedLocal, now: Now) void {
+    fn installLocal(self: *NetworkCore, prepared: *const PreparedLocal, now: Now) !void {
         std.debug.assert(prepared.changed);
-        self.local_revision +%= 1;
         if (self.discovery) |owned| {
-            owned.commitLocal(prepared.endpoints.?, &prepared.local.fork);
+            try owned.advertise(if (prepared.announcement) |*value| value else null, prepared.endpoints.?, &prepared.local.fork);
         }
+        self.local_revision +%= 1;
         self.protocols.identify.local = prepared.identify;
         self.protocols.router.setCapabilities(prepared.capabilities);
         const pm = &self.peer_manager;
@@ -490,12 +485,11 @@ pub const NetworkCore = struct {
         self.schedule = prepared.schedule;
     }
 
-    /// Prepares every owner before ENR publication; caller sequence input is ignored.
+    /// Caller sequence input is ignored; all fallible preparation precedes installation.
     fn applyLocal(self: *NetworkCore, update: *const local_state.LocalUpdate, now: Now) !bool {
         const prepared = try self.prepareLocal(update);
         if (!prepared.changed) return false;
-        try self.publishLocal(&prepared);
-        self.commitLocal(&prepared, now);
+        try self.installLocal(&prepared, now);
         return true;
     }
 
@@ -508,8 +502,7 @@ pub const NetworkCore = struct {
         const topics_changed = try self.protocols.gossipsub.prepareSubscriptions(intent.subscriptions, self.local_intent_workspace, now, slot);
         const demand_changed = !std.meta.eql(demand, self.peer_manager.demand);
         const changed = prepared.changed or topics_changed or demand_changed;
-        try self.publishLocal(&prepared);
-        if (prepared.changed) self.commitLocal(&prepared, now);
+        if (prepared.changed) try self.installLocal(&prepared, now);
         self.protocols.gossipsub.commitSubscriptions(self.local_intent_workspace);
         if (demand_changed) self.peer_manager.commitDemand(&demand);
         if (changed) std.log.scoped(.network_core).debug("intent_applied local_changed={any} topics_changed={any} demand_changed={any} subscriptions={d} fork={s} digest={x}", .{ prepared.changed, topics_changed, demand_changed, intent.subscriptions.len, @tagName(prepared.local.fork.fork), prepared.local.fork.digest });
