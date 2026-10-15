@@ -101,6 +101,9 @@ echo "START project=$FUZZ_PROJECT target=$FUZZ_TARGET seeds=$SEEDS state=$OUT"
 # The harness reads stdin, so no @@ (see test/fuzz/README.md).
 afl-fuzz -i "$SEEDS" -o "$OUT" -- "$BIN" >"$TMPDIR/afl.log" 2>&1 &
 pid=$!
+# Report at once rather than after the first interval, so a new or restarted
+# campaign is never shown as `missing` while it starts.
+write_status
 
 trap 'echo "SIGTERM: stopping afl-fuzz"; kill -TERM "$pid"; wait "$pid"; sync_findings CRASH crashes crash; sync_findings HANG hangs hang; write_status; exit 0' TERM INT
 
