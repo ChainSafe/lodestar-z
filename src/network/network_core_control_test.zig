@@ -1308,19 +1308,16 @@ test "core idle connected peers cost no control or dial visits" {
     try std.testing.expect(setup.client.peer_manager.dialFailed(intents[0].token, setup.pair.now));
     var control_visits: u64 = 0;
     var dial_visits: u64 = 0;
-    var refresh_visits: u64 = 0;
     for (0..33) |turn| {
         if (turn == 1) {
             control_visits = setup.client.peer_manager.control.visits;
             dial_visits = setup.client.peer_manager.dialing.visits;
-            refresh_visits = setup.client.peer_manager.catalog.refresh_visits;
         }
         try setup.step(0);
         try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     }
     try std.testing.expectEqual(control_visits, setup.client.peer_manager.control.visits);
     try std.testing.expectEqual(dial_visits, setup.client.peer_manager.dialing.visits);
-    try std.testing.expectEqual(refresh_visits, setup.client.peer_manager.catalog.refresh_visits);
 }
 
 test "core control starts a due ping or Status on the turn its deadline passes" {

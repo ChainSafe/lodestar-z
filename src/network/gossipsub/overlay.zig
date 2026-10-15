@@ -98,7 +98,6 @@ pub const Overlay = struct {
     /// Indices are immutable namespace ordinals, including while a topic is inactive.
     rows: []Row,
     namespace: topic_policy.Namespace,
-    subscription_revision: u64 = 0,
     slot: u64 = 0,
     mesh_changes: MeshChanges = .{},
 
@@ -120,7 +119,6 @@ pub const Overlay = struct {
             row.retire_after_ms = context.now +| context.options.retained_score_ms;
         }
         row.subscribed = on;
-        self.subscription_revision +|= 1;
         for (context.sessions.rows, 0..) |*peer, position| {
             const io = &peer.io;
             if (!peer.active or peer.outStream() == null) continue;
@@ -255,7 +253,6 @@ pub const Overlay = struct {
     }
 
     fn applySubscription(self: *Overlay, context: *const Context, topic: u16, peer: u16, on: bool, leave: MeshReason) void {
-        if (self.rows[topic].subscribers.isSet(peer) != on) self.subscription_revision +|= 1;
         if (on) self.rows[topic].subscribers.set(peer) else {
             self.rows[topic].subscribers.unset(peer);
             self.leaveMesh(context, topic, peer, leave);

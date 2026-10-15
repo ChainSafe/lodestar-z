@@ -43,7 +43,7 @@ pub const Sessions = struct {
     /// read to show a blocked stream is written again only after it gains capacity.
     writes: u64 = 0,
     blocked_writes: u64 = 0,
-    delivery_revision: u64 = 0,
+    delivery_changed: bool = false,
     io_arena: []u8,
     subscription_words: []usize,
     receive_pool: ReceivePool,
@@ -75,7 +75,7 @@ pub const Sessions = struct {
     pub fn setOutbound(self: *Sessions, index: u16, outbound: peer_session.Outbound) void {
         assert(self.rows[index].active);
         self.rows[index].outbound = outbound;
-        self.delivery_revision +|= 1;
+        self.delivery_changed = true;
         if (outbound == .pending or outbound == .closing) self.markReady(index);
     }
 
@@ -142,7 +142,7 @@ pub const Sessions = struct {
         const peer = &self.rows[index];
         peer.start(conn);
         self.by_connection[conn.index] = @intCast(index);
-        self.delivery_revision +|= 1;
+        self.delivery_changed = true;
         self.markReady(@intCast(index));
         return .{ .index = @intCast(index), .generation = peer.generation };
     }

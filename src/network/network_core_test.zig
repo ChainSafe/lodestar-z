@@ -202,7 +202,8 @@ test "core metrics copy peer processing work without advancing it" {
     defer node.deinit(std.testing.io);
     node.peer_manager.reconcile(node.protocols.gossipsub, node.last_now);
     const peer_work = node.peer_manager.counters;
-    try std.testing.expect(peer_work.catalog_deadline_rows > 0);
+    const selection = node.peer_manager.selection;
+    const policy_due = node.peer_manager.policy_due_ms;
     const metrics = @import("metrics/export.zig");
     const context = metrics.Context.init(&node, node.last_now);
     const bytes = try std.testing.allocator.alloc(u8, metrics.fixed_text_capacity);
@@ -210,6 +211,8 @@ test "core metrics copy peer processing work without advancing it" {
     var writer = std.Io.Writer.fixed(bytes);
     try metrics.write(&context, &writer);
     try std.testing.expectEqualDeep(peer_work, node.peer_manager.counters);
+    try std.testing.expectEqualDeep(selection, node.peer_manager.selection);
+    try std.testing.expectEqual(policy_due, node.peer_manager.policy_due_ms);
 }
 
 test "core signed bootstrap reaches relevant peer with zero and one outputs" {

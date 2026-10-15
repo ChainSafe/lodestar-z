@@ -403,9 +403,7 @@ test "peer discovery known and new identities share candidate replacement and re
                 try std.testing.expect(c.find(&retained.peer) == null);
                 if (previous) |peer| try std.testing.expectEqual(peer, accepted);
             } else {
-                const revision = c.intent_revision;
                 try std.testing.expectError(error.Capacity, d.enqueueDiscovered(&c, &incoming, &.{}, &.{ .syncnets = 1 }, 3));
-                try std.testing.expectEqual(revision, c.intent_revision);
                 try std.testing.expectEqual(victim, c.find(&retained.peer).?);
                 try std.testing.expect(c.intents.isSet(victim.index));
                 if (previous) |peer| {
@@ -424,4 +422,38 @@ test "peer discovery known and new identities share candidate replacement and re
             }
         }
     }
+}
+
+test "peer dial selection counts host demand across connection membership and expiry" {
+    var c = try Catalog.initWithIntents(a, opts, 2, 8, 1);
+    defer c.deinit(a);
+    var d = try dialing.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 1 });
+    const record = try candidate(1, 0);
+    try d.enqueue(&c, &record.peer, &.{address}, true, 0);
+    d.configureSelection(&c, &.{}, false, &.{}, 0);
+    try std.testing.expectEqual(@as(u16, 1), d.host_demand);
+    try std.testing.expect(!c.intents_dirty);
+
+    const peer = admit(&c, &record.peer, 0, .outbound, 0).admitted.peer;
+    try std.testing.expect(c.intents_dirty);
+    d.accepted(&c, peer, .{ .index = 0, .generation = 1 }, 0);
+    d.configureSelection(&c, &.{}, false, &.{}, 0);
+    try std.testing.expectEqual(@as(u16, 0), d.host_demand);
+    try std.testing.expect(c.disconnect(peer, .{ .index = 0, .generation = 1 }, .host, .{}, at(1)));
+    try std.testing.expect(c.intents_dirty);
+    d.configureSelection(&c, &.{}, false, &.{}, 1);
+    try std.testing.expectEqual(@as(u16, 1), d.host_demand);
+    try std.testing.expect(c.setDirect(peer, false));
+    try std.testing.expect(c.intents_dirty);
+    d.configureSelection(&c, &.{}, false, &.{}, 1);
+    try std.testing.expectEqual(@as(u16, 0), d.host_demand);
+
+    try d.enqueueUntil(&c, &record.peer, &.{address}, false, 2, 100);
+    d.configureSelection(&c, &.{}, false, &.{}, 2);
+    try std.testing.expectEqual(@as(u16, 1), d.host_demand);
+    try expire(&d, &c, 100);
+    try std.testing.expect(c.intents_dirty);
+    d.configureSelection(&c, &.{}, false, &.{}, 100);
+    try std.testing.expectEqual(@as(u16, 0), d.host_demand);
+    try std.testing.expect(!c.intents_dirty);
 }

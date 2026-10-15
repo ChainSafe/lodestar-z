@@ -13,7 +13,7 @@ const logging = @import("logging.zig");
 const ReqResp = @import("reqresp/root.zig").ReqResp;
 const types = @import("types.zig");
 
-pub const coverage_reconcile_interval_ms = 1_000;
+pub const policy_interval_ms = 1_000;
 pub const replacement_interval_ms = 5_000;
 
 pub const Options = struct {
@@ -34,15 +34,6 @@ pub const DiscoveryNeed = struct {
         return .{ .general = self.general, .attnets = self.attnets, .syncnets = self.syncnets, .custody = self.custody, .expires_ms = expires_ms };
     }
 };
-const SelectionRevision = struct {
-    catalog: u64,
-    delivery: u64,
-    gossip: gossip.Gossipsub.CoverageRevision,
-
-    fn cacheable(self: *const SelectionRevision) bool {
-        return self.catalog != std.math.maxInt(u64) and self.delivery != std.math.maxInt(u64) and self.gossip.cacheable();
-    }
-};
 
 pub const PeerManager = struct {
     allocator: std.mem.Allocator,
@@ -56,11 +47,9 @@ pub const PeerManager = struct {
     selection: policy.Result = .{},
     discovery_need: DiscoveryNeed = .{},
     demand: t.Demand = .{},
-    selection_revision: ?SelectionRevision = null,
-    reconciliation_deadline: ?u64 = null,
     custody_pending: bool = false,
     selection_deadline: ?u64 = null,
-    coverage_reconcile_after_ms: u64 = 0,
+    policy_due_ms: u64 = 0,
     replacement_after_ms: u64 = 0,
     native_dial_room: u16 = 0,
     metadata_freshness_ms: u64,
@@ -70,12 +59,8 @@ pub const PeerManager = struct {
 
     pub const Phase = enum { running, quiescing, stopped };
 
-    /// Uncached selection work, which the caching and bounded-work tests and the network bench read.
     pub const Counters = struct {
         custody_hashes: u64 = 0,
-        selections: u64 = 0,
-        selection_rows: u64 = 0,
-        catalog_deadline_rows: u64 = 0,
         candidate_selections: u64 = 0,
     };
     pub const PeerCounts = struct { connected: u16, relevant: u16, outbound_relevant: u16 };
@@ -239,41 +224,29 @@ pub const PeerManager = struct {
         const peer = self.catalog.findConnection(conn) orelse return;
         _ = self.catalog.updateEndpoint(peer, conn, endpoint);
     }
-    fn catalogDeadline(self: *PeerManager, now_ms: u64) ?u64 {
-        self.counters.catalog_deadline_rows +|= self.catalog.rows.len;
-        return self.catalog.nextDeadline(now_ms);
-    }
-    /// Reconciles at the supplied clock without pumping protocols or borrowing an Engine.
+    /// Catalog and delivery changes apply immediately. Scores and subscriptions refresh at most
+    /// one policy interval after a change; protocol and metadata deadlines may wake selection sooner.
     pub fn reconcile(self: *PeerManager, gossipsub: *gossip.Gossipsub, now: Now) void {
         if (self.phase != .running) return;
-        self.catalog.refresh(now.millis());
-        const expired = if (self.reconciliation_deadline) |due| now.millis() >= due else false;
-        if (self.policySchedule(gossipsub).due(now.monotonic) or expired) {
+        self.catalog.advanceClock(now.millis());
+        if (self.policySchedule(gossipsub).due(now.monotonic)) {
             self.refreshSelection(gossipsub, now);
-            self.coverage_reconcile_after_ms = now.millis() +| coverage_reconcile_interval_ms;
             self.refreshDiscoveryNeed();
-            const revision = self.currentSelectionRevision(gossipsub);
-            self.selection_revision = if (revision.cacheable()) revision else null;
-            const catalog_deadline = self.catalogDeadline(now.millis());
-            self.reconciliation_deadline = catalog_deadline;
-            if (self.selection_deadline) |due| self.reconciliation_deadline = @min(self.reconciliation_deadline orelse due, due);
-            self.dialing.selection_dirty = true;
+            self.catalog.selection_dirty = false;
+            gossipsub.clearDeliveryChanged();
+            self.policy_due_ms = now.millis() +| policy_interval_ms;
+            self.catalog.intents_dirty = true;
         }
-        if (self.dialing.selectionNeeded(&self.catalog) or (if (self.dialing.selection_deadline) |due| now.millis() >= due else false)) {
+        if (self.catalog.intents_dirty or (if (self.dialing.selection_deadline) |due| now.millis() >= due else false)) {
             self.counters.candidate_selections +|= 1;
             self.dialing.configureSelection(&self.catalog, &self.selection.deficits.missing, self.selection.retained_count < self.catalog.options.target_peers or self.selection.deficits.outbound > 0, &self.local.fork, now.millis());
         }
     }
-    fn currentSelectionRevision(self: *const PeerManager, gossipsub: *const gossip.Gossipsub) SelectionRevision {
-        return .{ .catalog = self.catalog.revision, .delivery = gossipsub.deliveryRevision(), .gossip = gossipsub.coverageRevision() };
-    }
     fn policySchedule(self: *const PeerManager, gossipsub: *const gossip.Gossipsub) types.Schedule {
-        const before = self.selection_revision orelse return .{ .runnable = true };
-        const after = self.currentSelectionRevision(gossipsub);
-        if (before.catalog != after.catalog or before.delivery != after.delivery) return .{ .runnable = true };
-        if (!after.cacheable() or !std.meta.eql(before.gossip, after.gossip))
-            return .{ .deadline = time.optionalMilliseconds(self.coverage_reconcile_after_ms) };
-        return .{};
+        return .{
+            .runnable = self.catalog.selection_dirty or gossipsub.deliveryChanged(),
+            .deadline = time.milliseconds(@min(self.policy_due_ms, self.selection_deadline orelse self.policy_due_ms)),
+        };
     }
     /// Observes transport progress before admission or dial selection. Admission itself consumes
     /// these bounded facts without borrowing transport or executing I/O.
@@ -290,16 +263,15 @@ pub const PeerManager = struct {
         result = result.merge(self.control.schedule(&self.catalog, now));
         if (self.phase != .running) return result;
         result = result.merge(self.dialing.schedule(&self.catalog, @min(capacities.dials, self.dialRoom())));
-        result = result.merge(.{ .runnable = self.dialing.selectionNeeded(&self.catalog), .deadline = time.optionalMilliseconds(self.dialing.selection_deadline) });
+        result = result.merge(.{ .runnable = self.catalog.intents_dirty, .deadline = time.optionalMilliseconds(self.dialing.selection_deadline) });
         result = result.merge(self.policySchedule(gossipsub));
-        result = result.merge(.{ .deadline = time.optionalMilliseconds(self.reconciliation_deadline) });
         result = result.merge(.{ .deadline = time.optionalMilliseconds(if (self.custody_pending) now.millis() +| 1 else null) });
         return result;
     }
     /// Requires demand validated against the local fork before publication.
     pub fn commitDemand(self: *PeerManager, demand: *const t.Demand) void {
         self.demand = demand.*;
-        self.selection_revision = null;
+        self.catalog.selection_dirty = true;
     }
     /// Returns the last completed policy evaluation, shared with discoveryNeed.
     /// Call reconcile with an explicit clock to include pending input changes.
@@ -331,8 +303,6 @@ pub const PeerManager = struct {
         try self.dialing.enqueueDiscovered(&self.catalog, candidate, &self.local.fork, &self.selection.deficits.missing, now.millis());
     }
     fn refreshSelection(self: *PeerManager, gossipsub: *gossip.Gossipsub, now: Now) void {
-        self.counters.selections +|= 1;
-        self.counters.selection_rows +|= self.catalog.rows.len;
         self.selection_deadline = null;
         const count = self.catalog.snapshots(self.snapshot_scratch);
         const local_subscriptions = gossipsub.localSubscriptions(self.local.fork.digest);
@@ -430,9 +400,9 @@ pub const PeerManager = struct {
     }
     fn dialRoom(self: *const PeerManager) u16 {
         const attempts = self.dialing.attempts();
-        const demand = self.dialing.demandCounts(&self.catalog);
-        const capacity = self.catalog.options.max_peers -| self.catalog.connectedCount() -| demand.pending;
-        const wanted = @max(self.selection.dial_budget, demand.host) -| demand.pending;
+        const pending = self.dialing.pendingPeers(&self.catalog, null);
+        const capacity = self.catalog.options.max_peers -| self.catalog.connectedCount() -| pending;
+        const wanted = @max(self.selection.dial_budget, self.dialing.host_demand) -| pending;
         return @min(self.native_dial_room -| attempts.unstarted, capacity, wanted);
     }
     /// Replaces the local Status alone, validated for the protocols the node serves.
@@ -440,7 +410,7 @@ pub const PeerManager = struct {
         var local = self.local;
         local.status = status.*;
         try local_state.copyServingLocal(&self.local, &local, receive);
-        self.selection_revision = null;
+        self.catalog.selection_dirty = true;
     }
 
     /// Applies peer policy's consequences of a committed local state. The caller validates it and
@@ -449,7 +419,7 @@ pub const PeerManager = struct {
         self.local = local.*;
         var budget: u16 = 0;
         _ = self.catalog.advanceCustody(&self.local.fork, now.millis(), self.metadata_freshness_ms, &budget);
-        self.selection_revision = null;
+        self.catalog.selection_dirty = true;
     }
     pub fn reStatusPeer(self: *PeerManager, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
         if (self.phase == .stopped) return false;
@@ -465,7 +435,7 @@ pub const PeerManager = struct {
                 std.log.scoped(.network_peers).debug("peer_non_completion peer={f} connection={d}:{d} endpoint={any}", .{ logging.peer(&fault.identity), fault.origin.connection.index, fault.origin.connection.generation, fault.origin.endpoint });
                 const peer = self.catalog.find(&fault.identity) orelse return;
                 _ = self.catalog.nonCompletion(peer, now.millis());
-                self.selection_revision = null;
+                self.catalog.selection_dirty = true;
             },
         }
     }
@@ -475,7 +445,7 @@ pub const PeerManager = struct {
         std.log.scoped(.network_peers).debug("peer_report peer={f} action={s} reason={s} origin={any}", .{ logging.peer(&report.identity), @tagName(report.action), @tagName(report.reason), report.origin });
         const peer = self.catalog.find(&report.identity) orelse return null;
         const decision = self.catalog.report(peer, report.action, now.millis()) orelse return null;
-        self.selection_revision = null;
+        self.catalog.selection_dirty = true;
         if (decision != .none) _ = self.disconnect(
             peer,
             if (decision == .ban) .banned else .reputation,
@@ -495,12 +465,12 @@ pub const PeerManager = struct {
         if (self.phase != .running) return error.Stopped;
         if (identity.eql(&self.local_identity)) return error.SelfDial;
         try self.dialing.enqueueUntil(&self.catalog, identity, addresses, false, now.millis(), deadline_ms);
-        self.selection_revision = null;
+        self.catalog.selection_dirty = true;
     }
     /// Retires dial ownership before returning the connection for the owner to close or abandon.
     pub fn cancelConnect(self: *PeerManager, identity: *const t.PeerId, now: Now) ?t.Handle {
         const close = self.dialing.cancelConnect(&self.catalog, identity, now.millis());
-        self.selection_revision = null;
+        self.catalog.selection_dirty = true;
         return close;
     }
     pub fn expireDials(self: *PeerManager, now: Now, close: *[peers.Dialing.attempts_max]t.Handle) []const t.Handle {
@@ -529,7 +499,7 @@ pub const PeerManager = struct {
         if (!already_direct and self.catalog.direct_count >= self.catalog.options.target_peers - self.catalog.options.min_outbound)
             return error.DirectPeerCapacity;
         try self.dialing.enqueue(&self.catalog, identity, addresses, true, now.millis());
-        self.selection_revision = null;
+        self.catalog.selection_dirty = true;
         const peer = self.catalog.find(identity) orelse return null;
         _ = self.catalog.setDirect(peer, true);
         return self.catalog.rowFor(peer).?.connection;
@@ -543,7 +513,7 @@ pub const PeerManager = struct {
         if (!self.catalog.rowFor(peer).?.direct) return false;
         _ = self.catalog.setDirect(peer, false);
         peers.Dialing.releaseIfUnused(&self.catalog, peer);
-        self.selection_revision = null;
+        self.catalog.selection_dirty = true;
         return true;
     }
     pub fn disconnect(self: *PeerManager, peer: t.PeerRef, reason: t.DisconnectReason, now: Now) bool {
@@ -573,7 +543,7 @@ pub const PeerManager = struct {
         if (self.discovery_need.general) _ = self.dialing.replayRemembered(&self.catalog, &self.local.fork, &self.selection.deficits.missing, now);
         if (count > 0 and self.selection.retained_count >= self.catalog.options.target_peers and self.selection.deficits.outbound == 0) {
             self.replacement_after_ms = now.millis() +| replacement_interval_ms;
-            self.selection_revision = null;
+            self.catalog.selection_dirty = true;
         }
         return count;
     }

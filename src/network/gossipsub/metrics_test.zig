@@ -47,11 +47,9 @@ test "score populations count cumulative gates, distinct mesh peers and empty sc
     for (0..3) |peer| _ = g.peers.score(g.sessions.rows[peer].logical, 1);
     const rows = try std.testing.allocator.dupe(PeerState, g.peers.scores.rows);
     defer std.testing.allocator.free(rows);
-    const revision = g.peers.scores.revision;
     const calculations = g.peers.scores.calculations;
     const populations = ScorePopulations.collect(&g.peers, g.overlay, g.sessions, 10 * g.peers.scores.params.decay_interval_ms);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(rows), std.mem.sliceAsBytes(g.peers.scores.rows));
-    try std.testing.expectEqual(revision, g.peers.scores.revision);
     try std.testing.expectEqual(calculations, g.peers.scores.calculations);
     const output = try render(&populations, &buffer);
     for ([_][]const u8{

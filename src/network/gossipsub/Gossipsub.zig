@@ -120,8 +120,13 @@ pub fn settle(self: *Gossipsub, index: u16) void {
     self.sessions.settle(index, &self.options);
 }
 
-pub fn deliveryRevision(self: *const Gossipsub) u64 {
-    return self.sessions.delivery_revision;
+pub fn deliveryChanged(self: *const Gossipsub) bool {
+    return self.sessions.delivery_changed;
+}
+
+/// Call after evaluating peer policy against the current delivery state.
+pub fn clearDeliveryChanged(self: *Gossipsub) void {
+    self.sessions.delivery_changed = false;
 }
 
 pub fn localSubscriptions(self: *const Gossipsub, digest: [4]u8) topic_policy.Subnets {
@@ -130,26 +135,6 @@ pub fn localSubscriptions(self: *const Gossipsub, digest: [4]u8) topic_policy.Su
 
 pub fn graylistThreshold(self: *const Gossipsub) f64 {
     return self.options.score_params.graylist_threshold;
-}
-
-pub const CoverageRevision = struct {
-    subscriptions: u64,
-    scores: u64,
-    heartbeat: u64,
-
-    pub fn cacheable(self: *const CoverageRevision) bool {
-        const exhausted = std.math.maxInt(u64);
-        return self.subscriptions != exhausted and
-            self.scores != exhausted and self.heartbeat != exhausted;
-    }
-};
-
-pub fn coverageRevision(self: *const Gossipsub) CoverageRevision {
-    return .{
-        .subscriptions = self.overlay.subscription_revision,
-        .scores = self.peers.scores.revision,
-        .heartbeat = self.cycle.epoch,
-    };
 }
 
 pub fn coverageSubscriptions(self: *Gossipsub, conn: Handle, digest: [4]u8, local: *const topic_policy.Subnets, now: Now) topic_policy.Subnets {

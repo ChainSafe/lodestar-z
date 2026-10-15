@@ -229,9 +229,7 @@ test "gossip reconnect resets positive scores and retains nonpositive evidence w
         book.retain(first);
         defer book.release(first);
         try std.testing.expectEqual(@as(f64, @floatFromInt(credits)) - 6, book.score(first, 1));
-        const revision = book.scores.revision;
         book.disconnect(first, 2);
-        try std.testing.expect(book.scores.revision > revision);
         try std.testing.expect(!book.scores.rows[first.index].connected);
         const expected: f64 = if (credits > 6) 0 else -6;
         try std.testing.expectEqual(expected, book.snapshot(first, 2));

@@ -86,7 +86,6 @@ pub const Breakdown = struct {
 };
 
 pub const PeerScore = struct {
-    revision: u64 = 0,
     /// Uncached score evaluations and the topic rows they visited, which the caching tests and
     /// the network bench read.
     calculations: u64 = 0,
@@ -155,20 +154,15 @@ pub const PeerScore = struct {
         return self.topics[index];
     }
 
-    /// Every write advances the revision the peer manager's coverage wakeup compares, even one that
-    /// leaves the counters unchanged. The cached score is invalidated only when `evaluate` reads a
-    /// different value from the new counters.
     fn store(self: *PeerScore, peer: u16, topic: u16, next: TopicCounters) void {
         const index = @as(usize, peer) * self.topic_params.len + topic;
         assert(index < self.topics.len);
-        self.revision +|= 1;
         if (observable(&self.topic_params[topic], &self.topics[index], &next)) self.rows[peer].dirty = true;
         self.topics[index] = next;
     }
 
     /// Clears every counter for a peer whose slot is being reused.
     pub fn resetPeer(self: *PeerScore, peer: u16) void {
-        self.revision +|= 1;
         self.rows[peer] = .{};
         const base = @as(usize, peer) * self.topic_params.len;
         @memset(self.topics[base..][0..self.topic_params.len], .{});
@@ -216,7 +210,6 @@ pub const PeerScore = struct {
 
     pub fn penalize(self: *PeerScore, peer: u16, amount: f64) void {
         assert(safeMagnitude(amount) and amount >= 0);
-        self.revision +|= 1;
         self.rows[peer].dirty = true;
         self.rows[peer].behaviour = @min(counter_max, self.rows[peer].behaviour + amount);
     }
@@ -378,7 +371,6 @@ pub const PeerScore = struct {
     pub fn applyValidatedTopic(self: *PeerScore, topic: u16, params: TopicParams) void {
         assert(topic < self.topic_params.len);
         if (std.meta.eql(self.topic_params[topic], params)) return;
-        self.revision +|= 1;
         self.topic_params[topic] = params;
         for (self.rows) |*row| row.dirty = true;
     }
@@ -416,7 +408,6 @@ pub const PeerScore = struct {
             }
         }
         self.refreshPeer(peer, now_ms);
-        self.revision +|= 1;
         row.dirty = true;
         row.connected = connected;
         row.last_decay_ms = now_ms;
@@ -452,7 +443,6 @@ pub const PeerScore = struct {
             self.store(peer, @intCast(topic), c);
         }
         if (self.rows[peer].behaviour != 0) {
-            self.revision +|= 1;
             self.rows[peer].dirty = true;
             self.rows[peer].behaviour = decayed(self.rows[peer].behaviour, self.params.behaviour_decay, steps, zero);
         }
@@ -784,9 +774,7 @@ test "score cache reports earliest active topic quantum activation and cap" {
     try std.testing.expectEqual(@as(?u64, 25), score.nextChange(0));
     _ = score.score(0, 25, 0);
     try std.testing.expectEqual(@as(?u64, null), score.nextChange(0));
-    score.revision = std.math.maxInt(u64);
     score.invalid(0, 0);
-    try std.testing.expectEqual(std.math.maxInt(u64), score.revision);
     try std.testing.expect(score.rows[0].dirty);
 }
 
@@ -795,9 +783,7 @@ test "score empty background decay does not fabricate mutations" {
     defer score.deinit(std.testing.allocator);
     score.refresh(0);
     _ = score.score(0, 0, 0);
-    const revision = score.revision;
     score.refresh(score.params.decay_interval_ms);
-    try std.testing.expectEqual(revision, score.revision);
     try std.testing.expect(!score.rows[0].dirty);
 }
 
@@ -874,12 +860,8 @@ test "score retirement invalidates primed totals with identical parameters" {
         try std.testing.expectEqual(@as(?u64, null), score.nextChange(@intCast(peer)));
     }
     const params = score.topic_params[0];
-    const revision = score.revision;
     score.resetTopic(0);
-    try std.testing.expect(score.revision > revision);
-    const retired_revision = score.revision;
     try score.configureTopic(0, params);
-    try std.testing.expectEqual(retired_revision, score.revision);
     for (0..2) |peer| {
         try std.testing.expect(score.rows[peer].dirty);
         try std.testing.expectEqual(@as(f64, 0), score.score(@intCast(peer), 1, 0));
@@ -887,7 +869,6 @@ test "score retirement invalidates primed totals with identical parameters" {
     const calculations = score.calculations;
     score.refresh(score.params.decay_interval_ms);
     for (0..2) |peer| try std.testing.expectEqual(@as(f64, 0), score.score(@intCast(peer), score.params.decay_interval_ms, 0));
-    try std.testing.expectEqual(retired_revision, score.revision);
     try std.testing.expectEqual(calculations, score.calculations);
 }
 
@@ -900,13 +881,11 @@ test "score snapshots preserve cache state and match policy evaluation" {
     const cached = scores.rows[0].cached;
     const calculations = scores.calculations;
     const visits = scores.topic_visits;
-    const revision = scores.revision;
     const next = scores.rows[0].cached_until;
     const value = scores.snapshot(0, 50000, 0);
     try std.testing.expectEqual(cached, scores.rows[0].cached);
     try std.testing.expectEqual(calculations, scores.calculations);
     try std.testing.expectEqual(visits, scores.topic_visits);
-    try std.testing.expectEqual(revision, scores.revision);
     try std.testing.expectEqual(next, scores.rows[0].cached_until);
     try std.testing.expect(scores.rows[0].dirty);
     try std.testing.expectEqual(value, scores.score(0, 50000, 0));

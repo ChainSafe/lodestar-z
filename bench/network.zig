@@ -379,7 +379,7 @@ fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected:
 fn printReconciliation(node: *network.NetworkCore, name: []const u8) void {
     const c = node.peer_manager.counters;
     const score = &node.protocols.gossipsub.peers.scores;
-    std.debug.print("case={s} selections={} selection_rows={} candidate_selections={} score_calculations={} score_topic_visits={}\n", .{ name, c.selections, c.selection_rows, c.candidate_selections, score.calculations, score.topic_visits });
+    std.debug.print("case={s} candidate_selections={} score_calculations={} score_topic_visits={}\n", .{ name, c.candidate_selections, score.calculations, score.topic_visits });
 }
 
 /// CI fails the idle_wait case above this many turns in its 1 s window.

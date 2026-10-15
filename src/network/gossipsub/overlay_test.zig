@@ -447,10 +447,8 @@ test "remote subscription coverage is fork exact and duplicate announcements pre
     const context = g.overlayContext(1);
     _ = g.overlay.peerSubscription(&context, peer.index, current, true);
     _ = g.overlay.peerSubscription(&context, peer.index, future, true);
-    const revision = g.coverageRevision();
     for (0..100) |_| _ = g.overlay.peerSubscription(&context, peer.index, current, true);
     _ = g.overlay.peerSubscription(&context, peer.index, "/eth2/02020202/beacon_attestation_63/ssz_snappy", true);
-    try std.testing.expectEqualDeep(revision, g.coverageRevision());
     const current_subnets = g.overlay.subnetSubscriptions(peer.index, @splat(0));
     const future_subnets = g.overlay.subnetSubscriptions(peer.index, @splat(1));
     try std.testing.expectEqual(@as(u64, 1) << 63, current_subnets.attnets);
@@ -493,9 +491,7 @@ test "remote subscriptions survive local topic expiry and isolate reused session
     try gossip_test.subscribe(&g, name);
     try std.testing.expectEqual(@as(usize, 1), g.overlay.subscribers(index).count());
     _ = g.overlay.peerSubscription(&context, second.index, name, false);
-    const revision = g.coverageRevision();
     _ = g.overlay.peerSubscription(&context, second.index, name, false);
-    try std.testing.expectEqualDeep(revision, g.coverageRevision());
     try std.testing.expectEqual(@as(usize, 0), g.resourceSnapshot().remote_subscriptions);
 }
 

@@ -51,7 +51,6 @@ test "peer population scores match selection and preserve reputation and gossip 
     _ = peers.admit(&.{ .bytes = @splat(0xee) }, &local, .{ .index = 1, .generation = 1 }, &.{ .direction = .outbound, .endpoint = .unspecified, .now_ms = 0 }).admitted;
     const reputation_before = row.reputation;
     const gossip_before = g.peers.scores.rows[logical.index];
-    const revision = g.peers.scores.revision;
     const calculations = g.peers.scores.calculations;
     const snapshot = Population.collect(&peers, &g, 600_000);
     const lighthouse = @intFromEnum(client.Client.Lighthouse);
@@ -65,6 +64,5 @@ test "peer population scores match selection and preserve reputation and gossip 
     try std.testing.expectEqualDeep(snapshot, Population.collect(&peers, &g, 600_000));
     try std.testing.expectEqualDeep(reputation_before, row.reputation);
     try std.testing.expectEqualDeep(gossip_before, g.peers.scores.rows[logical.index]);
-    try std.testing.expectEqual(revision, g.peers.scores.revision);
     try std.testing.expectEqual(calculations, g.peers.scores.calculations);
 }

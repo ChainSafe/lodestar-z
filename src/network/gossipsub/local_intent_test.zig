@@ -47,10 +47,8 @@ test "local intent exact capacity excess and namespace refusal" {
     try std.testing.expect(g.overlay.findTopic(desired[0]) == null);
     try std.testing.expect(try apply(&g, w, desired[0..512]));
     try std.testing.expect(!try apply(&g, w, desired[0..512]));
-    const revision = g.peers.scores.revision;
     try std.testing.expectError(error.InvalidTopic, apply(&g, w, &.{ desired[0], "invalid" }));
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    try std.testing.expectEqual(revision, g.peers.scores.revision);
     for (desired[0..512]) |topic_name| try std.testing.expect(g.overlay.subscribed(g.overlay.namespace.lookup(topic_name).?.ordinal));
     try std.testing.expect(try apply(&g, w, &.{}));
     const first = g.overlay.namespace.lookup(desired[0]).?.ordinal;
@@ -359,9 +357,7 @@ test "topic expiry invalidates positive and negative cached scores" {
         try support.unsubscribe(&g, name);
         g.cancelWrites(session);
         try std.testing.expectEqual(@as(f64, if (negative) -100 else 1), g.peers.score(peer, 10));
-        const revision = g.peers.scores.revision;
         g.overlay.expireTopic(&g.overlayContext(10), index, false);
-        try std.testing.expect(g.peers.scores.revision > revision);
         try std.testing.expectEqual(@as(f64, 0), g.peers.score(peer, 10));
         try support.subscribe(&g, name);
         try std.testing.expectEqual(index, g.overlay.findTopic(name).?);

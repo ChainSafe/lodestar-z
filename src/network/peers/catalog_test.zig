@@ -140,9 +140,7 @@ test "peer catalog endpoint observations preserve publication and connection gen
     try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&.{}));
     try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&out));
     try std.testing.expectEqual(rebound, out[0].updated.endpoint);
-    const revision = c.revision;
     try std.testing.expect(c.updateEndpoint(ref, first, &rebound));
-    try std.testing.expectEqual(revision, c.revision);
     try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&out));
 
     const admitted = admit(&c, &remote, replacement, .outbound, 1).admitted;
@@ -325,8 +323,7 @@ test "peer catalog rejected banned reconnect does not mutate retained reputation
         admit(&c, &remote, replacement, .outbound, 2_400_000),
     );
     try std.testing.expectEqual(before, c.rows[ref.index].reputation);
-    try std.testing.expectEqual(@as(u64, 2_400_001), c.nextDeadline(2_400_000).?);
-    c.refresh(2_400_001);
+    c.advanceClock(2_400_001);
     try std.testing.expectEqual(
         ref,
         admit(&c, &remote, replacement, .outbound, 2_400_001).admitted.peer,
@@ -410,7 +407,7 @@ test "peer catalog changed custody metadata immediately invalidates copied group
     try std.testing.expect(c.get(ref).?.custody_groups == null);
 }
 
-test "peer catalog revisions follow canonical generation replacement and reject stale mutations" {
+test "peer catalog replacement and reuse reject stale mutations" {
     var options = opts;
     options.capacity = 1;
     options.max_peers = 1;
@@ -418,25 +415,24 @@ test "peer catalog revisions follow canonical generation replacement and reject 
     var c = try Catalog.init(std.testing.allocator, options, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
-    const admitted_revision = c.revision;
     _ = admit(&c, &remote, replacement, .outbound, 1).admitted;
-    try std.testing.expectEqual(admitted_revision + 1, c.revision);
+    const replaced = c.get(ref).?;
+    try std.testing.expectEqual(replacement, replaced.connection.?);
     try std.testing.expect(!c.updateMetadata(ref, first, &.{}, 1));
     try std.testing.expect(!c.disconnect(ref, first, .host, .{}, at(1)));
-    try std.testing.expectEqual(admitted_revision + 1, c.revision);
+    try std.testing.expectEqualDeep(replaced, c.get(ref).?);
     try std.testing.expect(c.disconnect(ref, replacement, .host, .{}, at(2)));
     var events: [1]t.Event = undefined;
     _ = c.pollEvents(&events);
-    const closed_revision = c.revision;
     const reused = admit(&c, &third, first, .outbound, 3).admitted.peer;
     try std.testing.expectEqual(ref.index, reused.index);
     try std.testing.expect(reused.generation > ref.generation);
-    try std.testing.expectEqual(closed_revision + 1, c.revision);
+    try std.testing.expect(c.get(ref) == null);
+    const current = c.get(reused).?;
     try std.testing.expect(!c.setDirect(ref, true));
-    try std.testing.expectEqual(closed_revision + 1, c.revision);
-    c.revision = std.math.maxInt(u64);
+    try std.testing.expectEqualDeep(current, c.get(reused).?);
     try std.testing.expect(c.setDirect(reused, true));
-    try std.testing.expectEqual(std.math.maxInt(u64), c.revision);
+    try std.testing.expect(c.get(reused).?.direct);
 }
 
 test "peer catalog zero hash custody completion invalidates prior policy observation" {
@@ -445,12 +441,12 @@ test "peer catalog zero hash custody completion invalidates prior policy observa
     const ref = admit(&c, &remote, first, .outbound, 0).admitted.peer;
     try std.testing.expect(c.updateStatus(ref, first, &.{ .earliest_available_slot = 0 }, 0));
     try std.testing.expect(c.updateMetadata(ref, first, &.{ .custody_group_count = 128 }, 0));
-    const observed = c.revision;
+    c.selection_dirty = false;
     try std.testing.expect(c.get(ref).?.custody_groups == null);
     var budget: u16 = 0;
     try std.testing.expect(!c.advanceCustody(&.{ .fork = .fulu }, 0, 60_000, &budget));
     try std.testing.expectEqual(@as(usize, 128), c.get(ref).?.custody_groups.?.count());
-    try std.testing.expect(c.revision > observed);
+    try std.testing.expect(c.selection_dirty);
 }
 
 test "identify catalog metadata copies only to current full peer and transport generation" {
@@ -548,7 +544,7 @@ test "peer catalog sampling exhaustion never exposes custody checkpoint or retri
     }
 }
 
-test "unchanged metadata confirms freshness without publishing or changing policy revision" {
+test "unchanged metadata confirms freshness without publishing" {
     var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
@@ -557,9 +553,7 @@ test "unchanged metadata confirms freshness without publishing or changing polic
     try std.testing.expect(c.updateMetadata(ref, first, &metadata, 1));
     var events: [1]t.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&events));
-    const revision = c.revision;
     try std.testing.expect(c.updateMetadata(ref, first, &metadata, 20));
-    try std.testing.expectEqual(revision, c.revision);
     try std.testing.expectEqual(@as(u64, 20), c.get(ref).?.metadata_at_ms);
     try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&events));
     try std.testing.expect(!c.updateMetadata(ref, first, &.{ .seq_number = 6 }, 21));

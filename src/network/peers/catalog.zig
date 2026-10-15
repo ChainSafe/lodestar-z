@@ -141,25 +141,20 @@ pub const Catalog = struct {
     free: lists.List = .{},
     connected_count: u16 = 0,
     direct_count: u16 = 0,
-    intent_revision: u64 = 0,
+    intents_dirty: bool = true,
     /// Rejections recorded against identities, by kind.
     rejections: [@typeInfo(t.Rejection).@"enum".fields.len]u64 = @splat(0),
     random: std.Random.DefaultPrng,
     candidate_custody_cursor: usize = 0,
-    revision: u64 = 0,
+    selection_dirty: bool = true,
     event_cursor: usize = 0,
     custody_cursor: usize = 0,
     /// Rows with a pending close or update; pollEvents visits only these.
     events: std.DynamicBitSetUnmanaged,
     event_masks: []usize,
     event_count: u16 = 0,
-    /// The owner clock at the last refresh. Snapshots report reputation decayed to it.
+    /// Snapshots report reputation decayed to the last owner clock.
     clock_ms: u64 = 0,
-    /// No stored reputation crosses the ban or prune score, and no other reputation deadline
-    /// passes, before this time, so refresh decays the rows only once it has passed.
-    refresh_due_ms: u64 = 0,
-    /// Rows visited by refresh passes.
-    refresh_visits: u64 = 0,
     dial: DialIndex,
 
     /// Intent deadlines, in ms. Dialing owns the keys; the catalog marks a row in `dirty` when an
@@ -319,7 +314,7 @@ pub const Catalog = struct {
                 const before_context = row.custody_context;
                 const had_work = row.custody_work != null;
                 prepareCandidateCustody(row, context);
-                if (!std.meta.eql(before_context, row.custody_context) or had_work != (row.custody_work != null)) self.intent_revision +|= 1;
+                if (!std.meta.eql(before_context, row.custody_context) or had_work != (row.custody_work != null)) self.intents_dirty = true;
                 if (now_ms >= row.dial.hints_at_ms +| hint_freshness_ms) continue;
                 const work = if (row.custody_work) |*value| value else continue;
                 const before = work.totalHashes();
@@ -328,7 +323,7 @@ pub const Catalog = struct {
                     continue;
                 };
                 budget.* -= work.totalHashes() - before;
-                if (work.totalHashes() != before and result != null) self.intent_revision +|= 1;
+                if (work.totalHashes() != before and result != null) self.intents_dirty = true;
                 pending = pending or result == null;
             }
         }
@@ -345,19 +340,19 @@ pub const Catalog = struct {
             if (!row.occupied or row.connection == null or row.closing_reason != null) continue;
             const metadata = row.metadata orelse continue;
             const count = metadata.custody_group_count orelse {
-                if (row.custody_work != null) self.revision +|= 1;
+                if (row.custody_work != null) self.selection_dirty = true;
                 row.custody_work = null;
                 continue;
             };
             const compatible = if (row.status) |status| std.mem.eql(u8, &status.fork_digest, &context.digest) else false;
             if (count == 0 or count > context.custody_groups or !compatible) {
-                if (row.custody_work != null) self.revision +|= 1;
+                if (row.custody_work != null) self.selection_dirty = true;
                 row.custody_work = null;
                 continue;
             }
             var completed = if (row.custody_work) |*work| work.complete() != null else false;
             if (!std.meta.eql(row.custody_context, context.*) or (if (row.custody_work) |work| work.custody_count != count else true)) {
-                self.revision +|= 1;
+                self.selection_dirty = true;
                 row.custody_work = null;
                 row.custody_context = context.*;
                 if (row.node_id == null) row.node_id = custody.nodeId(&row.identity) catch continue;
@@ -373,7 +368,7 @@ pub const Catalog = struct {
             };
             budget.* -= work.totalHashes() - before;
             if (!completed and result != null) {
-                self.revision +|= 1;
+                self.selection_dirty = true;
                 row.pending_update = true;
                 self.syncEvent(index);
             }
@@ -492,9 +487,9 @@ pub const Catalog = struct {
             if (displaced) |old| self.by_connection[old.index] = null;
             connect(row, conn, options);
             self.by_connection[conn.index] = ref.index;
-            self.revision +|= 1;
+            self.selection_dirty = true;
+            self.intents_dirty = true;
             self.syncEvent(ref.index);
-            self.noteReputation(row, options.now_ms);
             return .{ .admitted = .{ .peer = ref, .displaced = displaced, .fresh = fresh } };
         }
         if (!self.admissionRoom(false, options)) return .capacity;
@@ -507,7 +502,8 @@ pub const Catalog = struct {
         connect(row, conn, options);
         self.connected_count += 1;
         self.by_connection[conn.index] = ref.index;
-        self.revision +|= 1;
+        self.selection_dirty = true;
+        self.intents_dirty = true;
         self.syncEvent(ref.index);
         return .{ .admitted = .{ .peer = ref, .fresh = true } };
     }
@@ -542,7 +538,7 @@ pub const Catalog = struct {
         const peer = existing orelse self.allocate(identity) orelse return error.Capacity;
         self.intents.set(peer.index);
         self.intent_count += 1;
-        self.intent_revision +|= 1;
+        self.intents_dirty = true;
         self.markDial(peer.index);
         return peer;
     }
@@ -554,7 +550,7 @@ pub const Catalog = struct {
         if (self.intents.isSet(peer.index)) {
             self.intents.unset(peer.index);
             self.intent_count -= 1;
-            self.intent_revision +|= 1;
+            self.intents_dirty = true;
         }
         if (row.established_slot == null) {
             self.forget(peer);
@@ -574,7 +570,7 @@ pub const Catalog = struct {
         if (self.intents.isSet(peer.index)) {
             self.intents.unset(peer.index);
             self.intent_count -= 1;
-            self.intent_revision +|= 1;
+            self.intents_dirty = true;
         }
         assert(!self.events.isSet(peer.index));
         row.* = .{ .generation = row.generation };
@@ -676,12 +672,6 @@ pub const Catalog = struct {
         self.dial.dirty_count += 1;
     }
 
-    /// Pulls the refresh deadline forward to the row's next reputation deadline.
-    fn noteReputation(self: *Catalog, row: *const Row, now_ms: u64) void {
-        const next = row.reputation.nextDeadline(now_ms) orelse return;
-        self.refresh_due_ms = @min(self.refresh_due_ms, next);
-    }
-
     pub fn connectedCount(self: *const Catalog) u16 {
         return self.connected_count;
     }
@@ -708,9 +698,10 @@ pub const Catalog = struct {
         if (evidence.ready)
             self.serve(row, servedUntil(reason) and (evidence.rejection == null or evidence.rejection == .shutdown), now);
         std.log.scoped(.network_peers).debug("peer_disconnected peer={f} connection={d}:{d} reason={s} connected_ms={d} relevant={any} agent={f}", .{ logging.peer(&row.identity), conn.index, conn.generation, @tagName(reason), now_ms -| row.connected_at_ms, row.status != null, std.json.fmt(client.agent(&row.identify), .{}) });
-        self.revision +|= 1;
+        self.selection_dirty = true;
         self.by_connection[conn.index] = null;
         self.connected_count -= 1;
+        self.intents_dirty = true;
         row.connection = null;
         row.custody_work = null;
         row.custody_context = null;
@@ -721,7 +712,6 @@ pub const Catalog = struct {
         row.reputation.decay(now_ms);
         self.connectionClosed(ref.index, reason, now_ms);
         self.syncEvent(ref.index);
-        self.noteReputation(row, now_ms);
         return true;
     }
 
@@ -829,7 +819,7 @@ pub const Catalog = struct {
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return true;
-        self.revision +|= 1;
+        self.selection_dirty = true;
         row.closing_reason = reason;
         row.status = null;
         row.pending_update = row.published;
@@ -841,7 +831,7 @@ pub const Catalog = struct {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return false;
         if (row.status == null and row.custody_work == null) return true;
-        self.revision +|= 1;
+        self.selection_dirty = true;
         row.status = null;
         row.custody_work = null;
         row.pending_update = row.published;
@@ -859,7 +849,7 @@ pub const Catalog = struct {
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return false;
-        self.revision +|= 1;
+        self.selection_dirty = true;
         row.status = status.*;
         row.dial.replacement_after_ms = @max(row.dial.replacement_after_ms, now_ms +| replacement_grace_ms);
         row.status_at_ms = now_ms;
@@ -872,7 +862,7 @@ pub const Catalog = struct {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return false;
         row.identify = metadata.*;
-        self.revision +|= 1;
+        self.selection_dirty = true;
         if (row.published or row.status != null) row.pending_update = true;
         self.syncEvent(ref.index);
         return true;
@@ -883,7 +873,7 @@ pub const Catalog = struct {
         if (row.closing_reason != null) return false;
         if (row.endpoint.eql(endpoint.*)) return true;
         row.endpoint = endpoint.*;
-        self.revision +|= 1;
+        self.selection_dirty = true;
         if (row.published) row.pending_update = true;
         self.syncEvent(ref.index);
         return true;
@@ -906,7 +896,7 @@ pub const Catalog = struct {
             }
         }
         if (row.metadata == null or row.metadata.?.custody_group_count != metadata.custody_group_count) row.custody_work = null;
-        self.revision +|= 1;
+        self.selection_dirty = true;
         row.metadata = metadata.*;
         row.metadata_at_ms = now_ms;
         if (row.published or row.status != null) row.pending_update = true;
@@ -917,7 +907,8 @@ pub const Catalog = struct {
     pub fn setDirect(self: *Catalog, ref: t.PeerRef, direct: bool) bool {
         const row = self.edit(ref) orelse return false;
         if (row.direct != direct) {
-            self.revision +|= 1;
+            self.selection_dirty = true;
+            self.intents_dirty = true;
             if (direct) self.direct_count += 1 else self.direct_count -= 1;
         }
         row.direct = direct;
@@ -932,8 +923,7 @@ pub const Catalog = struct {
     ) ?t.ReputationDecision {
         const row = self.edit(ref) orelse return null;
         if (row.established_slot == null) return null;
-        self.revision +|= 1;
-        defer self.noteReputation(row, now_ms);
+        self.selection_dirty = true;
         const decision = row.reputation.apply(action, now_ms);
         // A local ban forgets the peer whether or not a connection is left to close.
         if (decision == .ban) self.remembered.forget(&row.identity);
@@ -945,8 +935,7 @@ pub const Catalog = struct {
         if (row.established_slot == null) return false;
         const before = row.reputation.score;
         row.reputation.nonCompletion(now_ms);
-        if (before != row.reputation.score) self.revision +|= 1;
-        self.noteReputation(row, now_ms);
+        if (before != row.reputation.score) self.selection_dirty = true;
         return true;
     }
 
@@ -958,43 +947,13 @@ pub const Catalog = struct {
         duration_ms: u64,
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
-        self.revision +|= 1;
+        self.selection_dirty = true;
         row.reputation.cooldown(now_ms, duration_ms);
-        self.noteReputation(row, now_ms);
         return true;
     }
 
-    /// Advances the snapshot clock, and decays every row once a stored score may have crossed the
-    /// ban or prune score, so the revision moves on the crossing. It visits no row before then.
-    pub fn refresh(self: *Catalog, now_ms: u64) void {
+    pub fn advanceClock(self: *Catalog, now_ms: u64) void {
         self.clock_ms = @max(self.clock_ms, now_ms);
-        if (now_ms < self.refresh_due_ms) {
-            if (@import("builtin").is_test) self.checkReputation(now_ms);
-            return;
-        }
-        var due: u64 = std.math.maxInt(u64);
-        for (self.rows) |*row| {
-            if (!row.occupied) continue;
-            const banned = row.reputation.score <= reputation.ban_score;
-            const useful = row.reputation.score >= reputation.prune_score;
-            row.reputation.decay(now_ms);
-            if (banned != (row.reputation.score <= reputation.ban_score) or
-                useful != (row.reputation.score >= reputation.prune_score)) self.revision +|= 1;
-            if (row.reputation.nextDeadline(now_ms)) |next| due = @min(due, next);
-        }
-        self.refresh_visits +|= self.rows.len;
-        self.refresh_due_ms = due;
-    }
-
-    /// Test builds check that no stored score crossed the ban or prune score since the last pass.
-    fn checkReputation(self: *const Catalog, now_ms: u64) void {
-        for (self.rows) |*row| {
-            if (!row.occupied) continue;
-            var current = row.reputation;
-            current.decay(now_ms);
-            assert((row.reputation.score <= reputation.ban_score) == (current.score <= reputation.ban_score));
-            assert((row.reputation.score >= reputation.prune_score) == (current.score >= reputation.prune_score));
-        }
     }
 
     pub fn deferRedial(
@@ -1005,21 +964,9 @@ pub const Catalog = struct {
         duration_ms: u64,
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
-        self.revision +|= 1;
+        self.selection_dirty = true;
         row.reputation.deferRedial(now_ms, duration_ms);
-        self.noteReputation(row, now_ms);
         return true;
-    }
-
-    pub fn nextDeadline(self: *const Catalog, now_ms: u64) ?u64 {
-        var deadline: ?u64 = null;
-        for (self.rows) |*row| {
-            if (!row.occupied) continue;
-            if (row.reputation.nextDeadline(now_ms)) |next| {
-                deadline = @min(deadline orelse next, next);
-            }
-        }
-        return deadline;
     }
 
     /// Emits pending closes and updates in row order from the cursor, visiting only rows with one.

@@ -83,9 +83,7 @@ test "peer owner replacement rejects stale endpoint updates and retirement" {
     const peer = try admit(&fixture, conn, .inbound, at(10));
     const replacement: t.Handle = .{ .index = 1, .generation = 2 };
     try std.testing.expectEqualDeep(peer, try admit(&fixture, replacement, .outbound, at(20_001)));
-    const revision = manager.catalog.revision;
     manager.endpointChanged(conn, &.{ .ip4 = .{ .octets = .{ 203, 0, 113, 2 }, .port = 9001 } });
-    try std.testing.expectEqual(revision, manager.catalog.revision);
     try std.testing.expectEqualDeep(endpoint, manager.catalog.get(peer).?.endpoint);
     try std.testing.expect(manager.retireConnection(peer, conn, .health_error, at(20_001)) == null);
     try std.testing.expectEqual(at(20_001).millis(), schedule_test_support.wakeupMilliseconds(manager.control.schedule(&manager.catalog, at(20_001)), at(20_001).millis()).?);

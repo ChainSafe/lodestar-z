@@ -280,22 +280,17 @@ test "core subscriptions use copied startup policy and reject atomically" {
     text[6] = 'f';
     try std.testing.expectEqual(@as(f64, 2), owner.peers.scores.topic_params[0].weight);
     try std.testing.expectEqualStrings("/eth2/01020304/beacon_block/ssz_snappy", owner.overlay.topicString(0));
-    const revision = owner.peers.scores.revision;
     try std.testing.expectError(error.InvalidTopic, core_test.subscribe(&node, "bad"));
-    try std.testing.expectEqual(revision, owner.peers.scores.revision);
     try std.testing.expectEqual(@as(?u16, 0), owner.overlay.findTopic("/eth2/01020304/beacon_block/ssz_snappy"));
     var name: [topic_mod.topic_max_len]u8 = undefined;
     for (0..constants.topics_cap - 1) |index| {
         const topic = try topic_fixture.churnTopic(index, &name);
         try core_test.subscribe(&node, topic);
     }
-    const full_revision = owner.peers.scores.revision;
     const excess = try topic_fixture.churnTopic(511, &name);
     try std.testing.expectError(error.TopicCapacity, core_test.subscribe(&node, excess));
-    try std.testing.expectEqual(full_revision, owner.peers.scores.revision);
     node.shutdown(node.last_now);
     try std.testing.expectError(error.Stopped, core_test.subscribe(&node, owner.overlay.topicString(0)));
-    try std.testing.expectEqual(full_revision, owner.peers.scores.revision);
     try std.testing.expectEqual(calls, backing_node.allocations);
 }
 
@@ -554,7 +549,6 @@ test "core Status-only update preserves local owners and permits a regressing he
     const allocations = backing_node.allocations;
     const gossip = node.protocols.gossipsub;
     const topic = gossip.overlay.findTopic(name).?;
-    const revision = gossip.peers.scores.revision;
     const params = gossip.peers.scores.topic_params[topic];
     var status = node.localState().status;
     for ([_]u64{ 100, 80 }) |head_slot| {
@@ -568,11 +562,10 @@ test "core Status-only update preserves local owners and permits a regressing he
         try std.testing.expectEqualDeep(identify, node.protocols.identify.local);
         try std.testing.expectEqualDeep(now, node.last_now);
         try std.testing.expectEqualDeep(params, gossip.peers.scores.topic_params[topic]);
-        try std.testing.expectEqual(revision, gossip.peers.scores.revision);
         try std.testing.expect(gossip.overlay.subscribed(topic));
         try std.testing.expectEqual(@as(?u16, topic), gossip.overlay.findTopic(name));
         try std.testing.expectEqual(allocations, backing_node.allocations);
-        try std.testing.expect(node.peer_manager.selection_revision == null);
+        try std.testing.expect(node.peer_manager.catalog.selection_dirty);
     }
 }
 
@@ -615,7 +608,6 @@ test "core local intent demand candidate sequence and stopped refusals" {
         const before = ActivationSnapshot.capture(&node);
         const identify = node.protocols.identify.local;
         const g = node.protocols.gossipsub;
-        const revision = g.peers.scores.revision;
         var desired = intentFor(&node);
         desired.subscriptions = topic_fixture.subscriptions(&.{"/eth2/01020304/beacon_block/ssz_snappy"});
         desired.update.local.fork.custody_groups = 1;
@@ -631,7 +623,6 @@ test "core local intent demand candidate sequence and stopped refusals" {
         try before.expectUnchanged(&node);
         try std.testing.expectEqualDeep(identify, node.protocols.identify.local);
         try std.testing.expectEqualDeep(t.Demand{}, node.peer_manager.demand);
-        try std.testing.expectEqual(revision, g.peers.scores.revision);
         try std.testing.expect(g.overlay.findTopic("/eth2/01020304/beacon_block/ssz_snappy") == null);
         node.shutdown(node.last_now);
         try std.testing.expectError(error.Stopped, node.applyIntent(&desired, node.last_now));
@@ -662,10 +653,8 @@ test "core local intent topic demand no-op preserves Status scheduling and count
     const row = g.overlay.findTopic(name).?;
     g.peers.scores.invalid(0, row);
     const counters = g.peers.scores.topics[row];
-    const revision = g.peers.scores.revision;
     const retained = g.overlay.rows[row].retire_after_ms;
     try std.testing.expect(!try node.applyIntent(&desired, node.last_now));
-    try std.testing.expectEqual(revision, g.peers.scores.revision);
     desired.demand = .{ .attnets = 1 };
     try std.testing.expect(try node.applyIntent(&desired, node.last_now));
     try std.testing.expect(!try node.applyIntent(&desired, node.last_now));
@@ -823,7 +812,6 @@ test "core local intent three boundaries fit and all-column overlap refuses atom
     try std.testing.expect(try node.applyIntent(&desired, node.last_now));
     const before = ActivationSnapshot.capture(&node);
     const g = node.protocols.gossipsub;
-    const revision = g.peers.scores.revision;
     const old_demand = node.peer_manager.demand;
     try union_topics.fill(128);
     try std.testing.expectEqual(@as(usize, 615), union_topics.len);
@@ -833,7 +821,6 @@ test "core local intent three boundaries fit and all-column overlap refuses atom
     try std.testing.expectError(error.TopicCapacity, node.applyIntent(&desired, node.last_now));
     try before.expectUnchanged(&node);
     try std.testing.expectEqualDeep(old_demand, node.peer_manager.demand);
-    try std.testing.expectEqual(revision, g.peers.scores.revision);
     var count: usize = 0;
     for (g.overlay.rows) |row| if (row.subscribed) {
         count += 1;

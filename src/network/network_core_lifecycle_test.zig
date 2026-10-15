@@ -402,7 +402,7 @@ test "core native immediate close preserves direct membership and rejects stale 
         try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.peerCounts().relevant);
         try std.testing.expect(setup.client.peer_manager.catalog.get(captured.peer).?.connection == null);
         try std.testing.expect(setup.client.peer_manager.catalog.rows[0].connection == null);
-        try std.testing.expect(setup.client.peer_manager.selection_revision == null);
+        try std.testing.expect(setup.client.peer_manager.catalog.selection_dirty);
         try std.testing.expectError(error.StaleHandle, setup.pair.client.openStream(captured.connection.?));
         const sink = try std.testing.allocator.alloc(u8, rr.Protocol.blocks_by_root_v2.info().response_max);
         defer std.testing.allocator.free(sink);

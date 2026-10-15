@@ -95,17 +95,33 @@ test "peer manager reconciliation reads preserve completed demand and catalog ev
     try std.testing.expectEqualDeep(DiscoveryNeed{}, view.discoveryNeed());
 }
 
-test "peer manager reconciliation exhausted revisions stay invalidated" {
+test "peer manager periodically reconciles and observes accepted Status immediately" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     const owner = &fixture.manager;
     const g = &fixture.gossip;
     const now = Now.fromMilliseconds(.{ .mono_ms = 1000, .unix_s = 0 });
-    owner.catalog.revision = std.math.maxInt(u64);
+    const blocked: PeerManager.Capacities = .{ .peers = 0, .dials = 0 };
     owner.reconcile(g, now);
-    const before = owner.counters.selections;
-    owner.reconcile(g, now);
-    try std.testing.expectEqual(before + 1, owner.counters.selections);
+    try std.testing.expect(!fixture.schedule(now, blocked).runnable);
+    const due = fixture.schedule(now, blocked).deadline.?;
+    try std.testing.expectEqual(time.milliseconds(2000), due);
+    owner.reconcile(g, Now.fromMilliseconds(.{ .mono_ms = 1999, .unix_s = 0 }));
+    try std.testing.expectEqual(due, fixture.schedule(now, blocked).deadline.?);
+    owner.reconcile(g, Now.fromMilliseconds(.{ .mono_ms = 2000, .unix_s = 0 }));
+    try std.testing.expectEqual(time.milliseconds(3000), fixture.schedule(now, blocked).deadline.?);
+
+    const conn: t.Handle = .{ .index = 0, .generation = 1 };
+    const peer = owner.catalog.admit(&.{ .bytes = @splat(1) }, &owner.local_identity, conn, &.{ .direction = .outbound, .endpoint = quic_test_support.server_address, .now_ms = 2000 }).admitted.peer;
+    try std.testing.expect(owner.catalog.setDirect(peer, true));
+    const accepted = Now.fromMilliseconds(.{ .mono_ms = 2000, .unix_s = 0 });
+    owner.reconcile(g, accepted);
+    try std.testing.expect(!owner.policy_scratch[0].relevant);
+    try std.testing.expect(owner.catalog.updateStatus(peer, conn, &owner.local.status, 2000));
+    try std.testing.expect(fixture.schedule(accepted, blocked).runnable);
+    owner.reconcile(g, accepted);
+    try std.testing.expect(owner.policy_scratch[0].relevant);
+    try std.testing.expect(!owner.catalog.selection_dirty);
 }
 
 test "peer manager wakeups preserve dial bookkeeping and expiry without output capacity" {
@@ -139,6 +155,34 @@ test "peer manager wakeups preserve dial bookkeeping and expiry without output c
     owner.reconcile(&fixture.gossip, expired);
     try std.testing.expect(owner.catalog.find(&identity) == null);
     try std.testing.expectEqualDeep(Schedule{}, owner.dialing.schedule(&owner.catalog, 0));
+}
+
+test "peer manager suppresses due dials at full peer capacity and wakes when room returns" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const owner = &fixture.manager;
+    const now = Now.fromMilliseconds(.{ .mono_ms = 1000, .unix_s = 0 });
+    var last: t.PeerRef = undefined;
+    for (0..4) |index| {
+        const identity: t.PeerId = .{ .bytes = @splat(@intCast(index + 1)) };
+        last = owner.catalog.admit(&identity, &owner.local_identity, .{ .index = @intCast(index), .generation = 1 }, &.{ .direction = .outbound, .endpoint = quic_test_support.server_address, .now_ms = now.millis() }).admitted.peer;
+    }
+    try owner.connectUntil(&.{ .bytes = @splat(9) }, &.{quic_test_support.server_address}, now, 4000);
+    owner.native_dial_room = 4;
+    owner.reconcile(&fixture.gossip, now);
+    owner.finishDialBatch(now);
+    try std.testing.expectEqual(@as(u16, 1), owner.dialing.host_demand);
+    try std.testing.expect(owner.dialing.schedule(&owner.catalog, 1).due(now.monotonic));
+    for (0..3) |_| {
+        const wake = fixture.schedule(now, .{ .peers = 0, .dials = 1 });
+        try std.testing.expect(!wake.due(now.monotonic));
+        try std.testing.expectEqual(time.milliseconds(2000), wake.deadline.?);
+    }
+
+    try std.testing.expect(owner.catalog.disconnect(last, .{ .index = 3, .generation = 1 }, .host, .{}, now));
+    owner.reconcile(&fixture.gossip, now);
+    owner.finishDialBatch(now);
+    try std.testing.expect(fixture.schedule(now, .{ .peers = 0, .dials = 1 }).due(now.monotonic));
 }
 
 test "peer manager quiescence preserves control and peer delivery wakeups" {

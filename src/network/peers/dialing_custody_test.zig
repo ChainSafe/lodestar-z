@@ -87,7 +87,7 @@ test "peer dial custody diagnostics count unfinished derivations without mutatin
         try std.testing.expectEqual(cursor, q.cursor);
         try std.testing.expectEqual(custody_cursor, catalog.candidate_custody_cursor);
         try std.testing.expectEqualDeep(random, q.random);
-        try std.testing.expect(!q.selection_dirty);
+        try std.testing.expect(!catalog.intents_dirty);
         try std.testing.expectEqual(@as(?u64, catalog_mod.Catalog.hint_freshness_ms), q.selection_deadline);
         try std.testing.expectEqual(calls, backing.allocations);
         try std.testing.expectEqual(bytes, ledger.bytes);

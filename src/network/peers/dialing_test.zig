@@ -277,9 +277,7 @@ test "peer direct membership enumeration is complete atomic and read only" {
     const first_peer = catalog.find(&first).?;
     try std.testing.expect(catalog.setDirect(first_peer, false));
     try std.testing.expect(!catalog.rowFor(first_peer).?.direct);
-    const revision = catalog.revision;
     try std.testing.expect(catalog.setDirect(first_peer, false));
-    try std.testing.expectEqual(revision, catalog.revision);
     try std.testing.expectEqual(@as(usize, 1), try catalog.directPeers(&out));
     try std.testing.expect(out[0].eql(&second));
     try std.testing.expect(catalog.setDirect(catalog.find(&second).?, false));
@@ -298,18 +296,19 @@ test "peer explicit address updates reject overflow and invalid input without mu
     q.configureSelection(&catalog, &.{}, true, &.{}, 0);
     const before = candidates[0];
     const selection = q;
+    const intents_dirty = catalog.intents_dirty;
     const custody_cursor_before = catalog.candidate_custody_cursor;
     try std.testing.expectError(error.AddressCapacity, q.enqueue(&catalog, &peer, &.{third}, true, 10));
     try std.testing.expectEqualDeep(before, candidates[0]);
     try std.testing.expectEqualDeep(selection.random, q.random);
-    try std.testing.expectEqual(selection.selection_dirty, q.selection_dirty);
+    try std.testing.expectEqual(intents_dirty, catalog.intents_dirty);
     try std.testing.expectEqual(selection.selection_deadline, q.selection_deadline);
     try std.testing.expectEqual(selection.cursor, q.cursor);
     try std.testing.expectEqual(custody_cursor_before, catalog.candidate_custody_cursor);
     try std.testing.expectError(error.InvalidAddress, q.enqueue(&catalog, &peer, &.{ third, .unspecified }, true, 10));
     try std.testing.expectEqualDeep(before, candidates[0]);
     try std.testing.expectEqualDeep(selection.random, q.random);
-    try std.testing.expectEqual(selection.selection_dirty, q.selection_dirty);
+    try std.testing.expectEqual(intents_dirty, catalog.intents_dirty);
     try std.testing.expectEqual(selection.selection_deadline, q.selection_deadline);
     try std.testing.expectEqual(selection.cursor, q.cursor);
     try std.testing.expectEqual(custody_cursor_before, catalog.candidate_custody_cursor);
@@ -529,16 +528,13 @@ test "peer dial scheduling observes dirty intents without applying them" {
     try queue.enqueue(&catalog, &peer, &.{address}, true, 100);
     const dirty = catalog.dial.dirty_count;
     const visits = queue.visits;
-    const cached = queue.demand;
     try std.testing.expect(dirty > 0);
     const first = queue.schedule(&catalog, 0);
     try std.testing.expect(first.runnable);
     for (0..3) |_| {
         try std.testing.expectEqualDeep(first, queue.schedule(&catalog, 0));
-        _ = queue.demandCounts(&catalog);
         try std.testing.expectEqual(dirty, catalog.dial.dirty_count);
         try std.testing.expectEqual(visits, queue.visits);
-        try std.testing.expectEqualDeep(cached, queue.demand);
     }
     queue.refresh(&catalog, 100);
     try std.testing.expectEqual(@as(u32, 0), catalog.dial.dirty_count);
