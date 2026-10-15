@@ -72,8 +72,10 @@ const required = .{ "beaconConfig", "activeValidatorCount", "identitySecretKey",
 pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out: *Config) !void {
     try decode.object(value, &(required ++ .{ "gossipPolicy", "subscriptions", "peerStoreDir", "transport", "traceGossip", "traceTurns", "xray" }));
     inline for (required) |name| _ = try decode.get(value, name);
-    out.trace_gossip = if (try value.hasNamedProperty("traceGossip")) try decode.boolean(try decode.get(value, "traceGossip")) else false;
-    out.trace_turns = if (try value.hasNamedProperty("traceTurns")) try decode.boolean(try decode.get(value, "traceTurns")) else false;
+    const trace_gossip = try decode.get(value, "traceGossip");
+    const trace_turns = try decode.get(value, "traceTurns");
+    out.trace_gossip = if (try trace_gossip.typeof() == .undefined) false else try decode.boolean(trace_gossip);
+    out.trace_turns = if (try trace_turns.typeof() == .undefined) false else try decode.boolean(trace_turns);
     out.xray = null;
     if (try value.hasNamedProperty("xray")) {
         const xray = try decode.get(value, "xray");

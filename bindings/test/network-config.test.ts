@@ -265,6 +265,8 @@ it("rejects a noncanonical bootstrap encoding during ordinary owner startup", as
 
 it("accepts sparse operator policy with native defaults", async () => {
   const config: NativeApplicationConfig = applicationConfig();
+  config.traceGossip = undefined;
+  config.traceTurns = undefined;
   config.gossipPolicy = {activeSendTimeoutMs: 4000n, hostItems: undefined};
   config.transport = {receiveDatagramsPerTurn: 64};
   config.resources.nativeBudgetBytes = undefined;
