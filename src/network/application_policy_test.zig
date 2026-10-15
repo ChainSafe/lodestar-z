@@ -11,13 +11,30 @@ test "application policy bounds validator-driven work and execution shares" {
         for (processor, execution) |queued, running| {
             try std.testing.expect(running.items > 0 and running.items <= queued.items);
         }
-        const gossip = try policy.gossip(12_000, validators);
+        const gossip = try policy.gossip(&config.mainnet.config.chain, validators);
         try std.testing.expectEqual(12_000 * p.SLOTS_PER_EPOCH * 2, gossip.seen_ttl_ms);
     }
     const processor = try policy.processor(&.{}, 16);
     try std.testing.expectError(error.InvalidGossipExecutionLimits, policy.execution(&.{}, &processor, .{ .items = 1 }));
-    try std.testing.expectError(error.InvalidNetworkConfig, policy.gossip(0, 16));
-    try std.testing.expectError(error.InvalidNetworkConfig, policy.gossip(12_000, 0));
+    const invalid = config.mainnet.config.chain.merge(.{ .SLOT_DURATION_MS = 0 });
+    try std.testing.expectError(error.InvalidNetworkConfig, policy.gossip(&invalid, 16));
+    try std.testing.expectError(error.InvalidNetworkConfig, policy.gossip(&config.mainnet.config.chain, 0));
+}
+
+test "application seen retention covers the longest scheduled slot duration" {
+    for ([_]u64{ 0, 20, std.math.maxInt(u64) }) |epoch| {
+        for ([_]u64{ 6000, 24000 }) |duration_ms| {
+            const configured = config.mainnet.config.chain.merge(.{ .HEZE_FORK_EPOCH = epoch, .SLOT_DURATION_MS_HEZE = duration_ms });
+            const gossip = try policy.gossip(&configured, 16);
+            const max_slot_ms = if (epoch == std.math.maxInt(u64)) 12_000 else @max(12_000, duration_ms);
+            try std.testing.expectEqual(max_slot_ms * p.SLOTS_PER_EPOCH * 2, gossip.seen_ttl_ms);
+            try std.testing.expectEqual(12_000, gossip.score_params.decay_interval_ms);
+        }
+    }
+    for ([_]u64{ 0, 86_400_001, std.math.maxInt(u64) }) |duration_ms| {
+        const invalid = config.mainnet.config.chain.merge(.{ .HEZE_FORK_EPOCH = 20, .SLOT_DURATION_MS_HEZE = duration_ms });
+        try std.testing.expectError(error.InvalidNetworkConfig, policy.gossip(&invalid, 16));
+    }
 }
 
 const score = @import("gossipsub/score.zig");
@@ -39,7 +56,8 @@ test "application score policy matches Lodestar across committee boundaries and 
     defer parsed.deinit();
     for (parsed.value) |fixture| {
         try std.testing.expectEqual(p.SLOTS_PER_EPOCH, fixture.slots_per_epoch);
-        const actual = try policy.gossip(fixture.slot_ms, fixture.validators);
+        const configured = config.mainnet.config.chain.merge(.{ .SLOT_DURATION_MS = fixture.slot_ms });
+        const actual = try policy.gossip(&configured, fixture.validators);
         try std.testing.expectEqual(fixture.retained_score_ms, actual.retained_score_ms);
         inline for (std.meta.fields(score.Params)) |field| {
             if (field.type == f64) {

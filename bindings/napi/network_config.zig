@@ -106,7 +106,7 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
 
 fn parseGossip(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
     const validators = try decode.integer(try decode.get(value, "activeValidatorCount"), 9007199254740991);
-    out.gossip = try n.application_policy.gossip(beacon.chain.SLOT_DURATION_MS, validators);
+    out.gossip = try n.application_policy.gossip(&beacon.chain, validators);
     out.gossip.message_id_policy = .{ .phase0_digest = out.chain.phase0_digest };
     out.gossip.initial_slot = out.slot;
     const boundaries = out.chain.topics[0..out.chain.boundary_count];

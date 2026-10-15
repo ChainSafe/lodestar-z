@@ -342,7 +342,7 @@ fn hubResolved(chain: *const Chain, options: *const Options) !network.configurat
 /// Lodestar's `getTopicScoreParams` for attestation subnets at `validators` active validators, with
 /// every other kind unscored.
 fn lodestarTopics(validators: u32) [gossip.topic_policy.kind_count]gossip.score.TopicPolicy {
-    var result = (network.application_policy.gossip(chain_config.chain.SLOT_DURATION_MS, validators) catch unreachable).topic_params.?;
+    var result = (network.application_policy.gossip(&chain_config.chain, validators) catch unreachable).topic_params.?;
     for (&result, 0..) |*policy, i| if (i != @intFromEnum(Kind.beacon_attestation)) {
         policy.params.weight = 0;
     };

@@ -1,5 +1,6 @@
 //! Beacon-node gossip defaults and resource shares.
 const std = @import("std");
+const ChainConfig = @import("config").ChainConfig;
 const preset = @import("preset");
 const p = preset.preset;
 const constants = @import("constants");
@@ -16,8 +17,14 @@ pub const Execution = struct {
     concurrency: u32 = 16384,
 };
 
-pub fn gossip(slot_ms: u64, validators: u64) !gossip_options.Options {
+pub fn gossip(chain: *const ChainConfig, validators: u64) !gossip_options.Options {
+    const slot_ms = chain.SLOT_DURATION_MS;
     if (slot_ms == 0 or slot_ms > 86_400_000 or validators == 0 or validators > 9007199254740991) return error.InvalidNetworkConfig;
+    var max_slot_ms = slot_ms;
+    if (chain.HEZE_FORK_EPOCH != std.math.maxInt(u64)) {
+        if (chain.SLOT_DURATION_MS_HEZE == 0 or chain.SLOT_DURATION_MS_HEZE > 86_400_000) return error.InvalidNetworkConfig;
+        max_slot_ms = @max(max_slot_ms, chain.SLOT_DURATION_MS_HEZE);
+    }
     const epoch_ms = slot_ms * p.SLOTS_PER_EPOCH;
     const behaviour_decay = decay(10 * p.SLOTS_PER_EPOCH);
     const target = (10.0 / @as(f64, p.SLOTS_PER_EPOCH)) / (1 - behaviour_decay) - 6;
@@ -33,7 +40,7 @@ pub fn gossip(slot_ms: u64, validators: u64) !gossip_options.Options {
         .active_send_items = activeSendItems(),
         .large_frame_timeout_ms = 6000,
         .receive_arena_bytes = 128 * mib,
-        .seen_ttl_ms = epoch_ms * 2,
+        .seen_ttl_ms = max_slot_ms * p.SLOTS_PER_EPOCH * 2,
         .retained_score_ms = epoch_ms * 100,
         .opportunistic_graft_interval_ms = 42_000,
         .gossip_factor = 0.25,
