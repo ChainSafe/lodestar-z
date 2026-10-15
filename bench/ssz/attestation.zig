@@ -9,25 +9,25 @@ const era = @import("era");
 const config = @import("config");
 
 // printf "Date: %s\nKernel: %s\nCPU: %s\nCPUs: %s\nMemory: %s\n" "$(date)" "$(uname -r)" "$(lscpu | grep 'Model name' | awk -F: '{print $2}' | xargs)" "$(lscpu | grep '^CPU(s):' | awk '{print $2}')" "$(free -h | grep Mem | awk '{print $2}')"
-// Date: Fri Apr 25 10:07:24 AM EDT 2025
-// Kernel: 5.15.0-133-generic
-// CPU: AMD Ryzen Threadripper 1950X 16-Core Processor
-// CPUs: 32
-// Memory: 62Gi
-
-// zbuild run bench_attestation -Doptimize=ReleaseFast
+// Date: Wed Oct 14 14:53:05 UTC 2026
+// Kernel: 6.8.0-137-generic
+// CPU: Intel(R) Xeon(R) E-2386G CPU @ 3.50GHz
+// CPUs: 12
+// Memory: 31Gi
+// zig build run:bench_ssz_attestation -Doptimize=ReleaseSafe -Dcpu=baseline
 //
-// benchmark              runs     total time     time/run (avg ± σ)     (min ... max)                p75        p99        p995
-// -----------------------------------------------------------------------------------------------------------------------------
-// serialize attestation  100000   267.558ms      2.675us ± 570ns        (2.314us ... 40.227us)       2.625us    4.418us    4.649us
-// serialize attestation  100000   3.897ms        38ns ± 22ns            (30ns ... 7.053us)           40ns       50ns       50ns
-// deserialize attestatio 100000   532.577ms      5.325us ± 845ns        (4.508us ... 44.375us)       5.3us      7.614us    8.366us
-// deserialize attestatio 100000   4.378ms        43ns ± 23ns            (30ns ... 7.194us)           50ns       60ns       60ns
-// validate attestation   100000   2.384ms        23ns ± 25ns            (20ns ... 8.075us)           30ns       31ns       31ns
-// hash attestation       57120    2.017s         35.321us ± 3.204us     (30.479us ... 119.979us)     36.129us   45.648us   48.352us
-// hash attestation preal 100000   115.875ms      1.158us ± 268ns        (1.132us ... 32.542us)       1.153us    1.163us    1.272us
-// hash attestation onesh 100000   632.905ms      6.329us ± 427ns        (5.981us ... 59.494us)       6.442us    7.184us    7.675us
-// hash attestation seria 100000   657.36ms       6.573us ± 614ns        (5.991us ... 84.341us)       6.783us    7.234us    7.976us
+// benchmark                                 runs     total time     time/run (avg ± σ)    (min ... max)                p75        p99        p995
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+// serialize attestation                     100000   195.054ms      1.95us ± 1.105us      (1.702us ... 59.264us)       1.848us    3.018us    4.25us
+// serialize attestation prealloc            100000   10.816ms       108ns ± 38ns          (92ns ... 6.285us)           115ns      136ns      145ns
+// deserialize attestation                   100000   1.224s         12.246us ± 20.638us   (7.7us ... 935.497us)        14us       29.246us   49.794us
+// deserialize attestation prealloc struct   100000   638.142ms      6.381us ± 10.182us    (5.173us ... 605.338us)      5.961us    10.846us   13.107us
+// validate attestation                      100000   1.799ms        17ns ± 45ns           (15ns ... 8.757us)           18ns       28ns       30ns
+// hash attestation                          32598    1.836s         56.346us ± 57.708us   (42.592us ... 4.395ms)       51.712us   264.23us   458.083us
+// hash attestation prealloc                 100000   784.329ms      7.843us ± 1.3us       (7.146us ... 52.211us)       7.674us    12.253us   16.632us
+// hash attestation oneshot                  100000   767.966ms      7.679us ± 1.102us     (7.077us ... 71.305us)       7.524us    11.953us   14.48us
+// hash attestation serialized               100000   761.216ms      7.612us ± 1.022us     (7.064us ... 68.106us)       7.462us    11.42us    13.807us
+// equals attestation                        100000   1.791ms        17ns ± 14ns           (17ns ... 3.876us)           18ns       22ns       25ns
 
 const SerializeAttestation = struct {
     attestation: *Attestation.Type,

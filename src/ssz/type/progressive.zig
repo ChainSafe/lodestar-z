@@ -220,100 +220,122 @@ pub const NodeIterator = struct {
     }
 };
 
-pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
-    const subtree_count = subtreeCount(out.len);
-    var n = root;
-    var l: usize = 0;
-    for (0..subtree_count) |subtree_i| {
-        const subtree_length = @min(subtreeLength(subtree_i), out.len - l);
-        const subtree_depth = subtreeDepth(subtree_i);
-        const subtree_root = n.getLeft(pool) catch |err| {
-            if (@intFromEnum(n) == 0) {
-                for (l..l + subtree_length) |pos| {
-                    if (pos < out.len) {
-                        out[pos] = @enumFromInt(0);
-                    }
-                }
-                l += subtree_length;
-                n = @enumFromInt(0);
-                continue;
-            }
-            return err;
-        };
-        if (subtree_depth == 0) {
-            if (subtree_length != 1) {
-                return error.InvalidSubtreeLength;
-            }
-            out[l] = subtree_root;
-        } else {
-            try subtree_root.getNodesAtDepth(pool, subtree_depth, 0, out[l .. l + subtree_length]);
+/// Builds progressive subtrees with bounded scratch.
+/// Call `deinit` after success or failure; a successful `finish` transfers the root to the caller.
+/// Abandon the builder if a pool operation fails.
+pub const TreeBuilder = struct {
+    pool: *Node.Pool,
+    roots: [max_node_subtrees]?Node.Id = @splat(null),
+    subtree: Node.SubtreeBuilder,
+    subtree_count: usize = 0,
+    subtree_len: usize = 0,
+    remaining: usize,
+    chunked_leaf: bool = false,
+    finished: bool = false,
+
+    pub fn init(pool: *Node.Pool, chunk_count: usize) !TreeBuilder {
+        if (chunk_count > max_node_chunks) return error.InputTooLong;
+        return .{ .pool = pool, .subtree = Node.SubtreeBuilder.init(pool, 0), .remaining = chunk_count };
+    }
+
+    /// Subtrees of at least `ChunkedLeaf.K` chunks store each run of K chunks in one chunked leaf.
+    /// Append through `appendPacked`.
+    pub fn initChunkedLeaf(pool: *Node.Pool, chunk_count: usize) !TreeBuilder {
+        var builder = try init(pool, chunk_count);
+        builder.chunked_leaf = true;
+        return builder;
+    }
+
+    pub fn deinit(self: *TreeBuilder) void {
+        self.subtree.deinit();
+        for (self.roots) |root| if (root) |id| self.pool.unref(id);
+    }
+
+    /// Takes ownership of a fresh, unretained root or zero node on entry, including on error.
+    pub fn appendOwned(self: *TreeBuilder, node: Node.Id) !void {
+        std.debug.assert(node.getState(self.pool).refCount() == 0);
+        if (self.finished or self.remaining == 0) {
+            self.pool.unref(node);
+            return error.InvalidLength;
         }
-        l += subtree_length;
-        n = try n.getRight(pool);
+        std.debug.assert(self.leafOffset() == 0);
+        try self.appendChunks(node, 1);
     }
 
-    if (!std.mem.eql(u8, &n.getRoot(pool).*, &[_]u8{0} ** 32)) {
-        return error.InvalidTerminatorNode;
+    /// Returns how many chunks the next node holds, or zero once every chunk is appended.
+    pub fn nextNodeChunks(self: *const TreeBuilder) usize {
+        const capacity = @as(usize, 1) << @intCast(2 * self.subtree_count);
+        const node_chunks = @as(usize, 1) << @intCast(self.leafOffset());
+        return @min(node_chunks, capacity - self.subtree_len, self.remaining);
     }
-}
 
-pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, nodes: *[node_count]Node.Id) !Node.Id {
-    const subtree_count = comptime subtreeCount(node_count);
-    var n: Node.Id = @enumFromInt(0);
-    errdefer pool.unref(n);
+    /// Stores the packed bytes of the next node, `nextNodeChunks()` chunks long. Only the last
+    /// node may end in a partial chunk.
+    pub fn appendPacked(self: *TreeBuilder, bytes: []const u8) !void {
+        const chunk_count = (bytes.len + 31) / 32;
+        if (chunk_count == 0 or chunk_count != self.nextNodeChunks()) return error.InvalidLength;
+        std.debug.assert(bytes.len % 32 == 0 or chunk_count == self.remaining);
+        try self.appendChunks(try self.createPackedLeaf(bytes), chunk_count);
+    }
 
-    // Compute subtree starts at comptime
-    comptime var subtree_starts: [subtree_count]usize = undefined;
-    comptime {
-        var pos: usize = 0;
-        for (0..subtree_count) |subtree_i| {
-            subtree_starts[subtree_i] = pos;
-            pos += @min(subtreeLength(subtree_i), node_count - pos);
+    fn createPackedLeaf(self: *TreeBuilder, bytes: []const u8) !Node.Id {
+        if (self.leafOffset() == 0) {
+            var chunk: [32]u8 = @splat(0);
+            @memcpy(chunk[0..bytes.len], bytes);
+            return self.pool.createLeaf(&chunk);
+        }
+
+        const leaf = try self.pool.createChunkedLeafEmpty(@intCast((bytes.len + 31) / 32));
+        errdefer self.pool.unref(leaf);
+
+        const storage = try leaf.getChunkedLeafPtr(self.pool);
+        @memcpy(std.mem.asBytes(&storage.chunks)[0..bytes.len], bytes);
+        return leaf;
+    }
+
+    fn appendChunks(self: *TreeBuilder, node: Node.Id, chunk_count: usize) !void {
+        std.debug.assert(self.subtree_count < max_node_subtrees);
+        try self.subtree.append(node);
+        self.remaining -= chunk_count;
+        self.subtree_len += chunk_count;
+        if (self.subtree_len == @as(usize, 1) << @intCast(2 * self.subtree_count)) {
+            try self.finishSubtree();
         }
     }
 
-    // Process subtrees in reverse order
-    comptime var i: usize = 0;
-    inline while (i < subtree_count) : (i += 1) {
-        const subtree_i = subtree_count - 1 - i;
-        const st_depth = comptime subtreeDepth(subtree_i);
-        const l = comptime subtree_starts[subtree_i];
-        const st_length = comptime @min(subtreeLength(subtree_i), node_count - l);
-
-        const subtree_root = try Node.fillWithContents(pool, nodes[l..][0..st_length], st_depth);
-        n = try pool.createBranch(subtree_root, n);
+    fn finishSubtree(self: *TreeBuilder) !void {
+        std.debug.assert(self.subtree_len > 0);
+        self.roots[self.subtree_count] = try self.subtree.finish();
+        self.subtree_count += 1;
+        self.subtree_len = 0;
+        const leaf_offset = self.leafOffset();
+        self.subtree = Node.SubtreeBuilder.initWithOffset(
+            self.pool,
+            @intCast(2 * self.subtree_count - leaf_offset),
+            leaf_offset,
+        );
     }
 
-    return n;
-}
-
-pub fn fillWithContents(_: std.mem.Allocator, pool: *Node.Pool, nodes: []Node.Id) !Node.Id {
-    var subtree_starts: [max_node_subtrees]usize = undefined;
-    var subtree_count: usize = 0;
-    var pos: usize = 0;
-    for (0..max_node_subtrees) |i| {
-        if (pos == nodes.len) break;
-        subtree_starts[i] = pos;
-        pos += @min(@as(usize, 1) << @intCast(2 * i), nodes.len - pos);
-        subtree_count += 1;
-    }
-    if (pos != nodes.len) return error.InputTooLong;
-
-    var n: Node.Id = @enumFromInt(0);
-    errdefer pool.unref(n);
-
-    for (0..subtree_count) |i| {
-        const subtree_i = subtree_count - 1 - i;
-        const subtree_depth = subtreeDepth(subtree_i);
-        const l = subtree_starts[subtree_i];
-        const subtree_length = @min(subtreeLength(subtree_i), nodes.len - l);
-
-        const subtree_root = try Node.fillWithContents(pool, nodes[l .. l + subtree_length], subtree_depth);
-        n = try pool.createBranch(subtree_root, n);
+    fn leafOffset(self: *const TreeBuilder) Depth {
+        return if (self.chunked_leaf) chunkedLeafOffset(self.subtree_count) else 0;
     }
 
-    return n;
-}
+    pub fn finish(self: *TreeBuilder) !Node.Id {
+        if (self.finished) return error.InvalidState;
+        if (self.remaining != 0) return error.InvalidLength;
+        if (self.subtree_len != 0) try self.finishSubtree();
+        var root: Node.Id = @enumFromInt(0);
+        errdefer self.pool.unref(root);
+        for (0..self.subtree_count) |_| {
+            const i = self.subtree_count - 1;
+            root = try self.pool.createBranch(self.roots[i].?, root);
+            self.roots[i] = null;
+            self.subtree_count -= 1;
+        }
+        self.finished = true;
+        return root;
+    }
+};
 
 test {
     _ = @import("progressive_test.zig");
