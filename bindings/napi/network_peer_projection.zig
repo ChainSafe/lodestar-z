@@ -4,15 +4,15 @@ const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
 const t = n.peers.types;
 const network_js = @import("network_js.zig");
-pub const Entry = struct { event: t.Event, sequence: u64 };
+pub const Entry = t.Event;
 pub const Lane = struct {
     entries: [64]Entry = undefined,
     head: u8 = 0,
     len: u8 = 0,
-    pub fn publish(self: *Lane, events: []const t.Event, sequence: u64) void {
+    pub fn publish(self: *Lane, events: []const t.Event) void {
         std.debug.assert(events.len <= 64 - @as(usize, self.len));
         for (events) |event| {
-            self.entries[(@as(usize, self.head) + self.len) % 64] = .{ .event = event, .sequence = sequence };
+            self.entries[(@as(usize, self.head) + self.len) % 64] = event;
             self.len += 1;
         }
     }
@@ -93,9 +93,8 @@ pub fn state(env: napi.Env, value: *const t.Snapshot) !Value {
 }
 pub fn observation(env: napi.Env, entry: *const Entry) !Value {
     const object = try env.createObject();
-    try object.setNamedProperty("type", try env.createStringUtf8(@tagName(entry.event)));
-    try object.setNamedProperty("ownerSequence", try env.createBigintUint64(entry.sequence));
-    switch (entry.event) {
+    try object.setNamedProperty("type", try env.createStringUtf8(@tagName(entry.*)));
+    switch (entry.*) {
         .ready, .updated => |*value| try object.setNamedProperty("state", try state(env, value)),
         .closed => |value| {
             try object.setNamedProperty("connection", try network_js.connection(env, value.connection));
@@ -111,20 +110,19 @@ test "production peer lane preserves closed generations at capacity" {
     var events: [64]t.Event = undefined;
     const peer: n.PeerId = .{ .bytes = @splat(0) };
     for (&events, 0..) |*event, i| event.* = .{ .closed = .{ .peer = .{ .index = @intCast(i), .generation = std.math.maxInt(u64) - i }, .connection = .{ .index = @intCast(i), .generation = std.math.maxInt(u32) }, .identity = peer, .reason = .host } };
-    lane.publish(&events, std.math.maxInt(u64));
+    lane.publish(&events);
     try std.testing.expectEqual(@as(u8, 64), lane.len);
     var copied: [64]Entry = undefined;
     try std.testing.expectEqual(@as(usize, 64), lane.peek(&copied));
     for (copied, 0..) |entry, i| {
-        try std.testing.expectEqual(std.math.maxInt(u64) - i, entry.event.closed.peer.generation);
-        try std.testing.expectEqual(std.math.maxInt(u32), entry.event.closed.connection.generation);
-        try std.testing.expectEqual(std.math.maxInt(u64), entry.sequence);
+        try std.testing.expectEqual(std.math.maxInt(u64) - i, entry.closed.peer.generation);
+        try std.testing.expectEqual(std.math.maxInt(u32), entry.closed.connection.generation);
     }
     lane.commit(32);
-    lane.publish(events[0..32], 9);
+    lane.publish(events[0..32]);
     try std.testing.expectEqual(@as(usize, 64), lane.peek(&copied));
-    try std.testing.expectEqual(@as(u16, 32), copied[0].event.closed.peer.index);
-    try std.testing.expectEqual(@as(u64, 9), copied[32].sequence);
+    try std.testing.expectEqual(@as(u16, 32), copied[0].closed.peer.index);
+    try std.testing.expectEqual(@as(u16, 0), copied[32].closed.peer.index);
 }
 
 test "full production lane leaves catalog close pending until output resumes" {
@@ -142,7 +140,7 @@ test "full production lane leaves catalog close pending until output resumes" {
         try std.testing.expect(catalog.updateStatus(peer, handle, &.{ .head_slot = i }, i));
         const count = catalog.pollEvents(output[0 .. 64 - lane.len]);
         try std.testing.expectEqual(@as(usize, 1), count);
-        lane.publish(output[0..count], i + 1);
+        lane.publish(output[0..count]);
     }
     try std.testing.expect(catalog.disconnect(peer, handle, .host, .{}, n.Now.fromMilliseconds(.{ .mono_ms = 100, .unix_s = 0 })));
     try std.testing.expectEqual(@as(usize, 0), catalog.pollEvents(output[0 .. 64 - lane.len]));
@@ -150,9 +148,9 @@ test "full production lane leaves catalog close pending until output resumes" {
     lane.commit(64);
     const count = catalog.pollEvents(&output);
     try std.testing.expectEqual(@as(usize, 1), count);
-    lane.publish(output[0..count], 65);
+    lane.publish(output[0..count]);
     var copied: [1]Entry = undefined;
     _ = lane.peek(&copied);
-    try std.testing.expectEqual(handle, copied[0].event.closed.connection);
-    try std.testing.expectEqual(peer, copied[0].event.closed.peer);
+    try std.testing.expectEqual(handle, copied[0].closed.connection);
+    try std.testing.expectEqual(peer, copied[0].closed.peer);
 }

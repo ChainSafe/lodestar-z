@@ -27,18 +27,13 @@ pub fn settle(env: napi.Env, runtime: *Runtime, token: commands.Token) !void {
 
 fn result(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     const operation = &runtime.bridge.commands.cells[index];
-    const object = switch (operation.input) {
+    switch (operation.input) {
         .getMetrics => return network_metrics.value(runtime),
         .getGossipDiagnostics => return network_gossip_diagnostics.copy(env, &runtime.bridge.diagnostics.?.gossip),
         .getPeerScores => return peerScores(env, runtime),
-        .applyIntent => try env.createObject(),
         .removeDirectPeer => return env.getBoolean(operation.boolean),
         else => return env.getUndefined(),
-    };
-    try object.setNamedProperty("ownerSequence", try env.createBigintUint64(operation.sequence));
-    try object.setNamedProperty("changed", try env.getBoolean(operation.boolean));
-    try object.setNamedProperty("slot", try env.createBigintUint64(operation.applied_slot));
-    return object;
+    }
 }
 
 fn peerScores(env: napi.Env, runtime: *Runtime) !Value {

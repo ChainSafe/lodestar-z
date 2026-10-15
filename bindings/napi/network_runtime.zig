@@ -352,11 +352,6 @@ pub const Runtime = struct {
         self.unlock();
         if (release_notify) self.bridge.notify.release(.release) catch unreachable;
     }
-    pub fn advanceSequence(self: *Runtime) !u64 {
-        self.lock();
-        defer self.unlock();
-        return self.bridge.commands.advance();
-    }
     pub fn reservePublication(self: *Runtime, kind: n.gossipsub.topic.Kind, bytes: usize) !publications_mod.Token {
         self.lock();
         defer self.unlock();

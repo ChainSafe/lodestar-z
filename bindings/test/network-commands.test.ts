@@ -1,11 +1,8 @@
 import {createHook} from "node:async_hooks";
 import {expect, test, vi} from "vitest";
-import {applicationConfig, localIntent, startRuntime, topicName, unreachableConnect} from "./utils/network.js";
-import {BLOCKS} from "./utils/network-incoming.js";
+import {applicationConfig, localIntent, startRuntime, unreachableConnect} from "./utils/network.js";
 import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
 import type {NetworkTestRuntime} from "./utils/network-runtime.js";
-
-const PUBLISH = {allowZeroPeers: true, ignoreDuplicate: true};
 
 test("every command kind completes with its typed result", async () => {
   const config = applicationConfig();
@@ -17,12 +14,7 @@ test("every command kind completes with its typed result", async () => {
     remote = await startPeer(remoteConfig);
     const peer = await remote.identity;
     await remote.applyIntent(localIntent(remoteConfig));
-    const sequence = expect.any(BigInt);
-    expect(await runtime.applyIntent(localIntent(config))).toEqual({
-      changed: expect.any(Boolean),
-      ownerSequence: sequence,
-      slot: 100n,
-    });
+    expect(await runtime.applyIntent(localIntent(config))).toBeUndefined();
     expect(await runtime.updateStatus(config.local.status)).toBeUndefined();
     expect(await runtime.getIdentity()).toMatchObject(runtime.identity);
     expect(await runtime.connect(peer.peerId, [peer.localEndpoint], 5000n)).toBeUndefined();
@@ -32,7 +24,7 @@ test("every command kind completes with its typed result", async () => {
       peers: [expect.objectContaining({identity: peer.peerId})],
     });
     expect(await runtime.getGossipDiagnostics(0)).toMatchObject({
-      observedMonoMs: sequence,
+      observedMonoMs: expect.any(BigInt),
       peers: expect.any(Array),
       topics: expect.any(Array),
     });
@@ -138,27 +130,4 @@ test("close during native Promise creation refuses admission without leaving an 
     expect(await runtime.close()).toEqual({reason: "requested"});
   }
   expect(closedDuringCreation).toBe(true);
-});
-
-test("the owner starts commands, publications and requests in their admission order", async () => {
-  const runtime = startRuntime(applicationConfig());
-  try {
-    runtime.holdOperations(true);
-    const first = runtime.applyIntent({});
-    const publication = runtime.publishGossip(topicName(), new Uint8Array(4000), PUBLISH);
-    const second = runtime.applyIntent({});
-    // Handled now: native can reject the request, and an exchange settle it, before the commands below complete.
-    const request = runtime
-      .request(runtime.identity.peerId, BLOCKS, new Uint8Array(32))
-      .next()
-      .catch(() => undefined);
-    const third = runtime.applyIntent({});
-    // Released together, they start in one pass that advances the owner's sequence once per operation.
-    runtime.holdOperations(false);
-    const [a, b, c] = await Promise.all([first, second, third]);
-    await Promise.all([publication, request]);
-    expect([b.ownerSequence - a.ownerSequence, c.ownerSequence - b.ownerSequence]).toEqual([2n, 2n]);
-  } finally {
-    await runtime.close();
-  }
 });

@@ -60,7 +60,7 @@ it("owns a real native socket and releases it on idempotent close", childTestTim
       );
     }
     expect(identity.localEndpoint.port).toBeGreaterThan(0);
-    expect((await runtime.applyIntent(localIntent(config))).slot).toBeGreaterThanOrEqual(100n);
+    await runtime.applyIntent(localIntent(config));
     const closing = runtime.close();
     expect(terminal).toBe(closing);
     expect(runtime.close()).toBe(closing);
@@ -91,12 +91,15 @@ it("copies inputs before returning and preserves earlier identity snapshots", as
     config.local.status.headRoot.fill(99);
     const applied = runtime.applyIntent(intent);
     intent.syncCommittees[0].subnet = 2;
-    expect((await applied).slot).toBeGreaterThanOrEqual(100n);
+    await applied;
     expect((await runtime.getIdentity()).metadata.syncnets).toBe(2);
     expect(identity.metadata.syncnets).toBe(0);
     expect(identity.peerId).toEqual(expected);
-    expect((await runtime.applyIntent(intent)).changed).toBe(true);
-    expect((await runtime.applyIntent(intent)).changed).toBe(false);
+    await runtime.applyIntent(intent);
+    const updated = await runtime.getIdentity();
+    expect(updated.metadata.syncnets).toBe(6);
+    await runtime.applyIntent(intent);
+    expect(await runtime.getIdentity()).toEqual(updated);
   } finally {
     await runtime.close();
   }
@@ -512,7 +515,7 @@ it("settles results only in an exchange and notifies once until an exchange find
     await delay(0);
     expect([intentSettled(), querySettled()]).toEqual([true, true]);
     expect(exchange(runtime, settleOnly)).toMatchObject({checks: [], gossip: null, peers: [], serving: []});
-    expect((await intent).slot).toBeGreaterThanOrEqual(100n);
+    await intent;
     expect((await query).peers).toEqual([]);
     const pull = runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next();
     const pullSettled = watch(pull);

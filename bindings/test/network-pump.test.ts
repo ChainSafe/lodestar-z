@@ -124,7 +124,6 @@ type Incoming = ReturnType<typeof incoming>;
 const peerEvent: NativePeerObservation = {
   connection: {generation: 1, index: 0},
   identity: "peer",
-  ownerSequence: 1n,
   reason: "host",
   type: "closed",
 };

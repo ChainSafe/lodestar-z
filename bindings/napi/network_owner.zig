@@ -224,7 +224,6 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
         return err;
     };
     self.unlock();
-    const sequence = try self.advanceSequence();
     const result = n.driver.step(&self.owner.?.core, io, timestamp, .{ .peers = self.owner.?.outputs[0..@min(peer_room, self.owner.?.outputs.len)], .application = &self.owner.?.application_outputs }, .{ .handler = .{ .context = host, .apply = Host.apply }, .deadline = n.time.optionalMilliseconds(deadline) });
     if (host.failure) |err| return err;
     if (ingress.failure) |err| return err;
@@ -233,7 +232,7 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
     try requests_mod.capture(self, self.owner.?.application_outputs[0..result.counts.application], tick);
     commands.completeConnects(self, result.transport_events, tick);
     publishIdentity(self);
-    publishTurn(self, &result, tick, sequence);
+    publishTurn(self, &result, tick);
     return result;
 }
 
@@ -344,10 +343,6 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
                 return true;
             }
             const cell = self.bridge.commands.get(command.?);
-            cell.sequence = self.bridge.commands.advance() catch |err| {
-                self.unlock();
-                return err;
-            };
             self.bridge.commands.transition(cell, .executing);
             self.unlock();
             commands.execute(self, command.?, tick);
@@ -358,10 +353,6 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
                 self.unlock();
                 return true;
             }
-            _ = self.bridge.commands.advance() catch |err| {
-                self.unlock();
-                return err;
-            };
             self.unlock();
             publications.execute(self, publication.?, tick, (try Now.read(io)).millis());
             publishes += 1;
@@ -371,10 +362,6 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
                 self.unlock();
                 return true;
             }
-            _ = self.bridge.commands.advance() catch |err| {
-                self.unlock();
-                return err;
-            };
             self.unlock();
             try requests_mod.submit(self, request.?, tick);
             requests += 1;
@@ -397,7 +384,7 @@ pub fn publishIdentity(self: *Runtime) void {
     self.notifyIfReadyLocked();
 }
 
-fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n.Now, sequence: u64) void {
+fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n.Now) void {
     self.lock();
     if (timestamp.millis() >= self.health_log_due_ms) {
         const counts = self.owner.?.core.peerCounts();
@@ -405,7 +392,7 @@ fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n
         std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.owner.?.resolved.core.peers.target_peers, active_requests.outbound, active_requests.inbound, self.owner.?.core.counters.dial_started, self.owner.?.core.counters.dial_deferred, if (self.owner.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.owner.?.core.protocols.gossipsub.counters.local_pressure_resets, self.owner.?.core.transport.counters.received_bytes, self.owner.?.core.transport.counters.sent_bytes });
         self.health_log_due_ms = timestamp.millis() +| 30000;
     }
-    if (self.bridge.peer_updates) |lane| lane.publish(self.owner.?.outputs[0..result.counts.peers], sequence);
+    if (self.bridge.peer_updates) |lane| lane.publish(self.owner.?.outputs[0..result.counts.peers]);
     self.notifyIfReadyLocked();
     if (result.failure) |err| {
         std.log.scoped(.network_runtime).debug("owner_turn_failed reason={s} fatal={any}", .{ @errorName(err), result.readiness.failure != null });
@@ -531,6 +518,24 @@ test "a command queued after wait planning executes in the turn whose poll obser
     _ = try applyWork(&runtime, io, next_slot);
     try std.testing.expectEqual(1, try owner.core.clock.read(next_slot));
     try std.testing.expectEqual(1, owner.state.?.applied_slot.?);
+    const statuses = [_]u64{ 120, 80, 90 };
+    var updates: [3]commands.Token = undefined;
+    for (&updates, statuses, 0..) |*update_token, head, i| {
+        update_token.* = try runtime.bridge.commands.reserve(if (i == 1) .applyIntent else .updateStatus);
+        const cell = runtime.bridge.commands.get(update_token.*);
+        var status = owner.core.localState().status;
+        status.head_slot = head;
+        if (i == 1) cell.input.applyIntent = .{ .status = status } else cell.input.updateStatus = status;
+        runtime.bridge.commands.transition(cell, .queued);
+    }
+    defer for (updates) |update| runtime.bridge.commands.retire(update);
+    try std.testing.expect(!try executeWork(&runtime, io, next_slot));
+    for (updates) |update| {
+        const cell = runtime.bridge.commands.get(update);
+        try std.testing.expectEqual(.terminal, cell.state);
+        try std.testing.expect(cell.failure == null);
+    }
+    try std.testing.expectEqual(@as(u64, 90), owner.core.localState().status.head_slot);
     runtime.owner = null;
 }
 

@@ -17,9 +17,7 @@ pub const Cell = struct {
     order: u64 = 0,
     input: Input = .getMetrics,
     failure: ?anyerror = null,
-    sequence: u64 = 0,
     boolean: bool = false,
-    applied_slot: u64 = 0,
     deadline: u64 = 0,
 };
 pub const Table = struct {
@@ -31,13 +29,8 @@ pub const Table = struct {
     diagnostic: ?u8 = null,
     connects: u8 = 0,
     occupied: u8 = 0,
-    sequence: u64 = 0,
     admission_sequence: u64 = 0,
 
-    pub fn advance(self: *Table) !u64 {
-        self.sequence = std.math.add(u64, self.sequence, 1) catch return error.NetworkSequenceExhausted;
-        return self.sequence;
-    }
     pub fn nextOrder(self: *Table) !u64 {
         if (self.admission_sequence >= std.math.maxInt(u64) - 1) return error.NetworkSequenceExhausted;
         self.admission_sequence += 1;
@@ -156,8 +149,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
     switch (input.*) {
         .applyIntent => {
             const intent = &input.applyIntent;
-            operation.boolean = try self.owner.?.state.?.apply(core, &self.owner.?.config.chain, intent, timestamp);
-            operation.applied_slot = @intCast(@max(0, self.owner.?.state.?.applied_slot.?));
+            _ = try self.owner.?.state.?.apply(core, &self.owner.?.config.chain, intent, timestamp);
         },
         .updateStatus => {
             var status = input.updateStatus;

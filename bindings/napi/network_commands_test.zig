@@ -43,8 +43,6 @@ test "command identities never wrap" {
     var table: Table = .{};
     table.cells[0].generation = std.math.maxInt(u64);
     try std.testing.expectError(error.NetworkSequenceExhausted, table.reserve(.updateStatus));
-    table.sequence = std.math.maxInt(u64);
-    try std.testing.expectError(error.NetworkSequenceExhausted, table.advance());
     table.admission_sequence = std.math.maxInt(u64) - 2;
     try std.testing.expectEqual(std.math.maxInt(u64) - 1, try table.nextOrder());
     try std.testing.expectError(error.NetworkSequenceExhausted, table.nextOrder());

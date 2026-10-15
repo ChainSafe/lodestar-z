@@ -784,26 +784,3 @@ test("a full request table delivers every outcome and reuses each cell with the 
     await closedBy(native, lifecycle.closed);
   }
 });
-
-test("requests start in their admission order among commands", async () => {
-  const runtime = startRuntime(applicationConfig());
-  try {
-    runtime.holdOperations(true);
-    const outcome = () =>
-      runtime
-        .request(runtime.identity.peerId, BLOCKS, new Uint8Array(32))
-        .next()
-        .catch(() => undefined);
-    const first = outcome();
-    const before = runtime.applyIntent({});
-    const second = outcome();
-    const after = runtime.applyIntent({});
-    // Released together, each starts in one pass that advances the owner's sequence once per operation.
-    runtime.holdOperations(false);
-    const [a, b] = await Promise.all([before, after]);
-    await Promise.all([first, second]);
-    expect(b.ownerSequence - a.ownerSequence).toBe(2n);
-  } finally {
-    await runtime.close();
-  }
-});

@@ -253,7 +253,7 @@ test "owner work that races an exchange's check and arm always reaches a later e
                 if (self.stop.load(.acquire)) break;
                 target.lock();
                 if (self.produced < 5_000 and target.bridge.peer_updates.?.len < 64) {
-                    target.bridge.peer_updates.?.publish(&.{.{ .closed = undefined }}, self.produced);
+                    target.bridge.peer_updates.?.publish(&.{.{ .closed = undefined }});
                     self.produced += 1;
                     target.notifyIfReadyLocked();
                     if (self.produced == 5_000) self.done.store(true, .release);

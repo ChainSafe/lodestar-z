@@ -308,7 +308,7 @@ if (mode === "open") {
     runtime.exchange();
     await delay(5);
   }
-  assert.equal((await intent).slot, 100n);
+  assert.equal(await intent, undefined);
   assert.equal((await identity).peerId, runtime.identity.peerId);
   console.log("rearmed");
 } else throw new Error("Unknown lifecycle scenario");

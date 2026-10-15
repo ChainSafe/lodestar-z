@@ -177,7 +177,7 @@ fn queueRequest(runtime: *Runtime) !incoming.Token {
 fn publishPeer(runtime: *Runtime) void {
     runtime.lock();
     defer runtime.unlock();
-    runtime.bridge.peer_updates.?.publish(&.{.{ .closed = undefined }}, 1);
+    runtime.bridge.peer_updates.?.publish(&.{.{ .closed = undefined }});
     runtime.notifyIfReadyLocked();
 }
 

@@ -193,12 +193,6 @@ export interface NativeLocalIntent {
   syncCommittees?: readonly {subnet: number; untilSlot: number}[];
 }
 
-export interface NativeIntentResult {
-  changed: boolean;
-  slot: bigint;
-  ownerSequence: bigint;
-}
-
 export interface NativePeerScores {
   observedMonoMs: bigint;
   observedUnixMs: bigint;
@@ -293,14 +287,14 @@ export interface NativePeerState {
   goodbyeUntilMs: bigint;
   redialUntilMs: bigint;
 }
+/** Delivered in owner order. A close applies only to its connection generation. */
 export type NativePeerObservation =
-  | {type: "ready" | "updated"; state: NativePeerState; ownerSequence: bigint}
+  | {type: "ready" | "updated"; state: NativePeerState}
   | {
       type: "closed";
       connection: NativeConnection;
       identity: PeerIdStr;
       reason: NativeDisconnectReason;
-      ownerSequence: bigint;
     };
 
 export interface NativeRequestOptions {
@@ -581,7 +575,7 @@ export interface NativeNetwork {
   /** Native shutdown and its promised completions finished. A failed network cannot restart. */
   readonly closed: Promise<CloseResult>;
   /** Shares reserved admission with updateStatus; one state operation at a time avoids ordinary command pressure. */
-  applyIntent(intent: NativeLocalIntent): Promise<NativeIntentResult>;
+  applyIntent(intent: NativeLocalIntent): Promise<void>;
   /** Updates Status for the active fork; preserves clock, subscriptions, Metadata, ENR and demand. */
   updateStatus(status: NetworkStatusUpdate): Promise<void>;
   /** Copies `root` before returning. Throws InvalidNetworkBytes unless it is a 32-byte Uint8Array. */

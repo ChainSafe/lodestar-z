@@ -88,15 +88,7 @@ test("Status-only validation uses the active fork and leaves rejected updates un
     await expect(runtime.updateStatus({...config.local.status, earliestAvailableSlot: null})).rejects.toThrow(
       "MissingAvailability"
     );
-    expect((await runtime.applyIntent(intent)).changed).toBe(false);
-    const first = runtime.updateStatus({...config.local.status, headSlot: 120n});
-    const second = structuredClone(intent);
-    second.status = {...config.local.status, headSlot: 80n};
-    const coordinated = runtime.applyIntent(second);
-    const last = runtime.updateStatus({...config.local.status, headSlot: 90n});
-    await Promise.all([first, coordinated, last]);
-    second.status = {...config.local.status, headSlot: 90n};
-    expect((await runtime.applyIntent(second)).changed).toBe(false);
+    await runtime.applyIntent(intent);
   } finally {
     await runtime.close();
   }
@@ -407,7 +399,7 @@ test("identity reads the current signed ENR and copied intent ignores later inpu
     expect(first.localEnr).not.toEqual(ready.localEnr);
     const repeated = localIntent(config);
     repeated.syncCommittees = [{subnet: 0, untilSlot: 200}];
-    expect((await runtime.applyIntent(repeated)).changed).toBe(false);
+    await runtime.applyIntent(repeated);
     expect((await runtime.getIdentity()).localEnr).toEqual(first.localEnr);
   } finally {
     await runtime.close();
@@ -430,9 +422,10 @@ test("incomplete early metadata rejects the whole intent without publishing loca
     const after = await runtime.getIdentity();
     expect(after.metadata).toEqual(before.metadata);
     expect(after.localEnr).toEqual(before.localEnr);
-    expect((await runtime.applyIntent(localIntent(config))).changed).toBe(false);
+    await runtime.applyIntent(localIntent(config));
     intent.custodyGroupCount = 1n;
-    expect((await runtime.applyIntent(intent)).changed).toBe(true);
+    await runtime.applyIntent(intent);
+    expect((await runtime.getIdentity()).metadata.syncnets).toBe(1);
   } finally {
     await runtime.close();
   }

@@ -1,5 +1,5 @@
 import {expect, test} from "vitest";
-import type {HostCapacity, NativeForkEntry, NativeIdentity, NativeIntentResult} from "../src/network.js";
+import type {HostCapacity, NativeForkEntry, NativeIdentity} from "../src/network.js";
 import type {NativeDelivery, NativeRuntimeCloseResult} from "../src/network-runtime.js";
 import {applicationConfig, childTestTimeout, gossipAll, localIntent, requestForks, runChild} from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
@@ -33,7 +33,7 @@ interface DirectIncomingBridge {
     config: ReturnType<typeof applicationConfig>,
     onWorkAvailable: () => void
   ): {identity: NativeIdentity; closed: Promise<NativeRuntimeCloseResult>};
-  applyIntent(intent: ReturnType<typeof localIntent>): Promise<NativeIntentResult>;
+  applyIntent(intent: ReturnType<typeof localIntent>): Promise<void>;
   exchange(): NativeDelivery;
 
   setCapacity(capacity: HostCapacity | null): void;
