@@ -252,21 +252,20 @@ pub const TreeBuilder = struct {
     }
 
     /// Takes ownership of a fresh, unretained root or zero node on entry, including on error.
+    /// Builders from `initChunkedLeaf` take `appendPacked` instead.
     pub fn appendOwned(self: *TreeBuilder, node: Node.Id) !void {
         std.debug.assert(node.getState(self.pool).refCount() == 0);
+        std.debug.assert(!self.chunked_leaf);
         if (self.finished or self.remaining == 0) {
             self.pool.unref(node);
             return error.InvalidLength;
         }
-        std.debug.assert(self.leafOffset() == 0);
         try self.appendChunks(node, 1);
     }
 
     /// Returns how many chunks the next node holds, or zero once every chunk is appended.
     pub fn nextNodeChunks(self: *const TreeBuilder) usize {
-        const capacity = @as(usize, 1) << @intCast(2 * self.subtree_count);
-        const node_chunks = @as(usize, 1) << @intCast(self.leafOffset());
-        return @min(node_chunks, capacity - self.subtree_len, self.remaining);
+        return @min(@as(usize, 1) << @intCast(self.leafOffset()), self.remaining);
     }
 
     /// Stores the packed bytes of the next node, `nextNodeChunks()` chunks long. Only the last
@@ -274,7 +273,7 @@ pub const TreeBuilder = struct {
     pub fn appendPacked(self: *TreeBuilder, bytes: []const u8) !void {
         const chunk_count = (bytes.len + 31) / 32;
         if (chunk_count == 0 or chunk_count != self.nextNodeChunks()) return error.InvalidLength;
-        std.debug.assert(bytes.len % 32 == 0 or chunk_count == self.remaining);
+        if (bytes.len % 32 != 0 and chunk_count != self.remaining) return error.InvalidLength;
         try self.appendChunks(try self.createPackedLeaf(bytes), chunk_count);
     }
 

@@ -129,18 +129,21 @@ test "chunked progressive tree builder should size nodes by subtree and reject o
     var builder = try progressive.TreeBuilder.initChunkedLeaf(&pool, 86);
     defer builder.deinit();
 
-    // Subtrees 0 to 2 hold 21 chunks of one leaf each. Subtree 3 is one 64-chunk leaf. The last
-    // chunk starts subtree 4.
+    // Subtrees 0 to 2 hold 21 single-chunk leaves. Subtree 3 is one 64-chunk leaf. The last chunk
+    // starts subtree 4.
     for (0..21) |_| {
         try std.testing.expectEqual(1, builder.nextNodeChunks());
         try builder.appendPacked(bytes[0..32]);
     }
     try std.testing.expectEqual(64, builder.nextNodeChunks());
     try std.testing.expectError(error.InvalidLength, builder.appendPacked(bytes[0..32]));
+    const partial = bytes[0 .. bytes.len - 1];
+    try std.testing.expectError(error.InvalidLength, builder.appendPacked(partial));
     try builder.appendPacked(&bytes);
     try std.testing.expectEqual(1, builder.nextNodeChunks());
     try builder.appendPacked(bytes[0..1]);
     try std.testing.expectEqual(0, builder.nextNodeChunks());
+    try std.testing.expectError(error.InvalidLength, builder.appendPacked(&.{}));
     try std.testing.expectError(error.InvalidLength, builder.appendPacked(bytes[0..32]));
 
     const root = try builder.finish();

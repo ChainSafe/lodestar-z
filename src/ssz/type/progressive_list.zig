@@ -330,12 +330,10 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
                 return try pool.createBranch(contents, length_leaf);
             }
 
-            fn initTreeBuilder(pool: *Node.Pool, chunk_count: usize) !progressive.TreeBuilder {
-                if (comptime use_chunked_leaf) {
-                    return progressive.TreeBuilder.initChunkedLeaf(pool, chunk_count);
-                }
-                return progressive.TreeBuilder.init(pool, chunk_count);
-            }
+            const initTreeBuilder = if (use_chunked_leaf)
+                progressive.TreeBuilder.initChunkedLeaf
+            else
+                progressive.TreeBuilder.init;
 
             fn appendPackedBytes(builder: *progressive.TreeBuilder, bytes: []const u8) !void {
                 var offset: usize = 0;
