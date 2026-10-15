@@ -28,6 +28,7 @@ pub const Owner = struct {
     outputs: [32]n.peers.Event = undefined,
     application_outputs: [32]n.reqresp.ReqResp.Event = undefined,
     application: application_config.Config = undefined,
+    state: ?n.application_state.State = null,
     processor_metrics: processor_metrics.Snapshot = .{},
 
     pub fn readIdentity(self: *const Owner) !r.Identity {
@@ -81,6 +82,8 @@ pub fn initialize(self: *Runtime) !void {
         .discovery = if (self.owner.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.owner.?.config.discovery_sequence, .advertisement = self.owner.?.config.advertisement, .fixed = self.owner.?.config.fixed, .bootstrap = self.owner.?.records[0..self.owner.?.config.bootstrap_count] } else null,
     });
     self.owner.?.core_live = true;
+    self.owner.?.state = try n.application_state.State.init(&self.owner.?.config.state, &self.owner.?.config.chain, &self.owner.?.core.peerId(), &self.owner.?.config.local);
+    try self.owner.?.state.?.advance(&self.owner.?.core, &self.owner.?.config.chain, try Now.read(io));
     self.owner.?.core.turn_timing.enabled = self.owner.?.application.trace_turns;
     self.owner.?.core.protocols.gossipsub.trace_gossip = self.owner.?.application.trace_gossip;
     if (self.owner.?.application.xray) |*options| {
@@ -143,7 +146,10 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
     }
     self.lock();
     const peer_room: usize = if (self.bridge.peer_updates) |lane| 64 - @as(usize, lane.len) else self.owner.?.outputs.len;
-    const deadline = hostDeadline(self, timestamp);
+    const deadline = hostDeadline(self, timestamp) catch |err| {
+        self.unlock();
+        return err;
+    };
     self.unlock();
     const sequence = try self.advanceSequence();
     const result = n.driver.step(&self.owner.?.core, io, timestamp, .{ .peers = self.owner.?.outputs[0..@min(peer_room, self.owner.?.outputs.len)], .application = &self.owner.?.application_outputs }, .{ .handler = .{ .context = host, .apply = Host.apply }, .deadline = n.time.optionalMilliseconds(deadline) });
@@ -158,11 +164,15 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
 }
 
 /// The earliest host-owned deadline, read under the lock: the health log,
-/// connect timeouts, the graceful close and the gossip processor's groups and expiry. Host work
+/// slot clock, connect timeouts, the graceful close and the gossip processor's groups and expiry. Host work
 /// found by the previous turn's event capture is due now.
-fn hostDeadline(self: *Runtime, timestamp: n.Now) u64 {
+fn hostDeadline(self: *Runtime, timestamp: n.Now) !u64 {
     if (self.host_due) return timestamp.millis();
     var deadline = self.health_log_due_ms;
+    if (!self.bridge.stop) if (self.owner.?.state) |*state| {
+        if (try state.slot(timestamp) != state.applied_slot) return timestamp.millis();
+        deadline = @min(deadline, n.time.ceilMilliseconds(try state.config.clock.deadline(timestamp)));
+    };
     if (commands.connectDeadline(&self.bridge.commands)) |value| deadline = @min(deadline, value);
     if (self.closing_deadline) |value| deadline = @min(deadline, value);
     if (self.bridge.gossip) |*table| if (table.deadline()) |value| {
@@ -201,6 +211,7 @@ fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.NetworkCore.HostProgres
     if (stopped) return .{};
     var more = false;
     if (!stop) {
+        if (self.owner.?.state) |*state| try state.advance(&self.owner.?.core, &self.owner.?.config.chain, tick);
         more = applyReports(self, tick) or more;
         more = try executeWork(self, io, tick) or more;
     }
@@ -342,16 +353,26 @@ test "a command queued after wait planning executes in the turn whose poll obser
     const io = owner.threaded.io();
     runtime.owner = owner;
     const key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{71}));
+    const beacon_config = @import("config");
+    const chain_base = if (@import("preset").active_preset == .minimal) beacon_config.minimal.chain_config else beacon_config.mainnet.chain_config;
+    const beacon = beacon_config.BeaconConfig.init(chain_base, @splat(0));
+    owner.config.chain = try n.chain.Config.init(&beacon, false);
+    const initial = try owner.config.chain.update(.{ .metadata = .{ .custody_group_count = 1 }, .status = .{ .earliest_available_slot = 0 } }, null, 0);
     const resolved = try n.configuration.resolve(.{
         .seed = 1,
-        .gossip = .{ .topic_policy = &test_support.topic_policy },
-        .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }},
+        .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 1 },
+        .peers = .{ .capacity = 4, .outbound_reserve = 1, .max_peers = 3, .target_peers = 2, .min_outbound = 1 },
+        .dial = .{ .capacity = 4, .concurrent_max = 1, .outbound_reserved = 1, .seed = 7 },
+        .gossip = .{ .topic_policy = owner.config.chain.topics[0..owner.config.chain.boundary_count], .mcache_capacity = 8, .validation_capacity = 2 },
+        .forks = owner.config.chain.forks[0..owner.config.chain.boundary_count],
+        .router = .{ .capabilities = initial.capabilities },
         .admission_policy = .{ .deneb_start_slot = 0, .blocks_pre_deneb = 1024, .blocks_deneb = 128, .blob_identifiers_deneb = 768, .blob_identifiers_electra = 1152, .number_of_columns = 128, .column_chunks = 16384, .blob_schedule = &.{.{ .start_slot = 0, .max_blobs = 6 }} },
     });
     try owner.core.init(testing, io, &resolved, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
-        .local = .{ .metadata = .{ .custody_group_count = 1 }, .status = .{ .earliest_available_slot = 0 } },
+        .local = initial.local,
+        .schedule = initial.schedule,
     });
     defer owner.core.deinit(io);
     runtime.bridge.wake = try network_wake.Wake.init();
@@ -406,6 +427,17 @@ test "a command queued after wait planning executes in the turn whose poll obser
     try std.testing.expectEqual(.terminal, runtime.bridge.commands.get(token).state);
     try std.testing.expect(runtime.bridge.commands.get(token).failure == null);
     runtime.retireCommand(token);
+    const state_config = try n.application_state.Config.init(&beacon.chain, 1000, .{});
+    owner.state = try n.application_state.State.init(&state_config, &owner.config.chain, &owner.core.peerId(), &initial.local);
+    const first_slot = n.Now.fromMilliseconds(.{ .mono_ms = result.transport.now.millis() + 1, .unix_s = 1000 });
+    _ = try applyWork(&runtime, io, first_slot);
+    runtime.health_log_due_ms = first_slot.millis() + 30000;
+    try std.testing.expectEqual(first_slot.millis() + 1000, try hostDeadline(&runtime, first_slot));
+    const next_slot = n.Now.fromMilliseconds(.{ .mono_ms = first_slot.millis() + 12000, .unix_s = 1012 });
+    try std.testing.expectEqual(next_slot.millis(), try hostDeadline(&runtime, next_slot));
+    _ = try applyWork(&runtime, io, next_slot);
+    try std.testing.expectEqual(1, owner.core.current_slot);
+    try std.testing.expectEqual(1, owner.state.?.applied_slot.?);
     runtime.owner = null;
 }
 

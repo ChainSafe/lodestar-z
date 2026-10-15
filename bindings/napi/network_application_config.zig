@@ -70,11 +70,11 @@ const resource_maxima = .{
     .bridgeBudgetBytes = 1024 * 1024 * 1024,
 };
 
-const required = .{ "beaconConfig", "activeValidatorCount", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "resources", "identify", "serveLightClients", "logLevel" };
+const required = .{ "beaconConfig", "activeValidatorCount", "identitySecretKey", "bind", "local", "discovery", "genesisTime", "resources", "identify", "serveLightClients", "logLevel" };
 
 pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out: *Config) !void {
     const remembered = try value.hasNamedProperty("rememberedPeers");
-    try decode.object(value, &(required ++ .{ "gossipPolicy", "rememberedPeers", "transport", "traceGossip", "traceTurns", "xray" }));
+    try decode.object(value, &(required ++ .{ "gossipPolicy", "subscriptions", "rememberedPeers", "transport", "traceGossip", "traceTurns", "xray" }));
     inline for (required) |name| _ = try decode.get(value, name);
     out.trace_gossip = if (try value.hasNamedProperty("traceGossip")) try decode.boolean(try decode.get(value, "traceGossip")) else false;
     out.trace_turns = if (try value.hasNamedProperty("traceTurns")) try decode.boolean(try decode.get(value, "traceTurns")) else false;
@@ -157,54 +157,39 @@ fn parseRemembered(value: Value, out: *Config) !void {
     out.remembered_count = @intCast(count);
 }
 
-pub const Intent = struct {
-    value: n.NetworkCore.LocalIntent,
-    subscriptions: [n.gossipsub.topic_policy.boundary_max]n.gossipsub.local_intent.Boundary,
-};
-pub fn parseIntent(value: Value, out: *Intent, max_peers: u16) !void {
-    try decode.completeObject(value, &.{ "update", "demand", "subscriptions" });
-    const update = try decode.get(value, "update");
-    try decode.completeObject(update, &.{"local"});
-    try cfg.parseLocal(try decode.get(update, "local"), &out.value.update.local);
-    out.value.update.schedule = .{};
-    out.value.update.capabilities = .{ .receive = .initEmpty(), .request = .initEmpty() };
-    out.value.update.endpoints = null;
-    const demand = try decode.get(value, "demand");
-    try decode.completeObject(demand, &.{ "attnets", "syncnets", "groupTargets", "custodyGroupTargets", "attestationTarget", "syncTarget" });
-    const attnets = try decode.fixed(8, try decode.get(demand, "attnets"));
-    out.value.demand.attnets = std.mem.readInt(u64, &attnets, .little);
-    out.value.demand.syncnets = @intCast(try decode.integer(try decode.get(demand, "syncnets"), 15));
-    out.value.demand.attestation_target = @intCast(try decode.integer(try decode.get(demand, "attestationTarget"), max_peers));
-    out.value.demand.sync_target = @intCast(try decode.integer(try decode.get(demand, "syncTarget"), max_peers));
-    try targets(try decode.get(demand, "groupTargets"), &out.value.demand.group_targets, max_peers);
-    try targets(try decode.get(demand, "custodyGroupTargets"), &out.value.demand.custody_group_targets, max_peers);
-    const subscriptions = try decode.get(value, "subscriptions");
-    const count = try decode.array(subscriptions, n.gossipsub.topic_policy.boundary_max);
-    for (out.subscriptions[0..count], 0..) |*subscription, i| {
-        const entry = try subscriptions.getElement(@intCast(i));
-        try decode.completeObject(entry, &.{ "digest", "subnets" });
-        subscription.* = .{ .digest = try decode.fixed(4, try decode.get(entry, "digest")) };
-        const subnets = try decode.get(entry, "subnets");
-        try decode.object(subnets, &cfg.topic_kind_names);
-        inline for (std.meta.fields(n.gossipsub.topic.Kind), 0..) |field, k| {
-            if (try subnets.hasNamedProperty(field.name)) {
-                const input = try decode.get(subnets, field.name);
-                const view = try decode.byteView(input);
-                const mask = subscription.mask(@enumFromInt(k));
-                if (view.len > mask.len) return error.InvalidNetworkBytes;
-                @memcpy(mask[0..view.len], view);
-                subscription.lengths[k] = @intCast(view.len);
-            }
+pub const Intent = n.application_state.Update;
+pub fn parseIntent(value: Value, out: *Intent) !void {
+    try decode.object(value, &.{ "status", "coreTopics", "custodyGroupCount", "attesters", "syncCommittees" });
+    out.* = .{};
+    if (try value.hasNamedProperty("status")) {
+        var status: n.local_state.Status = undefined;
+        try cfg.parseStatus(try decode.get(value, "status"), &status);
+        out.status = status;
+    }
+    if (try value.hasNamedProperty("coreTopics")) out.core_topics = try decode.boolean(try decode.get(value, "coreTopics"));
+    if (try value.hasNamedProperty("custodyGroupCount")) out.custody_group_count = try decode.bigint(try decode.get(value, "custodyGroupCount"));
+    if (try value.hasNamedProperty("attesters")) {
+        const rows = try decode.get(value, "attesters");
+        out.attester_count = @intCast(try decode.array(rows, n.application_state.duty_batch_max));
+        for (out.attesters[0..out.attester_count], 0..) |*row, i| {
+            const entry = try rows.getElement(@intCast(i));
+            try decode.completeObject(entry, &.{ "slot", "subnets", "aggregators" });
+            row.* = .{
+                .slot = try decode.integer(try decode.get(entry, "slot"), 9007199254740990),
+                .subnets = try decode.bigint(try decode.get(entry, "subnets")),
+                .aggregators = try decode.bigint(try decode.get(entry, "aggregators")),
+            };
         }
     }
-    out.value.subscriptions = out.subscriptions[0..count];
-}
-
-fn targets(value: Value, out: *[128]u16, max_peers: u16) !void {
-    if (!try value.isTypedarray()) return error.InvalidNetworkBytes;
-    const info = try value.getTypedarrayInfo();
-    if (info.array_type != .uint16 or info.length > out.len or try info.arraybuffer.isDetachedArrayBuffer()) return error.InvalidNetworkBytes;
-    @memset(out, 0);
-    @memcpy(std.mem.sliceAsBytes(out[0..info.length]), info.data);
-    for (out) |target| if (target > max_peers) return error.InvalidNetworkInteger;
+    if (try value.hasNamedProperty("syncCommittees")) {
+        const rows = try decode.get(value, "syncCommittees");
+        const count = try decode.array(rows, 4);
+        for (0..count) |i| {
+            const entry = try rows.getElement(@intCast(i));
+            try decode.completeObject(entry, &.{ "subnet", "untilSlot" });
+            const subnet = try decode.integer(try decode.get(entry, "subnet"), 3);
+            const slot = try decode.integer(try decode.get(entry, "untilSlot"), 9007199254740990);
+            out.sync_until[subnet] = @max(out.sync_until[subnet] orelse 0, slot);
+        }
+    }
 }

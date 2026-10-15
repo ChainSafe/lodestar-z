@@ -48,7 +48,7 @@ async function closeRace(random: () => number): Promise<void> {
   const runtime = startRuntime(config);
   const settlements = new Settlements();
   const unsettled = settlements.unsettledAtClose(runtime.closed);
-  await runtime.applyIntent(localIntent(config), config.initialSlot);
+  await runtime.applyIntent(localIntent(config));
   const streams: ReturnType<typeof runtime.request>[] = [];
   const stream = () => streams[Math.floor(random() * streams.length)];
   const operations = [
@@ -101,10 +101,7 @@ test("a cancelled request retires on both ends while its peer holds it", async (
   const peer = await startPeer(peerConfig);
   const runtime = startRuntime(config);
   try {
-    await Promise.all([
-      runtime.applyIntent(localIntent(config), config.initialSlot),
-      peer.applyIntent(localIntent(peerConfig), peerConfig.initialSlot),
-    ]);
+    await Promise.all([runtime.applyIntent(localIntent(config)), peer.applyIntent(localIntent(peerConfig))]);
     await runtime.connect(peer.identity.peerId, [peer.identity.localEndpoint], 5000n);
     const stream = runtime.request(peer.identity.peerId, BLOCKS, new Uint8Array(32), {responseTimeoutMs: 60000});
     const pending = stream.next();

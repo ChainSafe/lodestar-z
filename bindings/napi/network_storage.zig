@@ -57,7 +57,6 @@ pub const Stores = struct {
 pub fn initialize(runtime: *Runtime, app: *const application_cfg.Config) !void {
     const resolved = &runtime.owner.?.resolved;
     runtime.peer_capacity = resolved.core.peers.capacity;
-    runtime.max_peers = resolved.core.peers.max_peers;
     const limits = resolved.core.protocols.reqresp;
     const request_capacity: usize = limits.outbound_max - limits.outbound_control_reserved;
     const incoming_capacity: usize = limits.serving_max - limits.serving_control_reserved;

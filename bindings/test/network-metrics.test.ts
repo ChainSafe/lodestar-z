@@ -68,7 +68,7 @@ test("metrics are available through startup and remain readable after close", as
     expect(samples(await runtime.getMetrics()).get("libp2p_peers")).toBe(0);
     expect(samples(await runtime.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
     await runtime.identity;
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     await vi.waitFor(async () =>
       expect(samples(await runtime.getMetrics()).get("lodestar_network_running_bool")).toBe(1)
     );

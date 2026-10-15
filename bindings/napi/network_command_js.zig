@@ -40,7 +40,7 @@ fn result(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     switch (operation.input.command) {
         .applyIntent => {
             try object.setNamedProperty("changed", try env.getBoolean(operation.boolean));
-            try object.setNamedProperty("slot", try env.createBigintUint64(operation.input.slot));
+            try object.setNamedProperty("slot", try env.createBigintUint64(operation.applied_slot));
         },
         .getPeers => {
             const peers = try env.createArrayWithLength(operation.count);
@@ -114,8 +114,7 @@ pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Comma
     const store = runtime.bridge.commands.cells[token.index].store;
     switch (command) {
         .applyIntent => {
-            operation.input.slot = try decode.bigint(args[1]);
-            try application_cfg.parseIntent(args[0], &runtime.bridge.stores.?.intents[store.?], runtime.max_peers);
+            try application_cfg.parseIntent(args[0], &runtime.bridge.stores.?.intents[store.?]);
         },
         .updateStatus => try cfg.parseStatus(args[0], &operation.input.status),
         .getIdentity, .getPeers, .getDirectPeers, .getRememberedPeers, .getMetrics => {},

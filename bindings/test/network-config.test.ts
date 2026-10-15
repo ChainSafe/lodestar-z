@@ -1,6 +1,6 @@
 import {expect, it} from "vitest";
 import bindings from "../src/index.js";
-import {applicationConfig, configureChain, discoveryConfig, startRuntime, testChain} from "./utils/network.js";
+import {applicationConfig, configureChain, discoveryConfig, setSlot, startRuntime, testChain} from "./utils/network.js";
 
 const cases: readonly [string, (config: ReturnType<typeof applicationConfig>) => void, string][] = [
   [
@@ -180,7 +180,7 @@ const cases: readonly [string, (config: ReturnType<typeof applicationConfig>) =>
   [
     "Number instead of BigInt",
     (c) => {
-      Object.assign(c, {initialSlot: 100});
+      Object.assign(c, {genesisTime: 100});
     },
     "InvalidNetworkInteger",
   ],
@@ -293,6 +293,7 @@ it("rejects a noncanonical bootstrap encoding during ordinary owner startup", as
 it("accepts explicit host wire policy and zero IDONTWANT threshold", async () => {
   const config = applicationConfig();
   Object.assign(config.gossipPolicy, {idontwantMinDataSize: 0, iwantFollowupMs: 12000n});
+  config.subscriptions = {slotsToSubscribeBeforeAggregatorDuty: 64, subscribeAllSubnets: false, targetGroupPeers: 6};
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;
@@ -341,7 +342,7 @@ it.each([0, 129])("rejects chain custody group bound %s", (groups) => {
 it.each([0, 1, 1_000_000])("rejects an active unsupported fork at epoch %s before owner allocation", (epoch) => {
   const config = applicationConfig();
   configureChain(config, {ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0, GLOAS_FORK_EPOCH: epoch});
-  config.initialSlot = BigInt(epoch) * 32n;
+  setSlot(config, BigInt(epoch) * 32n);
   expect(() => startRuntime(config)).toThrow("UnsupportedNetworkFork");
 });
 
@@ -352,9 +353,10 @@ it("starts with a future unsupported fork scheduled", async () => {
   await runtime.close();
 });
 
-it("derives the Fulu availability requirement from its BeaconConfig", () => {
+it.each([0, 2000])("requires availability from startup with Fulu scheduled at epoch %s", (epoch) => {
   const config = applicationConfig();
-  configureChain(config, {ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0});
+  configureChain(config, {ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: epoch});
+  config.local.status.earliestAvailableSlot = null;
   expect(() => startRuntime(config, () => undefined)).toThrow("MissingAvailability");
 });
 
@@ -362,6 +364,7 @@ it("selects its BeaconConfig independently of later configurations", async () =>
   const config = applicationConfig();
   const other = applicationConfig();
   configureChain(other, {ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0});
+  other.local.status.earliestAvailableSlot = null;
   expect(() => startRuntime(other)).toThrow("MissingAvailability");
   const runtime = startRuntime(config);
   await runtime.close();

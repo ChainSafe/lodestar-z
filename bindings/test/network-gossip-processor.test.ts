@@ -17,7 +17,6 @@ import {
   metricValue,
   settleOnly,
   startRuntime,
-  subscriptions,
   topicName,
   waitForGossipReady,
 } from "./utils/network.js";
@@ -38,7 +37,7 @@ test("direct feedback validates roots, handles and verdicts, and stale handles a
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     expect(exchange(runtime, gossipUrgent)).toMatchObject({checks: [], gossip: null});
     const handle = {generation: 1n, index: 0};
     for (const [invalid, code] of [
@@ -100,15 +99,18 @@ async function checks(runtime: NativeNetworkApplicationRuntime, count: number) {
 }
 
 test("native processor retains dependencies, protects blocks, batches ready work and bounds future slots", async () => {
-  const pair = await incomingPair();
+  const pair = await incomingPair(undefined, undefined, (left, right) => {
+    for (const config of [left, right])
+      config.subscriptions = {slotsToSubscribeBeforeAggregatorDuty: 2, subscribeAllSubnets: true, targetGroupPeers: 6};
+  });
   try {
     for (const [runtime, config] of [
       [pair.left, pair.leftConfig],
       [pair.right, pair.rightConfig],
     ] as const) {
       const intent = localIntent(config);
-      intent.subscriptions = subscriptions(BLOCK, ATTESTATION);
-      await runtime.applyIntent(intent, config.initialSlot);
+      intent.coreTopics = true;
+      await runtime.applyIntent(intent);
     }
     await Promise.all([
       pair.left.addDirectPeer(pair.remote.peerId, [pair.remote.localEndpoint]),
@@ -121,7 +123,7 @@ test("native processor retains dependencies, protects blocks, batches ready work
     const data = new Uint8Array(229);
     const view = new DataView(data.buffer);
     view.setUint32(0, 228, true);
-    view.setBigUint64(4, pair.rightConfig.initialSlot, true);
+    view.setBigUint64(4, 100n, true);
     data.fill(7, 20, 52);
     data[228] = 1;
     const root = data.slice(20, 52);
@@ -146,7 +148,7 @@ test("native processor retains dependencies, protects blocks, batches ready work
     ]);
 
     const blockBytes = new Uint8Array(4000);
-    new DataView(blockBytes.buffer).setBigUint64(100, pair.rightConfig.initialSlot, true);
+    new DataView(blockBytes.buffer).setBigUint64(100, 100n, true);
     await pair.left.publishGossip(BLOCK, blockBytes);
     const urgent = {...gossipUrgent};
     let block;
@@ -224,8 +226,8 @@ test("expired validation execution remains visible until late host completion", 
       [pair.right, pair.rightConfig],
     ] as const) {
       const intent = localIntent(config);
-      intent.subscriptions = subscriptions(BLOCK);
-      await runtime.applyIntent(intent, config.initialSlot);
+      intent.coreTopics = true;
+      await runtime.applyIntent(intent);
     }
     await Promise.all([
       pair.left.addDirectPeer(pair.remote.peerId, [pair.remote.localEndpoint]),
@@ -236,7 +238,7 @@ test("expired validation execution remains visible until late host completion", 
       waitForGossipReady(pair.right, [pair.identity.peerId], [BLOCK], () => pair.right.getMetrics()),
     ]);
     const block = new Uint8Array(4000);
-    new DataView(block.buffer).setBigUint64(100, pair.rightConfig.initialSlot, true);
+    new DataView(block.buffer).setBigUint64(100, 100n, true);
     await pair.left.publishGossip(BLOCK, block);
     let message: NativeGossipMessage | undefined;
     for (let i = 0; i < 1000 && !message; i++) {

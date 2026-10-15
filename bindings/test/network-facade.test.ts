@@ -18,7 +18,6 @@ import {
   localIntent,
   metricValue,
   runChild,
-  subscriptions,
   topicName,
   unreachableConnect,
   waitForGossipReady,
@@ -71,11 +70,11 @@ async function facadeWithPeers(
     for (const config of configs.slice(1)) peers.push(await startPeer(config));
     network = createNativeNetwork(configs[0], networkHost);
     const remote = await network.getIdentity();
-    const intent = (config: NativeApplicationConfig) => ({...localIntent(config), subscriptions: subscriptions(TOPIC)});
-    await network.applyIntent(intent(configs[0]), configs[0].initialSlot);
+    const intent = (config: NativeApplicationConfig) => ({...localIntent(config), coreTopics: true});
+    await network.applyIntent(intent(configs[0]));
     for (const [i, peer] of peers.entries()) {
       const identity = await peer.identity;
-      await peer.applyIntent(intent(configs[i + 1]), configs[i + 1].initialSlot);
+      await peer.applyIntent(intent(configs[i + 1]));
       await peer.connect(remote.peerId, [remote.localEndpoint], 5000n);
       await Promise.all([
         peer.addDirectPeer(remote.peerId, [remote.localEndpoint]),
@@ -287,8 +286,8 @@ test.each([
   try {
     network = createNativeNetwork(config, networkHost);
     const remote = await network.getIdentity();
-    await network.applyIntent(localIntent(config), config.initialSlot);
-    await peer.applyIntent(localIntent(peerConfig), peerConfig.initialSlot);
+    await network.applyIntent(localIntent(config));
+    await peer.applyIntent(localIntent(peerConfig));
     // The connection's first peer event reaches the throwing handler.
     await peer.connect(remote.peerId, [remote.localEndpoint], 5000n).catch(() => undefined);
     expect(await network.closed).toEqual({error: failure, reason: "failed"});
@@ -313,7 +312,7 @@ test.each([
       closedAt = records.length;
     });
     try {
-      await network.applyIntent(localIntent(config), config.initialSlot);
+      await network.applyIntent(localIntent(config));
       await vi.waitFor(() => expect(records.length > 0 || initial !== "info").toBe(true), {timeout: 2000});
       await delay(300);
       const levels = new Set(records.map(({level}) => level));
@@ -382,7 +381,7 @@ test("the facade validates its host, starts without host callbacks and hides the
     expect(network.limits.incomingCapacity).toBeGreaterThan(0);
     expect(Object.isFrozen(network.limits)).toBe(true);
     for (const name of ["exchange", "fail", "holdVerdicts", "identity", "state"]) expect(name in network).toBe(false);
-    await network.applyIntent(localIntent(config), config.initialSlot);
+    await network.applyIntent(localIntent(config));
     const peer = (await network.getIdentity()).peerId;
     const endpoint = {address: Uint8Array.of(127, 0, 0, 1), family: 4 as const, port: 9};
     const [direct] = unreachableConnect();

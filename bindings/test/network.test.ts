@@ -16,9 +16,9 @@ import {
   requestForks,
   runChild,
   runtimeReleased,
+  setSlot,
   settleOnly,
   startRuntime,
-  subscriptions,
   topicName,
 } from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
@@ -60,7 +60,7 @@ it("owns a real native socket and releases it on idempotent close", childTestTim
       );
     }
     expect(identity.localEndpoint.port).toBeGreaterThan(0);
-    expect((await runtime.applyIntent(localIntent(config), 101n)).slot).toBe(101n);
+    expect((await runtime.applyIntent(localIntent(config))).slot).toBeGreaterThanOrEqual(100n);
     const closing = runtime.close();
     expect(terminal).toBe(closing);
     expect(runtime.close()).toBe(closing);
@@ -77,50 +77,49 @@ it("owns a real native socket and releases it on idempotent close", childTestTim
   }
 });
 
-it("copies inputs before returning and advances the clock only through intents", async () => {
+it("copies inputs before returning and preserves earlier identity snapshots", async () => {
   const config = applicationConfig();
   const expected = peerIdFromPublicKey(privateKeyFromRaw(config.identitySecretKey).publicKey).toString();
-  config.local.metadata.syncnets = 2;
   const runtime = startRuntime(config);
-  expect(runtime.identity.metadata.syncnets).toBe(2);
-  config.local.metadata.syncnets = 4;
-  expect(runtime.identity.metadata.syncnets).toBe(2);
-  const intent = localIntent(config);
-  config.identitySecretKey.fill(0);
-  if (!("address" in config.bind)) throw new Error("Expected a single bind address");
-  config.bind.address.fill(0);
-  config.local.status.headRoot.fill(99);
+  const intent = {...localIntent(config), syncCommittees: [{subnet: 1, untilSlot: 200}]};
   try {
-    const identity = await runtime.identity;
+    const identity = runtime.identity;
+    expect(identity.metadata.syncnets).toBe(0);
+    config.identitySecretKey.fill(0);
+    if (!("address" in config.bind)) throw new Error("Expected a single bind address");
+    config.bind.address.fill(0);
+    config.local.status.headRoot.fill(99);
+    const applied = runtime.applyIntent(intent);
+    intent.syncCommittees[0].subnet = 2;
+    expect((await applied).slot).toBeGreaterThanOrEqual(100n);
+    expect((await runtime.getIdentity()).metadata.syncnets).toBe(2);
+    expect(identity.metadata.syncnets).toBe(0);
     expect(identity.peerId).toEqual(expected);
-    expect(await runtime.applyIntent(intent, 101n)).toMatchObject({slot: 101n});
-    expect((await runtime.getIdentity()).metadata.syncnets).toBe(4);
-    await expect(runtime.applyIntent(intent, 100n)).rejects.toThrow("ClockRegression");
-    await expect(runtime.applyIntent(intent, -1n)).rejects.toThrow("InvalidNetworkInteger");
-    await expect(runtime.applyIntent(intent, 1n << 64n)).rejects.toThrow("InvalidNetworkInteger");
-    expect(identity.peerId).toEqual(expected);
+    expect((await runtime.applyIntent(intent)).changed).toBe(true);
+    expect((await runtime.applyIntent(intent)).changed).toBe(false);
   } finally {
     await runtime.close();
   }
-  await expect(runtime.applyIntent(intent, 102n)).rejects.toThrow("NetworkClosed");
+  await expect(runtime.applyIntent(intent)).rejects.toThrow("NetworkClosed");
 }, 20000);
 
-it("starts without subscriptions and accepts ordinary updates after rejecting an invalid intent", async () => {
+it("starts with long-lived subnets and accepts sparse updates after rejecting an invalid intent", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config);
   try {
-    expect((await runtime.getGossipDiagnostics()).topics.some((topic) => topic.subscribed)).toBe(false);
+    expect(
+      (await runtime.getGossipDiagnostics()).topics.some((topic) => topic.subscribed && topic.topic === topicName())
+    ).toBe(false);
     expect(exchange(runtime, gossipAll)).toMatchObject({
       checks: [],
       gossip: null,
       serving: [],
     });
     const intent = localIntent(config);
-    intent.subscriptions = [{digest: new Uint8Array(4).fill(255), subnets: {}}];
-    await expect(runtime.applyIntent(intent, config.initialSlot)).rejects.toThrow("InvalidTopic");
+    await expect(runtime.applyIntent({...intent, custodyGroupCount: 0n})).rejects.toThrow("InvalidCustodyCount");
     const topic = topicName();
-    intent.subscriptions = subscriptions(topic);
-    await runtime.applyIntent(intent, config.initialSlot);
+    intent.coreTopics = true;
+    await runtime.applyIntent(intent);
     expect((await runtime.getGossipDiagnostics()).topics).toContainEqual(
       expect.objectContaining({subscribed: true, topic})
     );
@@ -169,14 +168,14 @@ it.each([
   [
     "negative bigint",
     (c: ReturnType<typeof applicationConfig>) => {
-      c.initialSlot = -1n;
+      c.genesisTime = -1n;
     },
     "InvalidNetworkInteger",
   ],
   [
     "overflow bigint",
     (c: ReturnType<typeof applicationConfig>) => {
-      c.initialSlot = 1n << 64n;
+      c.genesisTime = 1n << 64n;
     },
     "InvalidNetworkInteger",
   ],
@@ -389,8 +388,8 @@ it("starts wildcard discovery without advertised addresses", async () => {
     const identity = await runtime.getIdentity();
     expect(identity.localEnr).toBeInstanceOf(Uint8Array);
     const intent = localIntent(config);
-    intent.update.local.metadata.attnets[0] = 1;
-    await runtime.applyIntent(intent, config.initialSlot);
+    intent.syncCommittees = [{subnet: 0, untilSlot: 200}];
+    await runtime.applyIntent(intent);
     expect((await runtime.getIdentity()).localEnr).not.toEqual(identity.localEnr);
   } finally {
     await runtime.close();
@@ -402,9 +401,9 @@ it("publishes copied peer observations without repeating unread notifications", 
   const {multiaddr} = await import("@multiformats/multiaddr");
   const {setTimeout: delay} = await import("node:timers/promises");
   const config = applicationConfig();
-  config.initialSlot = 0x08070605n;
+  setSlot(config, 0x08070605n);
   configureChain(config, {BLOB_SCHEDULE: [], ELECTRA_FORK_EPOCH: Infinity, FULU_FORK_EPOCH: Infinity});
-  config.local.status.headSlot = config.initialSlot;
+  config.local.status.headSlot = 0x08070605n;
   config.local.status.finalizedEpoch = 0x01020304n;
   config.local.status.finalizedRoot = Uint8Array.from({length: 32}, (_, i) => i);
   config.local.status.headRoot = Uint8Array.from({length: 32}, (_, i) => 255 - i);
@@ -501,7 +500,7 @@ it("settles results only in an exchange and notifies once until an exchange find
   };
   const closing = watch(runtime.closed);
   try {
-    const intent = runtime.applyIntent(localIntent(config), config.initialSlot);
+    const intent = runtime.applyIntent(localIntent(config));
     const intentSettled = watch(intent);
     await vi.waitFor(() => expect(notifications).toBe(1));
     const identity = runtime.getIdentity();
@@ -513,7 +512,7 @@ it("settles results only in an exchange and notifies once until an exchange find
     await delay(0);
     expect([intentSettled(), identitySettled()]).toEqual([true, true]);
     expect(exchange(runtime, settleOnly)).toMatchObject({checks: [], gossip: null, peers: [], serving: []});
-    expect((await intent).slot).toBe(config.initialSlot);
+    expect((await intent).slot).toBeGreaterThanOrEqual(100n);
     expect((await identity).peerId).toBe(runtime.identity.peerId);
     const pull = runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next();
     const pullSettled = watch(pull);

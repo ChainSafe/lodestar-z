@@ -95,9 +95,9 @@ pub const Config = struct {
         return result;
     }
 
-    // The host adds namespaces two epochs early and removes them two epochs late.
+    // The application adds namespaces two epochs early and removes them two epochs late.
     // Resident storage covers the complete namespace, including outgoing and retained rows.
-    // The live subscription limit applies to the committed host schedule.
+    // The live subscription limit applies to the committed application schedule.
     fn validateScheduledTopicDemand(self: *const Config) error{UnsupportedTopicOverlap}!void {
         const lookahead: u64 = 2;
         var counts: [boundary_max]usize = @splat(0);

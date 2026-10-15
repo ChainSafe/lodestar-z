@@ -17,7 +17,7 @@ test("incoming request take is empty on an active application", async () => {
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     expect(nextIncoming(runtime)).toBeNull();
   } finally {
     await runtime.close();
@@ -244,7 +244,7 @@ stock(
       config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
       runtime = startRuntime(config, () => undefined);
       const identity = await runtime.identity;
-      await runtime.applyIntent(localIntent(config), config.initialSlot);
+      await runtime.applyIntent(localIntent(config));
       const addressBytes = Buffer.from(identity.localMultiaddr).toString("hex");
       for (const status of [0, 1, 2, 3, 139]) {
         const reply = peer.command("request", {addressBytes});
@@ -300,7 +300,7 @@ stock(
       const live = startRuntime(config, () => undefined);
       runtime = live;
       const identity = await live.identity;
-      await live.applyIntent(localIntent(config), config.initialSlot);
+      await live.applyIntent(localIntent(config));
       live.setLogLevel("debug");
       const addressBytes = Buffer.from(identity.localMultiaddr).toString("hex");
       let waits = 0;

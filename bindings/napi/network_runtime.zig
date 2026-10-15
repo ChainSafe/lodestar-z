@@ -84,7 +84,6 @@ pub const Runtime = struct {
     refs: std.atomic.Value(u32) = .init(1),
     owner: ?*Owner = null,
     peer_capacity: u16 = 0,
-    max_peers: u16 = 0,
 
     thread: ?std.Thread = null,
     /// JS thread: an exchange is running, so a nested one is refused.

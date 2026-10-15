@@ -20,7 +20,7 @@ test("request capacity refusal is typed while control and publication admission 
   config.resources.bridgeBudgetBytes = 256 * 1024 * 1024;
   const runtime = startRuntime(config);
   try {
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     const streams: ReturnType<typeof runtime.request>[] = [];
     expect(() => {
       for (let i = 0; i < 1024; i++) streams.push(runtime.request(runtime.identity.peerId, REQUEST, new Uint8Array(0)));
@@ -39,7 +39,7 @@ test("publication pressure preserves urgent, control and request admission", asy
   const config = applicationConfig();
   const runtime = startRuntime(config);
   try {
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     runtime.holdOperations(true);
     const options = {allowZeroPeers: true, ignoreDuplicate: true};
     const publications: Promise<unknown>[] = [];
@@ -81,7 +81,7 @@ test("network admits 200 publications while control remains available", async ()
   config.resources.nativeBudgetBytes = 512 * 1024 * 1024;
   const runtime = startRuntime(config);
   try {
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     const pending = Array.from({length: 200}, () =>
       runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true, ignoreDuplicate: true})
     );
@@ -96,7 +96,7 @@ test("publication turns make progress on payloads larger than the turn byte budg
   const config = applicationConfig();
   const runtime = startRuntime(config);
   try {
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     await Promise.all(
       [3 * 1024 * 1024, 3 * 1024 * 1024, 4000].map((size) =>
         runtime.publishGossip(BLOCK, new Uint8Array(size), {allowZeroPeers: true, ignoreDuplicate: true})
@@ -110,7 +110,7 @@ test("publication turns make progress on payloads larger than the turn byte budg
 test("close settles every pending publication", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config);
-  await runtime.applyIntent(localIntent(config), config.initialSlot);
+  await runtime.applyIntent(localIntent(config));
   const pending = Array.from({length: 16}, () =>
     runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true, ignoreDuplicate: true})
   );

@@ -33,7 +33,7 @@ interface DirectIncomingBridge {
     config: ReturnType<typeof applicationConfig>,
     onWorkAvailable: () => void
   ): {identity: NativeIdentity; closed: Promise<NativeRuntimeCloseResult>};
-  applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): Promise<NativeIntentResult>;
+  applyIntent(intent: ReturnType<typeof localIntent>): Promise<NativeIntentResult>;
   exchange(): NativeDelivery;
 
   setCapacity(capacity: HostCapacity | null): void;
@@ -57,8 +57,8 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
   const promises = native.initialize(config, () => undefined);
   try {
     const [, identity] = await Promise.all([client.identity, promises.identity]);
-    const intent = native.applyIntent(localIntent(config), config.initialSlot);
-    await client.applyIntent(localIntent(clientConfig), clientConfig.initialSlot);
+    const intent = native.applyIntent(localIntent(config));
+    await client.applyIntent(localIntent(clientConfig));
     await drainUntil(native, intent);
     await client.connect(identity.peerId, [identity.localEndpoint], 5000n);
     let previous: IncomingHandle | undefined;

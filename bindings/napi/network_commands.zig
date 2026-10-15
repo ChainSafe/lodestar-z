@@ -22,6 +22,7 @@ pub const Cell = struct {
     failure: ?anyerror = null,
     sequence: u64 = 0,
     boolean: bool = false,
+    applied_slot: u64 = 0,
     deadline: u64 = 0,
     identity: network_runtime.Identity = undefined,
     count: usize = 0,
@@ -142,7 +143,6 @@ pub const Input = struct {
     peer: n.PeerId = undefined,
     addresses: [2]n.Address = undefined,
     address_count: u8 = 0,
-    slot: u64 = 0,
     timeout_ms: u64 = 0,
     target_count: u16 = 0,
     diagnostics_cursor: u16 = 0,
@@ -170,14 +170,13 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
     const store = self.bridge.commands.cells[index].store;
     switch (input.command) {
         .applyIntent => {
-            if (input.slot < core.current_slot) return error.ClockRegression;
-            const intent = &self.bridge.stores.?.intents[store.?].value;
-            intent.update = try self.owner.?.config.chain.update(intent.update.local, core.advertisementEndpoints(), input.slot);
-            intent.slot = input.slot;
-            operation.boolean = try core.applyIntent(intent, timestamp);
+            const intent = &self.bridge.stores.?.intents[store.?];
+            operation.boolean = try self.owner.?.state.?.apply(core, &self.owner.?.config.chain, intent, timestamp);
+            operation.applied_slot = core.current_slot;
         },
         .updateStatus => {
             var status = input.status;
+            if (self.owner.?.config.chain.fulu_scheduled and status.earliest_available_slot == null) return error.MissingAvailability;
             status.fork_digest = core.localState().status.fork_digest;
             try core.updateStatus(&status);
         },

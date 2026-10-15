@@ -18,7 +18,7 @@ test("application request rejects control protocols at the exported boundary", a
   const runtime = startRuntime(config, () => undefined);
   try {
     const identity = await runtime.identity;
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     expect(() =>
       // @ts-expect-error Control protocols are native-owned; also check JavaScript callers.
       runtime.request(identity.peerId, "/eth2/beacon_chain/req/ping/1/ssz_snappy", new Uint8Array(8))
@@ -34,7 +34,7 @@ test("request admission owns terminal state and a bounded single pull", async ()
   const runtime = startRuntime(config, () => undefined);
   try {
     const identity = await runtime.identity;
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     const stream = runtime.request(
       identity.peerId,
       "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
@@ -72,7 +72,7 @@ async function connected() {
     config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
     runtime = startRuntime(config, () => undefined);
     await runtime.identity;
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     const id = peerIdFromHex(info.peer);
     await runtime.connect(
       id,
@@ -184,7 +184,7 @@ test("request validation rejects malformed options and detached input without re
   const runtime = startRuntime(config, () => undefined);
   try {
     const identity = await runtime.identity;
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     for (const options of [
       {responseTimeoutMs: 0},
       {responseTimeoutMs: 60001},
@@ -440,7 +440,7 @@ test("native bridge validates full handles and stale retirement", async () => {
   const lifecycle = native.initialize(config, () => undefined);
   try {
     const identity = await lifecycle.identity;
-    await drainUntil(native, native.applyIntent(localIntent(config), config.initialSlot));
+    await drainUntil(native, native.applyIntent(localIntent(config)));
     const {handle} = native.requestStart(identity.peerId, BLOCKS, new Uint8Array(32), undefined);
     expect(() => native.requestPull({...handle, generation: 0n})).toThrow("InvalidRequestHandle");
     expect(() => native.requestPull({...handle, generation: handle.generation + 1n})).toThrow("InvalidRequestHandle");
@@ -493,7 +493,7 @@ test.skipIf(!NATIVE_PEER)(
       const remote = await peer.command("listen");
       await peer.command("respond", {seed: 71, size: 4000});
       await runtime.identity;
-      await runtime.applyIntent(localIntent(config), config.initialSlot);
+      await runtime.applyIntent(localIntent(config));
       const parts = remote.address.split("/");
       const id = peerIdFromHex(remote.peer);
       await runtime.connect(id, [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: Number(parts[4])}], 5000n);
@@ -566,7 +566,7 @@ async function connectedNative() {
     const prepared = native.initialize(config, () => undefined);
     closing = prepared.closed;
     await prepared.identity;
-    await drainUntil(native, native.applyIntent(localIntent(config), config.initialSlot));
+    await drainUntil(native, native.applyIntent(localIntent(config)));
     const id = peerIdFromHex(remote.peer);
     await drainUntil(
       native,
@@ -767,7 +767,7 @@ test("a full request table delivers every outcome and reuses each cell with the 
   const lifecycle = native.initialize(config, () => undefined);
   try {
     const self = lifecycle.identity.peerId;
-    await drainUntil(native, native.applyIntent(localIntent(config), config.initialSlot));
+    await drainUntil(native, native.applyIntent(localIntent(config)));
     for (const generation of [1n, 2n]) {
       const handles: ReturnType<typeof native.requestStart>[] = [];
       expect(() => {

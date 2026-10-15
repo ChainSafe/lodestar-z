@@ -12,7 +12,6 @@ import {
   Settlements,
   settleOnly,
   startRuntime,
-  subscriptions,
   topicName,
   unreachableConnect,
   waitForGossipReady,
@@ -63,7 +62,7 @@ if (mode === "open") {
   let runtime = startRuntime(config);
   const settlements = new Settlements();
   const unsettled = settlements.unsettledAtClose(runtime.closed);
-  await runtime.applyIntent(localIntent(config), config.initialSlot);
+  await runtime.applyIntent(localIntent(config));
   settlements.watch(() => runtime.connect(...unreachableConnect()));
   settlements.watch(() => runtime.getIdentity());
   for (let i = 0; i < 4; i++)
@@ -104,9 +103,9 @@ if (mode === "open") {
   };
   let network = createNativeNetwork(config, host);
   host.network = network;
-  const intent = (value) => ({...localIntent(value), subscriptions: subscriptions(topicName())});
-  await network.applyIntent(intent(config), config.initialSlot);
-  await remote.applyIntent(intent(remoteConfig), remoteConfig.initialSlot);
+  const intent = (value) => ({...localIntent(value), coreTopics: true});
+  await network.applyIntent(intent(config));
+  await remote.applyIntent(intent(remoteConfig));
   const [identity, remoteIdentity] = await Promise.all([network.getIdentity(), remote.identity]);
   await remote.connect(identity.peerId, [identity.localEndpoint], 5000n);
   await Promise.all([
@@ -225,7 +224,7 @@ if (mode === "open") {
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
   config.resources.nativeBudgetBytes = 512 * 1024 * 1024;
   const runtime = startRuntime(config);
-  await runtime.applyIntent(localIntent(config), config.initialSlot);
+  await runtime.applyIntent(localIntent(config));
   holdSettling(runtime, true);
   const settlements = new Settlements();
   const unsettled = settlements.unsettledAtClose(runtime.closed);
@@ -254,7 +253,7 @@ if (mode === "open") {
   // Only the notifier ref, taken by close, keeps the loop alive until closed settles.
   const config = applicationConfig();
   const runtime = startRuntime(config);
-  await runtime.applyIntent(localIntent(config), config.initialSlot);
+  await runtime.applyIntent(localIntent(config));
   assert.deepEqual(await runtime.close(), {reason: "requested"});
   console.log("close-awaited");
 } else if (mode === "callback") {
@@ -291,7 +290,7 @@ if (mode === "open") {
     notifications++;
     throw new Error("notifier");
   });
-  const intent = runtime.applyIntent(localIntent(config), config.initialSlot);
+  const intent = runtime.applyIntent(localIntent(config));
   for (let i = 0; i < 200 && notifications === 0; i++) await delay(10);
   // Owner activity while it starts can notify again; an idle owner has none.
   await delay(100);
@@ -309,7 +308,7 @@ if (mode === "open") {
     runtime.exchange();
     await delay(5);
   }
-  assert.equal((await intent).slot, config.initialSlot);
+  assert.equal((await intent).slot, 100n);
   assert.equal((await identity).peerId, runtime.identity.peerId);
   console.log("rearmed");
 } else throw new Error("Unknown lifecycle scenario");

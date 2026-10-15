@@ -23,10 +23,7 @@ export async function incomingPair(
     left = await startPeer(leftConfig);
     right = startRuntime(rightConfig, onServerWorkAvailable);
     const [identity, remote] = await Promise.all([left.identity, right.identity]);
-    await Promise.all([
-      left.applyIntent(localIntent(leftConfig), leftConfig.initialSlot),
-      right.applyIntent(localIntent(rightConfig), rightConfig.initialSlot),
-    ]);
+    await Promise.all([left.applyIntent(localIntent(leftConfig)), right.applyIntent(localIntent(rightConfig))]);
     await left.connect(remote.peerId, [remote.localEndpoint], 5000n);
     return {identity, left, leftConfig, remote, right, rightConfig};
   } catch (error) {

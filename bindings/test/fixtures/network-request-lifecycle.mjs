@@ -24,8 +24,8 @@ if (mode === "exit") {
   const right = await startPeer(rightConfig);
   const [, remote] = await Promise.all([left.identity, right.identity]);
   await Promise.all([
-    left.applyIntent(localIntent(leftConfig), leftConfig.initialSlot),
-    right.applyIntent(localIntent(rightConfig), rightConfig.initialSlot),
+    left.applyIntent(localIntent(leftConfig)),
+    right.applyIntent(localIntent(rightConfig)),
   ]);
   await left.connect(remote.peerId, [remote.localEndpoint], 5000n);
   void left
@@ -46,8 +46,8 @@ if (mode === "pull-gc") {
   const runtime = startRuntime(config, () => undefined);
   const [, remote] = await Promise.all([runtime.identity, server.identity]);
   await Promise.all([
-    runtime.applyIntent(localIntent(config), config.initialSlot),
-    server.applyIntent(localIntent(serverConfig), serverConfig.initialSlot),
+    runtime.applyIntent(localIntent(config)),
+    server.applyIntent(localIntent(serverConfig)),
   ]);
   await runtime.connect(remote.peerId, [remote.localEndpoint], 5000n);
   let stream = runtime.request(
@@ -85,7 +85,7 @@ if (["closed-facade-gc", "closed-facade-gc-early", "closed-terminal"].includes(m
   const config = applicationConfig();
   let runtime = startRuntime(config, () => undefined);
   const identity = await runtime.identity;
-  await runtime.applyIntent(localIntent(config), config.initialSlot);
+  await runtime.applyIntent(localIntent(config));
   const stream = runtime.request(
     identity.peerId,
     "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
@@ -124,7 +124,7 @@ async function holdingPeer() {
   const config = applicationConfig();
   config.identitySecretKey[31] = 63;
   const peer = await startPeer(config);
-  await peer.applyIntent(localIntent(config), config.initialSlot);
+  await peer.applyIntent(localIntent(config));
   return {id: peer.identity.peerId, endpoint: peer.identity.localEndpoint, peer, native: peer};
 }
 
@@ -136,7 +136,7 @@ try {
     throw Error("request-notifier");
   });
   await runtime.identity;
-  await runtime.applyIntent(localIntent(config), config.initialSlot);
+  await runtime.applyIntent(localIntent(config));
   const id = holding.id;
   await runtime.connect(id, [holding.endpoint], 5000n);
   let stream = runtime.request(id, "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy", new Uint8Array(32), {

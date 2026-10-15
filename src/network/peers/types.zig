@@ -89,7 +89,7 @@ pub const Coverage = struct {
     groups: custody.Groups = .empty,
     custody_groups: custody.Groups = .empty,
 };
-/// Desired coverage persists until replacement; the host owns validator duty expiry.
+/// Desired coverage persists until replacement; the application owns validator duty expiry.
 pub const Demand = struct {
     attnets: u64 = 0,
     syncnets: u4 = 0,

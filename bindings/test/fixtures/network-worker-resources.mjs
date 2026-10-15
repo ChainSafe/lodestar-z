@@ -6,7 +6,7 @@ import {once} from "node:events";
 import {setTimeout as delay} from "node:timers/promises";
 import {isMainThread, parentPort, Worker} from "node:worker_threads";
 
-import {applicationConfig, localIntent, topicName, subscriptions} from "../utils/network.ts";
+import {applicationConfig, localIntent, topicName} from "../utils/network.ts";
 
 const topic = topicName();
 const blocks = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
@@ -28,8 +28,8 @@ if (!isMainThread) {
 const runtime = isMainThread ? await startPeer(config) : startRuntime(config);
 const identity = await runtime.identity;
 const intent = localIntent(config);
-intent.subscriptions = subscriptions(topic);
-await runtime.applyIntent(intent, config.initialSlot);
+intent.coreTopics = true;
+await runtime.applyIntent(intent);
 
 if (!isMainThread) {
   parentPort.postMessage(identity);
@@ -62,7 +62,7 @@ if (!isMainThread) {
     await until(async () => {
       try {
         const payload = new Uint8Array(4000);
-        new DataView(payload.buffer).setBigUint64(100, config.initialSlot, true);
+        new DataView(payload.buffer).setBigUint64(100, 100n, true);
         await runtime.publishGossip(topic, payload, {allowZeroPeers: false});
         return true;
       } catch (error) {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const p = @import("preset").preset;
 const napi = @import("zapi:zapi").napi;
 const n = @import("network");
 const d = @import("discv5");
@@ -15,6 +16,7 @@ pub const Config = struct {
     local: t.LocalState,
     schedule: n.local_state.ForkSchedule,
     chain: n.chain.Config,
+    state: n.application_state.Config,
     discovery_bind: ?n.udp.Sockets.Bindings,
     discovery_sequence: u64,
     advertisement: ?n.advertisement.Hints,
@@ -57,6 +59,7 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
         .local = .{},
         .schedule = .{},
         .chain = undefined,
+        .state = undefined,
         .discovery_bind = null,
         .discovery_sequence = 0,
         .advertisement = null,
@@ -71,9 +74,22 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, out: *Config) !void {
     errdefer out.wipe();
     out.secret = try decode.fixed(32, try decode.get(value, "identitySecretKey"));
     out.bind = try bindings(try decode.get(value, "bind"));
-    out.slot = try decode.bigint(try decode.get(value, "initialSlot"));
+    var subscription_options: n.application_state.Options = .{};
+    const subscriptions = try decode.get(value, "subscriptions");
+    if (try subscriptions.typeof() != .undefined) {
+        try decode.completeObject(subscriptions, &.{ "subscribeAllSubnets", "slotsToSubscribeBeforeAggregatorDuty", "targetGroupPeers" });
+        subscription_options = .{
+            .subscribe_all_subnets = try decode.boolean(try decode.get(subscriptions, "subscribeAllSubnets")),
+            .aggregator_lead_slots = try decode.integer(try decode.get(subscriptions, "slotsToSubscribeBeforeAggregatorDuty"), 2 * p.SLOTS_PER_EPOCH),
+            .target_group_peers = @intCast(try decode.integer(try decode.get(subscriptions, "targetGroupPeers"), 256)),
+        };
+    }
+    out.state = try n.application_state.Config.init(&beacon.chain, try decode.bigint(try decode.get(value, "genesisTime")), subscription_options);
+    const now = try n.Now.read(std.Io.Threaded.global_single_threaded.io());
+    out.slot = @intCast(@max(0, out.state.clock.slotAt(try n.SlotClock.unixMilliseconds(now))));
     try parseLocal(try decode.get(value, "local"), &out.local);
     out.chain = try n.chain.Config.init(beacon, try decode.boolean(try decode.get(value, "serveLightClients")));
+    if (out.chain.fulu_scheduled and out.local.status.earliest_available_slot == null) return error.MissingAvailability;
     const update = try out.chain.update(out.local, null, out.slot);
     out.local = update.local;
     out.schedule = update.schedule;

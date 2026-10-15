@@ -16,94 +16,11 @@ import {
   runChild,
   settleOnly,
   startRuntime,
-  subscriptions,
-  testChain,
-  topicName,
 } from "./utils/network.js";
 import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
 
-test("running application advances fork state only when the host updates intent", async () => {
-  const config = applicationConfig();
-  const boundarySlot = 128n;
-  const slotsPerEpoch = process.env.LODESTAR_PRESET === "minimal" ? 8n : 32n;
-  config.initialSlot = boundarySlot - 1n;
-  config.local.status.headSlot = config.initialSlot;
-  config.discovery = discoveryConfig().discovery;
-  configureChain(config, {ELECTRA_FORK_EPOCH: Number(boundarySlot / slotsPerEpoch)});
-  const runtime = startRuntime(config, () => undefined);
-  try {
-    const identity = await runtime.identity;
-    await delay(40);
-    expect((await runtime.getIdentity()).localEnr).toEqual(identity.localEnr);
-    const slot = boundarySlot;
-
-    const fresh = localIntent(config);
-    const result = await runtime.applyIntent(fresh, slot);
-    expect(result).toMatchObject({changed: true, slot});
-
-    expect((await runtime.getIdentity()).localEnr).not.toEqual(identity.localEnr);
-    expect((await runtime.applyIntent(fresh, slot)).changed).toBe(false);
-  } finally {
-    await runtime.close();
-  }
-});
-
-test("owned chain config follows Fulu and BPO with Lodestar topics", async () => {
-  const config = discoveryConfig();
-  const runtime = startRuntime(config, () => undefined);
-  try {
-    let identity = await runtime.identity;
-    configureChain(config, {BLOB_SCHEDULE: [], ELECTRA_FORK_EPOCH: Infinity, FULU_FORK_EPOCH: Infinity});
-    const epochs = [testChain.FULU_FORK_EPOCH, testChain.BLOB_SCHEDULE[0].EPOCH];
-    for (const [i, epoch] of epochs.entries()) {
-      const slot = BigInt(epoch * (process.env.LODESTAR_PRESET === "minimal" ? 8 : 32));
-      const intent = localIntent(config);
-      intent.update.local.status.headSlot = 1n;
-      intent.update.local.status.earliestAvailableSlot = 0n;
-      intent.update.local.metadata.custodyGroupCount = 8n;
-      intent.subscriptions = subscriptions(topicName("beacon_block", i + 2), topicName("data_column_sidecar_0", i + 2));
-      await runtime.applyIntent(intent, slot);
-      const current = await runtime.getIdentity();
-      expect(current.localEnr).not.toEqual(identity.localEnr);
-
-      identity = current;
-    }
-  } finally {
-    await runtime.close();
-  }
-});
-
-test("failed intent leaves running state and clock unchanged", async () => {
-  const config = applicationConfig();
-  const runtime = startRuntime(config, () => undefined);
-  const terminal = runtime.closed;
-  try {
-    await runtime.identity;
-    expect((await runtime.getPeers()).peers).toEqual([]);
-    await runtime.updateStatus(config.local.status);
-    const intent = localIntent(config);
-    intent.subscriptions = [{digest: new Uint8Array(4).fill(255), subnets: {}}];
-    await expect(runtime.applyIntent(intent, 101n)).rejects.toThrow();
-
-    expect((await runtime.applyIntent(localIntent(config), config.initialSlot)).slot).toBe(config.initialSlot);
-    const first = await runtime.applyIntent(localIntent(config), 102n);
-    expect(first.slot).toBe(102n);
-    const next = await runtime.applyIntent(localIntent(config), 103n);
-    expect(next.changed).toBe(false);
-    expect(next.ownerSequence).toBeGreaterThan(first.ownerSequence);
-    await expect(runtime.applyIntent(localIntent(config), 101n)).rejects.toThrow("ClockRegression");
-
-    expect("setCurrentSlot" in runtime).toBe(false);
-  } finally {
-    expect(runtime.close()).toBe(terminal);
-    await expect(terminal).resolves.toEqual({reason: "requested"});
-  }
-});
-
 test("Status-only updates copy inputs and preserve advertisement and subscriptions across a head regression", async () => {
   const config = discoveryConfig();
-  config.discovery.sequenceNumber = 18446744073709551615n;
-  config.local.metadata.sequenceNumber = 18446744073709551615n;
   const other = applicationConfig();
   other.identitySecretKey[31] = 2;
   const a = startRuntime(config, () => undefined);
@@ -112,9 +29,8 @@ test("Status-only updates copy inputs and preserve advertisement and subscriptio
     b = await startPeer(other);
     const [identity] = await Promise.all([a.identity, b.identity]);
     const intent = localIntent(config);
-    intent.subscriptions = subscriptions(topicName());
-    intent.demand.attnets[0] = 5;
-    await Promise.all([a.applyIntent(intent, 100n), b.applyIntent(localIntent(other), 100n)]);
+    intent.coreTopics = true;
+    await Promise.all([a.applyIntent(intent), b.applyIntent(localIntent(other))]);
     const topics = (await a.getGossipDiagnostics()).topics;
     const status = structuredClone(config.local.status);
     status.headSlot = 95n;
@@ -155,7 +71,7 @@ test("Status-only validation uses the active fork and leaves rejected updates un
   try {
     await runtime.identity;
     const intent = localIntent(config);
-    await runtime.applyIntent(intent, 100n);
+    await runtime.applyIntent(intent);
     for (const [field, value] of [
       ["headSlot", -1n],
       ["headSlot", 1n << 64n],
@@ -171,15 +87,15 @@ test("Status-only validation uses the active fork and leaves rejected updates un
     await expect(runtime.updateStatus({...config.local.status, earliestAvailableSlot: null})).rejects.toThrow(
       "MissingAvailability"
     );
-    expect((await runtime.applyIntent(intent, 100n)).changed).toBe(false);
+    expect((await runtime.applyIntent(intent)).changed).toBe(false);
     const first = runtime.updateStatus({...config.local.status, headSlot: 120n});
     const second = structuredClone(intent);
-    second.update.local.status.headSlot = 80n;
-    const coordinated = runtime.applyIntent(second, 100n);
+    second.status = {...config.local.status, headSlot: 80n};
+    const coordinated = runtime.applyIntent(second);
     const last = runtime.updateStatus({...config.local.status, headSlot: 90n});
     await Promise.all([first, coordinated, last]);
-    second.update.local.status.headSlot = 90n;
-    expect((await runtime.applyIntent(second, 100n)).changed).toBe(false);
+    second.status = {...config.local.status, headSlot: 90n};
+    expect((await runtime.applyIntent(second)).changed).toBe(false);
   } finally {
     await runtime.close();
   }
@@ -190,26 +106,23 @@ test("identity metadata belongs to its owner snapshot across queued intent updat
   const runtime = startRuntime(config, () => undefined);
   try {
     const ready = await runtime.identity;
-    expect(ready.metadata).toEqual(config.local.metadata);
-    const first = localIntent(config);
-    first.update.local.metadata.sequenceNumber = ready.metadata.sequenceNumber + 1n;
-    first.update.local.metadata.attnets[0] = 1;
-    const second = structuredClone(first);
-    second.update.local.metadata.sequenceNumber = ready.metadata.sequenceNumber + 2n;
-    second.update.local.metadata.attnets[0] = 2;
+    const first = {...localIntent(config), syncCommittees: [{subnet: 0, untilSlot: 200}]};
+    const second = {...localIntent(config), syncCommittees: [{subnet: 1, untilSlot: 200}]};
     const operations = [
-      runtime.applyIntent(first, 100n),
+      runtime.applyIntent(first),
       runtime.getIdentity(),
-      runtime.applyIntent(second, 100n),
+      runtime.applyIntent(second),
       runtime.getIdentity(),
     ] as const;
     const [appliedFirst, identityFirst, appliedSecond, identitySecond] = await Promise.all(operations);
-    expect(identityFirst.metadata).toEqual(first.update.local.metadata);
-    expect(identitySecond.metadata).toEqual(second.update.local.metadata);
+    expect(identityFirst.metadata.syncnets).toBe(1);
+    expect(identityFirst.metadata.sequenceNumber).toBe(ready.metadata.sequenceNumber + 1n);
+    expect(identitySecond.metadata.syncnets).toBe(3);
+    expect(identitySecond.metadata.sequenceNumber).toBe(ready.metadata.sequenceNumber + 2n);
     expect(identityFirst.ownerSequence).toBeGreaterThan(appliedFirst.ownerSequence);
     expect(identityFirst.ownerSequence).toBeLessThan(appliedSecond.ownerSequence);
     identityFirst.metadata.attnets.fill(255);
-    expect((await runtime.getIdentity()).metadata).toEqual(second.update.local.metadata);
+    expect((await runtime.getIdentity()).metadata).toEqual(identitySecond.metadata);
   } finally {
     await runtime.close();
   }
@@ -232,7 +145,7 @@ test("complete getters, membership and command results survive a throwing notifi
     const ready = await runtime.identity;
     const identity = await runtime.getIdentity();
     expect(identity.peerId).toEqual(ready.peerId);
-    await runtime.applyIntent(localIntent(config), 100n);
+    await runtime.applyIntent(localIntent(config));
     const snapshot = await runtime.getPeers();
     expect(snapshot).toMatchObject({
       capacity: 64,
@@ -246,7 +159,7 @@ test("complete getters, membership and command results survive a throwing notifi
     await runtime.reStatusPeers([]);
     expect(exchange(runtime, {...gossipAll}).peers).toEqual([]);
     const remoteIdentity = await remote.identity;
-    await remote.applyIntent(localIntent(other), 100n);
+    await remote.applyIntent(localIntent(other));
     const connected = runtime.connect(remoteIdentity.peerId, [remoteIdentity.localEndpoint], 5000n);
     const accepted = [runtime.getIdentity(), runtime.getDirectPeers()];
     await connected;
@@ -267,19 +180,18 @@ test("bounded typed stores refuse the third intent and unwind malformed input", 
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;
-    const one = runtime.applyIntent(localIntent(config), 100n);
-    const two = runtime.applyIntent(localIntent(config), 101n);
-    await expect(runtime.applyIntent(localIntent(config), 102n)).rejects.toThrow("NetworkCommandFull");
+    const one = runtime.applyIntent(localIntent(config));
+    const two = runtime.applyIntent(localIntent(config));
+    await expect(runtime.applyIntent(localIntent(config))).rejects.toThrow("NetworkCommandFull");
     await Promise.all([one, two]);
-    const invalid = localIntent(config);
-    Reflect.set(invalid.demand.groupTargets, 127, config.resources.maxPeers + 1);
-    await expect(runtime.applyIntent(invalid, 103n)).rejects.toThrow();
-    for (const targets of [new Uint16Array(129), new Uint16Array(128).fill(config.resources.maxPeers + 1)]) {
-      const malformed = localIntent(config);
-      malformed.demand.custodyGroupTargets = targets;
-      await expect(runtime.applyIntent(malformed, 103n)).rejects.toThrow();
+    for (const malformed of [
+      {coreTopics: 1},
+      {attesters: new Array(129).fill({aggregators: 1n, slot: 100, subnets: 1n})},
+    ]) {
+      // @ts-expect-error Exercise malformed external input.
+      await expect(runtime.applyIntent(malformed)).rejects.toThrow();
     }
-    await runtime.applyIntent(localIntent(config), 103n);
+    await runtime.applyIntent(localIntent(config));
     const pending = Array.from({length: 31}, () => runtime.getIdentity());
     expect(() => runtime.getIdentity()).toThrow("NetworkCommandFull");
     await Promise.all(pending);
@@ -300,7 +212,7 @@ test("actual 200/210 resources resolve and publish complete capacity", async () 
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;
-    await runtime.applyIntent(localIntent(config), 100n);
+    await runtime.applyIntent(localIntent(config));
     expect((await runtime.getPeers()).capacity).toBe(420);
 
     expect(runtime.limits.peerCapacity).toBe(Math.max(64, 2 * config.resources.maxPeers));
@@ -318,7 +230,7 @@ test("real authenticated connect, direct membership and generation-preserving im
   try {
     b = await startPeer(other);
     const [identityA, identityB] = await Promise.all([a.identity, b.identity]);
-    await Promise.all([a.applyIntent(localIntent(config), 100n), b.applyIntent(localIntent(other), 100n)]);
+    await Promise.all([a.applyIntent(localIntent(config)), b.applyIntent(localIntent(other))]);
     await a.connect(identityB.peerId, [identityB.localEndpoint], 5000n);
     await a.connect(identityB.peerId, [identityB.localEndpoint], 5000n);
     await a.addDirectPeer(identityB.peerId, [identityB.localEndpoint]);
@@ -354,7 +266,7 @@ test("connect timeout retains independently wanted direct membership", async () 
   try {
     await a.identity;
     const identity = await b.identity;
-    await a.applyIntent(localIntent(config), 100n);
+    await a.applyIntent(localIntent(config));
     await a.addDirectPeer(identity.peerId, [identity.localEndpoint]);
     await expect(a.connect(identity.peerId, [identity.localEndpoint], 30n)).rejects.toThrow("NetworkConnectTimeout");
     expect((await a.getDirectPeers()).identities).toEqual([identity.peerId]);
@@ -372,7 +284,7 @@ test("peer penalties accumulate while the command lane is full", async () => {
   try {
     b = await startPeer(second);
     const [, remote] = await Promise.all([a.identity, b.identity]);
-    await Promise.all([a.applyIntent(localIntent(first), 100n), b.applyIntent(localIntent(second), 100n)]);
+    await Promise.all([a.applyIntent(localIntent(first)), b.applyIntent(localIntent(second))]);
     await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
     const observed = (await a.getPeers()).peers.find((peer) => peer.identity === remote.peerId);
     if (!observed?.connection) throw Error("Missing connected peer");
@@ -433,11 +345,11 @@ test("disconnect cancels pending one-shot connects and releases their dial inten
     b = await startPeer(other);
     await a.identity;
     const identity = await b.identity;
-    await a.applyIntent(localIntent(config), 100n);
+    await a.applyIntent(localIntent(config));
     const pending = a.connect(identity.peerId, [identity.localEndpoint], 60000n).catch((error: Error) => error.message);
     await a.disconnect(identity.peerId);
     expect(await pending).toContain("NetworkConnectCancelled");
-    await b.applyIntent(localIntent(other), 100n);
+    await b.applyIntent(localIntent(other));
     await a.connect(identity.peerId, [identity.localEndpoint], 5000n);
     expect((await a.getPeers()).counts.connected).toBe(1);
     await a.disconnect(identity.peerId);
@@ -456,7 +368,7 @@ test("all typed stores and the connect allowance reject without partial admissio
   try {
     await runtime.identity;
     const identity = await remote.identity;
-    await runtime.applyIntent(localIntent(config), 100n);
+    await runtime.applyIntent(localIntent(config));
     const snapshots = [runtime.getPeers(), runtime.getPeers()];
     expect(() => runtime.getPeers()).toThrow("NetworkCommandFull");
     await Promise.all(snapshots);
@@ -490,15 +402,15 @@ test("identity reads the current signed ENR and copied intent ignores later inpu
     const ready = await runtime.identity;
     expect(ready.localEnr).not.toBeNull();
     const intent = localIntent(config);
-    intent.update.local.metadata.attnets[0] = 1;
-    const applied = runtime.applyIntent(intent, 101n);
-    intent.update.local.metadata.attnets[0] = 2;
+    intent.syncCommittees = [{subnet: 0, untilSlot: 200}];
+    const applied = runtime.applyIntent(intent);
+    intent.syncCommittees[0].subnet = 1;
     await applied;
     const first = await runtime.getIdentity();
     expect(first.localEnr).not.toEqual(ready.localEnr);
     const repeated = localIntent(config);
-    repeated.update.local.metadata.attnets[0] = 1;
-    expect((await runtime.applyIntent(repeated, 102n)).changed).toBe(false);
+    repeated.syncCommittees = [{subnet: 0, untilSlot: 200}];
+    expect((await runtime.applyIntent(repeated)).changed).toBe(false);
     expect((await runtime.getIdentity()).localEnr).toEqual(first.localEnr);
   } finally {
     await runtime.close();
@@ -512,18 +424,18 @@ test("incomplete early metadata rejects the whole intent without publishing loca
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;
-    await runtime.applyIntent(localIntent(config), 100n);
+    await runtime.applyIntent(localIntent(config));
     const before = await runtime.getIdentity();
     const intent = localIntent(config);
-    intent.update.local.metadata.attnets[0] = 1;
-    Reflect.set(intent.update.local.metadata, "custodyGroupCount", null);
-    await expect(runtime.applyIntent(intent, 101n)).rejects.toThrow("MissingCustodyAdvertisement");
+    intent.syncCommittees = [{subnet: 0, untilSlot: 200}];
+    intent.custodyGroupCount = 0n;
+    await expect(runtime.applyIntent(intent)).rejects.toThrow("InvalidCustodyCount");
     const after = await runtime.getIdentity();
     expect(after.metadata).toEqual(before.metadata);
     expect(after.localEnr).toEqual(before.localEnr);
-    expect((await runtime.applyIntent(localIntent(config), 100n)).changed).toBe(false);
-    intent.update.local.metadata.custodyGroupCount = 1n;
-    expect((await runtime.applyIntent(intent, 101n)).changed).toBe(true);
+    expect((await runtime.applyIntent(localIntent(config))).changed).toBe(false);
+    intent.custodyGroupCount = 1n;
+    expect((await runtime.applyIntent(intent)).changed).toBe(true);
   } finally {
     await runtime.close();
   }
@@ -538,7 +450,7 @@ test("graceful physical shutdown progresses while host callbacks are stalled", a
   try {
     b = await startPeer(other);
     const [, identity] = await Promise.all([a.identity, b.identity]);
-    await Promise.all([a.applyIntent(localIntent(config), 100n), b.applyIntent(localIntent(other), 100n)]);
+    await Promise.all([a.applyIntent(localIntent(config)), b.applyIntent(localIntent(other))]);
     await a.connect(identity.peerId, [identity.localEndpoint], 5000n);
     const closed = a.close();
     const wait = new Int32Array(new SharedArrayBuffer(4));

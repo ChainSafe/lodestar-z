@@ -26,6 +26,7 @@ export interface NetworkStatus {
   finalizedEpoch: bigint;
   headRoot: Uint8Array;
   headSlot: bigint;
+  /** Required from startup when Fulu is scheduled, including before its activation. */
   earliestAvailableSlot: bigint | null;
 }
 
@@ -109,7 +110,13 @@ export interface NativeRuntimeConfig {
   bind: IpEndpoint | readonly IpEndpoint[];
   local: NativeLocalState;
   discovery: NativeDiscoveryConfig | null;
-  initialSlot: bigint;
+  /** Unix genesis time in seconds. Native advances slots and expires duties independently of the JS event loop. */
+  genesisTime: bigint;
+  subscriptions?: {
+    subscribeAllSubnets: boolean;
+    slotsToSubscribeBeforeAggregatorDuty: number;
+    targetGroupPeers: number;
+  };
   gossipPolicy?: NativeGossipStartupPolicy;
 }
 
@@ -205,31 +212,17 @@ export interface NativeApplicationConfig extends NativeRuntimeConfig {
   rememberedPeers?: NativeRememberedPeers | null;
 }
 
-/** Desired coverage persists until replacement; the host owns validator duty expiry. */
-export interface NativeDemand {
-  attnets: Uint8Array;
-  syncnets: number;
-  /** At most 128 targets; omitted trailing entries are zero. Each target is bounded by maxPeers. */
-  groupTargets: Uint16Array;
-  /** Same bounds as groupTargets. Standing custody service targets; request consumers still check slot availability. */
-  custodyGroupTargets: Uint16Array;
-  attestationTarget: number;
-  syncTarget: number;
-}
-
-export interface NativeSubscriptionSet {
-  digest: Uint8Array;
-  /** Bit i selects subnet i; singleton kinds use bit 0. Missing kinds are unsubscribed. */
-  subnets: Partial<Record<NativeTopicKind, Uint8Array>>;
-}
-
+/** Sparse local changes; native derives fork subscriptions, metadata and peer demand. */
 export interface NativeLocalIntent {
-  update: {
-    local: NativeLocalState;
-  };
-  demand: NativeDemand;
-  /** One set per configured boundary; omitted boundaries are unsubscribed. */
-  subscriptions: readonly NativeSubscriptionSet[];
+  status?: NetworkStatusUpdate;
+  coreTopics?: boolean;
+  custodyGroupCount?: bigint;
+  /** Fold validator duties by slot into 64-bit subnet masks; aggregators must be a subset of subnets.
+   * At most four epochs of rows; native checks the current/next epoch horizon and discards expired duties.
+   */
+  attesters?: readonly {slot: number; subnets: bigint; aggregators: bigint}[];
+  /** Inclusive duty slot; the subscription expires at the following epoch boundary. */
+  syncCommittees?: readonly {subnet: number; untilSlot: number}[];
 }
 
 export interface NativeIntentResult {
@@ -632,7 +625,7 @@ export interface NativeNetwork {
   /** Native shutdown and its promised completions finished. A failed network cannot restart. */
   readonly closed: Promise<CloseResult>;
   /** Shares reserved admission with updateStatus; one state operation at a time avoids ordinary command pressure. */
-  applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;
+  applyIntent(intent: NativeLocalIntent): Promise<NativeIntentResult>;
   /** Updates Status for the active fork; preserves clock, subscriptions, Metadata, ENR and demand. */
   updateStatus(status: NetworkStatusUpdate): Promise<void>;
   /** Copies `root` before returning. Throws InvalidNetworkBytes unless it is a 32-byte Uint8Array. */

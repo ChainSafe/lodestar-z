@@ -21,7 +21,6 @@ import type {
   NativePeerAction,
   NativePeerReportContext,
   NativeRuntimeConfig,
-  NativeSubscriptionSet,
   NativeTopicKind,
 } from "../../src/network.js";
 import type {
@@ -108,6 +107,7 @@ export function networkConfig(): NativeRuntimeConfig & {
     activeValidatorCount: 16,
     bind: {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0},
     discovery: null,
+    genesisTime: BigInt(Math.floor(Date.now() / 1000)) - 1200n,
     gossipPolicy: {
       activeSendItems: Object.fromEntries(
         topicKinds.map((kind) => [kind, kind === "data_column_sidecar" ? 256 : kind === "blob_sidecar" ? 32 : 8])
@@ -129,11 +129,10 @@ export function networkConfig(): NativeRuntimeConfig & {
       validationTombstoneMs: 30000n,
     },
     identitySecretKey: key,
-    initialSlot: 100n,
     local: {
       metadata: {attnets: new Uint8Array(8), custodyGroupCount: 1n, sequenceNumber: 1n, syncnets: 0},
       status: {
-        earliestAvailableSlot: null,
+        earliestAvailableSlot: 0n,
         finalizedEpoch: 0n,
         finalizedRoot: new Uint8Array(32),
         headRoot: new Uint8Array(32),
@@ -204,20 +203,11 @@ export function applicationConfig(): NativeApplicationConfig & ReturnType<typeof
 }
 
 export function localIntent(config: NativeApplicationConfig): NativeLocalIntent {
-  return {
-    demand: {
-      attestationTarget: 1,
-      attnets: new Uint8Array(8),
-      custodyGroupTargets: new Uint16Array(128),
-      groupTargets: new Uint16Array(128),
-      syncTarget: 1,
-      syncnets: 0,
-    },
-    subscriptions: [],
-    update: {
-      local: structuredClone(config.local),
-    },
-  };
+  return {status: structuredClone(config.local.status)};
+}
+
+export function setSlot(config: NativeApplicationConfig, slot: bigint, slotDurationMs = 12000): void {
+  config.genesisTime = BigInt(Math.floor(Date.now() / 1000)) - slot * BigInt(slotDurationMs / 1000);
 }
 
 /**
@@ -304,30 +294,6 @@ export const topicKinds: readonly NativeTopicKind[] = [
   "blob_sidecar",
   "data_column_sidecar",
 ];
-
-export function subscriptions(...names: string[]): NativeSubscriptionSet[] {
-  const sets = new Map<string, NativeSubscriptionSet>();
-  for (const name of names) {
-    const match = /^\/eth2\/([0-9a-f]{8})\/([a-z_]+?)(?:_(\d+))?\/ssz_snappy$/.exec(name);
-    if (!match) throw Error(`Invalid fixture topic: ${name}`);
-    const [, digest, type, index] = match;
-    const kind = topicKinds.find((kind) => kind === type);
-    if (!kind) throw Error(`Invalid fixture kind: ${type}`);
-    const subnet = Number(index ?? 0);
-    if (subnet >= 128) throw Error(`Invalid fixture subnet: ${subnet}`);
-    let set = sets.get(digest);
-    if (!set) {
-      set = {digest: Uint8Array.from(Buffer.from(digest, "hex")), subnets: {}};
-      sets.set(digest, set);
-    }
-    const prior = set.subnets[kind];
-    const mask = new Uint8Array(Math.max(prior?.length ?? 0, (subnet >> 3) + 1));
-    if (prior) mask.set(prior);
-    mask[subnet >> 3] |= 1 << (subnet % 8);
-    set.subnets[kind] = mask;
-  }
-  return [...sets.values()];
-}
 
 export function peerIdFromHex(hex: string): string {
   return peerIdFromPublicKey(publicKeyFromProtobuf(Buffer.from(hex, "hex").subarray(2))).toString();

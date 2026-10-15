@@ -34,10 +34,10 @@ if (isMainThread) {
 } else {
   const config = applicationConfig();
   const runtime = startRuntime(config);
-  await runtime.applyIntent(localIntent(config), config.initialSlot);
+  await runtime.applyIntent(localIntent(config));
   holdSettling(runtime, true);
   const payload = new Uint8Array(4000);
-  new DataView(payload.buffer).setBigUint64(100, config.initialSlot, true);
+  new DataView(payload.buffer).setBigUint64(100, 100n, true);
   const pending = [];
   for (let i = 0; i < 16; i++) {
     pending.push(runtime.publishGossip(topicName(), payload, {allowZeroPeers: true, ignoreDuplicate: true}));

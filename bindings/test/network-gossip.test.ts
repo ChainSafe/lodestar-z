@@ -8,9 +8,9 @@ import {
   metricValue,
   peerIdFromHex,
   requestForks,
+  setSlot,
   settleOnly,
   startRuntime,
-  subscriptions,
   topicName,
   waitForGossipReady,
 } from "./utils/network.js";
@@ -21,7 +21,7 @@ test("gossip drain and stale verdict on an activated application", async () => {
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     expect(exchange(runtime, gossipAll).gossip).toBeNull();
     report(runtime, {generation: 1n, index: 0}, "ignore");
   } finally {
@@ -76,8 +76,8 @@ async function gossipPair(timeoutMs = 30000n, budget?: number, configure?: (conf
       [pair.right, pair.rightConfig],
     ] as const) {
       const intent = localIntent(config);
-      intent.subscriptions = subscriptions(TOPIC);
-      await runtime.applyIntent(intent, config.initialSlot);
+      intent.coreTopics = true;
+      await runtime.applyIntent(intent);
     }
     await Promise.all([
       pair.left.addDirectPeer(pair.remote.peerId, [pair.remote.localEndpoint]),
@@ -101,7 +101,7 @@ test("gossip lifecycle, strict representations and canonical publication refusal
   try {
     await runtime.identity;
     expect(exchange(runtime, gossipAll).gossip).toBeNull();
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     for (const malformed of [
       {...handle, generation: 0n},
       {...handle, generation: 1n << 64n},
@@ -257,8 +257,8 @@ test.each([
     expect(page.observedUnixMs).toBeGreaterThanOrEqual(BigInt(before - 1000));
     expect(page.observedMonoMs).toBeGreaterThan(0n);
     expect(page.nextCursor).toBeNull();
-    expect(page.topics).toHaveLength(1);
-    expect(page.topics[0]).toMatchObject({subscribed: true, topic: TOPIC});
+    const topic = page.topics.find((entry) => entry.topic === TOPIC);
+    expect(topic).toMatchObject({subscribed: true, topic: TOPIC});
     expect(page.peers).toHaveLength(1);
     const scored = page.peers[0];
     expect(scored.identity).toEqual(pair.identity.peerId);
@@ -268,8 +268,8 @@ test.each([
     expect(scored.appScore).toBe(0);
     expect(scored.weights.p5).toBe(0);
     if (verdict === "reject") {
-      expect(scored.topics[0].invalidMessageDeliveries).toBeGreaterThan(0);
-      expect(scored.topics[0].weights.p4).toBeLessThan(0);
+      expect(scored.topics.find((entry) => entry.index === topic?.index)?.invalidMessageDeliveries).toBeGreaterThan(0);
+      expect(scored.topics.find((entry) => entry.index === topic?.index)?.weights.p4).toBeLessThan(0);
     }
 
     scored.ip.fill(0);
@@ -388,13 +388,14 @@ for (const hoodi of [false, true]) {
       try {
         const info = await peer.command("ready");
         const config = applicationConfig();
+        setSlot(config, 2000n * 32n);
         const firstTopic = topicName("beacon_block", 2);
         const secondTopic = topicName("beacon_block", 3);
         runtime = startRuntime(config, () => undefined);
         const identity = await runtime.identity;
         const intent = localIntent(config);
-        intent.subscriptions = subscriptions(firstTopic, secondTopic);
-        await runtime.applyIntent(intent, config.initialSlot);
+        intent.coreTopics = true;
+        await runtime.applyIntent(intent);
         await peer.command("gossipSubscribe", {topic: firstTopic});
         await peer.command("gossipSubscribe", {topic: secondTopic});
         const remote = peerIdFromHex(info.peer);
@@ -498,7 +499,7 @@ test("gossip diagnostics validate cursors and share bounded snapshot admission",
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     for (const cursor of [-1, 0.5, 513, Number.NaN]) {
       expect(() => runtime.getGossipDiagnostics(cursor)).toThrow();
     }
@@ -519,7 +520,7 @@ test("gossip diagnostics paginate retained peers and peer drains expose remainin
   const identities = new Set<string>();
   try {
     await runtime.identity;
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await runtime.applyIntent(localIntent(config));
     for (let i = 0; i < 9; i++) {
       const remoteConfig = applicationConfig();
       remoteConfig.identitySecretKey[31] = 70 + i;
@@ -527,7 +528,7 @@ test("gossip diagnostics paginate retained peers and peer drains expose remainin
       try {
         const identity = await remote.identity;
         identities.add(identity.peerId);
-        await remote.applyIntent(localIntent(remoteConfig), remoteConfig.initialSlot);
+        await remote.applyIntent(localIntent(remoteConfig));
         await runtime.connect(identity.peerId, [identity.localEndpoint], 5000n);
         await vi.waitFor(
           async () => {

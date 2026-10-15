@@ -31,8 +31,8 @@ class NativeRuntime {
   setLogLevel(level) {
     this.#native.setLogLevel(level);
   }
-  async applyIntent(intent, slot) {
-    return this.#native.applyIntent(intent, slot);
+  async applyIntent(intent) {
+    return this.#native.applyIntent(intent);
   }
   updateStatus(status) {
     return this.#native.updateStatus(status);

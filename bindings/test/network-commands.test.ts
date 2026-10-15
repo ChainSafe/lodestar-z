@@ -16,9 +16,9 @@ test("every command kind completes with its typed result", async () => {
   try {
     remote = await startPeer(remoteConfig);
     const peer = await remote.identity;
-    await remote.applyIntent(localIntent(remoteConfig), 100n);
+    await remote.applyIntent(localIntent(remoteConfig));
     const sequence = expect.any(BigInt);
-    expect(await runtime.applyIntent(localIntent(config), 100n)).toEqual({
+    expect(await runtime.applyIntent(localIntent(config))).toEqual({
       changed: expect.any(Boolean),
       ownerSequence: sequence,
       slot: 100n,
@@ -64,7 +64,7 @@ function commands(): [string, [string, Command][]][] {
     [
       "eleven kinds",
       [
-        ["applyIntent", (runtime) => runtime.applyIntent(localIntent(config), 100n)],
+        ["applyIntent", (runtime) => runtime.applyIntent(localIntent(config))],
         ["updateStatus", (runtime) => runtime.updateStatus(config.local.status)],
         ["getIdentity", (runtime) => runtime.getIdentity()],
         ["getMetrics", (runtime) => runtime.getMetrics()],
@@ -110,8 +110,8 @@ test("ordinary command pressure preserves one local-state admission", async () =
   try {
     const admitted = Array.from({length: 31}, () => runtime.getIdentity());
     expect(() => runtime.getIdentity()).toThrow("NetworkCommandFull");
-    const state = runtime.applyIntent(localIntent(config), 100n);
-    const refused = expect(runtime.applyIntent(localIntent(config), 100n)).rejects.toThrow("NetworkCommandFull");
+    const state = runtime.applyIntent(localIntent(config));
+    const refused = expect(runtime.applyIntent(localIntent(config))).rejects.toThrow("NetworkCommandFull");
 
     await Promise.all([...admitted, state, refused]);
     expect((await runtime.getIdentity()).peerId).toBe(runtime.identity.peerId);

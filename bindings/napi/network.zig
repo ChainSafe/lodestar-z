@@ -283,8 +283,8 @@ pub fn setLogLevel(self: *@This(), level: js.Value) !void {
     try network_logs.configure(try self.owner(), level.val);
 }
 
-pub fn applyIntent(self: *@This(), intent: js.Value, slot: js.Value) !js.Value {
-    return .{ .val = try command_js.submit(js.env(), try self.owner(), .applyIntent, &.{ intent.val, slot.val }) };
+pub fn applyIntent(self: *@This(), intent: js.Value) !js.Value {
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .applyIntent, &.{intent.val}) };
 }
 pub fn updateStatus(self: *@This(), status: js.Value) !js.Value {
     return .{ .val = try command_js.submit(js.env(), try self.owner(), .updateStatus, &.{status.val}) };

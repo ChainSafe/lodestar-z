@@ -2,7 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 
 /// A copied owner-clock sample. Protocol deadlines use awake time; wall time is for TLS,
-/// persistence and diagnostics. The two clocks are sampled independently.
+/// consensus slots, persistence and diagnostics. The two clocks are sampled independently.
 pub const Now = struct {
     monotonic: Io.Clock.Timestamp,
     wall: Io.Clock.Timestamp,
