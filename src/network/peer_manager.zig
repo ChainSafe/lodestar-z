@@ -237,6 +237,7 @@ pub const PeerManager = struct {
             self.policy_due_ms = now.millis() +| policy_interval_ms;
             self.catalog.intents_dirty = true;
         }
+        if (self.discovery_need.general) _ = peers.Dialing.replayRemembered(&self.catalog, &self.local.fork, &self.selection.deficits.missing, now);
         if (self.catalog.intents_dirty or (if (self.dialing.selection_deadline) |due| now.millis() >= due else false)) {
             self.counters.candidate_selections +|= 1;
             self.dialing.configureSelection(&self.catalog, &self.selection.deficits.missing, self.selection.retained_count < self.catalog.options.target_peers or self.selection.deficits.outbound > 0, &self.local.fork, now.millis());
@@ -538,9 +539,6 @@ pub const PeerManager = struct {
         self.reconcile(gossipsub, now);
         self.transportProgress(engine);
         const count = self.dialing.poll(&self.catalog, now.millis(), out[0..@min(out.len, self.dialRoom())]);
-        // Replay refills the remembered candidates waiting for a paced first attempt after poll
-        // started some, so their eligibility deadline wakes the owner for the next.
-        if (self.discovery_need.general) _ = self.dialing.replayRemembered(&self.catalog, &self.local.fork, &self.selection.deficits.missing, now);
         if (count > 0 and self.selection.retained_count >= self.catalog.options.target_peers and self.selection.deficits.outbound == 0) {
             self.replacement_after_ms = now.millis() +| replacement_interval_ms;
             self.catalog.selection_dirty = true;

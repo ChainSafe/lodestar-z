@@ -1,9 +1,8 @@
 //! Remembered peers: outbound peers that served us, each with the QUIC endpoint we dialed, so a
 //! restart can redial them. The caller loads records at startup and checkpoints snapshots.
-//! Native decides what qualifies, replays loaded records once as paced automatic
-//! candidates, and forgets a record when health, rejection or identity evidence invalidates it.
-//! Records carry wall-clock seconds so they outlive the process; the replay pacer runs on the
-//! monotonic clock.
+//! Native decides what qualifies, replays loaded records once as automatic candidates, and
+//! forgets a record when health, rejection or identity evidence invalidates it.
+//! Records carry wall-clock seconds so they outlive the process.
 const std = @import("std");
 const t = @import("types.zig");
 const Now = @import("../types.zig").Now;
@@ -14,9 +13,6 @@ pub const capacity = 256;
 const expiry_s: u64 = 24 * 60 * 60;
 /// A dialed connection qualifies once it has served this long since its admission.
 pub const qualify_ms: u64 = 5 * 60_000;
-/// Remembered first attempts start four at once, then one every 250 ms.
-pub const replay_burst = 4;
-const replay_interval_ms: u64 = 250;
 
 pub const Record = struct {
     peer: t.PeerId,
@@ -57,9 +53,6 @@ pub const Memory = struct {
     order: [capacity]u8 = undefined,
     order_len: u16 = 0,
     cursor: u16 = 0,
-    /// The pacer's theoretical arrival time: a remembered first attempt may start while it is at
-    /// most `replay_burst - 1` intervals ahead of now.
-    replay_at_ms: u64 = 0,
     counters: Counters = .{},
 
     pub fn init(a: std.mem.Allocator) !Memory {
@@ -164,17 +157,6 @@ pub const Memory = struct {
             return entry.record;
         }
         return null;
-    }
-
-    /// When the pacer next lets a remembered first attempt start.
-    pub fn replayDue(self: *const Memory) u64 {
-        return self.replay_at_ms -| (replay_burst - 1) * replay_interval_ms;
-    }
-
-    /// Spends the pacer on one remembered first attempt.
-    pub fn takeReplay(self: *Memory, now_ms: u64) void {
-        std.debug.assert(now_ms >= self.replayDue());
-        self.replay_at_ms = @max(self.replay_at_ms, now_ms) +| replay_interval_ms;
     }
 
     pub fn note(self: *Memory, origin: Origin, stage: Stage) void {

@@ -156,20 +156,3 @@ test "remembered forgets a record on an identity mismatch only at its own endpoi
     memory.forget(&peer(1));
     try std.testing.expectEqual(@as(u16, 0), memory.count);
 }
-
-test "remembered replay pacer admits a burst of four, then one every 250 ms" {
-    var memory = try Memory.init(a);
-    defer memory.deinit(a);
-    const start: u64 = 10_000;
-    for (0..4) |_| {
-        try std.testing.expect(memory.replayDue() <= start);
-        memory.takeReplay(start);
-    }
-    try std.testing.expectEqual(start + 250, memory.replayDue());
-    memory.takeReplay(start + 250);
-    try std.testing.expectEqual(start + 500, memory.replayDue());
-    // An idle pacer refills to the burst and no further.
-    const later = start + 60_000;
-    for (0..4) |_| memory.takeReplay(later);
-    try std.testing.expectEqual(later + 250, memory.replayDue());
-}

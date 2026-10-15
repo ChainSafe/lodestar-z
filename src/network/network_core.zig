@@ -59,7 +59,7 @@ pub const NetworkCore = struct {
         clock: SlotClock,
         schedule: local_state.ForkSchedule = .{},
         discovery: ?DiscoveryOptions = null,
-        /// Peers an earlier run remembered, at most `peers.remembered.capacity`, replayed as paced
+        /// Peers an earlier run remembered, at most `peers.remembered.capacity`, replayed as
         /// automatic candidates. Native drops expired, unusable and duplicate records.
         remembered: []const peers.remembered.Record = &.{},
     };

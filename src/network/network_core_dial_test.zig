@@ -582,10 +582,7 @@ test "core remembers a served dial, keeps it through close, and replays it after
     try setup.initOwners(&.{});
     defer setup.deinit();
     setup.client.peer_manager.loadRemembered(records[0..count], setup.pair.now);
-    // The first turn queues the remembered candidate, and its due first attempt wakes the next.
     var intents: [1]SelectedDial = undefined;
-    try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
-    try std.testing.expectEqual(setup.pair.now.millis(), clientWakeup(&setup).?);
     try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     try std.testing.expect(intents[0].peer.eql(&records[0].peer));
     try std.testing.expect(intents[0].address.eql(support.server_address));

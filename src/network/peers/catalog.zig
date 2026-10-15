@@ -32,8 +32,7 @@ pub const Catalog = struct {
         eligible_at_ms: u64 = 0,
         replacement_after_ms: u64 = 0,
         failures: u8 = 0,
-        /// Replay queued this automatic intent from a remembered record; its first attempt is preferred.
-        replay: enum { none, untried, tried } = .none,
+        origin: remembered.Origin = .fresh,
 
         pub fn deferUntil(self: *DialState, eligible_at_ms: u64) void {
             self.eligible_at_ms = @max(self.eligible_at_ms, eligible_at_ms);
