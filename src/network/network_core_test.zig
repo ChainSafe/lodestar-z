@@ -753,7 +753,7 @@ test "core targeted Status serves two current connections and immediate close is
     const result = driver.step(&a, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
     if (result.failure) |err| return err;
     var status_started: usize = 0;
-    for (a.control_protocol.operations) |op| if (op.request != null and op.protocol == .status_v1) {
+    for (a.peer_manager.control.connections) |op| if (op.request != null and op.protocol == .status_v1) {
         status_started += 1;
     };
     try std.testing.expectEqual(@as(usize, 2), status_started);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const t = @import("types.zig");
 const wire = @import("../control_wire.zig");
 const Catalog = @import("catalog.zig").Catalog;
@@ -13,12 +14,17 @@ const logging = @import("../logging.zig");
 const identify_mod = @import("../identify/root.zig");
 const types = @import("../types.zig");
 const time = @import("../time.zig");
+const Router = @import("../router.zig").Router;
+const Engine = @import("../quic/Engine.zig");
 
 const health_probe_count = @typeInfo(Control.HealthProbe).@"enum".fields.len;
 const ConnectionState = struct {
-    /// A started request keeps its catalog index reserved through cancellation and replacement.
-    /// Only its matching terminal event releases this token; retiring a connection does not.
-    pending_request: ?rr.ReqResp.RequestHandle = null,
+    request: ?rr.ReqResp.RequestHandle = null,
+    protocol: rr.Protocol = .ping_v1,
+    received: bool = false,
+    after_ready: bool = false,
+    bytes: [wire.status_size_max]u8 = undefined,
+    sink: [wire.status_size_max]u8 = undefined,
     direction: t.Direction = .inbound,
     identify_state: enum { pending, started, done } = .pending,
     identify_retry_ms: u64 = 0,
@@ -42,10 +48,16 @@ const ConnectionState = struct {
     /// completed. None counts once a local close began.
     rejection: ?t.Rejection = null,
 };
-/// Peer control policy: probe scheduling, fork-transition grace, health streaks, evidence,
-/// rejection attribution and disconnect decisions. Started request tokens and their terminal
-/// outcomes keep connection states current; the owner executes the requests and closes it chooses.
+const Response = struct {
+    request: ?rr.ReqResp.RequestHandle = null,
+    conn: t.Handle = undefined,
+    bytes: [wire.status_size_max]u8 = undefined,
+};
+
+/// Owns peer qualification, health probes and their request buffers. Obsolete requests are
+/// abandoned before a connection row is reused. All calls run on the network owner thread.
 pub const Control = struct {
+    pub const Io = struct { reqresp: *rr.ReqResp, router: *Router, engine: *Engine };
     pub const Closing = struct { reason: t.DisconnectReason, deadline_ms: u64, sent: bool = false };
 
     pub const Options = struct {
@@ -64,12 +76,14 @@ pub const Control = struct {
     pub const HealthProbe = enum { status, metadata, ping };
 
     connections: []ConnectionState,
+    responses: []Response,
     /// Live connections keyed on the earliest time `decide` acts on them, in ms.
     deadlines: DeadlineHeap,
     /// The rows one maintain turn takes from the heap.
     due: []u32,
     options: Options,
     cursor: usize = 0,
+    consuming: bool = false,
     /// Connections taken from the deadline heap. An idle peer set visits none.
     visits: u64 = 0,
     counters: Counters = .{},
@@ -81,21 +95,6 @@ pub const Control = struct {
         health_failures: [health_probe_count]u64 = @splat(0),
         events: control_metrics.Counters = .{},
     };
-    /// One maintain turn: the rows taken from the heap in rotation order, and the starts left.
-    pub const Pass = struct { next: usize = 0, count: usize, starts_remaining: u16 };
-    /// A due connection's work for the owner: a close, or an Identify start and a control request
-    /// start within the turn's start quota.
-    pub const Due = struct {
-        index: u32,
-        peer: t.PeerRef,
-        conn: t.Handle,
-        close: ?t.DisconnectReason = null,
-        identify: bool = false,
-        request: ?wire.Probe = null,
-    };
-    /// A connection whose in-flight request peer control no longer wants.
-    pub const Connection = struct { peer: t.PeerRef, conn: t.Handle };
-
     pub fn validateOptions(options: Options) error{InvalidOptions}!void {
         if (options.starts_per_turn_max == 0 or options.starts_per_turn_max > 256 or options.health_failures_max == 0)
             return error.InvalidOptions;
@@ -111,22 +110,28 @@ pub const Control = struct {
         for (timers) |timer| if (timer == 0 or timer > 86_400_000) return error.InvalidOptions;
     }
 
-    pub fn init(a: std.mem.Allocator, options: Options, peer_capacity: u16) !Control {
+    pub fn init(a: std.mem.Allocator, options: Options, peer_capacity: u16, inbound_capacity: u16) !Control {
         try validateOptions(options);
+        if (inbound_capacity == 0) return error.InvalidOptions;
         const connections = try a.alloc(ConnectionState, peer_capacity);
         errdefer a.free(connections);
         var deadlines = try DeadlineHeap.init(a, peer_capacity);
         errdefer deadlines.deinit(a);
         const due = try a.alloc(u32, peer_capacity);
+        errdefer a.free(due);
+        const responses = try a.alloc(Response, inbound_capacity);
+        @memset(responses, .{});
         @memset(connections, .{});
         return .{
             .connections = connections,
+            .responses = responses,
             .deadlines = deadlines,
             .due = due,
             .options = options,
         };
     }
     pub fn deinit(self: *Control, a: std.mem.Allocator) void {
+        a.free(self.responses);
         a.free(self.due);
         self.deadlines.deinit(a);
         a.free(self.connections);
@@ -137,6 +142,7 @@ pub const Control = struct {
         const row = &self.connections[peer.index];
         return if (std.meta.eql(row.peer, peer) and std.meta.eql(row.conn, conn)) row else null;
     }
+    /// The owner releases any previous connection before reusing this peer row.
     pub fn connected(
         self: *Control,
         catalog: *const Catalog,
@@ -147,9 +153,8 @@ pub const Control = struct {
     ) void {
         std.debug.assert(peer.index < self.connections.len);
         self.counters.events.connected[@intFromEnum(direction)] +|= 1;
-        const pending_request = self.connections[peer.index].pending_request;
+        assert(self.connections[peer.index].request == null);
         self.connections[peer.index] = .{
-            .pending_request = pending_request,
             .direction = direction,
             .peer = peer,
             .conn = conn,
@@ -171,7 +176,7 @@ pub const Control = struct {
         const row = &self.connections[index];
         const peer = row.peer orelse return null;
         const current = connectedRow(catalog, peer, row.conn) orelse return null;
-        return dueAt(row, current.status != null, row.pending_request != null);
+        return dueAt(row, current.status != null, row.request != null);
     }
     /// The catalog row for this peer, if it still refers to this connection.
     fn connectedRow(catalog: *const Catalog, peer: t.PeerRef, conn: t.Handle) ?*const Catalog.Row {
@@ -185,9 +190,8 @@ pub const Control = struct {
         else
             self.options.ping_outbound_ms;
     }
-    /// Retires control state for a connection that closed or lost its catalog index to a
-    /// replacement. The protocol cancels the connection's requests separately.
-    pub fn retire(self: *Control, peer: t.PeerRef, conn: t.Handle) void {
+    /// Removes connection policy. The owner abandons its request before reusing this row.
+    fn retire(self: *Control, peer: t.PeerRef, conn: t.Handle) void {
         if (self.connectionState(peer, conn)) |row| {
             row.peer = null;
             self.deadlines.clear(peer.index);
@@ -231,15 +235,16 @@ pub const Control = struct {
             self.rekey(catalog, index);
         };
     }
-    /// Invalidates a connection's Status after the local fork changed and opens its transition
-    /// grace. Returns the connection whose in-flight request the owner cancels.
+    /// Invalidates Status and abandons the old fork's request before scheduling revalidation.
+    /// The owner accounts for any returned peer fault before consuming another event batch.
     pub fn revalidate(
         self: *Control,
         catalog: *Catalog,
         index: usize,
         previous: t.ForkContext,
+        io: *const Io,
         now: Now,
-    ) ?Connection {
+    ) ?rr.ReqResp.PeerFault {
         const row = &self.connections[index];
         const peer = row.peer orelse return null;
         if (row.closing != null) return null;
@@ -251,8 +256,9 @@ pub const Control = struct {
         row.status_due_ms = now.millis();
         row.retry_ms = 0;
         row.metadata_due_ms = row.metadata_due_ms orelse now.millis();
+        const fault = self.abandon(io, peer, row.conn, now);
         self.rekey(catalog, index);
-        return .{ .peer = peer, .conn = row.conn };
+        return fault;
     }
     pub fn revalidationDeadline(self: *const Control, peer: t.PeerRef, conn: t.Handle, now: Now) ?u64 {
         if (peer.index >= self.connections.len) return null;
@@ -275,75 +281,17 @@ pub const Control = struct {
             => 3,
         };
     }
-    /// Takes the connection states whose deadline passed, ordered as a scan of every row from the cursor
-    /// would reach them.
-    pub fn beginMaintenance(self: *Control, now: Now) Pass {
+    fn dueConnections(self: *Control, now: Now) []const u32 {
         var count: usize = 0;
-        // Each row holds at most one key, so the heap empties within connections.len pops.
-        while (self.deadlines.popDue(now.millis())) |index| {
+        for (0..self.connections.len) |_| {
+            const index = self.deadlines.popDue(now.millis()) orelse break;
             self.due[count] = index;
             count += 1;
         }
         self.visits +|= count;
         const due = self.due[0..count];
-        // std.sort.pdq fills its stack in ReleaseSafe even when there is nothing to order.
         if (due.len > 1) std.sort.pdq(u32, due, Rotation{ .start = self.cursor, .len = self.connections.len }, Rotation.lessThan);
-        return .{ .count = count, .starts_remaining = self.options.starts_per_turn_max };
-    }
-    /// Returns the pass's next connection with work, spending the start quota and advancing the
-    /// cursor for each start. Rekeys connections it passes over; the owner executes the work,
-    /// records its outcome and rekeys that connection before the next call.
-    pub fn nextDue(
-        self: *Control,
-        pass: *Pass,
-        catalog: *const Catalog,
-        local: *const t.LocalState,
-        now: Now,
-    ) ?Due {
-        while (pass.next < pass.count) {
-            const index = self.due[pass.next];
-            pass.next += 1;
-            if (self.dueWork(pass, catalog, index, local, now)) |due| return due;
-            self.rekey(catalog, index);
-        }
-        if (@import("builtin").is_test) self.checkDeadlines(catalog, now.millis());
-        return null;
-    }
-    fn dueWork(
-        self: *Control,
-        pass: *Pass,
-        catalog: *const Catalog,
-        index: u32,
-        local: *const t.LocalState,
-        now: Now,
-    ) ?Due {
-        const row = &self.connections[index];
-        const peer = row.peer orelse return null;
-        const current = connectedRow(catalog, peer, row.conn) orelse return null;
-        const relevant = current.status != null;
-        const decision = decide(row, relevant, row.pending_request != null, now.millis());
-        var due: Due = .{ .index = index, .peer = peer, .conn = row.conn };
-        if (decision.close) {
-            due.close = row.closing.?.reason;
-            return due;
-        }
-        if (pass.starts_remaining > 0 and relevant and row.closing == null and row.identify_state == .pending and now.millis() >= row.identify_retry_ms) {
-            pass.starts_remaining -= 1;
-            self.cursor = (index + 1) % self.connections.len;
-            due.identify = true;
-        }
-        if (decision.request) |action| if (pass.starts_remaining > 0) {
-            pass.starts_remaining -= 1;
-            self.cursor = (index + 1) % self.connections.len;
-            due.request = switch (action) {
-                .status => .{ .protocol = wire.statusProtocol(local.fork) },
-                .metadata => .{ .protocol = wire.metadataProtocol(local.fork) },
-                .ping => .{ .protocol = .ping_v1 },
-                .goodbye => .{ .protocol = .goodbye_v1, .code = goodbyeReason(row.closing.?.reason) },
-            };
-            due.request.?.after_ready = row.evidence == .ready;
-        };
-        return if (due.identify or due.request != null) due else null;
+        return due;
     }
     /// Orders row indices by their distance from `start`, wrapping at `len`.
     const Rotation = struct {
@@ -353,31 +301,179 @@ pub const Control = struct {
             return (a + self.len - self.start) % self.len < (b + self.len - self.start) % self.len;
         }
     };
-    pub fn started(self: *Control, catalog: *const Catalog, due: *const Due, identify_started: bool, request: ?rr.ReqResp.RequestHandle, now: Now) void {
-        if (due.identify) self.identifyStarted(due, identify_started, now);
-        if (due.request != null) self.requestStarted(due, request, now);
-        self.rekey(catalog, due.index);
-    }
-    fn identifyStarted(self: *Control, due: *const Due, succeeded: bool, now: Now) void {
-        const row = self.connectionState(due.peer, due.conn) orelse return;
-        if (!succeeded) {
-            row.identify_retry_ms = now.millis() +| 1_000;
-            return;
-        }
-        row.identify_state = .started;
-    }
-    fn requestStarted(self: *Control, due: *const Due, request: ?rr.ReqResp.RequestHandle, now: Now) void {
-        const row = self.connectionState(due.peer, due.conn) orelse return;
-        std.debug.assert(row.pending_request == null);
-        if (request == null) {
-            self.counters.deferred +|= 1;
-            row.retry_ms = now.millis() +| self.options.local_retry_ms;
-            return;
-        }
-        row.pending_request = request;
+    fn start(self: *Control, row: *ConnectionState, protocol: rr.Protocol, code: u64, io: *const Io, local: *const t.LocalState, now: Now) (rr.ReqResp.RequestError || wire.Error)!void {
+        assert(row.request == null);
+        const len = switch (protocol) {
+            .status_v1, .status_v2 => try wire.encodeStatus(protocol, &local.status, &row.bytes),
+            .ping_v1, .goodbye_v1 => wire.encodeScalar(if (protocol == .ping_v1) local.metadata.seq_number else code, &row.bytes) catch unreachable,
+            .metadata_v1, .metadata_v2, .metadata_v3 => 0,
+            else => unreachable,
+        };
+        row.request = try io.reqresp.request(io.engine, io.router, row.conn, protocol, row.bytes[0..len], &row.sink, .{}, now);
+        row.protocol = protocol;
+        row.received = false;
+        row.after_ready = row.evidence == .ready;
         self.counters.started +|= 1;
         row.retry_ms = 0;
-        if (due.request.?.protocol == .goodbye_v1) row.closing.?.sent = true;
+        if (protocol == .goodbye_v1) row.closing.?.sent = true;
+    }
+
+    /// Discards an obsolete outbound request before its row or local fork state changes.
+    /// Call only outside consumption of a borrowed reqresp event batch.
+    fn abandon(self: *Control, io: *const Io, peer: t.PeerRef, conn: t.Handle, now: Now) ?rr.ReqResp.PeerFault {
+        assert(!self.consuming);
+        if (peer.index >= self.connections.len) return null;
+        const row = &self.connections[peer.index];
+        const request = row.request orelse return null;
+        if (!std.meta.eql(row.conn, conn)) return null;
+        row.request = null;
+        return io.reqresp.abandon(io.engine, io.router, request, now);
+    }
+
+    /// Ends outbound buffer borrows before the row can be reused. Call outside a borrowed event
+    /// batch and account for the returned peer fault. Inbound responses retain terminal delivery.
+    pub fn releaseConnection(self: *Control, io: *const Io, peer: t.PeerRef, conn: t.Handle, now: Now) ?rr.ReqResp.PeerFault {
+        const fault = self.abandon(io, peer, conn, now);
+        self.retire(peer, conn);
+        for (self.responses) |*response| if (response.request) |request| {
+            if (std.meta.eql(response.conn, conn)) {
+                // Keep terminal delivery so any inbound protocol fault retains its normal path.
+                _ = io.reqresp.cancel(io.engine, io.router, request, now);
+            }
+        };
+        return fault;
+    }
+
+    pub fn receive(self: *Control, catalog: *Catalog, local: *const t.LocalState, io: *const Io, batch: []const rr.ReqResp.Event, now: Now, slot: u64) void {
+        assert(!self.consuming);
+        self.consuming = true;
+        defer self.consuming = false;
+        for (batch) |event| {
+            const request = switch (event) {
+                .request => |*incoming| {
+                    const peer = catalog.findConnection(incoming.conn) orelse {
+                        _ = io.reqresp.cancel(io.engine, io.router, incoming.request, now);
+                        continue;
+                    };
+                    self.requested(catalog, peer, incoming, local, now, slot);
+                    self.respond(io, incoming, local, now);
+                    continue;
+                },
+                inline else => |value| value.request,
+            };
+            if (request.direction == .inbound) {
+                for (self.responses) |*response| {
+                    if (!std.meta.eql(response.request, request)) continue;
+                    switch (event) {
+                        .chunk_sent => {
+                            _ = io.reqresp.finish(request, now);
+                        },
+                        .served, .failed => response.request = null,
+                        else => unreachable,
+                    }
+                    break;
+                }
+            } else {
+                for (self.connections) |*row| {
+                    if (!std.meta.eql(row.request, request)) continue;
+                    self.replied(catalog, row, event, local, now, slot);
+                    if (event == .chunk) _ = io.reqresp.consume(io.engine, io.router, request, now);
+                    break;
+                }
+            }
+        }
+    }
+
+    pub const Close = struct { peer: t.PeerRef, conn: t.Handle, reason: t.DisconnectReason };
+
+    /// Executes a bounded maintenance pass and returns the connections the owner must close
+    /// before its next turn. The output has room for every connected peer.
+    pub fn maintain(self: *Control, catalog: *Catalog, local: *const t.LocalState, io: *const Io, identify: *identify_mod.Handler, now: Now, closes: []Close) []Close {
+        assert(closes.len >= catalog.options.max_peers);
+        var count: usize = 0;
+        var starts_remaining = self.options.starts_per_turn_max;
+        for (self.dueConnections(now)) |index| {
+            defer self.rekey(catalog, index);
+            const row = &self.connections[index];
+            const peer = row.peer orelse continue;
+            const current = connectedRow(catalog, peer, row.conn) orelse continue;
+            const relevant = current.status != null;
+            const decision = decide(row, relevant, row.request != null, now.millis());
+            if (decision.close) {
+                closes[count] = .{ .peer = peer, .conn = row.conn, .reason = row.closing.?.reason };
+                count += 1;
+                continue;
+            }
+            if (starts_remaining > 0 and relevant and row.closing == null and row.identify_state == .pending and now.millis() >= row.identify_retry_ms) {
+                starts_remaining -= 1;
+                self.cursor = (index + 1) % self.connections.len;
+                if (identify.start(io.router, io.engine, peer, row.conn, now)) |_| {
+                    row.identify_state = .started;
+                } else |_| row.identify_retry_ms = now.millis() +| 1_000;
+            }
+            if (decision.request) |action| if (starts_remaining > 0) {
+                starts_remaining -= 1;
+                self.cursor = (index + 1) % self.connections.len;
+                const protocol: rr.Protocol = switch (action) {
+                    .status => wire.statusProtocol(local.fork),
+                    .metadata => wire.metadataProtocol(local.fork),
+                    .ping => .ping_v1,
+                    .goodbye => .goodbye_v1,
+                };
+                const code = if (action == .goodbye) goodbyeReason(row.closing.?.reason) else 0;
+                self.start(row, protocol, code, io, local, now) catch {
+                    self.counters.deferred +|= 1;
+                    row.retry_ms = now.millis() +| self.options.local_retry_ms;
+                };
+            };
+        }
+        if (builtin.is_test) self.checkDeadlines(catalog, now.millis());
+        return closes[0..count];
+    }
+
+    /// Answers a peer's control request from the local state, or cancels a request it cannot
+    /// answer. The response bytes stay immutable until reqresp reports them served or failed.
+    fn respond(
+        self: *Control,
+        io: *const Io,
+        event: *const @FieldType(rr.ReqResp.Event, "request"),
+        local: *const t.LocalState,
+        now: Now,
+    ) void {
+        const response = available: {
+            for (self.responses) |*candidate| if (candidate.request == null) break :available candidate;
+            unreachable;
+        };
+        response.conn = event.conn;
+        const len: usize = switch (event.protocol) {
+            .status_v1, .status_v2 => wire.encodeStatus(event.protocol, &local.status, &response.bytes) catch {
+                _ = io.reqresp.cancel(io.engine, io.router, event.request, now);
+                return;
+            },
+            .ping_v1 => blk: {
+                _ = wire.decodeScalar(event.bytes) catch {
+                    _ = io.reqresp.cancel(io.engine, io.router, event.request, now);
+                    return;
+                };
+                break :blk wire.encodeScalar(local.metadata.seq_number, &response.bytes) catch unreachable;
+            },
+            .metadata_v1, .metadata_v2, .metadata_v3 => wire.encodeMetadata(
+                event.protocol,
+                &local.metadata,
+                local.fork,
+                &response.bytes,
+            ) catch {
+                _ = io.reqresp.cancel(io.engine, io.router, event.request, now);
+                return;
+            },
+            .goodbye_v1 => wire.encodeScalar(1, &response.bytes) catch unreachable,
+            else => unreachable,
+        };
+        io.reqresp.respond(event.request, response.bytes[0..len], null, now) catch {
+            _ = io.reqresp.cancel(io.engine, io.router, event.request, now);
+            return;
+        };
+        response.request = event.request;
     }
 
     pub fn identifyResults(self: *Control, catalog: *Catalog, results: []const identify_mod.Handler.Result) void {
@@ -424,8 +520,7 @@ pub const Control = struct {
             row.rejection = .early_close;
     }
 
-    /// Retires control state and returns its evidence for the catalog close. A pending request
-    /// keeps its reservation until its terminal event. Untracked connections have no effect.
+    /// Returns evidence for catalog retirement. The owner then releases the connection's I/O.
     pub fn close(
         self: *Control,
         peer: t.PeerRef,
@@ -502,9 +597,7 @@ pub const Control = struct {
         }
         row.metadata_due_ms = row.metadata_due_ms orelse now.millis();
     }
-    /// Applies a peer's control request to its connection state before the owner answers it through the
-    /// control protocol.
-    pub fn requested(
+    fn requested(
         self: *Control,
         catalog: *Catalog,
         peer: t.PeerRef,
@@ -544,51 +637,45 @@ pub const Control = struct {
             else => unreachable,
         }
     }
-    /// Applies a reply to the connection state that started its request, before the owner settles it
-    /// through the control protocol. Replies to cancelled requests or retired connections change
-    /// no qualification or health evidence.
-    pub fn replied(
+    fn replied(
         self: *Control,
         catalog: *Catalog,
-        op: *const wire.ControlReply,
+        row: *ConnectionState,
         event: rr.ReqResp.Event,
         local: *const t.LocalState,
         now: Now,
         slot: u64,
     ) void {
-        // The protocol settles this event immediately after this call, before another policy
-        // evaluation. A replaced connection's terminal result releases its reservation without
-        // applying its health or qualification evidence to the replacement.
-        if (op.peer.index >= self.connections.len) return;
-        defer self.rekey(catalog, op.peer.index);
-        if (event == .done or event == .failed) {
-            const row = &self.connections[op.peer.index];
-            if (op.request != null and std.meta.eql(row.pending_request, op.request)) row.pending_request = null;
-        }
-        if (self.connectionState(op.peer, op.conn) == null or op.cancelled) return;
+        const peer = row.peer orelse return;
+        defer self.rekey(catalog, peer.index);
         switch (event) {
-            .chunk => |chunk| self.acceptChunk(catalog, op, chunk.bytes, local, now, slot),
-            .done, .failed => self.complete(catalog, op, event, now),
+            .chunk => |chunk| {
+                self.acceptChunk(catalog, row, chunk.bytes, local, now, slot);
+                row.received = true;
+            },
+            .done, .failed => {
+                self.complete(catalog, row, event, now);
+                row.request = null;
+            },
             else => {},
         }
     }
     fn acceptChunk(
         self: *Control,
         catalog: *Catalog,
-        op: *const wire.ControlReply,
+        row: *ConnectionState,
         bytes: []const u8,
         local: *const t.LocalState,
         now: Now,
         slot: u64,
     ) void {
-        const row = self.connectionState(op.peer, op.conn) orelse return;
         if (row.closing != null) return;
-        switch (op.protocol) {
+        switch (row.protocol) {
             .status_v1, .status_v2 => self.acceptStatus(
                 catalog,
-                op.peer,
-                op.conn,
-                op.protocol,
+                row.peer.?,
+                row.conn,
+                row.protocol,
                 bytes,
                 local,
                 now,
@@ -597,38 +684,37 @@ pub const Control = struct {
             .ping_v1 => {
                 if (wire.decodeScalar(bytes)) |seq_number| self.sequence(
                     catalog,
-                    op.peer,
-                    op.conn,
+                    row.peer.?,
+                    row.conn,
                     seq_number,
                     now,
                 ) else |_| {}
             },
             .metadata_v1, .metadata_v2, .metadata_v3 => {
-                const metadata = wire.decodeMetadata(op.protocol, bytes, local.fork) catch |err| {
+                const metadata = wire.decodeMetadata(row.protocol, bytes, local.fork) catch |err| {
                     if (err == error.InvalidLength or err == error.InvalidEncoding or err == error.InvalidSyncnets)
-                        _ = catalog.report(op.peer, .low_tolerance, now.millis());
-                    if (connectedRow(catalog, op.peer, op.conn)) |snapshot| {
+                        _ = catalog.report(row.peer.?, .low_tolerance, now.millis());
+                    if (connectedRow(catalog, row.peer.?, row.conn)) |snapshot| {
                         std.log.scoped(.network_peers).debug("metadata_rejected peer={f} connection={d}:{d} method={s} reason={s} bytes={d}", .{
                             logging.peer(&snapshot.identity),
-                            op.conn.index,
-                            op.conn.generation,
-                            @tagName(op.protocol),
+                            row.conn.index,
+                            row.conn.generation,
+                            @tagName(row.protocol),
                             @errorName(err),
                             bytes.len,
                         });
                     }
-                    _ = self.disconnect(catalog, op.peer, op.conn, .invalid_metadata, now);
+                    _ = self.disconnect(catalog, row.peer.?, row.conn, .invalid_metadata, now);
                     return;
                 };
-                _ = catalog.updateMetadata(op.peer, op.conn, &metadata, now.millis());
+                _ = catalog.updateMetadata(row.peer.?, row.conn, &metadata, now.millis());
                 row.metadata_due_ms = null;
-                applicationReady(catalog, row, op.peer, op.conn);
+                applicationReady(catalog, row, row.peer.?, row.conn);
             },
             else => {},
         }
     }
-    fn complete(self: *Control, catalog: *Catalog, op: *const wire.ControlReply, event: rr.ReqResp.Event, now: Now) void {
-        const row = self.connectionState(op.peer, op.conn) orelse return;
+    fn complete(self: *Control, catalog: *Catalog, row: *ConnectionState, event: rr.ReqResp.Event, now: Now) void {
         if (row.closing != null) return;
         switch (event) {
             .failed => |failed| switch (failed.reason) {
@@ -636,65 +722,65 @@ pub const Control = struct {
                     row.retry_ms = now.millis() +| self.options.local_retry_ms;
                 },
                 .negotiation_rejected => {
-                    const status = op.protocol == .status_v1 or op.protocol == .status_v2;
+                    const status = row.protocol == .status_v1 or row.protocol == .status_v2;
                     if (status and now.millis() < row.transition_until_ms) {
                         row.retry_ms = @min(row.transition_until_ms, now.millis() +| self.options.local_retry_ms);
                         return;
                     }
-                    if (healthProbe(op.protocol)) |probe| self.countHealthFailure(row, op, probe, failed.reason, .immediate);
+                    if (healthProbe(row.protocol)) |probe| self.countHealthFailure(row, probe, failed.reason, .immediate);
                     if (status) earlyClose(row);
-                    _ = self.disconnect(catalog, op.peer, op.conn, .health_error, now);
+                    _ = self.disconnect(catalog, row.peer.?, row.conn, .health_error, now);
                 },
                 else => {
-                    const probe = healthProbe(op.protocol) orelse return;
-                    self.healthFailure(catalog, row, op, probe, failed.reason, now);
+                    const probe = healthProbe(row.protocol) orelse return;
+                    self.healthFailure(catalog, row, probe, failed.reason, now);
                 },
             },
             .done => {
-                const probe = healthProbe(op.protocol) orelse return;
-                if (!op.received) {
-                    self.healthFailure(catalog, row, op, probe, .empty_response, now);
+                const probe = healthProbe(row.protocol) orelse return;
+                if (!row.received) {
+                    self.healthFailure(catalog, row, probe, .empty_response, now);
                     return;
                 }
                 row.health_failures[@intFromEnum(probe)] = 0;
-                if (op.after_ready and probe != .metadata) {
+                if (row.after_ready and probe != .metadata) {
                     row.evidence = .proven;
-                    catalog.clearHealthStrikes(op.peer, op.conn);
+                    catalog.clearHealthStrikes(row.peer.?, row.conn);
                 }
-                const snapshot = connectedRow(catalog, op.peer, op.conn) orelse return;
+                const snapshot = connectedRow(catalog, row.peer.?, row.conn) orelse return;
                 if (probe != .status) row.ping_due_ms = now.millis() +| self.pingInterval(snapshot.direction);
             },
             else => unreachable,
         }
     }
 
-    fn healthFailure(self: *Control, catalog: *Catalog, row: *ConnectionState, op: *const wire.ControlReply, probe: Control.HealthProbe, failure: rr.ReqResp.Failure, now: Now) void {
+    fn healthFailure(self: *Control, catalog: *Catalog, row: *ConnectionState, probe: Control.HealthProbe, failure: rr.ReqResp.Failure, now: Now) void {
         const failures = &row.health_failures[@intFromEnum(probe)];
         failures.* +|= 1;
         const at_limit = failures.* >= self.options.health_failures_max;
-        self.countHealthFailure(row, op, probe, failure, if (at_limit) .at_limit else .none);
+        self.countHealthFailure(row, probe, failure, if (at_limit) .at_limit else .none);
         if (at_limit) {
             const timed_out = failure == .timeout or (failure == .negotiation_failed and failure.negotiation_failed == .timeout);
-            _ = self.disconnect(catalog, op.peer, op.conn, if (timed_out) .health_timeout else .health_error, now);
+            _ = self.disconnect(catalog, row.peer.?, row.conn, if (timed_out) .health_timeout else .health_error, now);
             return;
         }
         row.retry_ms = now.millis() +| self.options.failure_retry_ms;
     }
     /// Counts a failed probe once and logs it with the probe's streak and the close it causes:
     /// none, the streak's limit, or an immediate one for a refused probe, which skips the streak.
-    fn countHealthFailure(self: *Control, row: *const ConnectionState, op: *const wire.ControlReply, probe: Control.HealthProbe, failure: rr.ReqResp.Failure, closes: enum { none, at_limit, immediate }) void {
+    fn countHealthFailure(self: *Control, row: *const ConnectionState, probe: Control.HealthProbe, failure: rr.ReqResp.Failure, closes: enum { none, at_limit, immediate }) void {
         self.counters.health_failures[@intFromEnum(probe)] +|= 1;
-        std.log.scoped(.network_peers).debug("peer_health_failure connection={d}:{d} probe={s} reason={s} failures={d} limit={d} close={s}", .{ op.conn.index, op.conn.generation, @tagName(probe), @tagName(failure), row.health_failures[@intFromEnum(probe)], self.options.health_failures_max, @tagName(closes) });
+        std.log.scoped(.network_peers).debug("peer_health_failure connection={d}:{d} probe={s} reason={s} failures={d} limit={d} close={s}", .{ row.conn.index, row.conn.generation, @tagName(probe), @tagName(failure), row.health_failures[@intFromEnum(probe)], self.options.health_failures_max, @tagName(closes) });
     }
     pub fn schedule(self: *const Control, catalog: *const Catalog, now: Now) types.Schedule {
-        if (@import("builtin").is_test) self.checkDeadlines(catalog, now.millis());
+        if (builtin.is_test) self.checkDeadlines(catalog, now.millis());
         return .{ .deadline = time.optionalMilliseconds(if (self.deadlines.peek()) |top| top.deadline else null) };
     }
 
     /// Test builds compare heap keys with a full scan, so every due connection stays on the heap.
     fn checkDeadlines(self: *const Control, catalog: *const Catalog, now_ms: u64) void {
         for (self.connections, 0..) |*row, index| {
-            const active_request = row.pending_request != null;
+            const active_request = row.request != null;
             const key = self.deadlines.get(@intCast(index));
             const peer = row.peer orelse {
                 assert(key == null);

@@ -567,7 +567,7 @@ test "queued request and disconnect share the protocol turn clock while latency 
         if (progress.failure) |err| return err;
         for (events[0..progress.progress.events]) |event| if (event == .connected) {
             owner.core.peer_manager.transportProgress(&owner.core.transport.engine);
-            try std.testing.expect(owner.core.peer_manager.admit(&event.connected, remote.localAddress(), progress.progress.now) != null);
+            try std.testing.expect(owner.core.peer_manager.admit(&event.connected, remote.localAddress(), &.{ .reqresp = &owner.core.protocols.reqresp, .router = &owner.core.protocols.router, .engine = &owner.core.transport.engine }, progress.progress.now) != null);
         };
         if (owner.core.isConnected(&remote_id)) break;
         const reply = n.transport_driver.step(&remote, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });

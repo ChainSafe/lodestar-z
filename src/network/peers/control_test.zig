@@ -3,6 +3,7 @@ const t = @import("types.zig");
 const w = @import("../control_wire.zig");
 const Catalog = @import("catalog.zig").Catalog;
 const Control = @import("control.zig").Control;
+const support = @import("control_test_support.zig");
 const rr = @import("../reqresp/root.zig");
 const Now = @import("../types.zig").Now;
 
@@ -10,7 +11,7 @@ test "control disconnect returns the original closing state and refuses stale co
     const a = std.testing.allocator;
     var catalog = try Catalog.init(a, .{ .capacity = 1, .outbound_reserve = 0, .target_peers = 1, .max_peers = 1, .min_outbound = 0 }, 1, 0);
     defer catalog.deinit(a);
-    var control = try Control.init(a, .{}, 1);
+    var control = try Control.init(a, .{}, 1, 1);
     defer control.deinit(a);
     const now = Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 });
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
@@ -23,12 +24,15 @@ test "control disconnect returns the original closing state and refuses stale co
     closing.sent = true;
     const repeated = control.disconnect(&catalog, peer, conn, .remote_goodbye, Now.fromMilliseconds(.{ .mono_ms = 20, .unix_s = 0 })).?;
     try std.testing.expectEqual(Control.Closing{ .reason = .host, .deadline_ms = 2010, .sent = true }, repeated.*);
-    control.retire(peer, conn);
+    var io: support.Io = .{};
+    try io.init();
+    defer io.deinit();
+    io.release(&control, peer, conn, now);
     try std.testing.expect(control.disconnect(&catalog, peer, conn, .host, now) == null);
 }
 
 test "control repeated Status intent preserves the first due time" {
-    var control = try Control.init(std.testing.allocator, .{}, 2);
+    var control = try Control.init(std.testing.allocator, .{}, 2, 2);
     defer control.deinit(std.testing.allocator);
     var catalog = try Catalog.init(std.testing.allocator, .{ .capacity = 2, .outbound_reserve = 0, .target_peers = 2, .max_peers = 2, .min_outbound = 0 }, 2, 0);
     defer catalog.deinit(std.testing.allocator);
@@ -50,7 +54,7 @@ test "control start quota and cursor preserve order across Identify and RPC star
     const a = std.testing.allocator;
     var catalog = try Catalog.init(a, .{ .capacity = 4, .outbound_reserve = 0, .target_peers = 4, .max_peers = 4, .min_outbound = 0 }, 4, 0);
     defer catalog.deinit(a);
-    var control = try Control.init(a, .{ .starts_per_turn_max = 3 }, 4);
+    var control = try Control.init(a, .{ .starts_per_turn_max = 3 }, 4, 4);
     defer control.deinit(a);
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 });
     const local: t.LocalState = .{};
@@ -62,67 +66,64 @@ test "control start quota and cursor preserve order across Identify and RPC star
         try std.testing.expect(catalog.updateStatus(peer, conn, &local.status, now.millis()));
         control.connected(&catalog, peer, conn, .outbound, now);
     }
-    // Every row is due for an Identify and a Status start. Nothing holds an operation here, so a
-    // started Status stays due; the passes check which work each row gets and in what order.
-    const Work = struct { index: u32, request: ?rr.Protocol };
-    const passes = [_]struct { work: [2]Work, cursor: usize }{
-        .{ .work = .{ .{ .index = 0, .request = .status_v1 }, .{ .index = 1, .request = null } }, .cursor = 2 },
-        .{ .work = .{ .{ .index = 2, .request = .status_v1 }, .{ .index = 3, .request = null } }, .cursor = 0 },
-    };
-    for (passes) |expected| {
-        var pass = control.beginMaintenance(now);
-        var seen: usize = 0;
-        while (control.nextDue(&pass, &catalog, &local, now)) |*due| : (seen += 1) {
-            try std.testing.expect(seen < expected.work.len);
-            try std.testing.expectEqual(expected.work[seen].index, due.index);
-            try std.testing.expect(due.close == null and due.identify);
-            try std.testing.expectEqual(expected.work[seen].request, if (due.request) |probe| probe.protocol else null);
-            if (due.request != null) {
-                const request: rr.ReqResp.RequestHandle = .{ .index = @intCast(due.index), .generation = 1, .direction = .outbound };
-                control.started(&catalog, due, true, request, now);
-                control.replied(&catalog, &.{ .peer = due.peer, .conn = due.conn, .request = request, .protocol = due.request.?.protocol, .cancelled = true }, .{ .done = .{ .request = request, .chunks = 1 } }, &local, now, 0);
-            } else control.started(&catalog, due, true, null, now);
-        }
-        try std.testing.expectEqual(expected.work.len, seen);
-        try std.testing.expectEqual(expected.cursor, control.cursor);
-    }
-    try std.testing.expectEqual(@as(u64, 2), control.counters.started);
-    try std.testing.expectEqual(@as(u64, 8), control.visits);
+    var io: support.Io = .{};
+    try io.init();
+    defer io.deinit();
+    // Failed starts spend the same quota. Closing the fixture transport makes all starts fail.
+    _ = io.pair.shared.pair.client.close(io.pair.shared.handles.client, 0);
+    try io.maintain(&control, &catalog, &local, now);
+    try std.testing.expectEqual(@as(usize, 2), control.cursor);
+    try std.testing.expectEqual(@as(u64, 1010), control.connections[0].identify_retry_ms);
+    try std.testing.expectEqual(@as(u64, 1010), control.connections[0].retry_ms);
+    try std.testing.expectEqual(@as(u64, 1010), control.connections[1].identify_retry_ms);
+    try std.testing.expectEqual(@as(u64, 0), control.connections[1].retry_ms);
+    try io.maintain(&control, &catalog, &local, now);
+    try std.testing.expectEqual(@as(usize, 0), control.cursor);
+    try std.testing.expectEqual(@as(u64, 1010), control.connections[2].identify_retry_ms);
+    try std.testing.expectEqual(@as(u64, 1010), control.connections[2].retry_ms);
+    try std.testing.expectEqual(@as(u64, 1010), control.connections[3].identify_retry_ms);
+    try std.testing.expectEqual(@as(u64, 0), control.connections[3].retry_ms);
+    try std.testing.expectEqual(@as(u64, 0), control.counters.started);
+    try std.testing.expectEqual(@as(u64, 2), control.counters.deferred);
+    try std.testing.expectEqual(@as(u64, 7), control.visits);
 }
 
 test "peer control relevance boundary roots forks and availability" {
+    var io: support.Io = .{};
+    try io.init();
+    defer io.deinit();
     var local: t.LocalState = .{};
     local.status.finalized_epoch = 4;
     local.status.finalized_root = @splat(1);
     var remote = local.status;
     remote.head_slot = 11;
-    try std.testing.expectEqual(@as(?t.DisconnectReason, null), try statusVerdict(&local, &remote, 10));
+    try std.testing.expectEqual(@as(?t.DisconnectReason, null), try statusVerdict(&io, &local, &remote, 10));
     remote.head_slot = 12;
-    try std.testing.expectEqual(t.DisconnectReason.future_head, (try statusVerdict(&local, &remote, 10)).?);
+    try std.testing.expectEqual(t.DisconnectReason.future_head, (try statusVerdict(&io, &local, &remote, 10)).?);
     remote.head_slot = 10;
     remote.fork_digest[0] = 1;
-    try std.testing.expectEqual(t.DisconnectReason.incompatible_fork, (try statusVerdict(&local, &remote, 10)).?);
+    try std.testing.expectEqual(t.DisconnectReason.incompatible_fork, (try statusVerdict(&io, &local, &remote, 10)).?);
     remote.fork_digest[0] = 0;
     remote.finalized_root = @splat(2);
-    try std.testing.expectEqual(t.DisconnectReason.finalized_mismatch, (try statusVerdict(&local, &remote, 10)).?);
+    try std.testing.expectEqual(t.DisconnectReason.finalized_mismatch, (try statusVerdict(&io, &local, &remote, 10)).?);
     remote.finalized_epoch = 3;
-    try std.testing.expect(try statusVerdict(&local, &remote, 10) == null);
+    try std.testing.expect(try statusVerdict(&io, &local, &remote, 10) == null);
     remote.finalized_epoch = 4;
     remote.finalized_root = @splat(0);
-    try std.testing.expect(try statusVerdict(&local, &remote, 10) == null);
+    try std.testing.expect(try statusVerdict(&io, &local, &remote, 10) == null);
     local.fork.fork = .fulu;
-    try std.testing.expectEqual(t.DisconnectReason.missing_availability, (try statusVerdict(&local, &remote, 10)).?);
+    try std.testing.expectEqual(t.DisconnectReason.missing_availability, (try statusVerdict(&io, &local, &remote, 10)).?);
     remote.earliest_available_slot = 0;
-    try std.testing.expect(try statusVerdict(&local, &remote, 10) == null);
+    try std.testing.expect(try statusVerdict(&io, &local, &remote, 10) == null);
 }
 
 /// Delivers the remote Status as an inbound request on a fresh connection and returns the close
 /// reason peer control chose, or null after it accepted the Status.
-fn statusVerdict(local: *const t.LocalState, remote: *const t.Status, slot: u64) !?t.DisconnectReason {
+fn statusVerdict(io: *support.Io, local: *const t.LocalState, remote: *const t.Status, slot: u64) !?t.DisconnectReason {
     const a = std.testing.allocator;
     var catalog = try Catalog.init(a, .{ .capacity = 1, .outbound_reserve = 0, .target_peers = 1, .max_peers = 1, .min_outbound = 0 }, 1, 0);
     defer catalog.deinit(a);
-    var control = try Control.init(a, .{}, 1);
+    var control = try Control.init(a, .{}, 1, 1);
     defer control.deinit(a);
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 });
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
@@ -133,7 +134,7 @@ fn statusVerdict(local: *const t.LocalState, remote: *const t.Status, slot: u64)
     var bytes: [w.status_size_max]u8 = undefined;
     const len = try w.encodeStatus(protocol, remote, &bytes);
     const request: rr.ReqResp.RequestHandle = .{ .index = 0, .generation = 1, .direction = .inbound };
-    control.requested(&catalog, peer, &.{ .request = request, .conn = conn, .protocol = protocol, .bytes = bytes[0..len] }, local, now, slot);
+    io.receive(&control, &catalog, local, .{ .request = .{ .request = request, .conn = conn, .protocol = protocol, .bytes = bytes[0..len] } }, now, slot);
     const snapshot = catalog.get(peer).?;
     if (snapshot.disconnect_reason) |reason| {
         try std.testing.expect(snapshot.status == null);
@@ -141,4 +142,8 @@ fn statusVerdict(local: *const t.LocalState, remote: *const t.Status, slot: u64)
     }
     try std.testing.expectEqualDeep(remote.*, snapshot.status.?);
     return null;
+}
+
+test "control rejects an empty inbound response pool" {
+    try std.testing.expectError(error.InvalidOptions, Control.init(std.testing.allocator, .{}, 1, 0));
 }

@@ -432,10 +432,10 @@ pub fn intent(node: *const NetworkCore, subscriptions: []const local_intent.Boun
     };
 }
 
-/// Control operations holding a request, which retirement tests watch drain.
+/// Peer control rows with an outstanding request.
 pub fn controlOperations(node: *const NetworkCore) usize {
     var count: usize = 0;
-    for (node.control_protocol.operations) |*op| count += @intFromBool(op.request != null);
+    for (node.peer_manager.control.connections) |*op| count += @intFromBool(op.request != null);
     return count;
 }
 
@@ -463,7 +463,7 @@ pub fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
 }
 
 pub fn failStatus(setup: *Setup, failure: ReqResp.Failure) !void {
-    for (setup.client.control_protocol.operations) |operation| if (operation.request) |handle| {
+    for (setup.client.peer_manager.control.connections) |operation| if (operation.request) |handle| {
         if (operation.protocol != .status_v1) continue;
         const requests = &setup.client.protocols.reqresp;
         const slot = &requests.outbound[handle.index];

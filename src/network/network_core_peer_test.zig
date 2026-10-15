@@ -109,7 +109,7 @@ test "core native immutable metadata response survives local update during pendi
     var pending = false;
     for (0..40) |_| {
         try setup.step(0);
-        for (setup.server.control_protocol.responses) |response| if (response.request) |request| {
+        for (setup.server.peer_manager.control.responses) |response| if (response.request) |request| {
             const slot = &setup.server.protocols.reqresp.inbound[request.index];
             if (slot.request.protocol != .metadata_v1) continue;
             try std.testing.expect(slot.request.io.writing);
@@ -243,7 +243,7 @@ fn allocationCheck(a: std.mem.Allocator) !void {
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     const opts = resolvedOptions().core;
     const receive = router.Router.initialCapabilities(opts.protocols.router).receive;
-    var core = try PeerManager.init(a, &identity, &localState(.{}), opts.peerManager(), receive, 4);
+    var core = try PeerManager.init(a, &identity, &localState(.{}), opts.peerManager(), receive, .{ .connections = 4, .control_responses = opts.protocols.reqresp.serving_control_reserved });
     defer core.deinit();
 }
 
@@ -251,7 +251,7 @@ test "core startup allocation failure cleans every prefix" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationCheck, .{});
 }
 
-test "core native deterministic replacement cancels old control and ignores stale physical close" {
+test "core native deterministic replacement abandons old control and ignores stale physical close" {
     var setup: Setup = .{};
     const local: t.LocalState = .{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } };
     try setup.initDirection(&local, true);
@@ -266,7 +266,7 @@ test "core native deterministic replacement cancels old control and ignores stal
     setup.client.peer_manager.reStatusPeers(setup.pair.now);
     try setup.step(1);
     var old_request: ?rr.ReqResp.RequestHandle = null;
-    for (setup.client.control_protocol.operations) |op| if (op.request != null) {
+    for (setup.client.peer_manager.control.connections) |op| if (op.request != null) {
         old_request = op.request;
         break;
     };
@@ -283,8 +283,8 @@ test "core native deterministic replacement cancels old control and ignores stal
     try std.testing.expect(setup.pair.client.registry.slots[old.connection.?.index].conn == null);
     try std.testing.expectEqual(@as(u16, 1), setup.pair.client.registry.active_len);
     try std.testing.expectError(error.StaleHandle, setup.pair.client.openStream(old.connection.?));
-    // The old connection's close and its cancelled Status have reached the owner by now.
-    for (setup.client.control_protocol.operations) |op| try std.testing.expect(!std.meta.eql(old_request, op.request));
+    // The old Status has been abandoned and its physical connection has closed.
+    for (setup.client.peer_manager.control.connections) |op| try std.testing.expect(!std.meta.eql(old_request, op.request));
     for (0..8) |_| try setup.step(1);
     _ = setup.client.peer_manager.snapshots(&snapshots);
     try std.testing.expectEqualDeep(selected, snapshots[0]);

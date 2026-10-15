@@ -6,7 +6,8 @@
 //! - readiness grants no reservation. The binding reserves bytes before producing the next response;
 //!   respond may still return Terminal while that terminal event awaits output capacity.
 //! - pending chunk/chunk_sent notifications precede the terminal. Terminal delivery ends borrows;
-//!   the slot is reusable as soon as its terminal is delivered.
+//!   the slot is reusable as soon as its terminal is delivered. Explicit abandon ends outbound borrows
+//!   immediately; the caller must first discard all delivered views for that request.
 //! - retainServing/releaseServing cover asynchronous host execution independently of stream lifetime.
 //! - every terminal transition detaches Router and transport ownership before returning.
 //!   Undelivered events keep their payload borrows until delivery.
@@ -809,6 +810,22 @@ pub fn cancel(self: *ReqResp, engine: *Engine, router: *Router, handle: RequestH
         slot.fail(self, engine, router, handle.index, .cancelled, now);
     }
     return true;
+}
+
+/// Detaches an outbound request, discards pending delivery and ends all payload borrows.
+/// The caller relinquishes delivered views and must account for the returned, owned peer fault.
+/// Stale handles do nothing.
+pub fn abandon(self: *ReqResp, engine: *Engine, router: *Router, handle: RequestHandle, now: Now) ?PeerFault {
+    assert(handle.direction == .outbound);
+    const record = &(self.outboundSlot(handle) orelse return null).request;
+    _ = self.cancel(engine, router, handle, now);
+    const terminal = record.terminalEvent().?;
+    const fault = if (terminal.peerFault()) |value| value.* else null;
+    record.notification = .none;
+    _ = record.deliver(record.protocol.isControl()).?;
+    self.retire(handle.index);
+    self.settle(handle.index);
+    return fault;
 }
 
 pub fn cancelApplications(self: *ReqResp, engine: *Engine, router: *Router, now: Now) void {

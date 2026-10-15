@@ -2,6 +2,7 @@ const std = @import("std");
 const schedule_test_support = @import("schedule_test_support.zig");
 const PeerManager = @import("peer_manager.zig").PeerManager;
 const t = @import("peers/types.zig");
+const control_test_support = @import("peers/control_test_support.zig");
 const wire = @import("control_wire.zig");
 const rr = @import("reqresp/root.zig");
 const Now = @import("types.zig").Now;
@@ -12,109 +13,119 @@ const Engine = @import("quic/Engine.zig");
 
 const identity: t.PeerId = .{ .bytes = @splat(1) };
 const endpoint: t.Address = .{ .ip4 = .{ .octets = .{ 203, 0, 113, 1 }, .port = 9000 } };
-const conn: t.Handle = .{ .index = 0, .generation = 1 };
 
-fn init() !PeerManager {
-    return PeerManager.init(std.testing.allocator, &.{ .bytes = @splat(0) }, &.{}, .{
-        .peers = .{ .capacity = 4, .outbound_reserve = 0, .target_peers = 3, .max_peers = 4, .min_outbound = 0 },
-        .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 1 },
-    }, .initEmpty(), 4);
-}
+const Fixture = struct {
+    manager: PeerManager = undefined,
+    io: control_test_support.Io = .{},
+
+    fn init(self: *Fixture) !void {
+        self.manager = try PeerManager.init(std.testing.allocator, &.{ .bytes = @splat(0) }, &.{}, .{
+            .peers = .{ .capacity = 4, .outbound_reserve = 0, .target_peers = 3, .max_peers = 4, .min_outbound = 0 },
+            .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 1 },
+        }, .initEmpty(), .{ .connections = 4, .control_responses = 4 });
+        errdefer self.manager.deinit();
+        try self.io.init();
+    }
+    fn deinit(self: *Fixture) void {
+        self.io.deinit();
+        self.manager.deinit();
+    }
+};
 fn at(ms: u64) Now {
     return Now.fromMilliseconds(.{ .mono_ms = ms, .unix_s = @intCast(1_000 + ms / 1_000) });
 }
-fn admit(manager: *PeerManager, connection: t.Handle, direction: t.Direction, now: Now) !t.PeerRef {
-    const admitted = manager.admit(&.{ .conn = connection, .peer_id = identity, .direction = direction }, endpoint, now) orelse return error.AdmissionRefused;
+fn admit(fixture: *Fixture, connection: t.Handle, direction: t.Direction, now: Now) !t.PeerRef {
+    const manager = &fixture.manager;
+    const admitted = manager.admit(&.{ .conn = connection, .peer_id = identity, .direction = direction }, endpoint, &fixture.io.controlIo(), now) orelse return error.AdmissionRefused;
     return admitted.peer;
 }
-fn outbound(manager: *PeerManager, now: Now) !t.PeerRef {
+fn outbound(fixture: *Fixture, now: Now) !t.PeerRef {
+    const conn = fixture.io.pair.shared.handles.client;
+    const manager = &fixture.manager;
     try manager.connect(&identity, &.{endpoint}, now);
     // Select the operator's already-admitted dial without running gossip or transport. The owner
     // still receives the real started/admitted transitions and records the original dial endpoint.
     var intents: [1]Dialing.SelectedDial = undefined;
     try std.testing.expectEqual(@as(usize, 1), manager.dialing.poll(&manager.catalog, now.millis(), &intents));
     try std.testing.expect(manager.dialStarted(intents[0].token, conn));
-    return admit(manager, conn, .outbound, now);
+    return admit(fixture, conn, .outbound, now);
 }
-fn startProbe(manager: *PeerManager, generation: u32, now: Now) !wire.ControlReply {
-    var pass = manager.beginControl(now);
-    const due = manager.nextControl(&pass, now) orelse return error.NoProbe;
-    const probe = due.request orelse return error.NoProbe;
-    try std.testing.expect(due.close == null);
-    const request: rr.ReqResp.RequestHandle = .{ .index = 0, .generation = generation, .direction = .outbound };
-    manager.controlStarted(&due, true, request, now);
-    try std.testing.expect(manager.nextControl(&pass, now) == null);
-    return .{ .peer = due.peer, .conn = due.conn, .request = request, .protocol = probe.protocol, .after_ready = probe.after_ready };
+const Probe = struct { request: rr.ReqResp.RequestHandle, conn: t.Handle, protocol: rr.Protocol, after_ready: bool };
+fn startProbe(fixture: *Fixture, generation: u32, now: Now) !Probe {
+    const manager = &fixture.manager;
+    try fixture.io.maintain(&manager.control, &manager.catalog, &manager.local, now);
+    const row = &manager.control.connections[manager.catalog.find(&identity).?.index];
+    const request = row.request orelse return error.NoProbe;
+    try std.testing.expectEqual(generation, request.generation);
+    return .{ .request = request, .conn = row.conn, .protocol = row.protocol, .after_ready = row.after_ready };
 }
-fn reply(manager: *PeerManager, observation: wire.ControlReply, bytes: []const u8, now: Now) void {
-    var result = observation;
-    manager.controlReplied(&result, .{ .chunk = .{ .request = result.request.?, .bytes = bytes, .fork = null, .origin = .{ .connection = result.conn, .endpoint = endpoint } } }, now, 0);
-    result.received = true;
-    manager.controlReplied(&result, .{ .done = .{ .request = result.request.?, .chunks = 1 } }, now, 0);
+fn reply(fixture: *Fixture, probe: Probe, bytes: []const u8, now: Now) !void {
+    const manager = &fixture.manager;
+    try fixture.io.reply(&manager.control, &manager.catalog, &manager.local, probe.request, bytes, now);
 }
-fn qualify(manager: *PeerManager, now: Now) !void {
+fn qualify(fixture: *Fixture, now: Now) !void {
+    const manager = &fixture.manager;
     var bytes: [wire.status_size_max]u8 = undefined;
-    const status = try startProbe(manager, 1, now);
+    const status = try startProbe(fixture, 1, now);
     try std.testing.expectEqual(rr.Protocol.status_v1, status.protocol);
-    reply(manager, status, bytes[0..try wire.encodeStatus(.status_v1, &manager.local.status, &bytes)], now);
-    const metadata = try startProbe(manager, 2, now);
+    try reply(fixture, status, bytes[0..try wire.encodeStatus(.status_v1, &manager.local.status, &bytes)], now);
+    const metadata = try startProbe(fixture, 2, now);
     try std.testing.expectEqual(rr.Protocol.metadata_v1, metadata.protocol);
-    reply(manager, metadata, bytes[0..try wire.encodeMetadata(.metadata_v1, &manager.local.metadata, manager.local.fork, &bytes)], now);
+    try reply(fixture, metadata, bytes[0..try wire.encodeMetadata(.metadata_v1, &manager.local.metadata, manager.local.fork, &bytes)], now);
 }
 
-test "peer owner replacement waits for cancelled request settlement without inheriting its evidence" {
-    var manager = try init();
-    defer manager.deinit();
-    const peer = try admit(&manager, conn, .inbound, at(10));
-    var old = try startProbe(&manager, 1, at(20_000));
+test "peer owner replacement rejects stale endpoint updates and retirement" {
+    var fixture: Fixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const manager = &fixture.manager;
+    const conn = fixture.io.pair.shared.handles.client;
+    const peer = try admit(&fixture, conn, .inbound, at(10));
     const replacement: t.Handle = .{ .index = 1, .generation = 2 };
-    try std.testing.expectEqualDeep(peer, try admit(&manager, replacement, .outbound, at(20_001)));
+    try std.testing.expectEqualDeep(peer, try admit(&fixture, replacement, .outbound, at(20_001)));
     const revision = manager.catalog.revision;
     manager.endpointChanged(conn, &.{ .ip4 = .{ .octets = .{ 203, 0, 113, 2 }, .port = 9001 } });
     try std.testing.expectEqual(revision, manager.catalog.revision);
     try std.testing.expectEqualDeep(endpoint, manager.catalog.get(peer).?.endpoint);
     try std.testing.expect(manager.retireConnection(peer, conn, .health_error, at(20_001)) == null);
-    try std.testing.expect(schedule_test_support.wakeupMilliseconds(manager.control.schedule(&manager.catalog, at(20_001)), at(20_001).millis()) == null);
+    try std.testing.expectEqual(at(20_001).millis(), schedule_test_support.wakeupMilliseconds(manager.control.schedule(&manager.catalog, at(20_001)), at(20_001).millis()).?);
     try std.testing.expect(manager.catalog.get(peer).?.status == null);
 
-    old.cancelled = true;
-    manager.controlReplied(&old, .{ .failed = .{ .request = old.request.?, .reason = .cancelled } }, at(20_002), 0);
-    try std.testing.expectEqual(at(20_002).millis(), schedule_test_support.wakeupMilliseconds(manager.control.schedule(&manager.catalog, at(20_002)), at(20_002).millis()).?);
-    const current = try startProbe(&manager, 2, at(20_002));
-    try std.testing.expectEqualDeep(replacement, current.conn);
-    // A repeated terminal result for the old generation cannot free the new request reservation.
-    manager.controlReplied(&old, .{ .failed = .{ .request = old.request.?, .reason = .cancelled } }, at(20_003), 0);
-    try std.testing.expect(schedule_test_support.wakeupMilliseconds(manager.control.schedule(&manager.catalog, at(20_003)), at(20_003).millis()) == null);
     try std.testing.expectEqual(@as(u64, 0), manager.control.counters.closed[@intFromEnum(t.DisconnectReason.health_error)]);
     try std.testing.expectEqual(@as(u8, 0), manager.catalog.rowFor(peer).?.dial.failures);
 }
 
 test "peer owner qualification clears dial evidence before later proven health" {
-    var manager = try init();
-    defer manager.deinit();
+    var fixture: Fixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const manager = &fixture.manager;
     const key = manager.catalog.history.endpointKey(&identity, endpoint);
     manager.catalog.history.recordEndpoint(key, .unanswered, 1, 1);
     manager.catalog.history.recordEndpoint(key, .health, 1, 1);
-    _ = try outbound(&manager, at(10));
+    _ = try outbound(&fixture, at(10));
     try std.testing.expectEqual(@as(u8, 2), manager.catalog.history.strikesFor(key, 1, 10));
-    try qualify(&manager, at(10));
+    try qualify(&fixture, at(10));
     try std.testing.expectEqual(@as(u8, 1), manager.catalog.history.strikesFor(key, 1, 10));
-    const ping = try startProbe(&manager, 3, at(20_010));
+    const ping = try startProbe(&fixture, 3, at(20_010));
     try std.testing.expectEqual(rr.Protocol.ping_v1, ping.protocol);
     try std.testing.expect(ping.after_ready);
-    reply(&manager, ping, &@as([8]u8, @splat(0)), at(20_010));
+    try reply(&fixture, ping, &@as([8]u8, @splat(0)), at(20_010));
     try std.testing.expectEqual(@as(u8, 0), manager.catalog.history.strikesFor(key, 1, 20_010));
 }
 
 test "peer owner retirement preserves remembered and rejection lifetimes and settles once" {
     for ([_]bool{ false, true }) |ready| {
         for ([_]u64{ remembered.qualify_ms - 1, remembered.qualify_ms, history.kept_connection_ms - 1, history.kept_connection_ms }) |lifetime| {
-            var manager = try init();
-            defer manager.deinit();
+            var fixture: Fixture = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const manager = &fixture.manager;
+            const conn = fixture.io.pair.shared.handles.client;
             const key = manager.catalog.history.identityKey(&identity);
             _ = manager.catalog.history.reject(key, .too_many_peers, 1);
-            const peer = try outbound(&manager, at(10));
-            if (ready) try qualify(&manager, at(10));
+            const peer = try outbound(&fixture, at(10));
+            if (ready) try qualify(&fixture, at(10));
             const now = at(10 + lifetime);
             try std.testing.expect(manager.retireConnection(peer, conn, .host, now) != null);
             const failures = manager.catalog.rowFor(peer).?.dial.failures;
@@ -134,12 +145,15 @@ test "peer owner retirement preserves remembered and rejection lifetimes and set
 
 test "peer owner kept connection clears old rejections before recording its final goodbye once" {
     for ([_]u64{ history.kept_connection_ms - 1, history.kept_connection_ms }) |lifetime| {
-        var manager = try init();
-        defer manager.deinit();
+        var fixture: Fixture = .{};
+        try fixture.init();
+        defer fixture.deinit();
+        const manager = &fixture.manager;
+        const conn = fixture.io.pair.shared.handles.client;
         const key = manager.catalog.history.identityKey(&identity);
         _ = manager.catalog.history.reject(key, .too_many_peers, 1);
-        const peer = try outbound(&manager, at(10));
-        try qualify(&manager, at(10));
+        const peer = try outbound(&fixture, at(10));
+        try qualify(&fixture, at(10));
         const now = at(10 + lifetime);
         const closed: @FieldType(Engine.Event, "closed") = .{ .conn = conn, .peer_id = identity, .direction = .outbound, .reason = .{ .peer_closed = .{ .app = true, .code = 0 } } };
         try std.testing.expect(manager.transportClosed(&closed, 129, now) != null);
@@ -156,13 +170,14 @@ test "peer owner kept connection clears old rejections before recording its fina
 }
 
 test "peer owner local probe refusal defers without peer evidence" {
-    var manager = try init();
-    defer manager.deinit();
-    const peer = try admit(&manager, conn, .outbound, at(10));
-    var pass = manager.beginControl(at(10));
-    const due = manager.nextControl(&pass, at(10)).?;
-    manager.controlStarted(&due, false, null, at(10));
-    try std.testing.expect(manager.nextControl(&pass, at(10)) == null);
+    var fixture: Fixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const manager = &fixture.manager;
+    const conn = fixture.io.pair.shared.handles.client;
+    const peer = try admit(&fixture, conn, .outbound, at(10));
+    try std.testing.expect(fixture.io.pair.shared.pair.client.close(conn, 0));
+    try fixture.io.maintain(&manager.control, &manager.catalog, &manager.local, at(10));
     try std.testing.expectEqual(@as(u64, 1_010), schedule_test_support.wakeupMilliseconds(manager.control.schedule(&manager.catalog, at(10)), at(10).millis()).?);
     try std.testing.expectEqual(@as(u64, 1), manager.control.counters.deferred);
     try std.testing.expectEqual(@as(u8, 0), manager.catalog.rowFor(peer).?.dial.failures);
@@ -171,8 +186,10 @@ test "peer owner local probe refusal defers without peer evidence" {
 }
 
 test "peer owner shutdown retires published and unqualified connections once in catalog order" {
-    var manager = try init();
-    defer manager.deinit();
+    var fixture: Fixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const manager = &fixture.manager;
     try std.testing.expect(try manager.addDirectPeer(&identity, &.{endpoint}, at(10)) == null);
     const connections = [_]t.Handle{
         .{ .index = 3, .generation = 1 },
@@ -182,7 +199,7 @@ test "peer owner shutdown retires published and unqualified connections once in 
     var peers: [connections.len]t.PeerRef = undefined;
     for (connections, 0..) |connection, index| {
         const remote: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 1))) };
-        const admission = manager.admit(&.{ .peer_id = remote, .conn = connection, .direction = .outbound }, endpoint, at(10)) orelse return error.AdmissionRefused;
+        const admission = manager.admit(&.{ .peer_id = remote, .conn = connection, .direction = .outbound }, endpoint, &fixture.io.controlIo(), at(10)) orelse return error.AdmissionRefused;
         try std.testing.expectEqual(index == 0, admission.direct);
         try std.testing.expect(admission.displaced == null);
         peers[index] = admission.peer;

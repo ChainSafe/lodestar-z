@@ -860,7 +860,7 @@ test "local intent failing at ENR sequence exhaustion preserves control state re
     try std.testing.expect(peer.relevant);
     manager.reStatusPeers(setup.pair.now);
     _ = try setup.turn(node, .{});
-    const probe = for (node.control_protocol.operations) |*op| {
+    const probe = for (node.peer_manager.control.connections) |*op| {
         if (op.request != null) break op;
     } else return error.TestUnexpectedResult;
     const probe_request = probe.request.?;
@@ -888,7 +888,6 @@ test "local intent failing at ENR sequence exhaustion preserves control state re
     try std.testing.expectEqualDeep(schedule, manager.control.connections[peer.peer.index]);
     try std.testing.expectEqual(key, manager.control.deadlines.get(peer.peer.index));
     try std.testing.expectEqual(probe_request, probe.request.?);
-    try std.testing.expect(!probe.cancelled);
     try std.testing.expect(manager.catalog.get(peer.peer).?.relevant);
     try std.testing.expectEqualDeep(local, node.localState());
     try std.testing.expectEqual(request_fork, node.protocols.reqresp.request_fork);

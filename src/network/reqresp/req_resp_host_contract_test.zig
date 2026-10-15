@@ -1,4 +1,5 @@
 const std = @import("std");
+const Protocol = @import("protocol.zig").Protocol;
 const rr = @import("ReqResp.zig");
 const Pair = @import("test_pair.zig").Pair;
 
@@ -117,4 +118,89 @@ test "reqresp finish while writing retains its independent host operation contra
     try std.testing.expectEqual(@as(usize, 1), drain(&pair, &events));
     try std.testing.expectEqual(@as(u32, 1), events[0].served.chunks);
     try std.testing.expectEqual(@as(usize, 0), drain(&pair, &events));
+}
+
+test "reqresp abandonment releases negotiating request buffers and ignores stale generations" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const owner = &pair.shared.client.reqresp;
+    const engine = &pair.shared.pair.client;
+    const router = &pair.shared.client.router;
+    var bytes = [_]u8{1} ** 8;
+    var sink: [8]u8 = undefined;
+    const first = try owner.request(engine, router, pair.shared.handles.client, .ping_v1, &bytes, &sink, .{}, pair.shared.pair.now);
+    try std.testing.expect(owner.outbound[first.index].request.stream_owner == .router);
+    try std.testing.expect(owner.abandon(engine, router, first, pair.shared.pair.now) == null);
+    try std.testing.expect(owner.outbound[first.index].request.io.payload.len == 0);
+    try std.testing.expect(owner.outbound[first.index].request.io.sink.len == 0);
+    @memset(&bytes, 2);
+    const second = try owner.request(engine, router, pair.shared.handles.client, .ping_v1, &bytes, &sink, .{}, pair.shared.pair.now);
+    try std.testing.expectEqual(first.index, second.index);
+    try std.testing.expectEqual(first.generation + 1, second.generation);
+    try std.testing.expect(owner.abandon(engine, router, first, pair.shared.pair.now) == null);
+    try std.testing.expect(owner.outbound[second.index].request.running());
+    try std.testing.expectEqual(second, owner.outbound[second.index].request.handle(second.index));
+    try std.testing.expect(owner.abandon(engine, router, second, pair.shared.pair.now) == null);
+    var events: [4]rr.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 0), owner.pump(engine, router, pair.shared.pair.now, .{ .control = &events }).control);
+}
+
+test "reqresp abandonment returns recorded peer faults exactly once" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const bytes = [_]u8{7} ** 8;
+    var sink: [8]u8 = undefined;
+    const owner = &pair.shared.client.reqresp;
+    const engine = &pair.shared.pair.client;
+    const router = &pair.shared.client.router;
+    const handle = try owner.request(engine, router, pair.shared.handles.client, .ping_v1, &bytes, &sink, .{}, pair.shared.pair.now);
+    const slot = &owner.outbound[handle.index];
+    slot.request.peer_fault = .protocol;
+    slot.fail(owner, engine, router, handle.index, .{ .negotiation_failed = .malformed }, pair.shared.pair.now);
+    const recorded = slot.request.terminalEvent().?.peerFault().?.*;
+    const before = owner.protocol_counters[@intFromEnum(Protocol.ping_v1)];
+    const fault = owner.abandon(engine, router, handle, pair.shared.pair.now).?;
+    try std.testing.expectEqualDeep(recorded, fault);
+    try std.testing.expect(owner.abandon(engine, router, handle, pair.shared.pair.now) == null);
+    try std.testing.expectEqualDeep(before, owner.protocol_counters[@intFromEnum(Protocol.ping_v1)]);
+    var events: [1]rr.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 0), owner.pump(engine, router, pair.shared.pair.now, .{ .control = &events }).control);
+}
+
+test "reqresp abandonment ends queued and delivered outbound chunk borrows" {
+    for ([_]bool{ false, true }) |delivered| {
+        var pair: Pair = .{};
+        try pair.init(.{}, .{});
+        defer pair.deinit();
+        const bytes = [_]u8{5} ** 8;
+        var sink: [8]u8 = undefined;
+        const incoming = try request(&pair, &bytes, &sink);
+        const owner = &pair.shared.client.reqresp;
+        const client = &owner.outbound[0];
+        const handle = client.request.handle(0);
+        var events: [1]rr.Event = undefined;
+        try std.testing.expectEqual(@as(usize, 1), drain(&pair, &events));
+        try pair.shared.server.reqresp.respond(incoming, &bytes, null, pair.shared.pair.now);
+        for (0..32) |_| {
+            _ = pair.shared.processServer(.{});
+            try pair.shared.pair.pump();
+            _ = pair.shared.processClient(.{});
+            if (client.request.pendingEvent() != null) break;
+        }
+        try std.testing.expect(client.request.pendingEvent().? == .chunk);
+        const engine = &pair.shared.pair.client;
+        const router = &pair.shared.client.router;
+        if (delivered) {
+            try std.testing.expectEqual(@as(usize, 1), owner.pump(engine, router, pair.shared.pair.now, .{ .control = &events }).control);
+            try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
+        }
+        try std.testing.expect(owner.cancel(engine, router, handle, pair.shared.pair.now));
+        try std.testing.expect(owner.abandon(engine, router, handle, pair.shared.pair.now) == null);
+        @memset(&sink, 99);
+        try std.testing.expectEqual(@as(usize, 0), owner.pump(engine, router, pair.shared.pair.now, .{ .control = &events }).control);
+        try std.testing.expectEqualSlices(u8, &([_]u8{99} ** 8), &sink);
+        try std.testing.expect(client.request.available());
+    }
 }

@@ -1,4 +1,4 @@
-//! Termination detaches I/O; terminal delivery ends application borrows and frees the slot.
+//! Termination detaches I/O; terminal delivery or explicit abandonment ends borrows and frees the slot.
 //! A queued response chunk survives termination until the host receives both events.
 const std = @import("std");
 const events = @import("events.zig");

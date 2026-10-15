@@ -11,6 +11,7 @@ const wake_sources = @import("wake_sources.zig");
 const Source = wake_sources.Source;
 const time = @import("time.zig");
 const Schedule = @import("schedule.zig").Schedule;
+const control_test_support = @import("peers/control_test_support.zig");
 const Dialing = @import("peers/dialing.zig").Dialing;
 
 const Fixture = struct {
@@ -25,7 +26,7 @@ const Fixture = struct {
         }, .{
             .peers = .{ .capacity = 4, .outbound_reserve = 0, .target_peers = 1, .max_peers = 4, .min_outbound = 0 },
             .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 1 },
-        }, .initEmpty(), 4);
+        }, .initEmpty(), .{ .connections = 4, .control_responses = 4 });
         errdefer manager.deinit();
         const gossip = try test_support.init(std.testing.allocator, .{
             .random_seed = 1,
@@ -151,7 +152,10 @@ test "peer manager quiescence preserves control and peer delivery wakeups" {
     const now = Now.fromMilliseconds(.{ .mono_ms = 1000, .unix_s = 0 });
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
-    const admission = owner.admit(&.{ .peer_id = identity, .conn = conn, .direction = .outbound }, quic_test_support.server_address, now) orelse return error.AdmissionRefused;
+    var io: control_test_support.Io = .{};
+    try io.init();
+    defer io.deinit();
+    const admission = owner.admit(&.{ .peer_id = identity, .conn = conn, .direction = .outbound }, quic_test_support.server_address, &io.controlIo(), now) orelse return error.AdmissionRefused;
     try std.testing.expect(owner.catalog.updateStatus(admission.peer, conn, &owner.local.status, now.millis()));
     var event: [1]t.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), owner.pollEvents(&event));

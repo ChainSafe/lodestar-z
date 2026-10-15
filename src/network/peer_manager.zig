@@ -8,11 +8,9 @@ const Engine = @import("quic/Engine.zig");
 const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
 const coverage = @import("peers/coverage.zig");
-const control_wire = @import("control_wire.zig");
 const local_state = @import("local_state.zig");
 const logging = @import("logging.zig");
 const ReqResp = @import("reqresp/root.zig").ReqResp;
-const identify = @import("identify/root.zig");
 const types = @import("types.zig");
 const wake_sources = @import("wake_sources.zig");
 
@@ -100,14 +98,14 @@ pub const PeerManager = struct {
         local: *const t.LocalState,
         options: Options,
         receive: capabilities.Set,
-        connections_max: u16,
+        capacities: struct { connections: u16, control_responses: u16 },
     ) !PeerManager {
         var copied: t.LocalState = undefined;
         try local_state.copyServingLocal(&copied, local, receive);
         try validateOptions(options);
-        var catalog = try peers.Catalog.initWithIntents(a, options.peers, options.dial.capacity, connections_max, options.dial.seed);
+        var catalog = try peers.Catalog.initWithIntents(a, options.peers, options.dial.capacity, capacities.connections, options.dial.seed);
         errdefer catalog.deinit(a);
-        var control = try peers.Control.init(a, options.control, @intCast(catalog.rows.len));
+        var control = try peers.Control.init(a, options.control, @intCast(catalog.rows.len), capacities.control_responses);
         errdefer control.deinit(a);
         const dialing = try peers.Dialing.init(options.dial);
         const scratch = try a.alloc(t.Snapshot, options.peers.capacity);
@@ -135,13 +133,14 @@ pub const PeerManager = struct {
         self.catalog.deinit(self.allocator);
         self.* = undefined;
     }
-    /// After transportProgress, admits an authenticated connection and starts qualification, or
-    /// refuses it and defers its dial. The owner closes a refused connection and, for an admitted
-    /// one, the connection it displaced.
+    /// Admits an authenticated connection and starts qualification, abandoning displaced control
+    /// requests before reusing their row. The owner releases the displaced connection's transport
+    /// and other protocols after this returns. Call outside a borrowed reqresp event batch.
     pub fn admit(
         self: *PeerManager,
         event: *const @FieldType(Engine.Event, "connected"),
         endpoint: t.Address,
+        io: *const peers.Control.Io,
         now: Now,
     ) ?Admission {
         if (self.phase != .running) return null;
@@ -161,8 +160,13 @@ pub const PeerManager = struct {
         );
         switch (decision) {
             .admitted => |admission| {
-                if (admission.displaced) |old| self.control.retire(admission.peer, old);
-                self.connected(admission.peer, event.conn, event.direction, now);
+                const fault = if (admission.displaced) |old|
+                    self.control.releaseConnection(io, admission.peer, old, now)
+                else
+                    null;
+                self.control.connected(&self.catalog, admission.peer, event.conn, event.direction, now);
+                if (fault) |*value| self.requestFault(value, now);
+                self.dialing.accepted(&self.catalog, admission.peer, event.conn, now.millis());
                 return .{
                     .peer = admission.peer,
                     .displaced = admission.displaced,
@@ -175,12 +179,6 @@ pub const PeerManager = struct {
                 return null;
             },
         }
-    }
-    /// Starts qualification and settles the dial after admission; replacement I/O may still be
-    /// cancelling, so the old request reservation remains until its terminal event.
-    fn connected(self: *PeerManager, peer: t.PeerRef, conn: t.Handle, direction: t.Direction, now: Now) void {
-        self.control.connected(&self.catalog, peer, conn, direction, now);
-        self.dialing.accepted(&self.catalog, peer, conn, now.millis());
     }
     /// Stops selecting new work once, while the core releases existing I/O.
     pub fn stop(self: *PeerManager) bool {
@@ -241,39 +239,6 @@ pub const PeerManager = struct {
     pub fn endpointChanged(self: *PeerManager, conn: t.Handle, endpoint: *const t.Address) void {
         const peer = self.catalog.findConnection(conn) orelse return;
         _ = self.catalog.updateEndpoint(peer, conn, endpoint);
-    }
-    /// Starts one bounded qualification/health maintenance pass. Its outcomes must be reported
-    /// before taking more work so the scheduling quota, resource reservation and deadlines agree.
-    pub fn beginControl(self: *PeerManager, now: Now) peers.Control.Pass {
-        return self.control.beginMaintenance(now);
-    }
-    pub fn nextControl(self: *PeerManager, pass: *peers.Control.Pass, now: Now) ?peers.Control.Due {
-        return self.control.nextDue(pass, &self.catalog, &self.local, now);
-    }
-    pub fn controlStarted(self: *PeerManager, due: *const peers.Control.Due, identify_started: bool, request: ?ReqResp.RequestHandle, now: Now) void {
-        self.control.started(&self.catalog, due, identify_started, request, now);
-    }
-    pub fn controlRequested(self: *PeerManager, request: *const @FieldType(ReqResp.Event, "request"), now: Now, slot: u64) ?t.PeerRef {
-        const peer = self.catalog.findConnection(request.conn) orelse return null;
-        self.control.requested(&self.catalog, peer, request, &self.local, now, slot);
-        return peer;
-    }
-    /// Called before the protocol consumes the borrowed event and settles its resource token.
-    pub fn controlReplied(self: *PeerManager, reply: *const control_wire.ControlReply, event: ReqResp.Event, now: Now, slot: u64) void {
-        self.control.replied(&self.catalog, reply, event, &self.local, now, slot);
-    }
-    pub fn identified(self: *PeerManager, results: []const identify.Handler.Result) void {
-        self.control.identifyResults(&self.catalog, results);
-    }
-    /// Advances the cursor to the next connection needing revalidation after a fork change. The caller cancels
-    /// the returned request; its reservation survives until the protocol's terminal event.
-    pub fn nextRevalidation(self: *PeerManager, cursor: *usize, now: Now) ?peers.Control.Connection {
-        while (cursor.* < self.control.connections.len) {
-            const index = cursor.*;
-            cursor.* += 1;
-            if (self.control.revalidate(&self.catalog, index, self.local.fork, now)) |connection| return connection;
-        }
-        return null;
     }
     fn catalogDeadline(self: *PeerManager, now_ms: u64) ?u64 {
         self.counters.catalog_deadline_rows +|= self.catalog.rows.len;
