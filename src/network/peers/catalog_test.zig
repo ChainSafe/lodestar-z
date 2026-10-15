@@ -630,6 +630,25 @@ test "catalog caches node ID across custody changes and reconnects and resets it
     try std.testing.expectEqual(third_id, c.rows[reused.index].node_id.?);
 }
 
+test "peer reputation changes invalidate dial scheduling only for retained intents" {
+    for ([_]bool{ false, true }) |retained| {
+        var catalog = try Catalog.initWithIntents(std.testing.allocator, opts, 1, 2, 0);
+        defer catalog.deinit(std.testing.allocator);
+        const peer = admit(&catalog, &remote, first, .outbound, 0).admitted.peer;
+        if (retained) _ = try catalog.retainIntent(&remote);
+        for ([_]enum { report, non_completion, cooldown, defer_redial }{ .report, .non_completion, .cooldown, .defer_redial }) |operation| {
+            catalog.dial_schedule_dirty = false;
+            switch (operation) {
+                .report => try std.testing.expectEqual(t.ReputationDecision.none, catalog.report(peer, .high_tolerance, 100).?),
+                .non_completion => try std.testing.expect(catalog.nonCompletion(peer, 100)),
+                .cooldown => try std.testing.expect(catalog.cooldown(peer, first, 100, 1000)),
+                .defer_redial => try std.testing.expect(catalog.deferRedial(peer, first, 100, 1000)),
+            }
+            try std.testing.expectEqual(retained, catalog.dial_schedule_dirty);
+        }
+    }
+}
+
 test "weak non-completion persists across reconnect and connection slot reuse" {
     var catalog = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer catalog.deinit(std.testing.allocator);

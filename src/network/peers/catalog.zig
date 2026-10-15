@@ -885,7 +885,7 @@ pub const Catalog = struct {
         const row = self.edit(ref) orelse return null;
         if (row.established_slot == null) return null;
         self.selection_dirty = true;
-        self.dial_schedule_dirty = true;
+        if (self.intents.isSet(ref.index)) self.dial_schedule_dirty = true;
         const decision = row.reputation.apply(action, now_ms);
         // A local ban forgets the peer whether or not a connection is left to close.
         if (decision == .ban) self.remembered.forget(&row.identity);
@@ -896,7 +896,7 @@ pub const Catalog = struct {
         const row = self.edit(ref) orelse return false;
         if (row.established_slot == null) return false;
         const before = row.reputation.score;
-        self.dial_schedule_dirty = true;
+        if (self.intents.isSet(ref.index)) self.dial_schedule_dirty = true;
         row.reputation.nonCompletion(now_ms);
         if (before != row.reputation.score) self.selection_dirty = true;
         return true;
@@ -911,7 +911,7 @@ pub const Catalog = struct {
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         self.selection_dirty = true;
-        self.dial_schedule_dirty = true;
+        if (self.intents.isSet(ref.index)) self.dial_schedule_dirty = true;
         row.reputation.cooldown(now_ms, duration_ms);
         return true;
     }
@@ -929,7 +929,7 @@ pub const Catalog = struct {
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         self.selection_dirty = true;
-        self.dial_schedule_dirty = true;
+        if (self.intents.isSet(ref.index)) self.dial_schedule_dirty = true;
         row.reputation.deferRedial(now_ms, duration_ms);
         return true;
     }

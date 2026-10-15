@@ -1294,7 +1294,7 @@ test "core request terminal scores captured identity without a JavaScript consum
     try std.testing.expectEqual(@as(f64, -10), setup.client.peer_manager.catalog.get(peer).?.score);
 }
 
-test "core idle connected peers cost no control or dial visits" {
+test "core idle connected peers leave control visits and dial scheduling unchanged" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -1312,6 +1312,7 @@ test "core idle connected peers cost no control or dial visits" {
             control_visits = setup.client.peer_manager.control.visits;
         }
         try setup.step(0);
+        try std.testing.expect(!setup.client.peer_manager.catalog.dial_schedule_dirty);
         try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &intents));
     }
     try std.testing.expectEqual(control_visits, setup.client.peer_manager.control.visits);
