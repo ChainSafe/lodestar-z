@@ -335,7 +335,7 @@ pub const Messages = struct {
                 assert(context.peers.matches(d.peer));
                 if (verdict == .reject) {
                     context.peers.invalid(d.peer, entry.topic);
-                    std.log.scoped(.network_gossip).debug("invalid_duplicate peer={f} origin={any}", .{ logging.peer(&context.peers.rows[d.peer.index].identity), d.origin });
+                    std.log.scoped(.network_gossip).debug("invalid_duplicate peer={f} message_id={x}", .{ logging.peer(&context.peers.rows[d.peer.index].identity), result.id });
                 } else if (d.eligible) context.peers.scores.creditMesh(d.peer.index, entry.topic);
             }
         }
@@ -347,7 +347,7 @@ pub const Messages = struct {
             .ignore => counts.ignored +|= 1,
         }
         context.validation_time.observe(now -| result.admitted_ms);
-        if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} origin={any} elapsed_ms={d}", .{ handle.index, handle.generation, result.id, @tagName(verdict), result.topicString(), logging.peer(&result.source), entry.origin, now -| result.admitted_ms });
+        if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, result.id, @tagName(verdict), result.topicString(), logging.peer(&result.source), now -| result.admitted_ms });
         return .{ .applied = result };
     }
 
@@ -360,7 +360,6 @@ fn recordDuplicate(context: *const Context, entry: *Attribution, source: *const 
     const ref = source.peer;
     const eligible = context.overlay.inMesh(topic, source.session.index) and now -| entry.admitted_ms <= context.peers.scores.topic_params[topic].mesh_delivery_window_ms;
     if (!Validation.duplicate(entry, context.peers, ref, eligible)) return;
-    entry.duplicates[entry.duplicate_len - 1].origin = .{ .connection = source.connection, .endpoint = source.endpoint };
     if (entry.state != .resolved) return;
     if (entry.verdict == .reject) {
         context.peers.invalid(ref, topic);

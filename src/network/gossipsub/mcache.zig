@@ -195,12 +195,12 @@ pub const HistoryEntry = struct {
 const List = struct { head: u32 = empty_slot, tail: u32 = empty_slot };
 
 pub const History = struct {
-    /// The hard ceiling on entries: retransmission counts cost `capacity × retained` bytes.
     pub const capacity_max = 65536;
     /// Entries of its kind a refused retention examines, oldest first, for copies to evict.
     const reclaim_scan = 64;
 
     generations: []u64,
+    /// Four peers per byte, with each message's row byte-aligned.
     counts: []u8,
     entries: []HistoryEntry,
     ids: []MessageId,
@@ -226,7 +226,7 @@ pub const History = struct {
         const generations = try a.alloc(u64, retained);
         errdefer a.free(generations);
         @memset(generations, 0);
-        const counts = try a.alloc(u8, capacity * retained);
+        const counts = try a.alloc(u8, capacity * countsRowBytes(retained));
         errdefer a.free(counts);
         @memset(counts, 0);
         var index = try Index.init(a, ids);
@@ -238,7 +238,7 @@ pub const History = struct {
         return .{ .entries = entries, .ids = ids, .index = index, .generations = generations, .counts = counts, .topics = topics };
     }
     pub fn backingBytes(capacity: usize, retained: usize, topic_count: usize) usize {
-        return capacity * (@sizeOf(HistoryEntry) + @sizeOf(MessageId) + retained) +
+        return capacity * (@sizeOf(HistoryEntry) + @sizeOf(MessageId) + countsRowBytes(retained)) +
             retained * @sizeOf(u64) + indexCapacity(capacity) * @sizeOf(u32) + topic_count * @sizeOf(List);
     }
 
@@ -337,27 +337,44 @@ pub const History = struct {
         return self.entries[slot].message;
     }
 
-    pub fn countsRow(self: *const History, slot: u32) []u8 {
+    fn countsRowBytes(retained: usize) usize {
+        return (retained + 3) / 4;
+    }
+
+    fn countsRow(self: *const History, slot: u32) []u8 {
         assert(slot < self.entries.len);
-        return self.counts[@as(usize, slot) * self.generations.len ..][0..self.generations.len];
+        const bytes = countsRowBytes(self.generations.len);
+        return self.counts[@as(usize, slot) * bytes ..][0..bytes];
+    }
+
+    fn sentCount(self: *const History, slot: u32, peer: u16) u2 {
+        const shift: u3 = @intCast((peer % 4) * 2);
+        return @truncate(self.countsRow(slot)[peer / 4] >> shift);
+    }
+
+    fn setSentCount(self: *const History, slot: u32, peer: u16, value: u2) void {
+        const shift: u3 = @intCast((peer % 4) * 2);
+        const byte = &self.countsRow(slot)[peer / 4];
+        byte.* = (byte.* & ~(@as(u8, 3) << shift)) | (@as(u8, value) << shift);
     }
 
     /// Called only with a canonical admitted identity. Older references never reset a column.
     pub fn bindPeer(self: *History, peer: PeerRef) void {
         assert(peer.index < self.generations.len and peer.generation != 0);
         if (peer.generation <= self.generations[peer.index]) return;
-        for (0..self.entries.len) |slot| self.countsRow(@intCast(slot))[peer.index] = 0;
+        for (0..self.entries.len) |slot| self.setSentCount(@intCast(slot), peer.index, 0);
         self.generations[peer.index] = peer.generation;
     }
-    pub fn iwantAllowed(self: *const History, slot: u32, peer: PeerRef, max: u8) bool {
+    pub fn iwantAllowed(self: *const History, slot: u32, peer: PeerRef, max: u2) bool {
         if (peer.index >= self.generations.len or peer.generation == 0) return false;
-        return self.generations[peer.index] == peer.generation and self.countsRow(slot)[peer.index] < max;
+        return self.generations[peer.index] == peer.generation and self.sentCount(slot, peer.index) < max;
     }
     pub fn sent(self: *const History, slot: u32, peer: PeerRef) void {
         if (peer.index >= self.generations.len or peer.generation == 0) return;
         if (self.generations[peer.index] != peer.generation) return;
-        assert(self.countsRow(slot)[peer.index] < 255);
-        self.countsRow(slot)[peer.index] += 1;
+        const sent_count = self.sentCount(slot, peer.index);
+        assert(sent_count < constants.gossip_retransmission);
+        self.setSentCount(slot, peer.index, sent_count + 1);
     }
     /// Whether `handle` fits its kind's retention allowance, evicting old copies of its kind to
     /// make room: a new message is worth more than an old copy, and a message the history cannot

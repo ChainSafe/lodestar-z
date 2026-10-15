@@ -145,7 +145,10 @@ test "gossipsub legal maximum IWANT response uses actual IO without mesh publish
     }
     try std.testing.expect(received);
     const cached = setup.shared.client.gossipsub.messages.history.get(&setup.shared.client.gossipsub.messages.store, id).?;
-    try std.testing.expectEqual(@as(u8, 1), setup.shared.client.gossipsub.messages.history.countsRow(cached)[0]);
+    const history = &setup.shared.client.gossipsub.messages.history;
+    const logical = setup.shared.client.gossipsub.sessions.rows[destination].logical;
+    try std.testing.expect(!history.iwantAllowed(cached, logical, 1));
+    try std.testing.expect(history.iwantAllowed(cached, logical, 2));
 }
 
 test "gossipsub IWANT promises commit on queue and start at completed control transmission" {
@@ -307,7 +310,7 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
         try std.testing.expectEqual(outbox.QueueResult.queued, tx.queueData(&g.messages.store, message, origin, .{ .bytes = g.options.tx_peer_bytes }, 1));
     }
     support.control(&g, first.index, .{ .iwant = iwant }, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }));
-    try std.testing.expectEqual(@as(u8, 0), g.messages.history.countsRow(g.messages.history.get(&g.messages.store, id).?)[logical_peer.index]);
+    try std.testing.expect(g.messages.history.iwantAllowed(g.messages.history.get(&g.messages.store, id).?, logical_peer, 1));
     try std.testing.expectEqual(@as(u64, 1), g.iwant_outcomes[@intFromEnum(IwantOutcome.refused)]);
     g.sessions.rows[first.index].io.tx.cancelStream();
     for (0..4) |_| support.control(&g, first.index, .{ .iwant = iwant }, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }));

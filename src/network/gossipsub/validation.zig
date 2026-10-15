@@ -1,5 +1,5 @@
-const PeerOrigin = @import("../types.zig").PeerOrigin;
 const std = @import("std");
+const histogram = @import("../metrics/histogram.zig");
 const mcache = @import("mcache.zig");
 const storage = @import("message_store.zig");
 const topic_mod = @import("topic.zig");
@@ -17,7 +17,7 @@ pub const PeerRef = @import("peer_book.zig").Ref;
 pub const Verdict = enum { accept, reject, ignore };
 pub const Outcome = union(enum) { applied: Verdict, already_resolved, expired, stale_handle };
 pub const duplicates_max = 16;
-pub const Duplicate = struct { peer: PeerRef, eligible: bool, origin: ?PeerOrigin = null };
+pub const Duplicate = struct { peer: PeerRef, eligible: bool };
 pub const Entry = struct {
     available_link: lists.Link = .{},
     deadline_link: lists.Link = .{},
@@ -41,7 +41,6 @@ pub const Attribution = struct {
     id: topic_mod.MessageId = undefined,
     /// Pending validation owns these peers; resolved attribution only compares their generations.
     source: PeerRef = undefined,
-    origin: ?PeerOrigin = null,
     topic: u16 = undefined,
     admitted_ms: u64 = 0,
     source_eligible: bool = false,
@@ -58,6 +57,7 @@ pub const Validation = struct {
     free_records: lists.List = .{},
     resolved_records: lists.List = .{},
     topic_counts: []u32,
+    attribution_eviction_age: histogram.Duration(&.{ 100, 300, 1000, 3000, 10000, 30000, 60000 }) = .{},
 
     timeout_ms: u64,
     tombstone_ms: u64,
@@ -165,6 +165,8 @@ pub const Validation = struct {
             assert(entry.reserved and record.reserved);
             const id = store.get(message).?.id;
             if (record.state == .free) owner.free_records.remove(owner.recent, "link", self.record) else {
+                if (now < record.until and !std.mem.eql(u8, &record.id, &id))
+                    owner.attribution_eviction_age.observe(now -| (record.until -| owner.tombstone_ms));
                 owner.resolved_records.remove(owner.recent, "link", self.record);
                 owner.index.remove(record.id);
                 owner.releaseAttribution(record, peers);

@@ -75,6 +75,13 @@ pub fn writeCounters(g: *const Gossipsub, w: *prom.Encoder) prom.Error!void {
         .unit = .seconds,
     }, @TypeOf(g.validation_time));
     try validation_time.histogram(.{}, &g.validation_time);
+    const eviction_age = try w.histograms(.{
+        .name = "gossipsub_attribution_eviction_age_seconds",
+        .kind = .histogram,
+        .help = "Time since verdict for attribution records evicted for capacity before expiry",
+        .unit = .seconds,
+    }, @TypeOf(g.messages.validation.attribution_eviction_age));
+    try eviction_age.histogram(.{}, &g.messages.validation.attribution_eviction_age);
 }
 
 pub fn writeScores(g: *const Gossipsub, running: bool, now_ms: u64, w: *prom.Encoder) prom.Error!void {

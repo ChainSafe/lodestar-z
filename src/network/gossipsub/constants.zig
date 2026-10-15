@@ -58,7 +58,7 @@ pub const max_ihave_per_heartbeat: usize = 10;
 pub const max_ihave_ids_per_heartbeat: usize = 5_000;
 pub const max_iwant_ids_per_rpc: usize = 5_000;
 pub const max_idontwant_per_heartbeat: usize = 512;
-pub const gossip_retransmission: u8 = 3;
+pub const gossip_retransmission: u2 = 3;
 
 pub fn seenTtlMs(slots_per_epoch: u64, seconds_per_slot: u64) u64 {
     return seconds_per_slot * 1000 * slots_per_epoch * seen_ttl_epochs;

@@ -39,9 +39,9 @@ test "gossip resolved attribution releases peer rows and scores late duplicates 
         g.connectionClosed(conn);
         const next = support.addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
         const current = g.logical(next.index);
-        const origin = g.messages.validation.find(inbox.last().id, 2).?.origin.?;
-        try std.testing.expectEqual(conn, origin.connection);
-        try std.testing.expectEqual(endpoint, origin.endpoint.?);
+        try std.testing.expectEqual(old, g.messages.validation.find(inbox.last().id, 2).?.source);
+        try std.testing.expectEqual(conn, inbox.last().peer);
+        try std.testing.expectEqual(endpoint, inbox.last().endpoint.?);
         try std.testing.expectEqual(old.index, current.index);
         try std.testing.expect(!g.peers.matches(old));
         g.overlay.rows[topic].mesh.set(next.index);

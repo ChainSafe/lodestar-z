@@ -177,7 +177,8 @@ test "gossipsub IWANT work preflight defers all replies and resumes exactly once
     try std.testing.expectEqual(@as(u64, 1), g.iwant_outcomes[@intFromEnum(IwantOutcome.miss)]);
     for (ids[0..2]) |id| {
         const slot = g.messages.history.get(&g.messages.store, id).?;
-        try std.testing.expectEqual(@as(u8, 1), g.messages.history.countsRow(slot)[g.sessions.rows[session.index].logical.index]);
+        try std.testing.expect(!g.messages.history.iwantAllowed(slot, g.sessions.rows[session.index].logical, 1));
+        try std.testing.expect(g.messages.history.iwantAllowed(slot, g.sessions.rows[session.index].logical, 2));
     }
     try std.testing.expectEqual(Progress.done, try session_io.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expectEqual(@as(usize, 2), io.tx.data.count);

@@ -3,6 +3,7 @@ const mcache = @import("mcache.zig");
 const SeenCache = mcache.SeenCache;
 const History = mcache.History;
 const HistoryEntry = mcache.HistoryEntry;
+const CountingAllocator = @import("../counting_allocator.zig").CountingAllocator;
 const MessageId = @import("topic.zig").MessageId;
 const Index = mcache.IdIndex(MessageId);
 const PeerRef = @import("peer_book.zig").Ref;
@@ -263,21 +264,29 @@ test "gossip history stale peer cannot restore retransmission allowance" {
 test "gossip history replacement resets message retransmission counts" {
     var store = try storage.Store.init(std.testing.allocator, 4, 16384);
     defer store.deinit(std.testing.allocator);
-    var history = try History.init(std.testing.allocator, 1, constants.retained_peers_cap, 1);
+    var history = try History.init(std.testing.allocator, 2, 5, 1);
     defer history.deinit(std.testing.allocator);
     const id: MessageId = @splat(1);
     const first = store.put(.beacon_block, id, "t", "first").?;
     history.put(&store, first, 0, 0);
     store.seal(first);
-    const peer: PeerRef = .{ .index = 0, .generation = 1 };
+    const other_id: MessageId = @splat(2);
+    const other = store.put(.beacon_block, other_id, "t", "other").?;
+    history.put(&store, other, 0, 0);
+    store.seal(other);
+    const peer: PeerRef = .{ .index = 4, .generation = 1 };
     history.bindPeer(peer);
-    for (0..3) |_| history.sent(history.get(&store, id).?, peer);
+    for (0..3) |_| {
+        history.sent(history.get(&store, id).?, peer);
+        history.sent(history.get(&store, other_id).?, peer);
+    }
     const replacement = store.put(.beacon_block, id, "t", "replacement").?;
     history.put(&store, replacement, 0, 0);
     store.seal(replacement);
     try std.testing.expect(history.iwantAllowed(history.get(&store, id).?, peer, 3));
-    try std.testing.expectEqual(@as(u8, 0), history.countsRow(history.get(&store, id).?)[peer.index]);
-    try std.testing.expectEqual(@as(usize, 1), store.used_entries);
+    try std.testing.expect(history.iwantAllowed(history.get(&store, id).?, peer, 1));
+    try std.testing.expect(!history.iwantAllowed(history.get(&store, other_id).?, peer, 3));
+    try std.testing.expectEqual(@as(usize, 2), store.used_entries);
 }
 
 test "gossip history canonical identity replacement clears only its bounded peer column" {
@@ -298,8 +307,9 @@ test "gossip history canonical identity replacement clears only its bounded peer
     for (0..history.entries.len) |i| {
         try std.testing.expect(history.iwantAllowed(@intCast(i), replacement, 3));
         try std.testing.expect(!history.iwantAllowed(@intCast(i), peer, 3));
-        try std.testing.expectEqual(@as(u8, 0), history.countsRow(@intCast(i))[0]);
-        try std.testing.expectEqual(@as(u8, 1), history.countsRow(@intCast(i))[1]);
+        try std.testing.expect(history.iwantAllowed(@intCast(i), replacement, 1));
+        try std.testing.expect(!history.iwantAllowed(@intCast(i), other, 1));
+        try std.testing.expect(history.iwantAllowed(@intCast(i), other, 2));
         for (0..3) |_| history.sent(@intCast(i), replacement);
     }
     history.bindPeer(peer);
@@ -309,14 +319,29 @@ test "gossip history canonical identity replacement clears only its bounded peer
     }
 }
 
-test "history resolved retained capacity bounds counters and stale peers" {
-    var history = try History.init(std.testing.allocator, 2, 4, 1);
-    defer history.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 4), history.generations.len);
-    try std.testing.expectEqual(@as(usize, 8), history.counts.len);
-    try std.testing.expectEqual(@as(usize, 4), history.countsRow(0).len);
-    try std.testing.expect(!history.iwantAllowed(0, .{ .index = 4, .generation = 1 }, 3));
-    history.sent(0, .{ .index = 4, .generation = 1 });
+test "gossip history packed counters isolate peers and message rows at partial byte boundaries" {
+    var ledger: CountingAllocator = .{ .backing = std.testing.allocator };
+    var history = try History.init(ledger.allocator(), 2, 5, 1);
+    defer history.deinit(ledger.allocator());
+    try std.testing.expectEqual(ledger.bytes, History.backingBytes(2, 5, 1));
+    try std.testing.expectEqual(@as(usize, 4), history.counts.len);
+    for (0..5) |i| history.bindPeer(.{ .index = @intCast(i), .generation = 1 });
+    for (0..5) |i| {
+        const peer: PeerRef = .{ .index = @intCast(i), .generation = 1 };
+        for (0..3) |sent| {
+            try std.testing.expect(history.iwantAllowed(0, peer, @intCast(sent + 1)));
+            history.sent(0, peer);
+            try std.testing.expect(!history.iwantAllowed(0, peer, @intCast(sent + 1)));
+        }
+        for (0..5) |j| {
+            const other: PeerRef = .{ .index = @intCast(j), .generation = 1 };
+            try std.testing.expectEqual(j > i, history.iwantAllowed(0, other, 1));
+            try std.testing.expect(history.iwantAllowed(1, other, 1));
+        }
+    }
+    try std.testing.expect(!history.iwantAllowed(0, .{ .index = 5, .generation = 1 }, 3));
+    history.sent(0, .{ .index = 5, .generation = 1 });
+    for (0..5) |i| try std.testing.expect(!history.iwantAllowed(0, .{ .index = @intCast(i), .generation = 1 }, 3));
 }
 
 test "gossip failed admission preserves history borrowed by validation" {

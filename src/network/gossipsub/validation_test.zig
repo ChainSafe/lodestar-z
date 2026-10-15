@@ -44,6 +44,7 @@ test "gossip validation topic pins follow attribution ownership through replacem
     try std.testing.expect(v.retainsTopic(1));
     v.expire(&store, &peers, 31);
     try std.testing.expect(std.mem.allEqual(u32, v.topic_counts, 0));
+    try std.testing.expectEqual(@as(u64, 0), v.attribution_eviction_age.count);
     for (0..10) |i| {
         const m = store.put(.beacon_block, @splat(@intCast(i + 10)), "topic", "payload").?;
         var next = v.reserve(store.get(m).?.id).?;
@@ -53,6 +54,16 @@ test "gossip validation topic pins follow attribution ownership through replacem
     }
     try std.testing.expectEqual(@as(u32, 4), v.topic_counts[0]);
     try std.testing.expectEqual(@as(u32, 4), v.topic_counts[1]);
+    try std.testing.expectEqual(@as(u64, 2), v.attribution_eviction_age.count);
+    try std.testing.expectEqual(@as(u128, 16), v.attribution_eviction_age.sum);
+    var uncommitted = v.reserve(@splat(99)).?;
+    uncommitted.cancel();
+    try std.testing.expectEqual(@as(u64, 2), v.attribution_eviction_age.count);
+    const after_expiry = store.put(.beacon_block, @splat(99), "topic", "payload").?;
+    var after_expiry_reservation = v.reserve(@splat(99)).?;
+    _ = after_expiry_reservation.commit(&store, &peers, after_expiry, source, 0, 61);
+    store.seal(after_expiry);
+    try std.testing.expectEqual(@as(u64, 2), v.attribution_eviction_age.count);
     v.clear(&store, &peers);
     try std.testing.expect(std.mem.allEqual(u32, v.topic_counts, 0));
     for (v.topic_counts) |count| try std.testing.expectEqual(@as(u32, 0), count);

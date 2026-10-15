@@ -131,6 +131,7 @@ fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void 
     if (!self.running) {
         resources.receive_pages = 0;
         resources.pending_validations = 0;
+        resources.resolved_attributions = 0;
         resources.delivery_descriptors_available = resources.delivery_descriptors_capacity;
         resources.queued_bytes = 0;
         resources.store_pages = 0;
@@ -140,6 +141,8 @@ fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void 
         .{ "receive_pages_capacity_count", "receive_page_capacity", "Receive pages the pool holds" },
         .{ "validation_capacity_count", "validation_capacity", "Messages the validation table holds" },
         .{ "mcache_not_validated_count", "pending_validations", "Admitted messages awaiting a verdict" },
+        .{ "attribution_capacity_count", "attribution_capacity", "Attribution records shared by pending validation and recent verdicts" },
+        .{ "attribution_resolved_count", "resolved_attributions", "Recent verdicts retained for duplicate scoring" },
         .{ "delivery_descriptors_capacity_count", "delivery_descriptors_capacity", "Outgoing data descriptors the shared pool holds" },
         .{ "delivery_descriptors_available_count", "delivery_descriptors_available", "Outgoing data descriptors free in the shared pool" },
         .{ "queued_bytes", "queued_bytes", "Compressed bytes queued to peers as data frames" },

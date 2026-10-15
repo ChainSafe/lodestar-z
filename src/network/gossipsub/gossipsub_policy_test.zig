@@ -456,7 +456,10 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     const io = &g.sessions.rows[peer.index].io;
     try std.testing.expectEqual(@as(usize, 1), io.tx.data.count);
     try std.testing.expectEqual(message, (io.tx.data.next(&g.messages.store, g.last_now_ms, g.options.tx_timeout_ms)).?.message);
-    try std.testing.expectEqual(@as(u8, 1), g.messages.history.countsRow(g.messages.history.get(&g.messages.store, id).?)[g.sessions.rows[peer.index].logical.index]);
+    const cached = g.messages.history.get(&g.messages.store, id).?;
+    const logical = g.sessions.rows[peer.index].logical;
+    try std.testing.expect(!g.messages.history.iwantAllowed(cached, logical, 1));
+    try std.testing.expect(g.messages.history.iwantAllowed(cached, logical, 2));
     var wire: [512]u8 = undefined;
     var used: usize = 0;
     for (0..8) |_| {
