@@ -419,14 +419,14 @@ pub fn openStream(self: *Engine, conn: Handle) StreamError!StreamHandle {
 pub fn read(self: *Engine, stream: StreamHandle, buf: []u8) StreamError!Read {
     const target = try self.readableStream(stream);
     var effects: Connection.Effects = .{};
-    defer self.streamEffects(stream.conn.index, effects);
+    defer self.streamEffects(stream, effects);
     const result = target.slot.read(target.index, target.id, buf, &effects) catch |err| return streamError(err);
     if (self.stream_capture) |capture| capture.data(stream, .inbound, buf[0..result.len]);
     return result;
 }
 
-/// Names the owner that now holds the stream. The engine never interprets the route; it
-/// returns it from `route` and in the stream's close event.
+/// Names the owner that consumes readiness and terminal I/O results. Routed streams retire
+/// during their terminal I/O call without emitting a close event.
 pub fn bindStream(self: *Engine, stream: StreamHandle, owner: Route) StreamError!void {
     const target = try self.readableStream(stream);
     assert(target.slot.table.matches(target.index, target.id));
@@ -473,13 +473,15 @@ pub fn streamReadable(self: *Engine, stream: StreamHandle) StreamError!bool {
 pub fn write(self: *Engine, stream: StreamHandle, bytes: []const u8, fin: bool) StreamError!usize {
     const target = try self.liveStream(stream);
     var effects: Connection.Effects = .{};
-    defer self.streamEffects(stream.conn.index, effects);
+    defer self.streamEffects(stream, effects);
     const count = target.slot.write(target.index, target.id, bytes, fin, &effects) catch |err| return streamError(err);
     if (self.stream_capture) |capture| capture.data(stream, .outbound, bytes[0..count]);
     return count;
 }
 
-fn streamEffects(self: *Engine, index: u16, effects: Connection.Effects) void {
+fn streamEffects(self: *Engine, stream: StreamHandle, effects: Connection.Effects) void {
+    if (effects.closed) |closed| if (self.stream_capture) |capture| capture.streamClosed(stream, closed == .reset);
+    const index = stream.conn.index;
     if (effects.dirty) self.markLiveDirty(index);
     if (effects.collect) self.markPending(index);
     self.noteEvents(index);
@@ -488,8 +490,9 @@ fn streamEffects(self: *Engine, index: u16, effects: Connection.Effects) void {
 pub fn streamCapacity(self: *Engine, stream: StreamHandle) StreamError!usize {
     const target = try self.readableStream(stream);
     assert(target.slot.table.matches(target.index, target.id));
-    defer self.noteEvents(stream.conn.index);
-    const available = target.slot.capacity(target.index, target.id) catch |err|
+    var effects: Connection.Effects = .{};
+    defer self.streamEffects(stream, effects);
+    const available = target.slot.capacity(target.index, target.id, &effects) catch |err|
         return streamError(err);
     assert(target.index < bounds.streams_per_connection);
     return available;
@@ -497,24 +500,18 @@ pub fn streamCapacity(self: *Engine, stream: StreamHandle) StreamError!usize {
 
 pub fn shutdown(self: *Engine, stream: StreamHandle, dir: ShutdownDirection, code: u64) void {
     const target = self.liveStream(stream) catch return;
-    self.streamEffects(stream.conn.index, target.slot.shutdown(target.index, target.id, dir, code));
+    self.streamEffects(stream, target.slot.shutdown(target.index, target.id, dir, code));
 }
 
 pub fn closeStream(self: *Engine, stream: StreamHandle, code: u64) void {
     const target = self.liveStream(stream) catch return;
-    self.streamEffects(stream.conn.index, target.slot.closeStream(target.index, target.id, code));
+    self.streamEffects(stream, target.slot.closeStream(target.index, target.id, code));
 }
 
 /// Drains connections with undelivered events in FIFO order. A connection whose events do
 /// not fit stays at the head. Per connection: connected, path_changed, stream events, closed.
 pub fn pollEvents(self: *Engine, events: []Event) usize {
     const slots = self.registry.slots;
-    var promoted: usize = 0;
-    while (self.registry.deferred.pop(slots, "deferred_link")) |row| : (promoted += 1) {
-        assert(promoted < slots.len);
-        slots[row].table.promoteDeferred();
-        self.noteEvents(@intCast(row));
-    }
     var count: usize = 0;
     var visited: usize = 0;
     while (count < events.len) : (visited += 1) {
@@ -770,8 +767,6 @@ fn checkInvariants(self: *Engine, now: Now) void {
     var scratch: [constants.datagram_size_max]u8 = undefined;
     for (slots, 0..) |*slot, position| {
         const index: u16 = @intCast(position);
-        // Deferred close events wait on the deferred list.
-        assert(slot.deferred_link.linked == (slot.table.deferred != 0));
         if (slot.state == .free) {
             assert(!slot.pending_link.linked and !slot.dirty_link.linked and !slot.event_link.linked and !slot.release_link.linked);
             assert(self.registry.timers.get(index) == null);
@@ -876,11 +871,10 @@ fn markLiveDirty(self: *Engine, index: u16) void {
 fn noteEvents(self: *Engine, index: u16) void {
     const slot = &self.registry.slots[index];
     if (slot.state == .free) return;
-    if (slot.table.deferred != 0) _ = self.registry.deferred.insert(self.registry.slots, "deferred_link", index);
     if (slot.hasEvents()) {
         _ = self.registry.events.insert(self.registry.slots, "event_link", index);
     } else if (slot.event_link.linked) {
-        // A deferred close replaced the entry's only undelivered event.
+        // Retiring a routed stream can remove its last undelivered readiness event.
         self.registry.events.remove(self.registry.slots, "event_link", index);
     }
 }
@@ -1048,7 +1042,6 @@ fn markClosed(self: *Engine, index: u16, reason: CloseReason) void {
     slot.markClosed(reason);
     self.registry.removeRoute(index);
     const slots = self.registry.slots;
-    if (slot.deferred_link.linked) self.registry.deferred.remove(slots, "deferred_link", index);
     if (slot.pending_link.linked) self.registry.pending.remove(slots, "pending_link", index);
     if (slot.dirty_link.linked) self.registry.dirty.remove(slots, "dirty_link", index);
     self.registry.timers.clear(index);

@@ -78,6 +78,58 @@ test "engine reports a stopped write on a stream that is still readable" {
     try std.testing.expectEqualStrings("x", buffer[0..(try pair.server.read(inbound, &buffer)).len]);
 }
 
+test "engine routed reset and stop retire through I/O and capture closure once" {
+    for ([_]bool{ false, true }) |reset_read| {
+        var pair: Pair = .{};
+        try pair.init(.{}, .{});
+        defer pair.deinit();
+        const handles = try connectPair(&pair);
+        var capture = try trace.Capture.init(std.testing.allocator, std.testing.io, @intCast(pair.server.registry.slots.len));
+        defer capture.deinit(std.testing.allocator);
+        capture.connected(handles.server, &pair.client_ctx.local_peer_id, client_address, server_address, .inbound);
+        pair.server.stream_capture = &capture;
+        defer pair.server.stream_capture = null;
+
+        const stream = try pair.client.openStream(handles.client);
+        _ = try pair.client.write(stream, "x", !reset_read);
+        try pair.pump();
+        var storage: [8]Event = undefined;
+        const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+        try pair.server.bindStream(inbound, .{ .owner = .reqresp_inbound, .row = 0 });
+        capture.selected(inbound, .{ .reqresp = .ping_v1 }, .inbound, "");
+        var buffer: [8]u8 = undefined;
+        const read = try pair.server.read(inbound, &buffer);
+        try std.testing.expectEqualStrings("x", buffer[0..read.len]);
+        try std.testing.expectEqual(!reset_read, read.fin);
+        if (reset_read) _ = try pair.server.write(inbound, "", true);
+        pair.client.shutdown(stream, if (reset_read) .write else .read, 7);
+        try pair.pump();
+        const ready = pair.events(&pair.server, &storage);
+        try std.testing.expectEqual(@as(usize, 1), ready.len);
+        try std.testing.expectEqual(inbound, ready[0].stream_ready.stream);
+        if (reset_read) {
+            const reset = try pair.server.read(inbound, &buffer);
+            try std.testing.expect(reset.fin);
+            try std.testing.expectEqual(@as(?u64, 7), reset.reset_code);
+        } else {
+            try std.testing.expect(ready[0].stream_ready.ready.writable);
+            try std.testing.expectError(error.StreamStopped, pair.server.write(inbound, "y", false));
+        }
+        try std.testing.expect(pair.server.route(inbound) == null);
+        try std.testing.expect(!pair.server.eventsPending());
+        try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.server, &storage).len);
+        pair.server.closeStream(inbound, 0);
+        const batch = capture.drain();
+        var closed: usize = 0;
+        for (batch.events) |event| if (event.payload == .stream_closed) {
+            try std.testing.expect(event.payload.stream_closed.reset);
+            closed += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), closed);
+        try std.testing.expect(!batch.reset and !batch.pending);
+    }
+}
+
 test "engine capacity preserves a STOP code before gathering writable streams" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
@@ -567,7 +619,7 @@ test "engine immediate host close before advancement preserves peer stream claim
 }
 
 // Bypass Slot for the peer FIN exchange to model a native stream collected before its table
-// entry. Each public operation must converge on the same closed wrapper and routed event.
+// entry. Each public operation must retire the routed wrapper without a second notification.
 test "engine normalizes missing native streams on read write and capacity" {
     for (0..3) |operation| {
         var pair: Pair = .{};
@@ -597,9 +649,11 @@ test "engine normalizes missing native streams on read write and capacity" {
         }
         try std.testing.expect(!pair.client.eventsPending());
         const events = pair.events(&pair.client, &storage);
-        try std.testing.expectEqual(@as(usize, 1), events.len);
-        _ = try expectStreamClosed(events[0], stream);
-        try std.testing.expectEqual(@as(u16, 3), events[0].stream_closed.route.row);
+        try std.testing.expectEqual(@as(usize, 0), events.len);
+        try std.testing.expect(pair.client.route(stream) == null);
+        const replacement = try pair.client.openStream(handles.client);
+        try std.testing.expectEqual(stream.slot, replacement.slot);
+        try std.testing.expect(replacement.id != stream.id);
         try std.testing.expectError(error.UnknownStream, pair.client.read(stream, &buffer));
     }
 }

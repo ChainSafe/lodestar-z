@@ -375,20 +375,6 @@ pub const Negotiator = struct {
         }
     }
 
-    /// A routed close. A reset fails the entry; any other close is observed by its next read.
-    pub fn streamClosed(self: *Negotiator, engine: *Engine, row: u24, stream: StreamHandle, reset: bool) void {
-        if (row >= self.entries.len) return;
-        const entry = &self.entries[row];
-        if (entry.state != .negotiating and entry.state != .pending) return;
-        if (!std.meta.eql(entry.stream, stream)) return;
-        if (reset) {
-            if (entry.finishing_selected) {
-                engine.closeStream(entry.stream, types.app_error_negotiation_failed);
-                self.release(row);
-            } else self.settle(row, fail(engine, entry, .stream_closed).result);
-        } else if (entry.state == .negotiating) self.markReady(row);
-    }
-
     pub fn cancel(self: *Negotiator, engine: *Engine, stream: StreamHandle) void {
         const bound = engine.route(stream);
         if (bound != null and bound.?.owner == .negotiation) {

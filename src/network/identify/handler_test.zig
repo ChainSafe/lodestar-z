@@ -135,15 +135,18 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
     for (0..32) |_| {
         var outcomes: [8]router_mod.Router.Outcome = undefined;
         protocols_test_support.forward(&pair, &pair.client, .{ .negotiator = &client.router.negotiator });
-        _ = client.router.pump(&pair.client, pair.now, &outcomes);
+        const count = client.router.pump(&pair.client, pair.now, &outcomes);
+        for (outcomes[0..count]) |outcome| if (std.meta.eql(outcome.stream, duplicate)) {
+            try std.testing.expectEqual(.stream_closed, outcome.result.failed);
+            refused = true;
+        };
+        client.router.releaseOutcomes();
         try pair.pump();
         _ = step(&pair, &server, true, &.{});
         try pair.pump();
         var events: [64]Engine.Event = undefined;
         const received = pair.events(&pair.client, &events);
-        for (received) |event| if (event == .stream_closed and std.meta.eql(event.stream_closed.stream, duplicate)) {
-            refused = true;
-        };
+        (protocols_test_support.Owners{ .negotiator = &client.router.negotiator }).route(&pair.client, received);
         client.router.transportEvents(&pair.client, received, pair.now);
         try std.testing.expectEqual(retained, server.identify.inbound[0].stream.?);
         if (refused) break;

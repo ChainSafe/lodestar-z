@@ -167,11 +167,6 @@ pub const Protocols = struct {
                 self.control_reqresp.connectionClosed(engine, &self.router, closed.conn, now);
                 self.reqresp.connectionClosed(engine, &self.router, closed.conn, now);
             },
-            .stream_closed => |closed| switch (closed.route.owner) {
-                .reqresp_inbound, .reqresp_outbound => self.reqresp.streamClosed(engine, &self.router, closed.route, closed.stream, closed.reset_code, now),
-                .reqresp_control_inbound, .reqresp_control_outbound => self.control_reqresp.streamClosed(engine, &self.router, closed.route, closed.stream, closed.reset_code, now),
-                else => {},
-            },
             else => {},
         };
         self.identify.transportEvents(engine, events);

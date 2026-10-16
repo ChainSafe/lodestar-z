@@ -32,19 +32,18 @@ pub const Event = union(enum) {
     /// a writable one only after a blocked write armed it and send capacity reached the armed
     /// watermark, or the peer stopped the stream.
     stream_ready: struct { stream: types.StreamHandle, ready: types.Readiness },
-    /// `route` is the stream's owner, captured before its table entry cleared. The owner of a
-    /// routed stream caused its close in one of its own stream calls, so that close is reported
-    /// by the next poll and does not make events pending.
-    stream_closed: struct { stream: types.StreamHandle, reset_code: ?u64, route: types.Route = .{} },
+    /// Only unrouted streams emit a close event. Routed owners consume terminal I/O results.
+    stream_closed: struct { stream: types.StreamHandle, reset_code: ?u64 },
     path_changed: struct { conn: types.Handle, peer: types.Address },
 };
 
 const State = enum { free, handshaking, established, closed };
 
-/// Scheduling work produced by a stream operation, including one that returns an error.
+/// Effects of a stream operation, including one that returns an error.
 pub const Effects = struct {
     dirty: bool = false,
     collect: bool = false,
+    closed: ?enum { finished, reset } = null,
 };
 
 /// Independent of connection phase, final-flight drain and close-event delivery.
@@ -106,8 +105,6 @@ dirty_link: index_list.Link = .{},
 event_link: index_list.Link = .{},
 /// Close event delivered; the slot is retired on the next turn.
 release_link: index_list.Link = .{},
-/// Has deferred stream close events, made deliverable by the next poll.
-deferred_link: index_list.Link = .{},
 table: StreamTable = .{},
 
 pub fn open(
@@ -119,7 +116,6 @@ pub fn open(
     assert(self.state == .free);
     assert(self.conn == null);
     assert(!self.pending_link.linked and !self.dirty_link.linked and !self.event_link.linked and !self.release_link.linked);
-    assert(!self.deferred_link.linked);
     self.handshake = .{ .now_unix = params.now.unixSeconds() };
     self.direction = params.direction;
     self.peer = params.peer;
@@ -364,7 +360,6 @@ pub fn drainEvents(self: *Connection, conn: types.Handle, events: []Event) usize
             events[count] = .{ .stream_closed = .{
                 .stream = .{ .conn = conn, .id = closed.id, .slot = entry_index },
                 .reset_code = closed.reset_code,
-                .route = closed.route,
             } };
             count += 1;
         }
@@ -427,7 +422,6 @@ pub fn markClosed(self: *Connection, reason: types.CloseReason) void {
     self.state = .closed;
     self.closing = .{ .started = reason };
     self.close_event = .pending;
-    self.table.promoteDeferred();
 }
 
 pub fn isEstablished(self: *const Connection) bool {
@@ -472,13 +466,13 @@ pub fn openStream(self: *Connection) Error!OpenedStream {
 }
 
 pub fn read(self: *Connection, index: u8, id: u64, buf: []u8, effects: *Effects) Error!types.Read {
-    const result = try self.readNative(index, id, buf);
+    const result = try self.readNative(index, id, buf, effects);
     effects.dirty = result.len > 0 or result.fin or result.reset_code != null;
     if ((result.len == 0 or result.fin) and self.table.matches(index, id)) self.table.readDone(index);
     return result;
 }
 
-fn readNative(self: *Connection, index: u8, id: u64, buf: []u8) Error!types.Read {
+fn readNative(self: *Connection, index: u8, id: u64, buf: []u8, effects: *Effects) Error!types.Read {
     assert(self.conn != null);
     assert(self.table.matches(index, id));
     var fin = false;
@@ -487,20 +481,20 @@ fn readNative(self: *Connection, index: u8, id: u64, buf: []u8) Error!types.Read
     if (rc == c.QUICHE_ERR_STREAM_RESET) {
         self.table.markFinReceived(index);
         if (c.quiche_conn_stream_capacity(self.conn.?, id) < 0) self.table.markFinSent(index);
-        if (self.table.entries[index].fin_sent) self.finishStream(index, code);
+        if (self.table.entries[index].fin_sent) self.finishStream(index, code, effects);
         return .{ .len = 0, .fin = true, .reset_code = code };
     }
-    const length = try self.streamResult(index, rc) orelse return .{ .len = 0, .fin = false };
+    const length = try self.streamResult(index, rc, effects) orelse return .{ .len = 0, .fin = false };
     assert(length <= buf.len);
     if (fin) {
         self.table.markFinReceived(index);
-        if (self.table.entries[index].fin_sent) self.finishStream(index, null);
+        if (self.table.entries[index].fin_sent) self.finishStream(index, null, effects);
     }
     return .{ .len = length, .fin = fin };
 }
 
 pub fn write(self: *Connection, index: u8, id: u64, bytes: []const u8, fin: bool, effects: *Effects) Error!usize {
-    const written = self.writeNative(index, id, bytes, fin) catch |err| {
+    const written = self.writeNative(index, id, bytes, fin, effects) catch |err| {
         if (err == error.WouldBlock) {
             effects.dirty = self.armWrite(index, id, bytes.len);
         } else if (self.table.matches(index, id)) self.table.disarm(index);
@@ -515,27 +509,27 @@ pub fn write(self: *Connection, index: u8, id: u64, bytes: []const u8, fin: bool
     return written;
 }
 
-fn writeNative(self: *Connection, index: u8, id: u64, bytes: []const u8, fin: bool) Error!usize {
+fn writeNative(self: *Connection, index: u8, id: u64, bytes: []const u8, fin: bool, effects: *Effects) Error!usize {
     assert(self.conn != null);
     assert(self.table.matches(index, id));
     const entry = &self.table.entries[index];
     if (entry.stopped) {
         // quiche may already have freed the stream; report the stop it delivered.
         self.table.markFinSent(index);
-        if (entry.fin_received) self.finishStream(index, entry.reset_code);
+        if (entry.fin_received) self.finishStream(index, entry.reset_code, effects);
         return error.StreamStopped;
     }
     var code: u64 = 0;
     const rc = c.quiche_conn_stream_send(self.conn.?, id, bytes.ptr, bytes.len, fin, &code);
     if (rc == c.QUICHE_ERR_STREAM_STOPPED) {
         self.table.markFinSent(index);
-        if (self.table.entries[index].fin_received) self.finishStream(index, code);
+        if (self.table.entries[index].fin_received) self.finishStream(index, code, effects);
         return error.StreamStopped;
     }
-    const length = try self.streamResult(index, rc) orelse {
+    const length = try self.streamResult(index, rc, effects) orelse {
         const available = self.capacityNative(index, id);
         if (available < 0 and available != c.QUICHE_ERR_DONE) {
-            self.finishStream(index, null);
+            self.finishStream(index, null, effects);
             return error.UnknownStream;
         }
         return error.WouldBlock;
@@ -543,21 +537,21 @@ fn writeNative(self: *Connection, index: u8, id: u64, bytes: []const u8, fin: bo
     assert(length <= bytes.len);
     if (fin and length == bytes.len) {
         self.table.markFinSent(index);
-        if (self.table.entries[index].fin_received) self.finishStream(index, null);
+        if (self.table.entries[index].fin_received) self.finishStream(index, null, effects);
     }
     return length;
 }
 
-pub fn capacity(self: *Connection, index: u8, id: u64) Error!usize {
+pub fn capacity(self: *Connection, index: u8, id: u64, effects: *Effects) Error!usize {
     assert(self.conn != null and self.table.matches(index, id));
     if (self.table.entries[index].stopped) return error.StreamStopped;
-    return (try self.streamResult(index, self.capacityNative(index, id))) orelse error.WouldBlock;
+    return (try self.streamResult(index, self.capacityNative(index, id), effects)) orelse error.WouldBlock;
 }
 
-fn streamResult(self: *Connection, index: u8, rc: isize) Error!?usize {
+fn streamResult(self: *Connection, index: u8, rc: isize, effects: *Effects) Error!?usize {
     return binding.check(rc) catch |err| switch (err) {
         error.InvalidStreamState => {
-            self.finishStream(index, null);
+            self.finishStream(index, null, effects);
             return error.UnknownStream;
         },
         else => return err,
@@ -606,8 +600,9 @@ pub fn shutdown(
         self.table.shutdownWrite(index);
     }
     const entry = self.table.entries[index];
-    if (entry.fin_received and entry.fin_sent) self.finishStream(index, null);
-    return .{ .dirty = true, .collect = self.table.armed != 0 };
+    var effects: Effects = .{ .dirty = true, .collect = self.table.armed != 0 };
+    if (entry.fin_received and entry.fin_sent) self.finishStream(index, null, &effects);
+    return effects;
 }
 
 pub fn closeStream(self: *Connection, index: u8, id: u64, code: u64) Effects {
@@ -616,16 +611,21 @@ pub fn closeStream(self: *Connection, index: u8, id: u64, code: u64) Effects {
     const entry = self.table.entries[index];
     if (!entry.fin_received) self.shutdownRaw(id, .read, code);
     if (!entry.fin_sent) self.shutdownRaw(id, .write, code);
-    self.finishStream(index, null);
+    var effects: Effects = .{ .dirty = true };
+    self.finishStream(index, null, &effects);
     assert(!self.table.matches(index, id));
     // A local reset can release connection credit to other blocked writers.
-    return .{ .dirty = true, .collect = self.table.armed != 0 };
+    effects.collect = self.table.armed != 0;
+    return effects;
 }
 
-fn finishStream(self: *Connection, index: u8, reset_code: ?u64) void {
+fn finishStream(self: *Connection, index: u8, reset_code: ?u64, effects: *Effects) void {
     assert(index < limits.streams_per_connection);
     assert(self.table.entries[index].claimed);
     if (self.state == .closed) {
+        self.table.discard(index);
+    } else if (self.table.entries[index].route.owner != .none) {
+        effects.closed = if (reset_code != null) .reset else .finished;
         self.table.discard(index);
     } else {
         self.table.clear(index, reset_code);

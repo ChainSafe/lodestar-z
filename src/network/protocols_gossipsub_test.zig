@@ -63,8 +63,9 @@ test "gossipsub protocol stack does not retry a closed outbound stream" {
     for (0..16) |_| try setup.pumpOnce();
     const index = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
     const first = setup.shared.client.gossipsub.sessions.outStream(index).?;
-    setup.shared.pair.client.closeStream(first, 0);
-    _ = setup.shared.client.process(&setup.shared.pair.client, &.{.{ .stream_closed = .{ .stream = first, .reset_code = 0 } }}, setup.shared.pair.now, .{});
+    const remote = setup.shared.server.gossipsub.sessions.rows[setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?].in_stream.?;
+    try std.testing.expectEqual(first.id, remote.id);
+    setup.shared.pair.server.closeStream(remote, 0);
     for (0..4) |_| try setup.pumpOnce();
     try std.testing.expect(setup.shared.client.gossipsub.sessions.outStream(index) == null);
     const started = setup.shared.client.gossipsub.counters.negotiation_started;
@@ -210,7 +211,7 @@ test "gossipsub protocol stack ignores stale outcomes after connection and peer 
         .protocol = .{ .meshsub = .v1_1 },
         .result = .{ .ready = .{ .protocol = .{ .meshsub = .v1_1 }, .leftover = "", .fin = false } },
     }, setup.shared.pair.now);
-    _ = setup.shared.client.process(&setup.shared.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.shared.pair.now, .{});
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{.{ .stream_ready = .{ .stream = old_stream, .ready = .{ .writable = true } } }}, setup.shared.pair.now, .{});
     try std.testing.expectEqual(live, setup.shared.client.gossipsub.sessions.outStream(index).?);
     try std.testing.expectEqual(sessions.Version.v1_2, setup.shared.client.gossipsub.sessions.rows[index].outbound.live.version);
     const peer = setup.shared.client.gossipsub.peers.rows[setup.shared.client.gossipsub.sessions.rows[index].logical.index];

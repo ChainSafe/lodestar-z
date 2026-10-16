@@ -696,8 +696,7 @@ test "core sampling delivery follows real outbound stream retirement replacement
     const handler = setup.client.protocols.gossipsub;
     const index = handler.sessions.find(snapshot.connection.?).?;
     const old_stream = handler.sessions.rows[index].outbound.live.stream;
-    setup.pair.client.closeStream(old_stream, 0);
-    handler.transportEvents(&setup.client.protocols.router, setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now);
+    session_io.resetOutbound(handler, setup.pair.client, index);
     try std.testing.expect(!handler.deliveryAvailable(snapshot.connection.?));
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 8), setup.client.peer_manager.coverageDeficits().groups);
@@ -720,7 +719,7 @@ test "core sampling delivery follows real outbound stream retirement replacement
     const replacement_stream = handler.sessions.rows[replacement_index].outbound.live.stream;
     try std.testing.expect(!std.meta.eql(old_stream, replacement_stream));
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().groups);
-    handler.transportEvents(&setup.client.protocols.router, setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now);
+    handler.streamReady(setup.pair.client, .{ .owner = .gossip_outbound, .row = index }, old_stream, .{ .writable = true });
     try std.testing.expect(handler.deliveryAvailable(replacement.connection.?));
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().groups);

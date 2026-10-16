@@ -214,12 +214,7 @@ pub const Handler = struct {
 
     pub fn transportEvents(self: *Handler, engine: *Engine, events: []const Engine.Event) void {
         for (events) |event| switch (event) {
-            .closed => |closed| self.closeMatching(engine, closed.conn, null, .transport),
-            .stream_closed => |closed| if (closed.route.owner == .identify) {
-                if (closed.reset_code != null) {
-                    self.closeMatching(engine, closed.stream.conn, closed.stream, .reset);
-                } else self.streamReady(closed.route.row, closed.stream);
-            },
+            .closed => |closed| self.closeConnection(engine, closed.conn),
             else => {},
         };
     }
@@ -229,14 +224,14 @@ pub const Handler = struct {
         engine.bindStream(stream, .{ .owner = .identify, .row = @intCast(row) }) catch {};
     }
 
-    fn closeMatching(self: *Handler, engine: *Engine, conn: Engine.Handle, which: ?Engine.StreamHandle, failure: Failure) void {
+    fn closeConnection(self: *Handler, engine: *Engine, conn: Engine.Handle) void {
         for (self.inbound) |*slot| if (slot.stream) |stream| {
-            if (std.meta.eql(stream.conn, conn) and (which == null or std.meta.eql(which.?, stream))) {
+            if (std.meta.eql(stream.conn, conn)) {
                 slot.close(engine);
             }
         };
         for (self.outbound) |*slot| if (slot.stream) |stream| {
-            if (std.meta.eql(stream.conn, conn) and (which == null or std.meta.eql(which.?, stream)) and slot.phase != .terminal) slot.finish(engine, .{ .failed = failure });
+            if (std.meta.eql(stream.conn, conn) and slot.phase != .terminal) slot.finish(engine, .{ .failed = .transport });
         };
     }
 

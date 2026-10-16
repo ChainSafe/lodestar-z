@@ -589,21 +589,6 @@ pub fn streamReady(self: *ReqResp, route: types.Route, stream: StreamHandle) voi
     self.markId(id);
 }
 
-/// A routed stream close. A reset fails an inbound slot that is not writing its response;
-/// any other close is observed by the slot's next stream call.
-pub fn streamClosed(self: *ReqResp, engine: *Engine, router: *Router, route: types.Route, stream: StreamHandle, reset_code: ?u64, now: Now) void {
-    const id = self.routedSlot(route, stream) orelse return;
-    if (reset_code != null and route.owner == self.options.routes.inbound) {
-        const index: u16 = @intCast(route.row);
-        const slot = &self.inbound[index];
-        if (slot.state != .writing_chunk and slot.state != .finishing) {
-            slot.fail(self, engine, router, index, .stream_closed, now);
-            return;
-        }
-    }
-    self.markId(id);
-}
-
 fn routedSlot(self: *const ReqResp, route: types.Route, stream: StreamHandle) ?u32 {
     const id: u32 = if (route.owner == self.options.routes.outbound)
         (if (route.row < self.outbound.len) route.row else return null)

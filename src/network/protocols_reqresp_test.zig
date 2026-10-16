@@ -87,12 +87,14 @@ test "protocol stack stream capture contains application framing exactly once" {
     var incoming: [1024]u8 = undefined;
     var sent: usize = 0;
     var received: usize = 0;
+    var closed: usize = 0;
     for (batch.events) |event| switch (event.payload) {
         .stream => |stream| if (stream.protocol == .reqresp and stream.protocol.reqresp == .status_v1) {
             try std.testing.expect(alias == null);
             alias = stream.id;
         },
         .data => |data| if (data.stream == alias) {
+            try std.testing.expectEqual(@as(usize, 0), closed);
             const bytes = batch.data[data.offset..][0..data.length];
             if (data.direction == .outbound) {
                 @memcpy(outgoing[sent..][0..bytes.len], bytes);
@@ -102,8 +104,13 @@ test "protocol stack stream capture contains application framing exactly once" {
                 received += bytes.len;
             }
         },
+        .stream_closed => |stream| if (stream.stream == alias) {
+            try std.testing.expect(!stream.reset);
+            closed += 1;
+        },
         else => {},
     };
+    try std.testing.expectEqual(@as(usize, 1), closed);
     try std.testing.expect(alias != null);
     var encoded: [1024]u8 = undefined;
     try std.testing.expectEqualSlices(u8, try codec.encodeRequest(&statusBytes(5), &encoded), outgoing[0..sent]);

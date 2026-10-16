@@ -18,7 +18,7 @@ pub const Entry = struct {
     reset_code: u64 = 0,
     /// Send capacity at which a writable event is reported; 0 means no write interest.
     write_lowat: u32 = 0,
-    /// The owner that holds the stream, kept until its close event is taken.
+    /// The owner that consumes readiness and terminal I/O results.
     route: types.Route = .{},
     claimed: bool = false,
     reset: bool = false,
@@ -41,9 +41,6 @@ const StreamTable = @This();
 entries: [limits.streams_per_connection]Entry = [_]Entry{.{}} ** limits.streams_per_connection,
 /// Entries with an undelivered opened, ready or closed event.
 pending: Mask = 0,
-/// Closed entries of routed streams. Their owner caused the close within its own stream call,
-/// so the close event waits for the next poll instead of waking the owner loop.
-deferred: Mask = 0,
 /// Entries with write interest.
 armed: Mask = 0,
 /// Entries whose delivered readable edge has not yet been read to Done.
@@ -90,7 +87,6 @@ pub fn claimLocal(self: *StreamTable, index: u8, id: u64) void {
     assert(index < half);
     assert(!self.entries[index].claimed);
     assert(self.pending & bit(index) == 0 and self.armed & bit(index) == 0 and self.reading & bit(index) == 0);
-    assert(self.deferred & bit(index) == 0);
     self.entries[index] = .{ .id = id, .claimed = true };
     self.next_local_id = id + 4;
 }
@@ -99,7 +95,7 @@ pub fn claimPeer(self: *StreamTable, id: u64) ?u8 {
     assert(self.find(id) == null);
     const index = self.freeIn(half) orelse return null;
     assert(index >= half);
-    assert(self.pending & bit(index) == 0 and self.armed & bit(index) == 0 and self.deferred & bit(index) == 0);
+    assert(self.pending & bit(index) == 0 and self.armed & bit(index) == 0);
     self.entries[index] = .{ .id = id, .claimed = true, .opened_pending = true };
     self.pending |= bit(index);
     return index;
@@ -107,6 +103,7 @@ pub fn claimPeer(self: *StreamTable, id: u64) ?u8 {
 
 pub fn bind(self: *StreamTable, index: u8, route: types.Route) void {
     assert(self.entries[index].claimed and !self.entries[index].closed_pending);
+    if (route.owner != .none) assert(!self.entries[index].opened_pending);
     self.entries[index].route = route;
 }
 
@@ -178,6 +175,7 @@ pub fn clear(self: *StreamTable, index: u8, reset_code: ?u64) void {
     assert(index < limits.streams_per_connection);
     const entry = &self.entries[index];
     assert(entry.claimed);
+    assert(entry.route.owner == .none);
     if (entry.closed_pending) return;
     entry.closed_pending = true;
     entry.ready = .{};
@@ -187,16 +185,7 @@ pub fn clear(self: *StreamTable, index: u8, reset_code: ?u64) void {
         entry.reset = true;
         entry.reset_code = code;
     }
-    if (entry.route.owner != .none and !entry.opened_pending) {
-        self.deferred |= bit(index);
-        self.pending &= ~bit(index);
-    } else self.pending |= bit(index);
-}
-
-/// Makes deferred close events deliverable.
-pub fn promoteDeferred(self: *StreamTable) void {
-    self.pending |= self.deferred;
-    self.deferred = 0;
+    self.pending |= bit(index);
 }
 
 pub fn takeOpened(self: *StreamTable, index: u8) void {
@@ -221,7 +210,7 @@ pub fn takeReady(self: *StreamTable, index: u8) types.Readiness {
     return ready;
 }
 
-pub fn takeClosed(self: *StreamTable, index: u8) ?struct { id: u64, reset_code: ?u64, route: types.Route } {
+pub fn takeClosed(self: *StreamTable, index: u8) ?struct { id: u64, reset_code: ?u64 } {
     assert(index < limits.streams_per_connection);
     const entry = &self.entries[index];
     if (!entry.closed_pending) return null;
@@ -230,11 +219,10 @@ pub fn takeClosed(self: *StreamTable, index: u8) ?struct { id: u64, reset_code: 
     assert(self.armed & bit(index) == 0);
     const id = entry.id;
     const reset_code: ?u64 = if (entry.reset) entry.reset_code else null;
-    const route = entry.route;
     entry.* = .{};
     self.pending &= ~bit(index);
     assert(self.reading & bit(index) == 0);
-    return .{ .id = id, .reset_code = reset_code, .route = route };
+    return .{ .id = id, .reset_code = reset_code };
 }
 
 pub fn discard(self: *StreamTable, index: u8) void {
@@ -245,7 +233,6 @@ pub fn discard(self: *StreamTable, index: u8) void {
     self.pending &= ~bit(index);
     self.armed &= ~bit(index);
     self.reading &= ~bit(index);
-    self.deferred &= ~bit(index);
 }
 
 pub fn readOpen(self: *const StreamTable, index: u8) bool {

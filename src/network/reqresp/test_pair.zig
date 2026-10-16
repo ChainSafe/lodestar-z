@@ -70,7 +70,6 @@ pub const Endpoint = struct {
         for (events) |event| {
             const stream, const route = switch (event) {
                 .stream_ready => |ready| .{ ready.stream, engine.route(ready.stream) orelse continue },
-                .stream_closed => |closed| .{ closed.stream, closed.route },
                 else => continue,
             };
             switch (route.owner) {
@@ -91,10 +90,6 @@ pub const Endpoint = struct {
             .closed => |closed| {
                 self.reqresp.connectionClosed(engine, &self.router, closed.conn, now);
                 self.control_reqresp.connectionClosed(engine, &self.router, closed.conn, now);
-            },
-            .stream_closed => |closed| {
-                self.reqresp.streamClosed(engine, &self.router, closed.route, closed.stream, closed.reset_code, now);
-                self.control_reqresp.streamClosed(engine, &self.router, closed.route, closed.stream, closed.reset_code, now);
             },
             else => {},
         };
@@ -164,7 +159,6 @@ pub fn forward(pair: *support.Pair, engine: *Engine, requests: *reqresp) void {
     for (pair.streamEvents(engine)) |event| {
         const stream, const route = switch (event) {
             .stream_ready => |ready| .{ ready.stream, engine.route(ready.stream) orelse continue },
-            .stream_closed => |closed| .{ closed.stream, closed.route },
             else => continue,
         };
         requests.streamReady(route, stream);

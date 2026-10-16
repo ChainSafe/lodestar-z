@@ -25,8 +25,9 @@ test "reverse route invariant detects orphans without a forward request to visit
             try std.testing.expectError(error.OrphanedRoute, invariant.check(&pair.client, routes, &outbound, &inbound));
         }
     }
-    // A closed route awaits event delivery and no longer obligates a request owner.
     pair.client.closeStream(stream, 0);
+    try std.testing.expect(pair.client.route(stream) == null);
+    try std.testing.expect(!pair.client.eventsPending());
     try invariant.check(&pair.client, .application, &outbound, &inbound);
 }
 

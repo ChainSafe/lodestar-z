@@ -344,7 +344,7 @@ test "negotiator delivers retained outcomes before recycled lower slots" {
     for (initial, 0..) |stream, index| {
         if (index >= 2) {
             const replacement = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{});
-            setup.dialer.streamClosed(&setup.pair.client, setup.pair.client.route(replacement).?.row, replacement, true);
+            setup.pair.client.closeStream(replacement, 0);
         }
         try std.testing.expectEqual(@as(usize, 1), setup.pumpDialer(&supported, &out));
         try std.testing.expectEqual(stream, out[0].stream);

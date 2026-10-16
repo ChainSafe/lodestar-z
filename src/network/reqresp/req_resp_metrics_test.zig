@@ -122,7 +122,7 @@ test "reqresp duration uses current time for inbound termination" {
         defer setup.deinit();
         var request: [ct.phase0.Status.fixed_size]u8 = undefined;
         var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
-        _ = try harness.requestStatus(&setup, &request, &sink);
+        const outbound = try harness.requestStatus(&setup, &request, &sink);
         try harness.waitForRequest(&setup);
         const owner = &setup.shared.server.control_reqresp;
         const handle = setup.serverEvents()[0].request.request;
@@ -132,7 +132,12 @@ test "reqresp duration uses current time for inbound termination" {
         const now = setup.shared.pair.now;
         switch (cause) {
             .cancel => try std.testing.expect(owner.cancel(&setup.shared.pair.server, &setup.shared.server.router, handle, now)),
-            .reset => owner.streamClosed(&setup.shared.pair.server, &setup.shared.server.router, .{ .owner = .reqresp_control_inbound, .row = handle.index }, slot.request.stream, 7, now),
+            .reset => {
+                const peer = &setup.shared.client.control_reqresp.outbound[outbound.index];
+                setup.shared.pair.client.closeStream(peer.request.stream, 7);
+                try setup.pumpOnce();
+                try setup.pumpOnce();
+            },
             .shutdown => owner.cancelAll(&setup.shared.pair.server, &setup.shared.server.router, now),
         }
         const times = &owner.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming_time;

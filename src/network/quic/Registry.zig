@@ -20,7 +20,6 @@ pending: index_list.List = .{},
 dirty: index_list.List = .{},
 events: index_list.List = .{},
 released: index_list.List = .{},
-deferred: index_list.List = .{},
 active_len: u16 = 0,
 handshaking: u16 = 0,
 dialing: u16 = 0,
@@ -133,7 +132,6 @@ fn unlink(self: *Registry, index: u16) void {
     if (slot.dirty_link.linked) self.dirty.remove(self.slots, "dirty_link", index);
     if (slot.event_link.linked) self.events.remove(self.slots, "event_link", index);
     if (slot.release_link.linked) self.released.remove(self.slots, "release_link", index);
-    if (slot.deferred_link.linked) self.deferred.remove(self.slots, "deferred_link", index);
     self.timers.clear(index);
 }
 

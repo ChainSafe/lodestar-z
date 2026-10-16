@@ -95,9 +95,7 @@ pub const ProtocolsPair = struct {
     }
 };
 
-/// The owners a test drives directly, reached by stream route. A readable, writable or close event
-/// marks the owner's row ready; gossip takes readiness events only. Lifecycle handling stays with
-/// the test.
+/// Routes readiness to the owners a test drives directly. Lifecycle handling stays with the test.
 pub const Owners = struct {
     negotiator: ?*negotiate.Negotiator = null,
     identify: ?*identify_mod.Handler = null,
@@ -108,14 +106,13 @@ pub const Owners = struct {
         for (events) |event| {
             const stream, const bound = switch (event) {
                 .stream_ready => |ready| .{ ready.stream, engine.route(ready.stream) orelse continue },
-                .stream_closed => |closed| .{ closed.stream, closed.route },
                 else => continue,
             };
             switch (bound.owner) {
                 .negotiation => if (self.negotiator) |owner| owner.streamReady(bound.row, stream),
                 .identify => if (self.identify) |owner| owner.streamReady(bound.row, stream),
                 .reqresp_outbound, .reqresp_inbound, .reqresp_control_outbound, .reqresp_control_inbound => if (self.reqresp) |owner| owner.streamReady(bound, stream),
-                .gossip_inbound, .gossip_outbound => if (self.gossip) |owner| if (event == .stream_ready) owner.streamReady(engine, bound, stream, event.stream_ready.ready),
+                .gossip_inbound, .gossip_outbound => if (self.gossip) |owner| owner.streamReady(engine, bound, stream, event.stream_ready.ready),
                 .none => {},
             }
         }

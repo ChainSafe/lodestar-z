@@ -54,7 +54,6 @@ pub fn transportEvents(
             _ = peerConnected(self, engine, connected.conn, false, now);
         },
         .path_changed => |changed| self.peers.migrate(changed.conn, changed.peer),
-        .stream_closed => |closed| streamClosed(self, engine, closed.stream),
         .closed => |closed| retireConnection(self, router, engine, closed.conn, now),
         else => {},
     };
@@ -173,20 +172,6 @@ fn openOutbound(
     };
     self.counters.negotiation_started += 1;
     self.sessions.setOutbound(index, .{ .negotiating = stream });
-}
-
-fn streamClosed(self: *Gossipsub, engine: *Engine, stream: StreamHandle) void {
-    const index = self.sessions.find(stream.conn) orelse return;
-    const session = &self.sessions.rows[index];
-    switch (session.outbound) {
-        .live => |live| if (std.meta.eql(live.stream, stream)) {
-            resetOutbound(self, engine, index);
-        },
-        .negotiating => |pending| if (std.meta.eql(pending, stream)) resetOutbound(self, engine, index),
-        .none, .send_timeout, .pending, .retry_at, .closing => {},
-    }
-    // Read-side FIN can be reported with buffered payload. The framing owner
-    // drains it before resetting; a reset is observed by its next read.
 }
 
 pub fn resetInbound(self: *Gossipsub, engine: *Engine, index: u16) void {

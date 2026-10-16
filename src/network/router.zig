@@ -198,9 +198,6 @@ pub const Router = struct {
                 };
             },
             .closed => |closed| self.negotiator.connectionClosed(engine, closed.conn),
-            .stream_closed => |closed| if (closed.route.owner == .negotiation) {
-                self.negotiator.streamClosed(engine, closed.route.row, closed.stream, closed.reset_code != null);
-            },
             else => {},
         };
     }
