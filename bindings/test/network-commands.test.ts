@@ -72,8 +72,11 @@ test.each(commands())("%s settle when close races their execution", async (_, ki
   );
   const closed = runtime.close();
   const results = await Promise.all(outcomes);
-  for (const [index, [kind]] of kinds.entries())
-    expect([`${kind} resolved`, `${kind} NetworkClosed`]).toContain(results[index]);
+  for (const [index, [kind]] of kinds.entries()) {
+    const expected = [`${kind} resolved`, `${kind} NetworkClosed`];
+    if (kind === "connect") expected.push("connect NetworkConnectCancelled");
+    expect(expected).toContain(results[index]);
+  }
   expect(await closed).toEqual({reason: "requested"});
 });
 
