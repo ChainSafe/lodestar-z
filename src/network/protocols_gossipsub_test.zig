@@ -206,7 +206,7 @@ test "gossipsub protocol stack ignores stale outcomes after connection and peer 
     setup.shared.client.gossipsub.negotiationResult(&setup.shared.pair.client, .{
         .stream = old_stream,
         .direction = .outbound,
-        .owner = .meshsub,
+        .protocol = .{ .meshsub = .v1_1 },
         .result = .{ .ready = .{ .protocol = .{ .meshsub = .v1_1 }, .leftover = "", .fin = false } },
     }, setup.shared.pair.now);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.shared.pair.now, .{});

@@ -82,7 +82,7 @@ pub const Endpoint = struct {
         var outcomes: [Router.outcomes_per_pump]Router.Outcome = undefined;
         const count = self.router.pump(engine, now, &outcomes);
         for (outcomes[0..count]) |outcome| {
-            const owner = outcome.owner orelse continue;
+            const owner = outcome.protocol orelse continue;
             std.debug.assert(owner == .reqresp);
             if (outcome.result == .ready) engine.bindStream(outcome.stream, .{}) catch {};
             self.reqresp.negotiationResult(&self.router, engine, outcome, now);

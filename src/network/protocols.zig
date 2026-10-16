@@ -187,7 +187,7 @@ pub const Protocols = struct {
         const count = self.router.pump(engine, now, &self.outcomes);
         defer self.router.releaseOutcomes();
         for (self.outcomes[0..count]) |outcome| {
-            const owner = outcome.owner orelse continue;
+            const owner = outcome.protocol orelse continue;
             if (self.rejectApplication(&outcome)) {
                 engine.closeStream(outcome.stream, 0);
                 continue;

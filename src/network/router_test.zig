@@ -28,7 +28,7 @@ test "router selects typed outbound protocol independently of offer indexes" {
         for (out[0..count]) |outcome| {
             try std.testing.expectEqual(stream, outcome.stream);
             try std.testing.expectEqual(types.Direction.outbound, outcome.direction);
-            try std.testing.expectEqual(Router.Kind.reqresp, outcome.owner.?);
+            try std.testing.expectEqual(rr.Protocol.ping_v1, outcome.protocol.?.reqresp);
             try std.testing.expectEqual(rr.Protocol.ping_v1, outcome.result.ready.protocol.reqresp);
             accepted = true;
         }
@@ -394,4 +394,42 @@ test "router control capacity counts pending and reported negotiations until rec
     _ = router.pump(&pair.client, pair.now, &.{});
     const ordinary = try router.beginMeshsub(&pair.client, handles.client, pair.now);
     defer router.cancel(&pair.client, ordinary);
+}
+
+test "router preserves the request protocol on outbound rejection and timeout" {
+    for ([_]rr.Protocol{ .status_v2, .blocks_by_root_v2 }) |which| {
+        for ([_]bool{ false, true }) |timeout| {
+            var pair: support.Pair = .{};
+            try pair.init(.{}, .{});
+            defer pair.deinit();
+            const handles = try support.connectPair(&pair);
+            var client = try Router.init(std.testing.allocator, .{});
+            defer client.deinit();
+            var server = try Router.init(std.testing.allocator, .{
+                .capabilities = .{ .receive = .initEmpty(), .request = .initEmpty() },
+            });
+            defer server.deinit();
+            const stream = try client.beginOutbound(&pair.client, handles.client, .{ .reqresp = which }, pair.now);
+            if (timeout) pair.advance(10_000);
+            var delivered = false;
+            for (0..16) |_| {
+                var out: [1]Router.Outcome = undefined;
+                if (pumpRouter(&client, &pair, &pair.client, pair.now, &out) == 1) {
+                    try std.testing.expectEqual(stream, out[0].stream);
+                    try std.testing.expectEqual(which, out[0].protocol.?.reqresp);
+                    if (timeout) {
+                        try std.testing.expectEqual(negotiate.Negotiator.Failure.timeout, out[0].result.failed);
+                    } else try std.testing.expect(out[0].result == .rejected);
+                    delivered = true;
+                    break;
+                }
+                try pair.pump();
+                var events: [16]Engine.Event = undefined;
+                server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
+                _ = pumpRouter(&server, &pair, &pair.server, pair.now, &out);
+                try pair.pump();
+            }
+            try std.testing.expect(delivered);
+        }
+    }
 }

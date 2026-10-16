@@ -72,7 +72,7 @@ test "reqresp duration uses event time for cancellation negotiation and connecti
                 try std.testing.expect(owner.negotiated(&setup.shared.pair.client, &setup.shared.client.router, .{
                     .stream = stream,
                     .direction = .outbound,
-                    .owner = .reqresp,
+                    .protocol = .{ .reqresp = .status_v1 },
                     .result = if (cause == .rejected) .rejected else .{ .failed = .timeout },
                 }, now));
             },

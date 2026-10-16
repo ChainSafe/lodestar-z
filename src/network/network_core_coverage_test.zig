@@ -702,7 +702,7 @@ test "core sampling delivery follows real outbound stream retirement replacement
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 8), setup.client.peer_manager.coverageDeficits().groups);
     try std.testing.expectEqual(snapshot.custody_groups, setup.client.peer_manager.catalog.get(snapshot.peer).?.custody_groups);
-    handler.negotiationResult(setup.pair.client, .{ .stream = old_stream, .direction = .outbound, .owner = .meshsub, .result = .{ .ready = .{ .protocol = .{ .meshsub = .v1_2 }, .leftover = &.{}, .fin = false } } }, setup.pair.now);
+    handler.negotiationResult(setup.pair.client, .{ .stream = old_stream, .direction = .outbound, .protocol = .{ .meshsub = .v1_2 }, .result = .{ .ready = .{ .protocol = .{ .meshsub = .v1_2 }, .leftover = &.{}, .fin = false } } }, setup.pair.now);
     setup.client.peer_manager.reconcile(setup.client.protocols.gossipsub, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 8), setup.client.peer_manager.coverageDeficits().groups);
     for (0..16) |_| try setup.step(1);

@@ -32,7 +32,7 @@ pub const Router = struct {
     pub const Outcome = struct {
         stream: Engine.StreamHandle,
         direction: types.Direction,
-        owner: ?Kind,
+        protocol: ?Protocol,
         result: union(enum) { ready: Selection, rejected, failed: Negotiator.Failure },
     };
 
@@ -233,7 +233,7 @@ pub const Router = struct {
             outcome.* = .{
                 .stream = result.stream,
                 .direction = result.direction,
-                .owner = if (selected) |protocol| std.meta.activeTag(protocol) else null,
+                .protocol = selected,
                 .result = switch (result.result) {
                     .ready => |ready| .{ .ready = .{
                         .protocol = selected.?,
