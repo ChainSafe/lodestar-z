@@ -179,6 +179,7 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
                 }
                 return;
             }
+            // TODO: Share leaf copy-on-write logic with BasicPackedChunks.set via TreeViewState.editLeaf.
             if (state.isLeaf() and state.refCount() == 0) {
                 ST.Element.tree.fromValuePackedIntoChunk(
                     &self.state.pool.nodes.items(.root)[@intFromEnum(node)],
@@ -294,8 +295,9 @@ pub fn ProgressiveListBasicTreeView(comptime ST: type) type {
             block: ?Block = null,
             bytes: []const u8 = undefined,
 
-            pub fn next(self: *ReadonlyIterator) !Element {
-                if (self.index >= self.blocks.view._orig_len) return error.InvalidLength;
+            /// Returns null when exhausted.
+            pub fn next(self: *ReadonlyIterator) !?Element {
+                if (self.index >= self.blocks.view._orig_len) return null;
                 const pool = self.blocks.view.state.pool;
                 const block = self.block orelse blk: {
                     const next_block = try self.blocks.next();
