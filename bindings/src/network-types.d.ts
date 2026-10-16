@@ -1,21 +1,15 @@
 /**
- * The low-level runtime the binding pump drains through `exchange`, and its controls. Private: the
- * package exports only `createNativeNetwork`, and binding ownership tests import this module directly.
+ * Internal native delivery shapes. The package exports its host-facing API through network.js.
  */
 import type {
   HostCapacity,
-  IpEndpoint,
   NativeConnection,
   NativeForkEntry,
   NativeIdentity,
   NativeLogRecord,
-  NativeNetwork,
-  NativePeerAction,
-  NativePeerReportContext,
   NativePeerObservation,
   NativeRequestProtocolId,
   NativeTopicKind,
-  PeerIdStr,
 } from "./network.js";
 
 /** One exchange's delivery, which the host owns. */
@@ -37,42 +31,6 @@ export interface NativeDelivery extends Omit<NativeExchange, "serving"> {
 export interface NativeIncomingDescriptor
   extends Pick<NativeIncomingRequest, "peerId" | "connection" | "protocol" | "data" | "closed"> {
   readonly handle: {index: number; generation: bigint};
-}
-
-export interface NativeNetworkApplicationRuntime
-  extends Pick<
-    NativeNetwork,
-    | "limits"
-    | "setLogLevel"
-    | "request"
-    | "applyIntent"
-    | "updateStatus"
-    | "getGossipDiagnostics"
-    | "getPeerScores"
-    | "disconnect"
-  > {
-  drainLogs(maxRecords?: number): NativeLogBatch;
-  /** Prometheus text rendered on demand by the owner. Rejects with NetworkClosed once the owner stops. */
-  getMetrics: NativeNetwork["metrics"];
-  publishGossip: NativeNetwork["publish"];
-  /** A failed runtime cannot restart. The host must shut down the beacon node on terminal failure. */
-  readonly closed: Promise<NativeRuntimeCloseResult>;
-  readonly identity: NativeIdentity;
-  /** One-shot connection attempt, retired on success or timeout. Use addDirectPeer for persistent membership. */
-  connect(peerId: PeerIdStr, addresses: readonly IpEndpoint[], timeoutMs: bigint): Promise<void>;
-  reStatusPeers: NativeNetwork["reStatus"];
-  addDirectPeer(peerId: PeerIdStr, addresses: readonly IpEndpoint[]): Promise<void>;
-  removeDirectPeer(peerId: PeerIdStr): Promise<boolean>;
-  /** Settles bounded completions and delivers payloads under standing host capacity. */
-  exchange(): NativeExchange;
-  /** Replenishes the host allowance without scheduling delivery; call exchange when capacity recovers. */
-  setCapacity(capacity: HostCapacity | null): void;
-  reportGossip(handle: NativeGossipHandle, verdict: NativeGossipVerdict): void;
-  classifyGossip(handle: NativeGossipHandle, available: boolean): void;
-  notifyBlock(root: Uint8Array): void;
-  dropQueuedGossip(): void;
-  reportPeer(peerId: PeerIdStr, action: NativePeerAction, context?: NativePeerReportContext): void;
-  close(): Promise<NativeRuntimeCloseResult>;
 }
 
 export interface NativeIncomingRequest {
@@ -144,4 +102,13 @@ export interface NativeLogBatch {
   dropped: bigint;
   suppressed: bigint;
   truncated: bigint;
+}
+
+export interface NativeBridge {
+  close(): void;
+  exchange(): NativeDelivery;
+  drainLogs(maxRecords?: number): NativeLogBatch;
+  setCapacity(capacity: HostCapacity | null): void;
+  reportGossip(handle: NativeGossipHandle, verdict: NativeGossipVerdict): void;
+  classifyGossip(handle: NativeGossipHandle, available: boolean): void;
 }

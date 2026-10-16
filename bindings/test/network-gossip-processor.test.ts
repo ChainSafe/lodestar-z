@@ -1,6 +1,6 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test} from "vitest";
-import type {NativeGossipDependencyCheck, NativeGossipHandle, NativeGossipVerdict} from "../src/network-runtime.js";
+import type {NativeGossipDependencyCheck, NativeGossipHandle, NativeGossipVerdict} from "../src/network-types.js";
 import type {Feedback} from "./utils/network.js";
 import {
   applicationConfig,

@@ -19,7 +19,7 @@ import type {
   NativeGossipMessage,
   NativeIncomingRequest,
   NativeLogBatch,
-} from "../src/network-runtime.js";
+} from "../src/network-types.js";
 import {childTestTimeout, spawnChild} from "./utils/network.js";
 
 vi.mock("../src/network-incoming.js", () => {

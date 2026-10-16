@@ -213,7 +213,7 @@ if (mode === "open") {
   served.length = 0;
   await runtimeReleased();
   const next = startRuntime(applicationConfig());
-  assert.equal(typeof (await next.getIdentity()).peerId, "string");
+  assert.equal(typeof (await next.observeIdentity()).peerId, "string");
   assert.deepEqual(await next.close(), {reason: "requested"});
   console.log("saturated-closed");
 } else if (mode === "finalized-drain") {
@@ -295,7 +295,7 @@ if (mode === "open") {
   await delay(100);
   const idle = notifications;
   assert(idle > 0);
-  const identity = runtime.getIdentity();
+  const command = runtime.reStatusPeers([]);
   for (let i = 0; i < 200 && notifications === idle; i++) await delay(10);
   assert(notifications > idle);
   let closed = false;
@@ -308,6 +308,6 @@ if (mode === "open") {
     await delay(5);
   }
   assert.equal(await intent, undefined);
-  assert.equal((await identity).peerId, runtime.identity.peerId);
+  assert.equal(await command, undefined);
   console.log("rearmed");
 } else throw new Error("Unknown lifecycle scenario");

@@ -6,19 +6,19 @@ import {TurnScheduler} from "./network-turn-scheduler.js";
 
 /**
  * @typedef {import("./network-turn-scheduler.js").Continuation} Continuation
- * @typedef {import("./network-runtime.js").NativeGossipHandle} Handle
- * @typedef {import("./network-runtime.js").NativeIncomingRequest} Incoming
- * @typedef {import("./network-runtime.js").NativeDelivery} Exchange
+ * @typedef {import("./network-types.js").NativeGossipHandle} Handle
+ * @typedef {import("./network-types.js").NativeIncomingRequest} Incoming
+ * @typedef {import("./network-types.js").NativeDelivery} Exchange
  * @typedef {import("./network.js").NativeHost} Host
  * @typedef {import("./network.js").CloseResult} CloseResult
  * @typedef {import("./network.js").GossipJob} GossipJob
  * @typedef {import("./network.js").NativeForkEntry} NativeForkEntry
  * @typedef {import("./network.js").Verdict} Verdict
- * @typedef {import("./network-runtime.js").NativeNetworkApplicationRuntime} NativeNetworkApplicationRuntime
- * @typedef {import("./network-runtime.js").NativeGossipBatch} NativeGossipBatch
- * @typedef {import("./network-runtime.js").NativeGossipDependencyCheck} NativeGossipDependencyCheck
+ * @typedef {import("./network-types.js").NativeBridge} NativeBridge
+ * @typedef {import("./network-types.js").NativeGossipBatch} NativeGossipBatch
+ * @typedef {import("./network-types.js").NativeGossipDependencyCheck} NativeGossipDependencyCheck
  * @typedef {{adopted: boolean, handles: Handle[], job: GossipJob | null}} Job
- * @typedef {Pick<NativeNetworkApplicationRuntime, "drainLogs" | "setCapacity" | "reportGossip" | "classifyGossip"> & {
+ * @typedef {Pick<NativeBridge, "drainLogs" | "setCapacity" | "reportGossip" | "classifyGossip"> & {
  * close(): void,
  * exchange(): Exchange,
  * }} Runtime

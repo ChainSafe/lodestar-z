@@ -82,7 +82,7 @@ test("incoming copied metadata and acknowledged multiple contexts preserve wire 
     expect(incoming.data).toEqual(query);
     expect(incoming.protocol).toBe(BLOCKS);
     expect(incoming.peerId).toEqual(pair.identity.peerId);
-    const peers = await pair.right.getPeers();
+    const peers = await pair.right.observePeers();
     expect(incoming.connection).toEqual(peers.peers[0].connection);
 
     incoming.connection.generation++;
@@ -371,7 +371,7 @@ test("a ready incoming response delivers its bytes and preserves control progres
 
     await incoming.finish();
     await pair.right.reStatusPeers([pair.identity.peerId]);
-    expect((await pair.right.getIdentity()).peerId).toEqual(pair.remote.peerId);
+    expect((await pair.right.observeIdentity()).peerId).toEqual(pair.remote.peerId);
   } finally {
     await Promise.all([pair.left.stop(), pair.right.close()]);
   }

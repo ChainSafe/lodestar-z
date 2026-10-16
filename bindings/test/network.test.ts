@@ -92,14 +92,14 @@ it("copies inputs before returning and preserves earlier identity snapshots", as
     const applied = runtime.applyIntent(intent);
     intent.syncCommittees[0].subnet = 2;
     await applied;
-    expect((await runtime.getIdentity()).metadata.syncnets).toBe(2);
+    expect((await runtime.observeIdentity()).metadata.syncnets).toBe(2);
     expect(identity.metadata.syncnets).toBe(0);
     expect(identity.peerId).toEqual(expected);
     await runtime.applyIntent(intent);
-    const updated = await runtime.getIdentity();
+    const updated = await runtime.observeIdentity();
     expect(updated.metadata.syncnets).toBe(6);
     await runtime.applyIntent(intent);
-    expect(await runtime.getIdentity()).toEqual(updated);
+    expect(await runtime.observeIdentity()).toEqual(updated);
   } finally {
     await runtime.close();
   }
@@ -199,7 +199,7 @@ it("rejects another initialization while one is live and accepts one after relea
   let runtime: ReturnType<typeof startRuntime> | null = startRuntime(applicationConfig());
   expect(typeof runtime.identity.peerId).toBe("string");
   expect(() => startRuntime(applicationConfig())).toThrow("NetworkAlreadyInitialized");
-  expect((await runtime.getIdentity()).peerId).toEqual(runtime.identity.peerId);
+  expect((await runtime.observeIdentity()).peerId).toEqual(runtime.identity.peerId);
   await runtime.close();
   runtime = null;
   await runtimeReleased();
@@ -223,7 +223,7 @@ it("rejects invalid standing capacity without changing the running runtime", asy
       "InvalidNetworkConfig"
     );
     expect(exchange(runtime, settleOnly).needsAnotherExchange).toBe(false);
-    expect(await runtime.getIdentity()).toMatchObject(runtime.identity);
+    expect(await runtime.observeIdentity()).toMatchObject(runtime.identity);
   } finally {
     await runtime.close();
   }
@@ -291,7 +291,7 @@ it("rejects initialization from another Node environment", async () => {
   try {
     const failure = await new Promise<Error>((resolve) => worker.once("error", resolve));
     expect(failure.message).toContain("NetworkAlreadyInitialized");
-    expect((await runtime.getIdentity()).peerId).toEqual(runtime.identity.peerId);
+    expect((await runtime.observeIdentity()).peerId).toEqual(runtime.identity.peerId);
   } finally {
     await worker.terminate();
     await runtime.close();
@@ -378,12 +378,12 @@ it("starts wildcard discovery without advertised addresses", async () => {
   };
   const runtime = startRuntime(config);
   try {
-    const identity = await runtime.getIdentity();
+    const identity = await runtime.observeIdentity();
     expect(identity.localEnr).toBeInstanceOf(Uint8Array);
     const intent = localIntent(config);
     intent.syncCommittees = [{subnet: 0, untilSlot: 200}];
     await runtime.applyIntent(intent);
-    expect((await runtime.getIdentity()).localEnr).not.toEqual(identity.localEnr);
+    expect((await runtime.observeIdentity()).localEnr).not.toEqual(identity.localEnr);
   } finally {
     await runtime.close();
   }

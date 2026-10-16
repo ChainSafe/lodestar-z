@@ -1,6 +1,6 @@
 import {setTimeout as delay} from "node:timers/promises";
 import type {NativeApplicationConfig} from "../../src/network.js";
-import type {NativeIncomingRequest} from "../../src/network-runtime.js";
+import type {NativeIncomingRequest} from "../../src/network-types.js";
 import {applicationConfig, localIntent, nextIncoming, startRuntime} from "./network.js";
 import {type PeerRuntime, startPeer} from "./network-peer.js";
 import type {NetworkTestRuntime} from "./network-runtime.js";

@@ -13,8 +13,8 @@ process.on("disconnect", async () => {
 const methods = new Set([
   "applyIntent",
   "updateStatus",
-  "getIdentity",
-  "getPeers",
+  "observeIdentity",
+  "observePeers",
   "getGossipDiagnostics",
   "getPeerScores",
   "connect",
@@ -22,7 +22,6 @@ const methods = new Set([
   "reStatusPeers",
   "addDirectPeer",
   "removeDirectPeer",
-  "getDirectPeers",
   "exchange",
   "setCapacity",
   "reportGossip",

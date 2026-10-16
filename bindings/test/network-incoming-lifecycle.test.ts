@@ -1,6 +1,6 @@
 import {expect, test} from "vitest";
 import type {HostCapacity, NativeForkEntry, NativeIdentity} from "../src/network.js";
-import type {NativeDelivery, NativeRuntimeCloseResult} from "../src/network-runtime.js";
+import type {NativeDelivery, NativeRuntimeCloseResult} from "../src/network-types.js";
 import {applicationConfig, childTestTimeout, gossipAll, localIntent, requestForks, runChild} from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
 import {startPeer} from "./utils/network-peer.js";

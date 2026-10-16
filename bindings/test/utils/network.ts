@@ -30,7 +30,7 @@ import type {
   NativeGossipHandle,
   NativeGossipVerdict,
   NativeIncomingRequest,
-} from "../../src/network-runtime.js";
+} from "../../src/network-types.js";
 
 const MIB = 1024 * 1024;
 

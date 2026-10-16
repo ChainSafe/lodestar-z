@@ -5,131 +5,48 @@ import {NativeRequest} from "../../src/network-request.js";
 
 const live = new Set();
 
-class NativeRuntime {
-  #native;
-  #closed;
-  #latestIdentity;
-  #peers = new Map();
-  #directPeers = new Set();
-  #stopping = false;
-  #onPeers;
-
-  constructor(config, onWorkAvailable, onPeers) {
-    this.#onPeers = onPeers;
-    this.#native = new bindings.NativeNetworkRuntime();
-    const initialized = this.#native.initialize(config, onWorkAvailable);
-    this.identity = structuredClone(initialized.identity);
-    this.#latestIdentity = initialized.identity;
-    this.limits = initialized.limits;
-    this.#closed = initialized.closed;
-    live.add(this);
-    void this.#closed.then(() => live.delete(this));
-  }
-
-  get closed() {
-    return this.#closed;
-  }
-  getMetrics() {
-    return this.#native.getMetrics();
-  }
-  drainLogs(maxRecords = 256) {
-    return this.#native.drainLogs(maxRecords);
-  }
-  setLogLevel(level) {
-    this.#native.setLogLevel(level);
-  }
-  async applyIntent(intent) {
-    return this.#native.applyIntent(intent);
-  }
-  updateStatus(status) {
-    return this.#native.updateStatus(status);
-  }
-  getIdentity() {
-    if (this.#stopping) throw new Error("NetworkClosed");
-    return Promise.resolve(structuredClone(this.#latestIdentity));
-  }
-  getPeers() {
-    if (this.#stopping) throw new Error("NetworkClosed");
-    const peers = [...this.#peers.values()];
-    return Promise.resolve({peers, counts: {connected: peers.length, relevant: peers.filter((peer) => peer.relevant).length}});
-  }
-  getPeerScores() {
-    return this.#native.getPeerScores();
-  }
-  getGossipDiagnostics(cursor = 0) {
-    return this.#native.getGossipDiagnostics(cursor);
-  }
-  connect(peerId, addresses, timeoutMs) {
-    return this.#native.connect(peerId, addresses, timeoutMs);
-  }
-  disconnect(peerId) {
-    return this.#native.disconnect(peerId);
-  }
-  reStatusPeers(peerIds) {
-    return this.#native.reStatusPeers(peerIds);
-  }
-  addDirectPeer(peerId, addresses) {
-    return this.#native.addDirectPeer(peerId, addresses).then(() => { this.#directPeers.add(peerId); });
-  }
-  removeDirectPeer(peerId) {
-    return this.#native.removeDirectPeer(peerId).then((removed) => { this.#directPeers.delete(peerId); return removed; });
-  }
-  getDirectPeers() {
-    if (this.#stopping) throw new Error("NetworkClosed");
-    return Promise.resolve([...this.#directPeers]);
-  }
-
-  exchange() {
-    const result = this.#native.exchange();
-    if (result.identity) this.#latestIdentity = structuredClone(result.identity);
-    this.#onPeers?.(result.peers);
-    for (const event of result.peers) {
-      if (event.type === "closed") this.#peers.delete(event.identity);
-      else if (event.state.connection) this.#peers.set(event.state.identity, event.state);
-      else this.#peers.delete(event.state.identity);
-    }
-    const serving = result.serving;
-    if (serving.length === 0) return result;
-    for (let i = 0; i < serving.length; i++) {
-      const descriptor = serving[i];
-      serving[i] = new NativeIncoming(this.#native, descriptor);
-    }
-    return result;
-  }
-  setCapacity(capacity) {
-    this.#native.setCapacity(capacity);
-  }
-  reportGossip(handle, verdict) {
-    this.#native.reportGossip(handle, verdict);
-  }
-  classifyGossip(handle, available) {
-    this.#native.classifyGossip(handle, available);
-  }
-  notifyBlock(root) {
-    this.#native.notifyBlock(root);
-  }
-  dropQueuedGossip() {
-    this.#native.dropQueuedGossip();
-  }
-  reportPeer(peerId, action, context) {
-    this.#native.reportPeer(peerId, action, context);
-  }
-  async publishGossip(topic, data, options) {
-    return this.#native.publishGossip(topic, data, options);
-  }
-  request(peerId, protocol, data, options) {
-    return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options));
-  }
-  close() {
-    this.#stopping = true;
-    this.#native.close();
-    return this.#closed;
-  }
-}
-
-/** A low-level runtime, which its host drains through `exchange`. Private: for binding ownership tests. */
+/** A manually drained native instance. Observations are fixture state, not production query implementations. */
 export function initializeNativeNetworkRuntime(config, onWorkAvailable, onPeers) {
-  return new NativeRuntime(config, onWorkAvailable, onPeers);
+  const runtime = new bindings.NativeNetworkRuntime();
+  const initialized = runtime.initialize(config, onWorkAvailable);
+  Object.assign(runtime, initialized);
+  let identity = initialized.identity;
+  const peers = new Map();
+  const exchange = runtime.exchange.bind(runtime);
+  const close = runtime.close.bind(runtime);
+  const publish = runtime.publishGossip.bind(runtime);
+  const applyIntent = runtime.applyIntent.bind(runtime);
+  const diagnostics = runtime.getGossipDiagnostics.bind(runtime);
+  const logs = runtime.drainLogs.bind(runtime);
+  const connect = runtime.connect.bind(runtime);
+  const report = runtime.reportPeer.bind(runtime);
+  live.add(runtime);
+  void runtime.closed.then(() => live.delete(runtime));
+  runtime.observeIdentity = () => identity;
+  runtime.observePeers = () => {
+    const values = [...peers.values()];
+    return {peers: values, counts: {connected: values.length, relevant: values.filter((peer) => peer.relevant).length}};
+  };
+  runtime.exchange = () => {
+    const result = exchange();
+    if (result.identity) identity = result.identity;
+    onPeers?.(result.peers);
+    for (const event of result.peers) {
+      if (event.type === "closed") peers.delete(event.identity);
+      else if (event.state.connection) peers.set(event.state.identity, event.state);
+      else peers.delete(event.state.identity);
+    }
+    return {...result, serving: result.serving.map((descriptor) => new NativeIncoming(runtime, descriptor))};
+  };
+  runtime.close = () => { close(); return runtime.closed; };
+  runtime.publishGossip = async (topic, data, options) => publish(topic, data, options);
+  runtime.applyIntent = async (...args) => applyIntent(...args);
+  runtime.getGossipDiagnostics = (cursor = 0) => diagnostics(cursor);
+  runtime.drainLogs = (count = 256) => logs(count);
+  runtime.connect = (peer, endpoints, timeout) => connect(peer, endpoints, timeout);
+  runtime.reportPeer = (peer, action, context) => report(peer, action, context);
+  runtime.request = (peer, protocol, data, options) => new NativeRequest(runtime, runtime.requestStart(peer, protocol, data, options));
+  return runtime;
 }
 
 export {createNetwork as createNativeNetwork};

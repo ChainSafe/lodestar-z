@@ -22,6 +22,7 @@ import {
   unreachableConnect,
   waitForGossipReady,
 } from "./utils/network.js";
+import {host} from "./utils/network-host.js";
 import {BLOCKS} from "./utils/network-incoming.js";
 import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
 import {createNativeNetwork, runtimeOf} from "./utils/network-runtime.js";
@@ -32,21 +33,6 @@ function blockPayload(byte: number): Uint8Array {
   const bytes = new Uint8Array(4000).fill(byte);
   new DataView(bytes.buffer).setBigUint64(100, 100n, true);
   return bytes;
-}
-
-/** A host that takes nothing but what a test overrides. */
-function host(overrides: Partial<NativeHost> = {}): NativeHost {
-  return {
-    capacity: () => ({gossipValidation: "ready", incomingRequestSlots: 32}),
-    checkDependencies: (checks) => checks.map(() => false),
-    failed: () => undefined,
-    logs: () => undefined,
-    peers: () => undefined,
-    serve: (request) => request.cancel(),
-    subscribeCapacity: () => () => undefined,
-    validate: (job) => Promise.resolve(job.messages.map(() => "ignore" as const)),
-    ...overrides,
-  };
 }
 
 /**
@@ -378,7 +364,10 @@ test("the facade validates its host, starts without host callbacks and hides the
     expect(Object.isFrozen(network.limits)).toBe(true);
     for (const name of ["exchange", "fail", "holdVerdicts", "identity", "state"]) expect(name in network).toBe(false);
     await network.applyIntent(localIntent(config));
-    const peer = (await network.getIdentity()).peerId;
+    const identity = await network.getIdentity();
+    const peer = identity.peerId;
+    identity.metadata.attnets.fill(255);
+    expect((await network.getIdentity()).metadata.attnets).not.toEqual(identity.metadata.attnets);
     const endpoint = {address: Uint8Array.of(127, 0, 0, 1), family: 4 as const, port: 9};
     const [direct] = unreachableConnect();
     expect(peer).not.toBe(direct);

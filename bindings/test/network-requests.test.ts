@@ -1,5 +1,5 @@
 import {expect, test} from "vitest";
-import type {NativeRuntimeCloseResult} from "../src/network-runtime.js";
+import type {NativeRuntimeCloseResult} from "../src/network-types.js";
 import {
   applicationConfig,
   childTestTimeout,
@@ -300,7 +300,7 @@ stockTest(
     const {runtime, peer, id} = await connected();
     try {
       const {waitFor} = await import("../../test/interop/child.mjs");
-      await waitFor(async () => (await runtime.getPeers()).counts.relevant === 1);
+      await waitFor(async () => (await runtime.observePeers()).counts.relevant === 1);
       expect((await peer.command("stats")).control.status).toBe(1);
       await expect(runtime.request(id, BLOCKS, new Uint8Array(32), {expectedChunks: 2}).next()).rejects.toMatchObject({
         code: "NetworkRequestRejected",
@@ -320,11 +320,11 @@ stockTest(
         reason: "too_many_requests",
       });
       const {multiaddr} = await import("@multiformats/multiaddr");
-      const identity = await runtime.getIdentity();
+      const identity = await runtime.observeIdentity();
       expect((await peer.command("ping", {address: multiaddr(identity.localMultiaddr).toString()})).length).toBe(8);
       await runtime.reStatusPeers([id]);
       await waitFor(async () => (await peer.command("stats")).control.status >= 2);
-      expect((await runtime.getPeers()).peers[0].metadata?.sequenceNumber).toBe(1n);
+      expect((await runtime.observePeers()).peers[0].metadata?.sequenceNumber).toBe(1n);
       await Promise.all(streams.map((stream) => stream.return?.()));
       const commands = Array.from({length: 31}, () => runtime.reStatusPeers([]));
       const independent = runtime.request(id, BLOCKS, new Uint8Array(32));
@@ -499,7 +499,7 @@ test.skipIf(!NATIVE_PEER)(
       await runtime.connect(id, [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: Number(parts[4])}], 5000n);
       // The peer must serve the control exchange, not only the request below.
       await expect
-        .poll(async () => (await runtime.getPeers()).peers.find((peer) => peer.identity === id)?.metadata ?? null, {
+        .poll(async () => (await runtime.observePeers()).peers.find((peer) => peer.identity === id)?.metadata ?? null, {
           timeout: 5000,
         })
         .not.toBeNull();
@@ -591,14 +591,14 @@ stockTest(
       const stream = runtime.request(id, BLOCKS, new Uint8Array(32));
       let score = 0;
       for (let attempt = 0; attempt < 100; attempt++) {
-        score = (await runtime.getPeers()).peers[0].score;
+        score = (await runtime.observePeers()).peers[0].score;
         if (score < -9) break;
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       expect(score).toBeGreaterThanOrEqual(-10);
       expect(score).toBeLessThan(-9);
       await expect(stream.next()).rejects.toMatchObject({reason: "unknown_context"});
-      expect((await runtime.getPeers()).peers[0].score).toBeGreaterThanOrEqual(score);
+      expect((await runtime.observePeers()).peers[0].score).toBeGreaterThanOrEqual(score);
     } finally {
       await runtime.close();
       await peer.stop();
@@ -612,7 +612,7 @@ async function servedPair() {
   const pair = await incomingPair();
   try {
     await expect
-      .poll(async () => (await pair.right.getPeers()).peers[0]?.status ?? null, {timeout: 10000})
+      .poll(async () => (await pair.right.observePeers()).peers[0]?.status ?? null, {timeout: 10000})
       .not.toBeNull();
     return {...pair, peer: pair.identity.peerId};
   } catch (error) {
@@ -627,7 +627,7 @@ const done = {done: true, value: undefined};
 test("a final chunk waits for a delayed pull, and an outcome that arrives with no pull waits for the next", async () => {
   const {left, peer, right} = await servedPair();
   try {
-    const connected = (await right.getPeers()).peers.find((entry) => entry.identity === peer);
+    const connected = (await right.observePeers()).peers.find((entry) => entry.identity === peer);
     const finished = right.request(peer, BLOCKS, new Uint8Array(32));
     const first = finished.next();
     const served = await takeIncoming(left);

@@ -50,7 +50,7 @@ test("ReleaseSafe debug logs correlate real requests without draining request da
     const {waitFor} = await import("../../test/interop/child.mjs");
     // Startup control requests share the bounded req/resp log quota.
     await waitFor(async () => {
-      const snapshots = await Promise.all([pair.left.getPeers(), pair.right.getPeers()]);
+      const snapshots = await Promise.all([pair.left.observePeers(), pair.right.observePeers()]);
       return snapshots.every((snapshot) => snapshot.peers[0]?.status && snapshot.peers[0]?.metadata);
     });
     await pair.left.setLogLevel("debug");

@@ -16,10 +16,10 @@ test("every command kind completes with its typed result", async () => {
     await remote.applyIntent(localIntent(remoteConfig));
     expect(await runtime.applyIntent(localIntent(config))).toBeUndefined();
     expect(await runtime.updateStatus(config.local.status)).toBeUndefined();
-    expect(await runtime.getIdentity()).toMatchObject(runtime.identity);
+    expect(await runtime.observeIdentity()).toMatchObject(runtime.identity);
     expect(await runtime.connect(peer.peerId, [peer.localEndpoint], 5000n)).toBeUndefined();
-    await vi.waitFor(async () => expect((await runtime.getPeers()).counts.connected).toBe(1));
-    expect(await runtime.getPeers()).toMatchObject({
+    await vi.waitFor(async () => expect((await runtime.observePeers()).counts.connected).toBe(1));
+    expect(await runtime.observePeers()).toMatchObject({
       counts: {connected: 1},
       peers: [expect.objectContaining({identity: peer.peerId})],
     });
@@ -30,7 +30,6 @@ test("every command kind completes with its typed result", async () => {
     });
     expect(await runtime.reStatusPeers([peer.peerId])).toBeUndefined();
     expect(await runtime.addDirectPeer(peer.peerId, [peer.localEndpoint])).toBeUndefined();
-    expect(await runtime.getDirectPeers()).toEqual([peer.peerId]);
     expect(await runtime.removeDirectPeer(peer.peerId)).toBe(true);
     expect(await runtime.disconnect(peer.peerId)).toBeUndefined();
   } finally {
@@ -88,25 +87,10 @@ test("ordinary command pressure preserves one local-state admission", async () =
     const refused = expect(runtime.applyIntent(localIntent(config))).rejects.toThrow("NetworkCommandFull");
 
     await Promise.all([...admitted, state, refused]);
-    expect((await runtime.getIdentity()).peerId).toBe(runtime.identity.peerId);
+    expect((await runtime.observeIdentity()).peerId).toBe(runtime.identity.peerId);
   } finally {
     // A refused command left no record, so the close result finds none missing.
     expect(await runtime.close()).toEqual({reason: "requested"});
-  }
-});
-
-test("a direct peer list remains independent of later membership changes", async () => {
-  const runtime = startRuntime(applicationConfig());
-  try {
-    const [peer, endpoints] = unreachableConnect();
-    await runtime.addDirectPeer(peer, endpoints);
-    const first = await runtime.getDirectPeers();
-    expect(await runtime.removeDirectPeer(peer)).toBe(true);
-    const second = await runtime.getDirectPeers();
-    expect(first).toEqual([peer]);
-    expect(second).toEqual([]);
-  } finally {
-    await runtime.close();
   }
 });
 

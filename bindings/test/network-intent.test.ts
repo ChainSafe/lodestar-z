@@ -16,7 +16,7 @@ test("sparse intents derive subscriptions and reject invalid changes atomically"
     expect(
       (await runtime.getGossipDiagnostics()).topics.some((topic) => topic.subscribed && topic.topic === topicName())
     ).toBe(true);
-    const before = await runtime.getIdentity();
+    const before = await runtime.observeIdentity();
     for (const [patch, error] of [
       [{custodyGroupCount: 0n}, "InvalidCustodyCount"],
       [{attesters: [{aggregators: 2n, slot: 100, subnets: 1n}]}, "InvalidCommitteeDuty"],
@@ -24,7 +24,7 @@ test("sparse intents derive subscriptions and reject invalid changes atomically"
       [{syncCommittees: [{subnet: 4, untilSlot: 200}]}, "InvalidNetworkInteger"],
     ] as const) {
       await expect(runtime.applyIntent({...patch, coreTopics: false})).rejects.toThrow(error);
-      expect((await runtime.getIdentity()).metadata).toEqual(before.metadata);
+      expect((await runtime.observeIdentity()).metadata).toEqual(before.metadata);
       expect(
         (await runtime.getGossipDiagnostics()).topics.some((topic) => topic.subscribed && topic.topic === topicName())
       ).toBe(true);
@@ -58,7 +58,7 @@ test("duty arrays reject malformed inputs without consuming admission", async ()
         {subnet: 1, untilSlot: 150},
       ],
     });
-    expect((await runtime.getIdentity()).metadata.syncnets).toBe(2);
+    expect((await runtime.observeIdentity()).metadata.syncnets).toBe(2);
   } finally {
     await runtime.close();
   }
@@ -79,11 +79,11 @@ test("host changes preserve native advertisement and reject endpoint overrides",
   const config = discoveryConfig();
   const runtime = startRuntime(config);
   try {
-    const before = (await runtime.getIdentity()).localEnr;
+    const before = (await runtime.observeIdentity()).localEnr;
     const intent = localIntent(config);
     Reflect.set(intent, "endpoints", {ip4: Uint8Array.of(192, 0, 2, 1)});
     await expect(runtime.applyIntent(intent)).rejects.toThrow("InvalidNetworkConfig");
-    expect((await runtime.getIdentity()).localEnr).toEqual(before);
+    expect((await runtime.observeIdentity()).localEnr).toEqual(before);
   } finally {
     await runtime.close();
   }

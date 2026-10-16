@@ -72,7 +72,7 @@ if (!isMainThread) {
     });
     const [held] = await ready;
     await worker.terminate();
-    assert.deepEqual((await runtime.getIdentity()).peerId, identity.peerId);
+    assert.deepEqual((await runtime.observeIdentity()).peerId, identity.peerId);
     const socket = createSocket("udp4");
     try {
       socket.bind(held.port, "127.0.0.1");

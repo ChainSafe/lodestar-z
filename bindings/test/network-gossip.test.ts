@@ -33,7 +33,7 @@ test("gossip drain and stale verdict on an activated application", async () => {
 
 import {setTimeout as delay} from "node:timers/promises";
 import type {NativeApplicationConfig} from "../src/network.js";
-import type {NativeGossipHandle, NativeGossipMessage, NativeGossipVerdict} from "../src/network-runtime.js";
+import type {NativeGossipHandle, NativeGossipMessage, NativeGossipVerdict} from "../src/network-types.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 const TOPIC = topicName();
@@ -200,7 +200,7 @@ test.each([
     expect(message.topic).toBe(TOPIC);
     expect(message.data).toEqual(blockPayload(4000, 7));
     expect(message.peerId).toEqual(pair.identity.peerId);
-    expect(message.connection).toEqual((await pair.right.getPeers()).peers[0].connection);
+    expect(message.connection).toEqual((await pair.right.observePeers()).peers[0].connection);
     const {messageId} = await import("../../test/interop/codec.mjs");
     expect(Buffer.from(message.id)).toEqual(messageId(TOPIC, blockPayload(4000, 7)));
     expect(message.receivedAtUnixMs).toBeGreaterThanOrEqual(before);
@@ -353,11 +353,11 @@ test("gossip and both request directions retain independent payload capacity", a
       {done: true, value: undefined},
       {done: true, value: undefined},
     ]);
-    const statusAt = (await pair.right.getPeers()).peers[0].statusAtMs;
+    const statusAt = (await pair.right.observePeers()).peers[0].statusAtMs;
     await pair.right.reStatusPeers([pair.identity.peerId]);
     let statusUpdated = false;
     for (let i = 0; i < 1000; i++) {
-      if ((await pair.right.getPeers()).peers[0].statusAtMs > statusAt) {
+      if ((await pair.right.observePeers()).peers[0].statusAtMs > statusAt) {
         statusUpdated = true;
         break;
       }

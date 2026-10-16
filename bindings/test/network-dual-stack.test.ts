@@ -1,6 +1,8 @@
 import {expect, it} from "vitest";
-import type {IpEndpoint} from "../src/network.js";
+import {type IpEndpoint, createNativeNetwork} from "../src/network.js";
 import {applicationConfig, discoveryConfig, startRuntime} from "./utils/network.js";
+
+import {host} from "./utils/network-host.js";
 
 const ip4: IpEndpoint = {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0};
 const ip6: IpEndpoint = {address: Uint8Array.from({length: 16}, (_, i) => Number(i === 15)), family: 6, port: 0};
@@ -22,9 +24,9 @@ it.each(
   const config = applicationConfig();
   config.bind = bind;
   const values = Array.isArray(bind) ? bind : [bind];
-  const runtime = startRuntime(config, () => undefined);
+  const runtime = createNativeNetwork(config, host());
   try {
-    const identity = await runtime.identity;
+    const identity = await runtime.getIdentity();
     const expected = values.map((endpoint) => endpoint.family).sort();
     expect(identity.localEndpoints.map((endpoint) => endpoint.family)).toEqual(expected);
     for (const endpoint of identity.localEndpoints) expect(endpoint.port).toBeGreaterThan(0);

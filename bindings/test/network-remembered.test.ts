@@ -81,7 +81,7 @@ test("directory creation failure disables persistence without failing the runtim
   await writeFile(options.peerStoreDir, "keep");
   const runtime = startRuntime(options);
   try {
-    expect(await runtime.getIdentity()).toBeDefined();
+    expect(await runtime.observeIdentity()).toBeDefined();
   } finally {
     await runtime.close();
   }

@@ -6,7 +6,7 @@ import type {
   NativeRequestProtocolId,
   NativeResponseChunk,
 } from "../../src/network.js";
-import type {NativeDelivery, NativeRuntimeCloseResult} from "../../src/network-runtime.js";
+import type {NativeDelivery, NativeRuntimeCloseResult} from "../../src/network-types.js";
 import type {NetworkTestRuntime} from "./network-runtime.js";
 
 interface RequestHandle {

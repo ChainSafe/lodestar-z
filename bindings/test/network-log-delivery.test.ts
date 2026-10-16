@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, it, vi} from "vitest";
 import type {NativeLogLoss, NativeLogRecord} from "../src/network.js";
 import {LOG_DRAIN_ERRORS_NAME, LOG_ERRORS_NAME, LOG_MS, LOG_RECORDS, LogDelivery} from "../src/network-log-delivery.js";
-import type {NativeLogBatch} from "../src/network-runtime.js";
+import type {NativeLogBatch} from "../src/network-types.js";
 
 const noLogs: NativeLogBatch = {dropped: 0n, more: false, records: [], suppressed: 0n, truncated: 0n};
 
