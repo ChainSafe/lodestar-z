@@ -77,6 +77,7 @@ export interface LevelDbIterator<T = LevelDbEntry> extends AsyncIterableIterator
  * Admission rejects with PendingOperationsExceeded or PendingBytesExceeded instead of waiting for room.
  * Pending-byte admission counts copied inputs and job metadata. Read results are allocated to their actual size;
  * each active read or cursor page has a separate 1 GiB output bound.
+ * Point reads temporarily materialize each complete stored value before checking that bound.
  * Up to two read results and one cursor/maintenance result can remain native-owned until JS delivery.
  * These bounds do not bound engine scratch memory, process RSS, or returned data retained by the caller.
  * Close iterators when abandoning them. Inputs must be attached Uint8Arrays backed by ordinary ArrayBuffers;
@@ -95,7 +96,7 @@ export declare class LevelDb {
   /** Removes an unopened database off the event loop. Rejects while this addon has an open handle. */
   static destroy(path: string): Promise<void>;
   get(key: Uint8Array, options?: LevelDbReadOptions): Promise<Uint8Array | null>;
-  /** Preserves key order and duplicates. Missing keys yield null; empty values yield empty arrays. */
+  /** Reads one consistent snapshot, preserving key order and duplicates. Missing keys yield null; empty values yield empty arrays. */
   getMany(keys: readonly Uint8Array[], options?: LevelDbReadOptions): Promise<(Uint8Array | null)[]>;
   put(key: Uint8Array, value: Uint8Array, options?: LevelDbWriteOptions): Promise<void>;
   del(key: Uint8Array, options?: LevelDbWriteOptions): Promise<void>;

@@ -33,11 +33,12 @@ input buffers are rejected.
 
 ## Workload and limits
 
-Point reads seek an iterator to the exact key, inspect its borrowed value length,
-and then copy into a bounded result buffer. `getMany(keys)` reuses a single iterator
+Point reads use LevelDB's `Get` path. `getMany(keys)` holds one snapshot
 for up to 16,777,216 keys, preserves input order and duplicates, and returns a
-consistent view. It avoids a C `leveldb_get`
-allocation of the full value before enforcing the output bound. Reads and cursors
+consistent view. The engine and C API materialize one complete stored value
+before the binding checks its length and copies it into a bounded owned result.
+The write side limits new values to 1 GiB; imported databases may contain larger
+values, which reads reject after that temporary allocation. Reads and cursors
 expose `fillCache`. Point reads default to filling the cache; native cursors default
 to bypassing it. The Lodestar controller preserves its existing cache defaults.
 
@@ -213,8 +214,8 @@ environment, logger, batch callback, and repair wrappers.
 `DB.get` checks and frees the C error before interpreting a null result as a missing
 key. Successful results are C-owned and require the raw module's `free(value.ptr)`,
 including empty values. `DB.propertyValue` results require the same cleanup.
-`DB.get` allocates the complete value; the bounded API's `getManyOwned` uses an
-iterator to inspect each value's length before allocating and copying it.
+`DB.get` allocates the complete value; `getManyOwned` checks that value's length
+before allocating its owned copy and frees the C allocation on success or failure.
 
 Iterator `key()` and `value()` return borrowed bytes valid only until that iterator
 moves or is destroyed. Inspect lengths and copy into caller-owned memory before
@@ -230,3 +231,44 @@ close, destroy, or release each exactly once. Callers serialize use of mutable
 handles and enforce input sizes, batch limits, and traversal budgets before entering
 the raw API. Cache capacity and read output limits do not bound engine scratch
 space or process RSS.
+
+## Workload measurements
+
+`bench/leveldb.ts` measures the installed addon without changing production defaults:
+
+```sh
+node --import tsx bench/leveldb.ts > /tmp/leveldb-defaults.json
+node --import tsx bench/leveldb.ts --archive-mib=300 --rounds=32 > /tmp/leveldb-large-state.json
+node --import tsx bench/leveldb.ts --offline-sample=/path/to/offline-snapshot --start-hex=0010 --work-dir=/scratch > /tmp/leveldb-sample.json
+node --import tsx bench/leveldb.ts --cache-mib=64 --write-buffer-mib=32 --open-files=2000 > /tmp/leveldb-options.json
+```
+
+Only supply a closed database or a consistent filesystem snapshot. The benchmark
+never opens the source directory: it copies the flat snapshot into a fresh temporary
+directory for each case and removes its copies afterwards. Samples are capped at
+8 GiB and 100,000 files. Without a sample it creates 256 deterministic 64 KiB rows;
+the report labels this as a synthetic smoke run, not mainnet evidence.
+
+Both cases use the same first 128 keys at or after `start-hex`. Choose a prefix from
+the database's block or column archive; this is a bounded range replay, not uniform
+sampling of the whole database. Each round reads a point hit, a known miss and a
+cursor seek plus page while writing a 128 KiB record. `range_page` includes both
+the deferred native seek and the following page read. Every eighth round also reads a synthetic
+archived state. The second case submits an archive write before the reads every eight
+rounds, on the same handle. Archive bytes are deterministic and incompressible, and
+writes use the ordinary asynchronous durability policy. The archive defaults to
+32 MiB, accepts 1–512 MiB, and total archive writes per case are capped at 8 GiB.
+The cursor retains its snapshot throughout each case, as a serving iterator does.
+
+JSON output includes operation counts and p50/p95/p99/max latency in milliseconds,
+synchronous submission time separately, `leveldb.stats` before and after each case,
+options, Node version, commit and local addon SHA-256. Submission time captures input
+copying before the promise returns. Read latency starts at that read's invocation,
+so it excludes an earlier archive write's synchronous submission stall. RSS is a
+point observation; peak RSS is cumulative across both cases in the same process.
+
+Run repeated comparisons on the same snapshot and filesystem before changing a
+default. The harness does not flush the OS page cache, model production arrival
+rates, or infer significance from a small sample. Compare unchanged-addon repeats
+before interpreting a rebuilt addon's numbers. `max_file_size` is not configurable
+through the binding, so this harness does not claim to compare table sizes.

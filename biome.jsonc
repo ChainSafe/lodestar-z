@@ -8,6 +8,7 @@
   ],
   "files": {
     "includes": [
+      "bench/**/*.ts",
       "bindings/**/*.ts",
       "bindings/src/network*.js",
       "bindings/src/leveldb*.js",

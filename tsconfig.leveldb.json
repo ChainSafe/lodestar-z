@@ -8,5 +8,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["bindings/src/leveldb.d.ts", "bindings/test/leveldb*.test.ts"]
+  "include": ["bench/leveldb.ts", "bindings/src/leveldb.d.ts", "bindings/test/leveldb*.test.ts"]
 }

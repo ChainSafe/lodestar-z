@@ -109,7 +109,7 @@ pub const DB = struct {
     }
 
     /// Returns C-owned bytes. Free them with `free(value.ptr)`, including empty values.
-    /// This call allocates the full value; bounded callers should use an iterator.
+    /// The C API allocates the complete stored value before returning its length.
     pub fn get(db: *DB, options: *ReadOptions, key: []const u8, diagnostics: ?*Diagnostics) Error!?[]const u8 {
         var vallen: usize = undefined;
         var errptr: ?[*:0]u8 = null;

@@ -26,7 +26,7 @@ pub fn copyEntry(allocator: Allocator, key: []const u8, value: []const u8) !Entr
     return .{ .key = key_copy, .value = value_copy };
 }
 
-/// One iterator keeps a consistent view. Copy each value before moving it.
+/// Multi-gets share one snapshot. The C API materializes each value before the output limits apply.
 pub fn getMany(
     db: *raw.DB,
     allocator: Allocator,
@@ -46,8 +46,10 @@ pub fn getMany(
     read_options.setFillCache(options.fill_cache);
     read_options.setVerifyChecksums(true);
 
-    var iterator = try db.createIterator(&read_options);
-    defer iterator.destroy();
+    if (keys.len == 0) return;
+    var snapshot = if (keys.len > 1) try db.createSnapshot() else null;
+    defer if (snapshot) |*value| db.releaseSnapshot(value);
+    if (snapshot) |*value| read_options.setSnapshot(value);
 
     errdefer {
         for (results) |value| if (value) |bytes| allocator.free(bytes);
@@ -56,18 +58,12 @@ pub fn getMany(
 
     var total: usize = 0;
     for (keys, results) |key, *output| {
-        if (try lookup(&iterator, key, diagnostics)) |value| {
+        if (try db.get(&read_options, key, diagnostics)) |value| {
+            defer raw.free(value.ptr);
             if (value.len > options.max_value_bytes) return error.ValueTooLarge;
             if (value.len > options.max_total_bytes - total) return error.BatchTooLarge;
             output.* = try allocator.dupe(u8, value);
             total += value.len;
         }
     }
-}
-
-fn lookup(iterator: *raw.Iterator, key: []const u8, diagnostics: ?*raw.Diagnostics) !?[]const u8 {
-    iterator.seek(key);
-    try iterator.getError(diagnostics);
-    if (!iterator.valid() or !std.mem.eql(u8, iterator.key(), key)) return null;
-    return iterator.value();
 }

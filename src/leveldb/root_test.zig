@@ -59,6 +59,63 @@ test "owned reads preserve mixed missing empty duplicate and unsorted key order"
     try testing.expectEqualStrings("BB", results[4].?);
 }
 
+test "owned multi-get keeps its snapshot when a write lands between results" {
+    const WriteOnAllocation = struct {
+        db: *leveldb.Database,
+        written: bool = false,
+        failure: ?anyerror = null,
+
+        fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!self.written) {
+                self.written = true;
+                self.db.writeWithLimits(&.{
+                    .{ .key = "a", .value = "new" },
+                    .{ .key = "b", .value = "new" },
+                }, false, .{
+                    .max_value_bytes = 3,
+                    .max_total_bytes = 8,
+                    .max_entries = 2,
+                }, null) catch |err| {
+                    self.failure = err;
+                    return null;
+                };
+            }
+            return allocator.rawAlloc(len, alignment, return_address);
+        }
+
+        fn free(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, return_address: usize) void {
+            allocator.rawFree(memory, alignment, return_address);
+        }
+    };
+
+    var fixture: Fixture = undefined;
+    try fixture.init(allocator);
+    defer fixture.deinit();
+    try fixture.write(&.{
+        .{ .key = "a", .value = "old" },
+        .{ .key = "b", .value = "old" },
+    }, false);
+
+    var writer = WriteOnAllocation{ .db = &fixture.db };
+    fixture.db.allocator = .{ .ptr = &writer, .vtable = &.{
+        .alloc = WriteOnAllocation.alloc,
+        .resize = std.mem.Allocator.noResize,
+        .remap = std.mem.Allocator.noRemap,
+        .free = WriteOnAllocation.free,
+    } };
+    defer fixture.db.allocator = allocator;
+
+    var results: [3]?[]const u8 = undefined;
+    try fixture.db.getManyOwned(&.{ "a", "b", "a" }, &results, 3, 9, false, null);
+    defer helpers.freeValues(fixture.db.allocator, &results);
+    try testing.expect(writer.written);
+    try testing.expectEqual(null, writer.failure);
+    for (results) |value| try testing.expectEqualStrings("old", value.?);
+    try expectValue(&fixture.db, "a", "new");
+    try expectValue(&fixture.db, "b", "new");
+}
+
 test "write applies ordered puts and deletes and persists after reopening" {
     var fixture: Fixture = undefined;
     try fixture.init(allocator);
