@@ -63,8 +63,8 @@ test "reqresp attribution keeps absolute deadlines while excluding host holds an
         }
         pair.shared.pair.now.monotonic = time.milliseconds(deadline);
         var events: [1]rr.Event = undefined;
-        const count = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .application = &events });
-        try std.testing.expectEqual(@as(usize, 1), count.application);
+        const count = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, &events);
+        try std.testing.expectEqual(@as(usize, 1), count);
         try std.testing.expectEqual(rr.Failure.timeout, events[0].failed.reason);
         const fault = events[0].peerFault();
         if (case == .remote) {
@@ -92,16 +92,16 @@ test "reqresp attribution ignores locally unread incoming bodies at absolute exp
     defer pair.deinit();
     const stream = try pair.openRaw(.ping_v1);
     try pair.awaitRawSelection(stream, .ping_v1);
-    const incoming = for (pair.shared.server.reqresp.inbound) |*slot| {
+    const incoming = for (pair.shared.server.control_reqresp.inbound) |*slot| {
         if (slot.request.occupied()) break slot;
     } else return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), try pair.shared.pair.client.write(stream, &.{8}, false));
     try pair.shared.pair.pump();
     try std.testing.expect(try pair.shared.pair.server.streamReadable(incoming.request.stream));
-    pair.shared.pair.now.monotonic = time.milliseconds(incoming.deadline(&pair.shared.server.reqresp).?);
+    pair.shared.pair.now.monotonic = time.milliseconds(incoming.deadline(&pair.shared.server.control_reqresp).?);
     var events: [1]rr.Event = undefined;
-    const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &events });
-    try std.testing.expectEqual(@as(usize, 1), count.control);
+    const count = pair.shared.server.control_reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, &events);
+    try std.testing.expectEqual(@as(usize, 1), count);
     try std.testing.expectEqual(rr.Failure.timeout, events[0].failed.reason);
     try std.testing.expect(events[0].peerFault() == null);
 }

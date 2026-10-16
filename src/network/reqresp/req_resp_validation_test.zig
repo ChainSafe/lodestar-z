@@ -25,15 +25,15 @@ test "reqresp rejects reserved error results before changing a serving response"
         var request: [ct.phase0.Status.fixed_size]u8 = undefined;
         _ = try requestStatus(&setup, &request, &sink);
         try waitForRequest(&setup);
-        const server = &setup.shared.server.reqresp.inbound[0];
+        const server = &setup.shared.server.control_reqresp.inbound[0];
         const handle = server.request.handle(0);
         for ([_]u8{ 0, 4, 5, 127 }) |invalid| {
-            try std.testing.expectError(error.InvalidError, setup.shared.server.reqresp.respondError(handle, invalid, "reserved", setup.shared.pair.now));
+            try std.testing.expectError(error.InvalidError, setup.shared.server.control_reqresp.respondError(handle, invalid, "reserved", setup.shared.pair.now));
             try std.testing.expectEqual(.serving, server.state);
             try std.testing.expectEqual(@as(u16, 0), server.request.error_len);
             try std.testing.expect(server.request.io.outbox.idle());
         }
-        try setup.shared.server.reqresp.respondError(handle, valid, "valid", setup.shared.pair.now);
+        try setup.shared.server.control_reqresp.respondError(handle, valid, "valid", setup.shared.pair.now);
         var failure: ?reqresp.Failure = null;
         for (0..30) |_| {
             try setup.pumpOnce();
@@ -84,14 +84,14 @@ test "reqresp caller cardinality rejects invalid bounds before opening a stream"
         .{ .expected_chunks = 2 }, .{ .timeouts = .{ .response = .fromMilliseconds(0) } },
     };
     for (options) |invalid| {
-        try std.testing.expectError(error.InvalidRequestOptions, setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, invalid, setup.shared.pair.now));
+        try std.testing.expectError(error.InvalidRequestOptions, setup.shared.client.control_reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, invalid, setup.shared.pair.now));
     }
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.control_reqresp.pendingCounts().outbound);
 }
 
 test "reqresp validates transport capacity and copies its fork table" {
     var forks = [_]ForkEntry{.{ .digest = deneb_digest, .fork = .deneb }};
-    var rr = try reqresp.init(std.testing.allocator, .{ .connections = 1, .forks = &forks, .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1, 1, 64) });
+    var rr = try reqresp.init(std.testing.allocator, .{ .connections = 1, .forks = &forks, .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1, 16) });
     defer rr.deinit();
     forks[0].digest = fulu_digest;
     try std.testing.expectEqual(@as(?ForkSeq, .deneb), rr.forkFor(deneb_digest));
@@ -100,7 +100,7 @@ test "reqresp validates transport capacity and copies its fork table" {
     try setup.init(.{}, .{});
     defer setup.deinit();
     try std.testing.expectError(error.InvalidCapacity, rr.validateTransportCapacity(&setup.shared.pair.client));
-    try std.testing.expectError(error.InvalidOptions, reqresp.init(std.testing.allocator, .{ .connections = 1025, .forks = &.{}, .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1, 1, 64) }));
+    try std.testing.expectError(error.InvalidOptions, reqresp.init(std.testing.allocator, .{ .connections = 1025, .forks = &.{}, .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1, 16) }));
     const plan = rr.memoryPlan();
     try std.testing.expectEqual(plan.total_bytes, plan.facade_bytes + plan.slot_bytes + plan.io_bytes + plan.admission_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes);
     try std.testing.expect(plan.io_bytes > 0 and plan.slot_bytes > 0);
@@ -162,7 +162,7 @@ test "reqresp rejects duplicate digests before allocating" {
     for ([_]ForkSeq{ .fulu, .deneb }) |fork| {
         try std.testing.expectError(error.InvalidOptions, reqresp.init(failing.allocator(), .{
             .forks = &.{ first, .{ .digest = first.digest, .fork = fork } },
-            .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1, 1, 1),
+            .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1, 1),
         }));
     }
 }
@@ -177,7 +177,7 @@ test "reqresp validates all timeout durations before stream admission" {
         for ([_]i96{ -1, 0, 60001, std.math.maxInt(u64) }) |invalid| {
             var policy: reqresp.RequestOptions.Timeouts = .{ .negotiation = .fromMilliseconds(1), .request = .fromMilliseconds(1), .response = .fromMilliseconds(1) };
             @field(policy, field) = .fromNanoseconds(@as(i96, invalid) * std.time.ns_per_ms);
-            try std.testing.expectError(error.InvalidRequestOptions, setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request, &sink, .{ .timeouts = policy }, setup.shared.pair.now));
+            try std.testing.expectError(error.InvalidRequestOptions, setup.shared.client.control_reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request, &sink, .{ .timeouts = policy }, setup.shared.pair.now));
         }
     }
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.router.negotiator.active());

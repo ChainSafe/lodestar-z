@@ -5,6 +5,7 @@ const Peer = @import("network_peer.zig").Peer;
 
 pub fn emit(peer: *Peer, id: u32) !void {
     const reqresp = peer.protocols.reqresp.pendingCounts();
+    const control_reqresp = peer.protocols.control_reqresp.pendingCounts();
     const gossip = peer.protocols.gossipsub.resourceSnapshot();
     var streams: usize = 0;
     for (peer.transport.engine.registry.activeIndices()) |index| {
@@ -41,8 +42,8 @@ pub fn emit(peer: *Peer, id: u32) !void {
         .gossipPeers = gossip.admitted_peers,
         .remoteSubscriptions = gossip.remote_subscriptions,
         .meshMembers = gossip.mesh_members,
-        .reqrespOutbound = reqresp.outbound,
-        .reqrespInbound = reqresp.inbound,
+        .reqrespOutbound = @as(usize, reqresp.outbound) + control_reqresp.outbound,
+        .reqrespInbound = @as(usize, reqresp.inbound) + control_reqresp.inbound,
         .gossipDescriptors = gossip.queued_descriptors,
         .gossipQueuedBytes = gossip.queued_bytes,
         .heldFrames = gossip.held_frames,

@@ -10,6 +10,7 @@ const negotiate = @import("negotiate.zig");
 const multistream = @import("wire/multistream.zig");
 const sessions = @import("gossipsub/sessions.zig");
 const protocols_test_support = @import("protocols_test_support.zig");
+const control_fixture = @import("reqresp/control_fixture.zig");
 const ReqResp = @import("reqresp/ReqResp.zig");
 const policy_fixture = @import("reqresp/policy_fixture.zig");
 const session_io = @import("gossipsub/session_io.zig");
@@ -147,7 +148,7 @@ test "gossipsub protocol stack negotiates with a v1.1-only peer" {
     try setup.init();
     defer setup.deinit();
     setup.shared.server.deinit();
-    setup.shared.server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = .{ .forks = &.{}, .connections = 4, .outbound_max = 1, .serving_max = 1, .inbound_per_connection_max = 1, .admission = try ReqResp.Options.Admission.defaults(&policy_fixture.config(), 4, 4, 1) }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } }, &setup.shared.pair.server);
+    setup.shared.server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .control_reqresp = try control_fixture.controlOptions(), .reqresp = .{ .protocols = .application, .forks = &.{}, .connections = 4, .outbound_max = 1, .serving_max = 1, .inbound_per_connection_max = 1, .admission = try ReqResp.Options.Admission.defaults(&policy_fixture.config(), 4, 1) }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } }, &setup.shared.pair.server);
     setup.shared.server_inbox.attach(setup.shared.server.gossipsub);
     _ = setup.shared.server.gossipsub.peerConnected(&setup.shared.pair.server, setup.shared.handles.server, false, setup.shared.pair.now);
     for (0..24) |_| try setup.pumpOnce();
@@ -282,7 +283,7 @@ test "gossipsub protocol stack preserves a remotely half-closed outbound stream 
 
 fn compositionAllocationPrefix(allocator: std.mem.Allocator) !void {
     const resolved = try configuration.resolve(.{ .gossip = .{ .topic_policy = comptime &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })}, .receive_arena_bytes = 16 * 1024 * 1024, .seen_capacity = 4096, .mcache_capacity = 256, .validation_capacity = 64, .mcache_arena_bytes = 16 * 1024 * 1024 }, .peers = .{ .capacity = 64, .outbound_reserve = 4, .target_peers = 8, .max_peers = 12, .min_outbound = 2 }, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
-    var protocols = try Protocols.init(allocator, .{ .reqresp = resolved.core.protocols.reqresp, .gossipsub = resolved.core.protocols.gossipsub, .router = .{ .negotiations_max = 2 } }, &try protocols_test_support.fixtureLocal(.{}));
+    var protocols = try Protocols.init(allocator, .{ .reqresp = resolved.core.protocols.reqresp, .control_reqresp = resolved.core.protocols.control_reqresp, .gossipsub = resolved.core.protocols.gossipsub, .router = .{ .negotiations_max = 2 } }, &try protocols_test_support.fixtureLocal(.{}));
     defer protocols.deinit();
     try std.testing.expectEqual(@as(usize, 12), protocols.gossipsub.sessions.rows.len);
     try std.testing.expectEqual(@as(usize, 2), protocols.router.negotiator.entries.len);

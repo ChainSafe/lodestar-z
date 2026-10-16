@@ -31,7 +31,7 @@ test "reqresp quotas preserve every protocol rate across chain configurations an
     for ([_]*const config.BeaconConfig{ &config.mainnet.config, &config.minimal.config }) |chain| {
         var points: [request_policy.schedule_max]request_policy.BlobLimit = undefined;
         const policy = try request_policy.Config.fromBeaconConfig(chain, &points);
-        const limits = try Options.defaults(&policy, 256, 200, 32);
+        const limits = try Options.defaults(&policy, 256, 8);
         try std.testing.expectEqual(@as(u16, 256), limits.identities);
         try std.testing.expectEqual(@as(u32, 36), limits.starts.tokens);
         try std.testing.expectEqual(@as(u64, 10_000), limits.starts.period_ms);
@@ -43,22 +43,22 @@ test "reqresp quotas preserve every protocol rate across chain configurations an
                 const global = limits.global[@intFromEnum(fork)][index];
                 try std.testing.expectEqual(case.tokens[era], peer.tokens);
                 try std.testing.expectEqual(case.period_ms, peer.period_ms);
-                try std.testing.expectEqual(case.tokens[era] * @as(u32, if (case.protocol.isControl()) 200 else 8), global.tokens);
+                try std.testing.expectEqual(case.tokens[era] * @as(u32, 8), global.tokens);
                 try std.testing.expectEqual(case.period_ms, global.period_ms);
             }
         }
     }
 }
 
-test "reqresp quotas follow configured request bounds and scale application capacity at batch boundaries" {
+test "reqresp quotas follow configured request bounds and scale the instance global allowance" {
     var policy = fixture.config();
     policy.blocks_pre_deneb = 16;
     policy.blocks_deneb = 8;
     policy.blob_identifiers_deneb = 24;
     policy.blob_identifiers_electra = 48;
     policy.column_chunks = 96;
-    for ([_]u16{ 0, 1, 3, 4, 7, 8, 32 }, [_]u32{ 1, 1, 1, 1, 1, 2, 8 }) |capacity, scale| {
-        const limits = try Options.defaults(&policy, 8, 3, capacity);
+    for ([_]u16{ 1, 2, 3, 8, 210 }) |scale| {
+        const limits = try Options.defaults(&policy, 8, scale);
         for (std.enums.values(config.ForkSeq)) |fork| {
             const peer = limits.peer[@intFromEnum(fork)];
             const global = limits.global[@intFromEnum(fork)];
@@ -66,11 +66,10 @@ test "reqresp quotas follow configured request bounds and scale application capa
             try std.testing.expectEqual(@as(u32, 8), peer[@intFromEnum(Protocol.blocks_by_head_v1)].tokens);
             try std.testing.expectEqual(@as(u32, if (fork.gte(.electra)) 48 else 24), peer[@intFromEnum(Protocol.blob_sidecars_by_root_v1)].tokens);
             try std.testing.expectEqual(@as(u32, 96 * scale), global[@intFromEnum(Protocol.data_column_sidecars_by_range_v1)].tokens);
-            try std.testing.expectEqual(@as(u32, 6), global[@intFromEnum(Protocol.ping_v1)].tokens);
+            try std.testing.expectEqual(@as(u32, 2) * scale, global[@intFromEnum(Protocol.ping_v1)].tokens);
         }
     }
-    try std.testing.expectError(error.InvalidPolicy, Options.defaults(&policy, 8, 0, 1));
-    try std.testing.expectError(error.InvalidPolicy, Options.defaults(&policy, 8, 9, 1));
+    try std.testing.expectError(error.InvalidPolicy, Options.defaults(&policy, 8, 0));
     policy.blocks_deneb = 0;
-    try std.testing.expectError(error.InvalidPolicy, Options.defaults(&policy, 8, 3, 1));
+    try std.testing.expectError(error.InvalidPolicy, Options.defaults(&policy, 8, 3));
 }

@@ -178,7 +178,7 @@ test "sent responses wait for next-chunk credit and can close while waiting" {
         try pair.shared.pair.init(resolved.limits, resolved.limits);
         defer pair.shared.pair.deinit();
         const options = resolved.core.protocols;
-        pair.shared.client = try rr.testing.Endpoint.init(std.testing.allocator, options.reqresp, options.router);
+        pair.shared.client = try rr.testing.Endpoint.init(std.testing.allocator, options.reqresp, options.control_reqresp, options.router);
         defer pair.shared.client.deinit();
         defer pair.shared.client.reqresp.cancelAll(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now);
         const local = try options.identify.makeLocal(&pair.shared.pair.server.tls.local_peer_id, &pair.shared.pair.server.local);

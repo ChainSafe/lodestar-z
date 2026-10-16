@@ -15,8 +15,8 @@ pub fn initialize(runtime: *Runtime, app: *const application_cfg.Config) !void {
     const resolved = &runtime.owner.?.resolved;
     runtime.peer_capacity = resolved.core.peers.capacity;
     const limits = resolved.core.protocols.reqresp;
-    const request_capacity: usize = limits.outbound_max - limits.outbound_control_reserved;
-    const incoming_capacity: usize = limits.serving_max - limits.serving_control_reserved;
+    const request_capacity: usize = limits.outbound_max;
+    const incoming_capacity: usize = limits.serving_max;
     const gossip_options = &resolved.core.protocols.gossipsub;
     const chain = &runtime.owner.?.config.chain;
     const processor_options = try n.gossip_processor.GossipProcessor.Options.resolve(runtime.owner.?.config.processor_limits, runtime.owner.?.config.execution_limits, gossip_options.topic_policy, chain.forks[0..chain.boundary_count], gossip_options.random_seed.?);
@@ -33,7 +33,7 @@ pub fn initialize(runtime: *Runtime, app: *const application_cfg.Config) !void {
     var request_max: usize = 0;
     for (0..n.reqresp.Protocol.count) |i| {
         const protocol: n.reqresp.Protocol = @enumFromInt(i);
-        if (protocol.isControl()) continue;
+        if (!limits.protocols.contains(protocol)) continue;
         response_max = @max(response_max, protocol.info().response_max);
         request_max = @max(request_max, protocol.info().request_max);
     }

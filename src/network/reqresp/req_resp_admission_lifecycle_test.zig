@@ -36,15 +36,15 @@ test "reqresp admission counts release native slots on terminal delivery" {
     try std.testing.expectEqual(1, client.outboundProtocolPendingCount(client_conn, .blocks_by_root_v2));
     try std.testing.expectEqual(0, server.inboundProtocolRunningCount(server_conn, .blocks_by_root_v2));
     try std.testing.expectEqual(1, server.inboundPendingCount(server_conn));
-    try std.testing.expectEqual(1, client.outboundApplicationOccupiedCount(client_conn));
-    try std.testing.expectEqual(1, server.inboundApplicationOccupiedCount(server_conn));
+    try std.testing.expectEqual(1, client.outboundOccupiedCount(client_conn));
+    try std.testing.expectEqual(1, server.inboundPendingCount(server_conn));
     try setup.pumpOnce();
     try std.testing.expectEqual(0, client.outboundProtocolPendingCount(client_conn, .blocks_by_root_v2));
     try std.testing.expectEqual(0, server.inboundPendingCount(server_conn));
     try std.testing.expectEqual(0, client.pendingCounts().outbound);
     try std.testing.expectEqual(0, server.pendingCounts().inbound);
-    try std.testing.expectEqual(0, client.outboundApplicationOccupiedCount(client_conn));
-    try std.testing.expectEqual(0, server.inboundApplicationOccupiedCount(server_conn));
+    try std.testing.expectEqual(0, client.outboundOccupiedCount(client_conn));
+    try std.testing.expectEqual(0, server.inboundPendingCount(server_conn));
 }
 
 fn receive(setup: *harness.Pair) !@FieldType(rr.Event, "request") {
@@ -60,7 +60,7 @@ fn receive(setup: *harness.Pair) !@FieldType(rr.Event, "request") {
 
 test "reqresp admission lifecycle incomplete requests cannot consume another connection's receive reservation" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .serving_max = 2, .serving_control_reserved = 1 });
+    try setup.init(.{}, .{ .serving_max = 1, .control_serving_max = 1, .control_serving_per_peer_max = 1 });
     defer setup.deinit();
     for (0..2) |_| {
         const stream = try setup.openRaw(.blocks_by_root_v2);
@@ -83,7 +83,7 @@ test "reqresp admission lifecycle incomplete requests cannot consume another con
 
 test "reqresp admission lifecycle cancellation retains execution until host retirement" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .serving_max = 2, .serving_control_reserved = 1, .serving_per_peer_max = 1 });
+    try setup.init(.{}, .{ .serving_max = 1, .control_serving_max = 1, .control_serving_per_peer_max = 1, .serving_per_peer_max = 1 });
     defer setup.deinit();
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
@@ -123,10 +123,9 @@ fn allocation(allocator: std.mem.Allocator) !void {
     var owner = try rr.init(allocator, .{
         .connections = 2,
         .forks = &.{},
-        .admission = try rr.Options.Admission.defaults(&policy(), 2, 1, 1),
+        .admission = try rr.Options.Admission.defaults(&policy(), 2, 1),
         .outbound_max = 2,
         .serving_max = 2,
-        .serving_control_reserved = 1,
     });
     defer owner.deinit();
     for (0..2) |peer| for (std.enums.values(Protocol)) |which| {
@@ -141,13 +140,14 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
     const quotas = admission_fixture.quotas(4, 1000);
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
-        .serving_max = 3,
-        .serving_control_reserved = 1,
+        .serving_max = 2,
+        .control_serving_max = 1,
+        .control_serving_per_peer_max = 1,
         .admission = .{ .policy = policy(), .limits = .{ .identities = 3, .peer = quotas, .global = quotas } },
     });
     defer setup.deinit();
-    const owner = &setup.shared.server.reqresp;
     for ([_]Protocol{ .blocks_by_root_v2, .blocks_by_root_v2, .ping_v1 }, 0..) |which, peer| {
+        const owner = setup.shared.server.requests(which);
         const index = owner.receive_layout.first(@intCast(peer), which);
         const slot = &owner.inbound[index];
         defer owner.settleSlot(.inbound, @intCast(index));
@@ -165,18 +165,21 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
             .stream = .{ .conn = conn, .slot = 0, .id = 0 },
         };
     }
+    const owner = &setup.shared.server.reqresp;
+    const controls = &setup.shared.server.control_reqresp;
     const heavy = &owner.inbound[owner.receive_layout.first(0, .blocks_by_root_v2)];
     try std.testing.expectEqual(.allowed, owner.admission.limiter.take(&heavy.identity, .blocks_by_root_v2, 4, .fulu, setup.shared.pair.now.millis()));
     var application_events: [4]rr.Event = undefined;
     var control_events: [4]rr.Event = undefined;
     setup.shared.pair.advance(250);
-    const first = owner.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .application = &application_events, .control = &control_events });
-    try std.testing.expectEqual(@as(usize, 0), first.application);
-    try std.testing.expectEqual(@as(usize, 1), first.control);
+    const first_control = controls.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, &control_events);
+    const first = owner.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, &application_events);
+    try std.testing.expectEqual(@as(usize, 0), first);
+    try std.testing.expectEqual(@as(usize, 1), first_control);
     try std.testing.expectEqual(@as(u128, 1), heavy.admission.paid);
     setup.shared.pair.advance(250);
-    const second = owner.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .application = &application_events, .control = &control_events });
-    try std.testing.expectEqual(@as(usize, 1), second.application);
+    const second = owner.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, &application_events);
+    try std.testing.expectEqual(@as(usize, 1), second);
     try std.testing.expectEqual(@as(u16, 1), application_events[0].request.conn.index);
     try std.testing.expectEqual(@as(u128, 1), heavy.admission.paid);
 }
@@ -188,8 +191,9 @@ test "reqresp admission lifecycle protocol buffers and all startup allocation fa
 test "reqresp admission lifecycle a fresh burst starts full requests before splitting residual quota" {
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
-        .serving_max = 3,
-        .serving_control_reserved = 1,
+        .serving_max = 2,
+        .control_serving_max = 1,
+        .control_serving_per_peer_max = 1,
         .admission = .{ .policy = policy(), .limits = .{
             .identities = 4,
             .peer = admission_fixture.quotas(4, 1000),
@@ -217,8 +221,8 @@ test "reqresp admission lifecycle a fresh burst starts full requests before spli
         };
     }
     var events: [4]rr.Event = undefined;
-    const result = owner.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .application = &events });
-    try std.testing.expectEqual(@as(usize, 2), result.application);
+    const result = owner.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, &events);
+    try std.testing.expectEqual(@as(usize, 2), result);
     try std.testing.expectEqual(@as(u16, 0), events[0].request.conn.index);
     try std.testing.expectEqual(@as(u16, 1), events[1].request.conn.index);
 }
@@ -245,7 +249,7 @@ test "reqresp bounds concurrent requests per protocol on both sides" {
     const third = requestBlocks(&setup, &request_storage_8, 1, sinks[2 * size ..]);
     try std.testing.expectError(error.TooManyRequests, third);
     var pings: [8]u8 = undefined;
-    _ = try setup.shared.client.reqresp.request(
+    _ = try setup.shared.client.control_reqresp.request(
         &setup.shared.pair.client,
         &setup.shared.client.router,
         setup.shared.handles.client,
@@ -290,7 +294,7 @@ test "reqresp bounds concurrent requests per protocol on both sides" {
 
 test "reqresp exhausts outbound slots and per-connection inbound slots" {
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 1 }, .{ .inbound_per_connection_max = 1 });
+    try setup.init(.{ .control_outbound_max = 1 }, .{ .inbound_per_connection_max = 1 });
     defer setup.deinit();
 
     var sinks: [2][ct.phase0.Status.fixed_size]u8 = undefined;
@@ -302,7 +306,7 @@ test "reqresp exhausts outbound slots and per-connection inbound slots" {
 
     const raw = try setup.openRaw(.ping_v1);
     for (0..10) |_| try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u8, 1), setup.shared.server.reqresp.inboundPendingCount(setup.shared.handles.server));
+    try std.testing.expectEqual(@as(u8, 1), setup.shared.server.control_reqresp.inboundPendingCount(setup.shared.handles.server));
     var buffer: [256]u8 = undefined;
     var finished = false;
     for (0..4) |_| {

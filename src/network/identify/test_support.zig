@@ -4,6 +4,7 @@ const Engine = @import("../quic/Engine.zig");
 const identify = @import("root.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const KeyPair = @import("../wire/keys.zig").KeyPair;
+const control_fixture = @import("../reqresp/control_fixture.zig");
 const ReqResp = @import("../reqresp/ReqResp.zig");
 const policy_fixture = @import("../reqresp/policy_fixture.zig");
 
@@ -19,5 +20,5 @@ pub fn step(pair: *support.Pair, protocols: *Protocols, server: bool, results: [
 }
 
 pub fn protocolsOptions(agent: []const u8) !Protocols.Options {
-    return .{ .reqresp = .{ .forks = &.{}, .admission = try ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 128, 64) }, .gossipsub = .{ .random_seed = 1 }, .identify = .{ .agent = agent, .inbound_max = 1, .outbound_max = 1 } };
+    return .{ .control_reqresp = try control_fixture.controlOptions(), .reqresp = .{ .protocols = .application, .forks = &.{}, .admission = try ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 16) }, .gossipsub = .{ .random_seed = 1 }, .identify = .{ .agent = agent, .inbound_max = 1, .outbound_max = 1 } };
 }

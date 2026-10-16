@@ -12,7 +12,8 @@ const stream_trace = @import("stream_trace.zig");
 const codec = @import("reqresp/codec.zig");
 
 const support = @import("quic/test_support.zig");
-const reservedOptions = @import("reqresp/control_fixture.zig").reservedOptions;
+const control_fixture = @import("reqresp/control_fixture.zig");
+const applicationOptions = control_fixture.applicationOptions;
 
 const Event = reqresp.Event;
 const Protocol = protocol.Protocol;
@@ -23,8 +24,9 @@ const Pair = harness.Pair;
 fn roundTrip(setup: *Pair, seed: u8) !void {
     const request_ssz = statusBytes(seed);
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
-    _ = try setup.shared.client.request(
+    _ = try setup.shared.client.control_reqresp.request(
         &setup.shared.pair.client,
+        &setup.shared.client.router,
         setup.shared.handles.client,
         .status_v1,
         &request_ssz,
@@ -40,15 +42,15 @@ fn roundTrip(setup: *Pair, seed: u8) !void {
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
                 try std.testing.expectEqual(Protocol.status_v1, incoming.protocol);
-                try setup.shared.server.reqresp.respond(incoming.request, &reply, null, setup.shared.pair.now);
+                try setup.shared.server.control_reqresp.respond(incoming.request, &reply, null, setup.shared.pair.now);
             },
-            .chunk_sent => |sent| try std.testing.expect(setup.shared.server.reqresp.finish(sent.request, setup.shared.pair.now)),
+            .chunk_sent => |sent| try std.testing.expect(setup.shared.server.control_reqresp.finish(sent.request, setup.shared.pair.now)),
             else => {},
         };
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &reply, chunk.bytes);
-                try std.testing.expect(setup.shared.client.reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, chunk.request, setup.shared.pair.now));
+                try std.testing.expect(setup.shared.client.control_reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, chunk.request, setup.shared.pair.now));
             },
             .done => done = true,
             .failed => return error.TestUnexpectedResult,
@@ -64,8 +66,8 @@ test "protocol stack round trips a status request through the collapsed host loo
     defer setup.deinit();
 
     try roundTrip(&setup, 5);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.control_reqresp.pendingCounts().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.control_reqresp.pendingCounts().inbound);
 }
 
 test "protocol stack stream capture contains application framing exactly once" {
@@ -120,7 +122,7 @@ test "protocol stack reclaims inbound sinks across more requests than it has slo
 
     var seed: u8 = 0;
     while (seed < 12) : (seed += 1) try roundTrip(&setup, seed);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.control_reqresp.pendingCounts().inbound);
 }
 
 test "protocol stack fails in-flight requests when the connection closes" {
@@ -130,8 +132,9 @@ test "protocol stack fails in-flight requests when the connection closes" {
 
     const request_ssz = statusBytes(1);
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
-    _ = try setup.shared.client.request(
+    _ = try setup.shared.client.control_reqresp.request(
         &setup.shared.pair.client,
+        &setup.shared.client.router,
         setup.shared.handles.client,
         .status_v1,
         &request_ssz,
@@ -164,7 +167,7 @@ test "protocol stack fails in-flight requests when the connection closes" {
     }
     try std.testing.expect(client_failed);
     try std.testing.expect(server_failed);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.control_reqresp.pendingCounts().inbound);
 }
 
 test "protocol stack control wakeup includes negotiation after application quiescence" {
@@ -174,15 +177,17 @@ test "protocol stack control wakeup includes negotiation after application quies
     setup.shared.client.closeApplications(&setup.shared.pair.client, setup.shared.pair.now);
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
-    const handle = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .timeouts = .{ .response = .fromMilliseconds(60_000) } }, setup.shared.pair.now);
+    const handle = try setup.shared.client.control_reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .timeouts = .{ .response = .fromMilliseconds(60_000) } }, setup.shared.pair.now);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
     try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis() + 5_000), schedule_test_support.wakeupMilliseconds(schedule_test_support.protocolsSchedule(&setup.shared.client, .{ .control = 0 }), setup.shared.pair.now.millis()));
-    try std.testing.expect(setup.shared.client.reqresp.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
+    try std.testing.expect(setup.shared.client.control_reqresp.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
     try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(schedule_test_support.protocolsSchedule(&setup.shared.client, .{ .control = 0 }), setup.shared.pair.now.millis()));
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expect(events[0].failed.reason == .cancelled);
+    setup.shared.server.closeApplications(&setup.shared.pair.server, setup.shared.pair.now);
+    try roundTrip(&setup, 7);
 }
 
 test "protocol stack preserves drained native stream events across a partial request sweep" {
@@ -191,7 +196,7 @@ test "protocol stack preserves drained native stream events across a partial req
     defer setup.deinit();
     const bytes = [_]u8{9} ** 8;
     var sink: [8]u8 = undefined;
-    _ = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
+    _ = try setup.shared.client.control_reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
     var incoming: ?reqresp.RequestHandle = null;
     for (0..30) |_| {
         try setup.pumpOnce();
@@ -201,8 +206,8 @@ test "protocol stack preserves drained native stream events across a partial req
         if (incoming != null) break;
     }
     try std.testing.expect(incoming != null);
-    const stream = setup.shared.server.reqresp.inbound[incoming.?.index].request.stream;
-    setup.shared.client.reqresp.options.work_per_pump_max = 1;
+    const stream = setup.shared.server.control_reqresp.inbound[incoming.?.index].request.stream;
+    setup.shared.client.control_reqresp.options.work_per_pump_max = 1;
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
     var wire: [codec.frame_scratch_max]u8 = undefined;
     const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
@@ -236,7 +241,7 @@ test "protocol stack request work remains bounded and rotates between live strea
     var sinks: [2][8]u8 = undefined;
     var handles: [2]reqresp.RequestHandle = undefined;
     for (&sinks, &handles) |*sink, *handle| {
-        handle.* = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, sink, .{}, setup.shared.pair.now);
+        handle.* = try setup.shared.client.control_reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, sink, .{}, setup.shared.pair.now);
     }
     var incoming: [2]reqresp.RequestHandle = undefined;
     var received: usize = 0;
@@ -253,29 +258,29 @@ test "protocol stack request work remains bounded and rotates between live strea
     var wire: [codec.frame_scratch_max]u8 = undefined;
     const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
     for (incoming) |handle| {
-        const stream = setup.shared.server.reqresp.inbound[handle.index].request.stream;
+        const stream = setup.shared.server.control_reqresp.inbound[handle.index].request.stream;
         try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
     }
     try setup.shared.pair.pump();
-    protocols_test_support.forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
-    setup.shared.client.reqresp.options.work_per_pump_max = 1;
+    protocols_test_support.forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.control_reqresp });
+    setup.shared.client.control_reqresp.options.work_per_pump_max = 1;
     var events: [2]Event = undefined;
     var delivered: [2]reqresp.RequestHandle = undefined;
     for (&delivered) |*handle| {
-        const count = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control;
+        const count = setup.shared.client.control_reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, &events);
         try std.testing.expectEqual(@as(usize, 1), count);
         try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
         handle.* = events[0].chunk.request;
     }
     try std.testing.expect(!std.meta.eql(delivered[0], delivered[1]));
-    for (handles) |handle| try std.testing.expect(setup.shared.client.reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
+    for (handles) |handle| try std.testing.expect(setup.shared.client.control_reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
 }
 
 test "protocol stack reqresp slot is serviced only after a stream event or its deadline" {
     var setup: Pair = .{};
     try setup.init(.{}, .{ .progress_timeout_ms = 1_000 });
     defer setup.deinit();
-    const server = &setup.shared.server.reqresp;
+    const server = &setup.shared.server.control_reqresp;
     // Two accepted ping streams whose request bytes have not arrived.
     const fed = try setup.openRaw(.ping_v1);
     try setup.awaitRawSelection(fed, .ping_v1);
@@ -287,7 +292,7 @@ test "protocol stack reqresp slot is serviced only after a stream event or its d
     for (0..8) |_| {
         try setup.pumpOnce();
         try std.testing.expectEqual(idle, server.visits);
-        try std.testing.expect(schedule_test_support.wakeupMilliseconds(server.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()).? > setup.shared.pair.now.millis());
+        try std.testing.expect(schedule_test_support.wakeupMilliseconds(server.schedule(1), setup.shared.pair.now.millis()).? > setup.shared.pair.now.millis());
     }
 
     const ping = [_]u8{3} ** 8;
@@ -329,12 +334,12 @@ test "protocol stack reqresp slot is serviced only after a stream event or its d
 
 test "protocol stack reqresp deadline fires on time while more slots than the pump budget stay ready" {
     // One client identity opens every stream, so its request starts need a larger burst.
-    var admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 128, 128, 8);
+    var admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 128, 2);
     admission.limits.starts.tokens = 64;
     var setup: Pair = .{};
     try setup.init(.{}, .{ .progress_timeout_ms = 1_000, .admission = admission });
     defer setup.deinit();
-    const server = &setup.shared.server.reqresp;
+    const server = &setup.shared.server.control_reqresp;
     // An accepted ping stream whose request never arrives.
     const stream = try setup.openRaw(.ping_v1);
     try setup.awaitRawSelection(stream, .ping_v1);
@@ -386,12 +391,12 @@ test "protocol stack reqresp slots stay indexed by connection across a reconnect
     var setup: Pair = .{};
     try setup.init(.{}, .{});
     defer setup.deinit();
-    const server = &setup.shared.server.reqresp;
-    const client = &setup.shared.client.reqresp;
+    const server = &setup.shared.server.control_reqresp;
+    const client = &setup.shared.client.control_reqresp;
     const old = setup.shared.handles;
     const bytes = [_]u8{4} ** 8;
     var sinks: [2][8]u8 = undefined;
-    _ = try setup.shared.client.request(&setup.shared.pair.client, old.client, .ping_v1, &bytes, &sinks[0], .{}, setup.shared.pair.now);
+    _ = try setup.shared.client.control_reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, old.client, .ping_v1, &bytes, &sinks[0], .{}, setup.shared.pair.now);
     const stale = try awaitRequest(&setup);
     const slots_per_connection = server.receive_layout.slots_per_connection;
     try std.testing.expectEqual(@as(usize, old.server.index), stale.index / slots_per_connection);
@@ -408,7 +413,7 @@ test "protocol stack reqresp slots stay indexed by connection across a reconnect
     try std.testing.expectEqual(old.server.index, fresh_server.index);
     try std.testing.expect(old.server.generation != fresh_server.generation);
 
-    _ = try setup.shared.client.request(&setup.shared.pair.client, fresh_client, .ping_v1, &bytes, &sinks[1], .{}, setup.shared.pair.now);
+    _ = try setup.shared.client.control_reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, fresh_client, .ping_v1, &bytes, &sinks[1], .{}, setup.shared.pair.now);
     for (0..8) |_| try setup.pumpOnce();
     try std.testing.expectEqual(@as(u8, 1), server.inboundProtocolRunningCount(fresh_server, .ping_v1));
     try std.testing.expectEqual(@as(u8, 1), server.inboundPendingCount(old.server));
@@ -471,8 +476,8 @@ test "protocol stack reqresp request on one connection among 64 visits only its 
     var setup: Pair = .{};
     try setup.init(.{}, .{});
     defer setup.deinit();
-    const server = &setup.shared.server.reqresp;
-    const client = &setup.shared.client.reqresp;
+    const server = &setup.shared.server.control_reqresp;
+    const client = &setup.shared.client.control_reqresp;
     var connections: [64]Engine.Handle = undefined;
     connections[0] = setup.shared.handles.client;
     var dialed: usize = 1;
@@ -492,7 +497,7 @@ test "protocol stack reqresp request on one connection among 64 visits only its 
 
     const bytes = [_]u8{6} ** 8;
     var sink: [8]u8 = undefined;
-    _ = try setup.shared.client.request(&setup.shared.pair.client, connections[41], .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
+    _ = try setup.shared.client.control_reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, connections[41], .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
     const incoming = try awaitRequest(&setup);
     try server.respond(incoming, &bytes, null, setup.shared.pair.now);
     var done = false;
@@ -514,8 +519,8 @@ test "protocol stack reqresp request on one connection among 64 visits only its 
     // would visit every slot of every connection.
     try std.testing.expect(client.visits - idle[0] <= 16);
     try std.testing.expect(server.visits - idle[1] <= 16);
-    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(server.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
-    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(client.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(server.schedule(1), setup.shared.pair.now.millis()));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(client.schedule(1), setup.shared.pair.now.millis()));
 }
 
 test "protocol stack reqresp retains request and chunk bytes through control progress" {
@@ -523,11 +528,11 @@ test "protocol stack reqresp retains request and chunk bytes through control pro
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var options = try reservedOptions();
+    var options = try applicationOptions();
     options.forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }};
-    var client = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.client);
+    var client = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .control_reqresp = try control_fixture.controlOptions(), .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.client);
     defer client.deinit();
-    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .control_reqresp = try control_fixture.controlOptions(), .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const sink = try std.testing.allocator.alloc(
@@ -550,8 +555,9 @@ test "protocol stack reqresp retains request and chunk bytes through control pro
     );
     const ping_bytes = [_]u8{42} ++ [_]u8{0} ** 7;
     var pong: [8]u8 = undefined;
-    _ = try client.request(
+    _ = try client.control_reqresp.request(
         &pair.client,
+        &client.router,
         handles.client,
         .ping_v1,
         &ping_bytes,
@@ -568,7 +574,7 @@ test "protocol stack reqresp retains request and chunk bytes through control pro
         for (output[0..received.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &ping_bytes, chunk.bytes);
-                try std.testing.expect(client.reqresp.consume(&pair.client, &client.router, chunk.request, pair.now));
+                try std.testing.expect(client.control_reqresp.consume(&pair.client, &client.router, chunk.request, pair.now));
                 got_pong = true;
             },
             .failed => return error.TestUnexpectedResult,
@@ -578,9 +584,9 @@ test "protocol stack reqresp retains request and chunk bytes through control pro
         for (output[0..incoming.control]) |event| switch (event) {
             .request => |request| {
                 try std.testing.expectEqual(protocol.Protocol.ping_v1, request.protocol);
-                try server.reqresp.respond(request.request, &ping_bytes, null, pair.now);
+                try server.control_reqresp.respond(request.request, &ping_bytes, null, pair.now);
             },
-            .chunk_sent => |sent| _ = server.reqresp.finish(sent.request, pair.now),
+            .chunk_sent => |sent| _ = server.control_reqresp.finish(sent.request, pair.now),
             .failed => return error.TestUnexpectedResult,
             else => {},
         };
@@ -588,7 +594,7 @@ test "protocol stack reqresp retains request and chunk bytes through control pro
     try std.testing.expect(got_pong);
     try std.testing.expectEqual(
         1,
-        server.reqresp.pump(&pair.server, &server.router, pair.now, .{ .application = &output, .control = &.{} }).application,
+        server.reqresp.pump(&pair.server, &server.router, pair.now, &output),
     );
     const request = output[0].request;
     try std.testing.expectEqualSlices(u8, &root, request.bytes);
@@ -606,23 +612,23 @@ test "protocol stack reqresp retains request and chunk bytes through control pro
     try std.testing.expectEqualSlices(u8, &block, sink[0..block.len]);
     try std.testing.expectEqual(
         pair.now.millis() + 10_000,
-        schedule_test_support.wakeupMilliseconds(client.reqresp.schedule(.{ .application = 0, .control = 1 }), pair.now.millis()),
+        schedule_test_support.wakeupMilliseconds(client.reqresp.schedule(0), pair.now.millis()),
     );
     try std.testing.expectEqual(
         pair.now.millis(),
-        schedule_test_support.wakeupMilliseconds(client.reqresp.schedule(.{ .application = 1, .control = 0 }), pair.now.millis()),
+        schedule_test_support.wakeupMilliseconds(client.reqresp.schedule(1), pair.now.millis()),
     );
     try std.testing.expect(client.reqresp.cancel(&pair.client, &client.router, app, pair.now));
-    _ = client.reqresp.pump(&pair.client, &client.router, pair.now, .{ .application = &.{}, .control = &.{} });
+    _ = client.reqresp.pump(&pair.client, &client.router, pair.now, &.{});
     try std.testing.expectEqual(
         1,
-        client.reqresp.pump(&pair.client, &client.router, pair.now, .{ .application = &output, .control = &.{} }).application,
+        client.reqresp.pump(&pair.client, &client.router, pair.now, &output),
     );
     try std.testing.expectEqualSlices(u8, &block, output[0].chunk.bytes);
     try std.testing.expectEqual(app, output[0].chunk.request);
     try std.testing.expectEqual(
         1,
-        client.reqresp.pump(&pair.client, &client.router, pair.now, .{ .application = &output, .control = &.{} }).application,
+        client.reqresp.pump(&pair.client, &client.router, pair.now, &output),
     );
     try std.testing.expectEqual(app, output[0].failed.request);
 }

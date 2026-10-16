@@ -110,7 +110,7 @@ test "core native immutable metadata response survives local update during pendi
     for (0..40) |_| {
         try setup.step(0);
         for (setup.server.peer_manager.control.responses) |response| if (response.request) |request| {
-            const slot = &setup.server.protocols.reqresp.inbound[request.index];
+            const slot = &setup.server.protocols.control_reqresp.inbound[request.index];
             if (slot.request.protocol != .metadata_v1) continue;
             try std.testing.expect(slot.request.io.writing);
             const changed: t.Metadata = .{ .seq_number = 5, .attnets = @splat(9) };
@@ -204,7 +204,7 @@ test "core native control retries a failed probe on the turn its retry deadline 
     const retry = row.retry_ms;
     try std.testing.expectEqual(setup.pair.now.millis() + setup.client.peer_manager.control.options.failure_retry_ms, retry);
     try std.testing.expectEqual(retry, schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now), setup.pair.now.millis()).?);
-    const counter = &setup.client.protocols.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
+    const counter = &setup.client.protocols.control_reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
     const started = counter.*;
     const visits = setup.client.peer_manager.control.visits;
     setup.pair.now.monotonic = time.milliseconds(retry - 1);
@@ -243,7 +243,7 @@ fn allocationCheck(a: std.mem.Allocator) !void {
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     const opts = resolvedOptions().core;
     const receive = router.Router.initialCapabilities(opts.protocols.router).receive;
-    var core = try PeerManager.init(a, &identity, &localState(.{}), opts.peerManager(), receive, .{ .connections = 4, .control_responses = opts.protocols.reqresp.serving_control_reserved });
+    var core = try PeerManager.init(a, &identity, &localState(.{}), opts.peerManager(), receive, .{ .connections = 4, .control_responses = opts.protocols.control_reqresp.serving_max });
     defer core.deinit();
 }
 
@@ -333,7 +333,7 @@ test "core native saturated app requests retain partitioned borrows while contro
         ),
     );
     try std.testing.expectError(
-        error.ControlProtocol,
+        error.ProtocolDisabled,
         setup.client.sendReqRespRequest(
             &server_id,
             .ping_v1,

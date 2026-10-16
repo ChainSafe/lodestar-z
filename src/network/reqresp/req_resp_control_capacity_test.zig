@@ -7,7 +7,8 @@ const support = @import("../quic/test_support.zig");
 const policy_fixture = @import("policy_fixture.zig");
 const Endpoint = @import("test_pair.zig").Endpoint;
 
-const reservedOptions = @import("control_fixture.zig").reservedOptions;
+const control_fixture = @import("control_fixture.zig");
+const applicationOptions = control_fixture.applicationOptions;
 
 test "reqresp decoder captures configured root byte bounds before reading a body" {
     var pair: support.Pair = .{};
@@ -16,7 +17,7 @@ test "reqresp decoder captures configured root byte bounds before reading a body
     const handles = try support.connectPair(&pair);
     var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var options = try reservedOptions();
+    var options = try applicationOptions();
     options.admission.policy.blob_identifiers_deneb = 2;
     options.admission.policy.blob_identifiers_electra = 3;
     options.request_fork = .deneb;
@@ -44,16 +45,16 @@ test "reqresp decoder captures configured root byte bounds before reading a body
     try std.testing.expectEqual(@as(usize, 0), newer.written);
 }
 
-test "reqresp partitions compact outbound control storage without consuming application capacity" {
-    const options = try reservedOptions();
-    var requests = try rr.init(std.testing.allocator, options);
-    defer requests.deinit();
-    for (0..options.outbound_control_reserved) |index| {
-        const slot = &requests.outbound[index];
+test "reqresp instances size outbound storage from their own protocols" {
+    var application = try rr.init(std.testing.allocator, try applicationOptions());
+    defer application.deinit();
+    var control = try rr.init(std.testing.allocator, try control_fixture.controlOptions());
+    defer control.deinit();
+    for (control.outbound) |*slot| {
         try std.testing.expectEqual(protocol.control_scratch_length, slot.request.io.scratch.len);
         try std.testing.expectEqual(RequestIO.control_read_buffer_length, slot.request.io.read_buffer.len);
     }
-    for (requests.outbound[options.outbound_control_reserved..]) |*slot| {
+    for (application.outbound) |*slot| {
         try std.testing.expectEqual(RequestIO.scratch_length, slot.request.io.scratch.len);
         try std.testing.expectEqual(RequestIO.read_buffer_length, slot.request.io.read_buffer.len);
     }
@@ -66,7 +67,7 @@ test "reqresp compact control admission rejects oversized handoffs before claimi
     const handles = try support.connectPair(&pair);
     var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var requests = try rr.init(std.testing.allocator, try reservedOptions());
+    var requests = try rr.init(std.testing.allocator, try control_fixture.controlOptions());
     defer requests.deinit();
     defer requests.cancelAll(&pair.server, &router, pair.now);
     const stream = try inboundStream(&pair, handles.client);
@@ -87,8 +88,11 @@ test "reqresp control capacity protects outbound slots and retains terminal owne
     const handles = try support.connectPair(&pair);
     var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var requests = try rr.init(std.testing.allocator, try reservedOptions());
+    var requests = try rr.init(std.testing.allocator, try applicationOptions());
     defer requests.deinit();
+    var controls = try rr.init(std.testing.allocator, try control_fixture.controlOptions());
+    defer controls.deinit();
+    defer controls.cancelAll(&pair.client, &router, pair.now);
     const size = protocol.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, size * 3);
     defer {
@@ -129,7 +133,7 @@ test "reqresp control capacity protects outbound slots and retains terminal owne
         ),
     );
     var pong: [8]u8 = undefined;
-    const ping = try requests.request(
+    const ping = try controls.request(
         &pair.client,
         &router,
         handles.client,
@@ -156,7 +160,7 @@ test "reqresp control capacity protects outbound slots and retains terminal owne
         ),
     );
     var events: [1]rr.Event = undefined;
-    try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &events }).application);
+    try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, &events));
     try std.testing.expectEqual(first, events[0].failed.request);
     _ = try requests.request(
         &pair.client,
@@ -170,17 +174,20 @@ test "reqresp control capacity protects outbound slots and retains terminal owne
     );
 }
 
-test "reqresp control capacity bounds application requests per connection across protocols" {
+test "reqresp bounds application requests per connection across protocols" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
     var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var options: rr.Options = .{ .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 8, 2, 4), .outbound_max = 4, .serving_max = 4, .forks = &.{} };
+    var options: rr.Options = .{ .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 8, 1), .outbound_max = 4, .serving_max = 4, .forks = &.{} };
     options.outbound_per_connection_max = 2;
     var requests = try rr.init(std.testing.allocator, options);
     defer requests.deinit();
+    var controls = try rr.init(std.testing.allocator, try control_fixture.controlOptions());
+    defer controls.deinit();
+    defer controls.cancelAll(&pair.client, &router, pair.now);
     const size = protocol.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, 3 * size);
     defer {
@@ -221,7 +228,7 @@ test "reqresp control capacity bounds application requests per connection across
         ),
     );
     var pong: [8]u8 = undefined;
-    _ = try requests.request(
+    _ = try controls.request(
         &pair.client,
         &router,
         handles.client,
@@ -233,7 +240,7 @@ test "reqresp control capacity bounds application requests per connection across
     );
     try std.testing.expect(requests.cancel(&pair.client, &router, first, pair.now));
     var events: [1]rr.Event = undefined;
-    _ = requests.pump(&pair.client, &router, pair.now, .{ .application = &.{} }).application;
+    _ = requests.pump(&pair.client, &router, pair.now, &.{});
     try std.testing.expectError(
         error.TooManyRequests,
         requests.request(
@@ -247,7 +254,7 @@ test "reqresp control capacity bounds application requests per connection across
             pair.now,
         ),
     );
-    try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &events }).application);
+    try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, &events));
     try std.testing.expectEqual(first, events[0].failed.request);
     _ = try requests.request(
         &pair.client,
@@ -279,10 +286,11 @@ test "reqresp inbound admission selects distinct reserved sinks" {
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var options = try reservedOptions();
+    var options = try applicationOptions();
     options.inbound_per_connection_max = 4;
-    var server = try Endpoint.init(std.testing.allocator, options, .{});
+    var server = try Endpoint.init(std.testing.allocator, options, try control_fixture.controlOptions(), .{});
     defer server.deinit();
+    defer server.control_reqresp.cancelAll(&pair.server, &server.router, pair.now);
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const ordinary: Router.Selection = .{
         .protocol = .{ .reqresp = .blocks_by_root_v2 },
@@ -292,11 +300,11 @@ test "reqresp inbound admission selects distinct reserved sinks" {
     const first = (server.reqresp.accept(&pair.server, try inboundStream(&pair, handles.client), ordinary, pair.now) catch null).?;
     const second = (server.reqresp.accept(&pair.server, try inboundStream(&pair, handles.client), ordinary, pair.now) catch null).?;
     try std.testing.expect(first.index != second.index);
-    const status = (server.reqresp.accept(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = .status_v1 }, .leftover = &.{}, .fin = false }, pair.now) catch null).?;
-    try std.testing.expect(status.index != first.index and status.index != second.index);
+    const status = (server.control_reqresp.accept(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = .status_v1 }, .leftover = &.{}, .fin = false }, pair.now) catch null).?;
+    try std.testing.expect(server.control_reqresp.inbound[status.index].receive.sink.ptr != server.reqresp.inbound[first.index].receive.sink.ptr);
     try std.testing.expectEqual(
-        server.reqresp.inbound[status.index].receive.sink.ptr,
-        server.reqresp.inbound[status.index].request.io.sink.ptr,
+        server.control_reqresp.inbound[status.index].receive.sink.ptr,
+        server.control_reqresp.inbound[status.index].request.io.sink.ptr,
     );
 }
 
@@ -304,7 +312,6 @@ test "reqresp admission refusals distinguish capacity and concurrency without fa
     const Case = struct {
         slots: u16,
         connection_limit: u8,
-        application_limit: u8 = 0,
         held: u8 = 2,
         accepted: protocol.Protocol = .ping_v1,
         refused: protocol.Protocol = .ping_v1,
@@ -313,7 +320,7 @@ test "reqresp admission refusals distinguish capacity and concurrency without fa
     };
     const cases = [_]Case{
         .{ .slots = 4, .connection_limit = 2, .refused = .status_v1, .reason = .connection_capacity, .failure = error.ConnectionSlotsExhausted },
-        .{ .slots = 4, .connection_limit = 4, .application_limit = 1, .held = 1, .accepted = .blocks_by_root_v2, .refused = .blocks_by_range_v2, .reason = .connection_capacity, .failure = error.ConnectionSlotsExhausted },
+        .{ .slots = 4, .connection_limit = 1, .held = 1, .accepted = .blocks_by_root_v2, .refused = .blocks_by_range_v2, .reason = .connection_capacity, .failure = error.ConnectionSlotsExhausted },
         .{ .slots = 4, .connection_limit = 4, .reason = .protocol_concurrency, .failure = error.ProtocolConcurrency },
     };
     for (cases) |case| {
@@ -327,9 +334,8 @@ test "reqresp admission refusals distinguish capacity and concurrency without fa
             .outbound_max = 1,
             .serving_max = case.slots,
             .inbound_per_connection_max = case.connection_limit,
-            .inbound_application_per_connection_max = case.application_limit,
             .forks = &.{},
-            .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 8, 2, case.slots),
+            .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 8, @max(1, (case.slots) / 4)),
         });
         defer requests.deinit();
         defer requests.cancelAll(&pair.server, &router, pair.now);
@@ -355,32 +361,15 @@ test "reqresp admission refusals distinguish capacity and concurrency without fa
     }
 }
 
-test "reqresp control capacity validates headroom and cleans every allocation prefix" {
+test "reqresp validates headroom and cleans every allocation prefix" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailures, .{});
-    var options = try reservedOptions();
-    options.outbound_control_reserved = 5;
-    try std.testing.expectError(
-        error.InvalidOptions,
-        rr.init(std.testing.allocator, options),
-    );
-    options = try reservedOptions();
-    options.serving_control_reserved = 5;
-    try std.testing.expectError(
-        error.InvalidOptions,
-        rr.init(std.testing.allocator, options),
-    );
-    options = try reservedOptions();
+    var options = try applicationOptions();
     options.outbound_per_connection_max = 3;
     try std.testing.expectError(
         error.InvalidOptions,
         rr.init(std.testing.allocator, options),
     );
-    options = try reservedOptions();
-    options.inbound_application_per_connection_max = 3;
-    options.serving_max = 16;
-    options.inbound_per_connection_max = 2;
-    try std.testing.expectError(error.InvalidOptions, rr.init(std.testing.allocator, options));
-    options = try reservedOptions();
+    options = try applicationOptions();
     options.outbound_max = 64;
     options.outbound_per_connection_max = 61;
     try std.testing.expectError(
@@ -399,14 +388,14 @@ test "reqresp control capacity validates headroom and cleans every allocation pr
     );
 }
 
-test "reqresp control capacity zero defaults retain all ordinary slots and admission rollback" {
+test "reqresp available slots preserve admission rollback" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
     var requests = try rr.init(
         std.testing.allocator,
-        .{ .outbound_max = 4, .serving_max = 4, .forks = &.{}, .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 8, 2, 4) },
+        .{ .outbound_max = 4, .serving_max = 4, .forks = &.{}, .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 8, 1) },
     );
     defer requests.deinit();
     var router = try Router.init(std.testing.allocator, .{ .negotiations_max = 4 });
@@ -481,12 +470,12 @@ test "reqresp control capacity zero defaults retain all ordinary slots and admis
     requests.cancelAll(&pair.client, &router, pair.now);
     try std.testing.expectEqual(0, router.negotiator.active());
     var events: [4]rr.Event = undefined;
-    try std.testing.expectEqual(4, requests.pump(&pair.client, &router, pair.now, .{ .application = &events }).application);
+    try std.testing.expectEqual(4, requests.pump(&pair.client, &router, pair.now, &events));
     for (events) |event| try std.testing.expectEqual(rr.Failure.cancelled, event.failed.reason);
 }
 
 fn allocationFailures(allocator: std.mem.Allocator) !void {
-    var options = try reservedOptions();
+    var options = try applicationOptions();
     options.outbound_per_connection_max = 2;
     var requests = try rr.init(allocator, options);
     defer requests.deinit();
@@ -500,24 +489,24 @@ test "reqresp reserved physical sinks admit full native control wave and recycle
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var options = try reservedOptions();
-    options.inbound_per_connection_max = 4;
-    var server = try Endpoint.init(std.testing.allocator, options, .{});
+    var options = try applicationOptions();
+    options.inbound_per_connection_max = 8;
+    var server = try Endpoint.init(std.testing.allocator, options, try control_fixture.controlOptions(), .{});
     defer server.deinit();
-    defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
-    var wave: [4]rr.RequestHandle = undefined;
-    for ([_]protocol.Protocol{ .status_v1, .ping_v1, .metadata_v3, .goodbye_v1 }, 0..) |which, i| {
-        wave[i] = (server.reqresp.accept(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = which }, .leftover = &.{}, .fin = false }, pair.now) catch null).?;
-        try std.testing.expectEqual(server.reqresp.inbound[wave[i].index].receive.sink.ptr, server.reqresp.inbound[wave[i].index].request.io.sink.ptr);
-        try std.testing.expect(server.reqresp.inbound[wave[i].index].receive.sink.len >= which.info().request_max);
+    defer server.control_reqresp.cancelAll(&pair.server, &server.router, pair.now);
+    var wave: [8]rr.RequestHandle = undefined;
+    for ([_]protocol.Protocol{ .status_v1, .status_v1, .ping_v1, .ping_v1, .metadata_v3, .metadata_v3, .goodbye_v1, .goodbye_v1 }, 0..) |which, i| {
+        wave[i] = (server.control_reqresp.accept(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = which }, .leftover = &.{}, .fin = false }, pair.now) catch null).?;
+        try std.testing.expectEqual(server.control_reqresp.inbound[wave[i].index].receive.sink.ptr, server.control_reqresp.inbound[wave[i].index].request.io.sink.ptr);
+        try std.testing.expect(server.control_reqresp.inbound[wave[i].index].receive.sink.len >= which.info().request_max);
     }
-    try std.testing.expect(server.reqresp.cancel(&pair.server, &server.router, wave[0], pair.now));
+    try std.testing.expect(server.control_reqresp.cancel(&pair.server, &server.router, wave[0], pair.now));
     var events: [4]rr.Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), server.reqresp.pump(&pair.server, &server.router, pair.now, .{ .control = &events }).control);
+    try std.testing.expectEqual(@as(usize, 1), server.control_reqresp.pump(&pair.server, &server.router, pair.now, &events));
     try std.testing.expectEqual(wave[0], events[0].failed.request);
-    try std.testing.expectEqual(@as(usize, 0), server.reqresp.pump(&pair.server, &server.router, pair.now, .{ .control = &events }).control);
-    try std.testing.expect(server.reqresp.responseReadiness(wave[0]) == .stale);
-    const replacement = (server.reqresp.accept(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = .status_v1 }, .leftover = &.{}, .fin = false }, pair.now) catch null).?;
+    try std.testing.expectEqual(@as(usize, 0), server.control_reqresp.pump(&pair.server, &server.router, pair.now, &events));
+    try std.testing.expect(server.control_reqresp.responseReadiness(wave[0]) == .stale);
+    const replacement = (server.control_reqresp.accept(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = .status_v1 }, .leftover = &.{}, .fin = false }, pair.now) catch null).?;
     try std.testing.expectEqual(wave[0].index, replacement.index);
     try std.testing.expectEqual(wave[0].generation + 1, replacement.generation);
 }

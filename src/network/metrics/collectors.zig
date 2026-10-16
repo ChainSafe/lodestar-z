@@ -189,8 +189,10 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
         for (rr.protocol.methods, 0..) |method, index| {
             if (!firstMethod(index)) continue;
             var count: u64 = 0;
-            for (rr.protocol.methods, &self.owner.protocols.reqresp.protocol_counters) |candidate, *values| {
-                if (std.mem.eql(u8, candidate, method)) count +|= @field(values, metric[1]);
+            for ([_]*const rr.ReqResp{ &self.owner.protocols.reqresp, &self.owner.protocols.control_reqresp }) |instance| {
+                for (rr.protocol.methods, &instance.protocol_counters) |candidate, *values| {
+                    if (std.mem.eql(u8, candidate, method)) count +|= @field(values, metric[1]);
+                }
             }
             try requests.sample(.{method}, count);
         }
@@ -212,20 +214,24 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
         var rate_limited: u64 = 0;
         inline for (std.meta.fields(rr.ReqResp.metrics.AdmissionRefusal)) |reason| {
             var count: u64 = 0;
-            for (rr.protocol.methods, &self.owner.protocols.reqresp.protocol_counters) |candidate, *values| {
-                if (std.mem.eql(u8, candidate, method)) count +|= values.admission_refusals[reason.value];
+            for ([_]*const rr.ReqResp{ &self.owner.protocols.reqresp, &self.owner.protocols.control_reqresp }) |instance| {
+                for (rr.protocol.methods, &instance.protocol_counters) |candidate, *values| {
+                    if (std.mem.eql(u8, candidate, method)) count +|= values.admission_refusals[reason.value];
+                }
             }
             try refusals.sample(.{ method, reason.name }, count);
             if (comptime reason.value == @intFromEnum(rr.ReqResp.metrics.AdmissionRefusal.peer_quota) or reason.value == @intFromEnum(rr.ReqResp.metrics.AdmissionRefusal.global_quota)) rate_limited +|= count;
         }
         try rate_limits.sample(.{method}, rate_limited);
     }
+    var phases = self.owner.protocols.reqresp.resourceSnapshot().inbound_phases;
+    for (&phases, self.owner.protocols.control_reqresp.resourceSnapshot().inbound_phases) |*count, control| count.* += control;
     try w.enums(.{
         .name = "beacon_reqresp_incoming_count",
         .kind = .gauge,
         .help = "Occupied incoming request slots by current phase, including terminal owners awaiting recycling",
         .labels = &.{"phase"},
-    }, rr.ReqResp.metrics.InboundPhase, &self.owner.protocols.reqresp.resourceSnapshot().inbound_phases);
+    }, rr.ReqResp.metrics.InboundPhase, &phases);
 }
 
 fn writeRequestStreams(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -246,27 +252,35 @@ fn writeRequestStreams(self: *const Context, w: *prom.Encoder) prom.Error!void {
             if (!firstMethod(index)) continue;
             var opened_count: u64 = 0;
             var closed_count: u64 = 0;
-            for (rr.protocol.methods, &self.owner.protocols.reqresp.protocol_counters) |candidate, *values| {
-                if (!std.mem.eql(u8, candidate, method)) continue;
-                if (comptime std.mem.eql(u8, direction, "outgoing")) {
-                    opened_count +|= values.outgoing_opened;
-                    closed_count +|= values.outgoing_closed;
-                } else {
-                    opened_count +|= values.incoming;
-                    closed_count +|= values.incoming_time.count;
+            for ([_]*const rr.ReqResp{ &self.owner.protocols.reqresp, &self.owner.protocols.control_reqresp }) |instance| {
+                for (rr.protocol.methods, &instance.protocol_counters) |candidate, *values| {
+                    if (!std.mem.eql(u8, candidate, method)) continue;
+                    if (comptime std.mem.eql(u8, direction, "outgoing")) {
+                        opened_count +|= values.outgoing_opened;
+                        closed_count +|= values.outgoing_closed;
+                    } else {
+                        opened_count +|= values.incoming;
+                        closed_count +|= values.incoming_time.count;
+                    }
                 }
             }
             try opened.sample(.{method}, opened_count);
             try closed.sample(.{method}, closed_count);
         }
     }
-    const reasons = &self.owner.protocols.reqresp.outgoing_error_reasons;
+    const reasons = requestErrorReasons(self);
     try w.scalar(.{
         .name = "beacon_reqresp_dial_errors_total",
         .kind = .counter,
         .help = "Outgoing requests failing protocol negotiation, including negotiation timeouts",
     }, reasons[@intFromEnum(rr.ReqResp.metrics.ErrorReason.REQUEST_ERROR_DIAL_ERROR)] +|
         reasons[@intFromEnum(rr.ReqResp.metrics.ErrorReason.REQUEST_ERROR_DIAL_TIMEOUT)]);
+}
+
+fn requestErrorReasons(self: *const Context) [rr.ReqResp.metrics.error_reason_count]u64 {
+    var result = self.owner.protocols.reqresp.outgoing_error_reasons;
+    for (&result, self.owner.protocols.control_reqresp.outgoing_error_reasons) |*count, control| count.* +|= control;
+    return result;
 }
 
 fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -284,8 +298,10 @@ fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {
         for (rr.protocol.methods, 0..) |method, index| {
             if (!firstMethod(index)) continue;
             var aggregate: @TypeOf(@field(self.owner.protocols.reqresp.protocol_counters[0], metric[1])) = .{};
-            for (rr.protocol.methods, &self.owner.protocols.reqresp.protocol_counters) |candidate, *values| {
-                if (std.mem.eql(u8, candidate, method)) aggregate.merge(&@field(values, metric[1]));
+            for ([_]*const rr.ReqResp{ &self.owner.protocols.reqresp, &self.owner.protocols.control_reqresp }) |instance| {
+                for (rr.protocol.methods, &instance.protocol_counters) |candidate, *values| {
+                    if (std.mem.eql(u8, candidate, method)) aggregate.merge(&@field(values, metric[1]));
+                }
             }
             try durations.histogram(.{method}, &aggregate);
         }
@@ -295,7 +311,7 @@ fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .kind = .counter,
         .help = "Terminal outgoing native failures using host request error labels",
         .labels = &.{"reason"},
-    }, rr.ReqResp.metrics.ErrorReason, &self.owner.protocols.reqresp.outgoing_error_reasons);
+    }, rr.ReqResp.metrics.ErrorReason, &requestErrorReasons(self));
 }
 
 fn writeBridge(self: *const Context, w: *prom.Encoder) prom.Error!void {

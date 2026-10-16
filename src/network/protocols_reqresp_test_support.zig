@@ -29,7 +29,7 @@ pub const Pair = struct {
     }
 
     fn protocolsOptions(overrides: Overrides, forks: []const ForkEntry) !protocols.Protocols.Options {
-        return .{ .reqresp = try requests.Pair.options(overrides, forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 } };
+        return .{ .reqresp = try requests.Pair.options(overrides, forks), .control_reqresp = try requests.Pair.controlOptions(overrides, forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 } };
     }
 
     pub fn deinit(self: *Pair) void {

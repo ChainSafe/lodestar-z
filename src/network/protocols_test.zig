@@ -9,6 +9,7 @@ const topic_mod = @import("gossipsub/topic.zig");
 const multistream = @import("wire/multistream.zig");
 const protobuf = @import("gossipsub/protobuf.zig");
 const protocols_mod = @import("protocols.zig");
+const control_fixture = @import("reqresp/control_fixture.zig");
 const policy_fixture = @import("reqresp/policy_fixture.zig");
 const protocols_test_support = @import("protocols_test_support.zig");
 const topic_fixture = @import("gossipsub/topic_fixture.zig");
@@ -18,12 +19,13 @@ const ForkSeq = @import("config").ForkSeq;
 const admission_fixture = @import("reqresp/admission_fixture.zig");
 
 fn rrOptions() !protocols_mod.Protocols.Options {
-    return .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
+    return .{ .gossipsub = .{ .random_seed = 1 }, .control_reqresp = try control_fixture.controlOptions(), .reqresp = .{
+        .protocols = .application,
         .outbound_max = 4,
         .serving_max = 4,
         .inbound_per_connection_max = 4,
         .forks = &.{},
-        .admission = try rr.ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 128, 4),
+        .admission = try rr.ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 1),
     } };
 }
 
@@ -33,9 +35,9 @@ test "protocol stack composes simultaneous ping and meshsub on one connection" {
     defer pair.deinit();
     var client = try protocols_test_support.initProtocols(std.testing.allocator, try rrOptions(), &pair.client);
     defer client.deinit();
-    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1, .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1, .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })} }, .reqresp = (try rrOptions()).reqresp, .control_reqresp = (try rrOptions()).control_reqresp }, &pair.server);
     defer server.deinit();
-    const requests = &server.reqresp;
+    const requests = &server.control_reqresp;
     const gossip = server.gossipsub;
     const handles = try support.connectPair(&pair);
     _ = gossip.peerConnected(&pair.server, handles.server, false, pair.now);
@@ -44,7 +46,7 @@ test "protocol stack composes simultaneous ping and meshsub on one connection" {
     try gossip_test.subscribe(gossip, topic);
     const ping = [_]u8{ 42, 0, 0, 0, 0, 0, 0, 0 };
     var response: [8]u8 = undefined;
-    _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &response, .{}, pair.now);
+    _ = try client.control_reqresp.request(&pair.client, &client.router, handles.client, .ping_v1, &ping, &response, .{}, pair.now);
     const stream = try pair.client.openStream(handles.client);
     const dialer = try multistream.Dialer.init("/meshsub/1.2.0");
     var bytes: [512]u8 = undefined;
@@ -62,7 +64,7 @@ test "protocol stack composes simultaneous ping and meshsub on one connection" {
         for (request_events[0..client_count]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &ping, chunk.bytes);
-                try std.testing.expect(client.reqresp.consume(&pair.client, &client.router, chunk.request, pair.now));
+                try std.testing.expect(client.control_reqresp.consume(&pair.client, &client.router, chunk.request, pair.now));
                 pong = true;
             },
             else => {},
@@ -89,22 +91,23 @@ test "protocol stack handles native stream events past empty request capacity" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var client = try protocols_test_support.initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
+    var client = try protocols_test_support.initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .control_reqresp = try control_fixture.controlOptions(), .reqresp = .{
+        .protocols = .application,
         .forks = &.{},
         .outbound_max = 64,
         .serving_max = 64,
         .work_per_pump_max = 1,
-        .admission = try rr.ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 128, 64),
+        .admission = try rr.ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 16),
     } }, &pair.client);
     defer client.deinit();
-    defer client.reqresp.cancelAll(&pair.client, &client.router, pair.now);
+    defer client.control_reqresp.cancelAll(&pair.client, &client.router, pair.now);
     var server = try protocols_test_support.initProtocols(std.testing.allocator, try rrOptions(), &pair.server);
     defer server.deinit();
-    defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
+    defer server.control_reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const handles = try support.connectPair(&pair);
     const ping = [_]u8{3} ** 8;
     var sink: [8]u8 = undefined;
-    _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
+    _ = try client.control_reqresp.request(&pair.client, &client.router, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
     var incoming: ?rr.ReqResp.RequestHandle = null;
     var transport: [16]Engine.Event = undefined;
     var requests: [8]rr.ReqResp.Event = undefined;
@@ -121,7 +124,7 @@ test "protocol stack handles native stream events past empty request capacity" {
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(schedule_test_support.protocolsSchedule(&client, .{ .control = 1 }), pair.now.millis()).? > pair.now.millis());
     var wire: [rr.codec.frame_scratch_max]u8 = undefined;
     const encoded = try rr.codec.encodeChunk(0, null, &ping, &wire);
-    const stream = server.reqresp.inbound[incoming.?.index].request.stream;
+    const stream = server.control_reqresp.inbound[incoming.?.index].request.stream;
     try std.testing.expectEqual(encoded.len, try pair.server.write(stream, encoded, false));
     try pair.pump();
     const polled = pair.events(&pair.client, &transport);
@@ -137,10 +140,10 @@ test "protocol stack gossip capacity refusal preserves reqresp and explicit host
     defer pair.deinit();
     var client = try protocols_test_support.initProtocols(std.testing.allocator, try rrOptions(), &pair.client);
     defer client.deinit();
-    defer client.reqresp.cancelAll(&pair.client, &client.router, pair.now);
-    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
+    defer client.control_reqresp.cancelAll(&pair.client, &client.router, pair.now);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = (try rrOptions()).reqresp, .control_reqresp = (try rrOptions()).control_reqresp }, &pair.server);
     defer server.deinit();
-    defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
+    defer server.control_reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const handles = try support.connectPair(&pair);
     const peers = @import("gossipsub/peer_book.zig");
     var retained: [peers.capacity - peers.outbound_reserve]peers.Ref = undefined;
@@ -157,7 +160,7 @@ test "protocol stack gossip capacity refusal preserves reqresp and explicit host
     try std.testing.expect(!server.gossipsub.admitted(handles.server));
     const ping = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;
-    _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
+    _ = try client.control_reqresp.request(&pair.client, &client.router, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
     var pong = false;
     for (0..64) |_| {
         var transport: [16]Engine.Event = undefined;
@@ -166,13 +169,13 @@ test "protocol stack gossip capacity refusal preserves reqresp and explicit host
         const count = client.process(&pair.client, pair.events(&pair.client, &transport), pair.now, .{ .control = &requests }).control;
         for (requests[0..count]) |event| if (event == .chunk) {
             try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);
-            try std.testing.expect(client.reqresp.consume(&pair.client, &client.router, event.chunk.request, pair.now));
+            try std.testing.expect(client.control_reqresp.consume(&pair.client, &client.router, event.chunk.request, pair.now));
             pong = true;
         };
         const counts = server.process(&pair.server, pair.events(&pair.server, &transport), pair.now, .{ .control = &requests });
         for (requests[0..counts.control]) |event| switch (event) {
-            .request => |request| try server.reqresp.respond(request.request, &ping, null, pair.now),
-            .chunk_sent => |sent| _ = server.reqresp.finish(sent.request, pair.now),
+            .request => |request| try server.control_reqresp.respond(request.request, &ping, null, pair.now),
+            .chunk_sent => |sent| _ = server.control_reqresp.finish(sent.request, pair.now),
             else => {},
         };
         if (pong) break;
@@ -192,19 +195,20 @@ test "protocol stack capabilities disabled outbound preserves stream and request
     const handles = try support.connectPair(&pair);
     var protocols = try protocols_test_support.initProtocols(std.testing.allocator, .{
         .reqresp = (try rrOptions()).reqresp,
+        .control_reqresp = (try rrOptions()).control_reqresp,
         .gossipsub = .{ .random_seed = 1 },
         .router = .{ .capabilities = caps.Directional{ .receive = .initEmpty(), .request = .initEmpty() } },
     }, &pair.client);
     defer protocols.deinit();
     const before = pair.client.resourceSnapshot();
-    const requests = protocols.reqresp.pendingCounts();
+    const requests = protocols.control_reqresp.pendingCounts();
     const negotiations = protocols.router.negotiator.active();
     var sink: [8]u8 = undefined;
-    try std.testing.expectError(error.ProtocolDisabled, protocols.request(&pair.client, handles.client, .ping_v1, &(@as([8]u8, @splat(0))), &sink, .{}, pair.now));
+    try std.testing.expectError(error.ProtocolDisabled, protocols.control_reqresp.request(&pair.client, &protocols.router, handles.client, .ping_v1, &(@as([8]u8, @splat(0))), &sink, .{}, pair.now));
     try std.testing.expectError(error.ProtocolDisabled, protocols.router.beginOutbound(&pair.client, handles.client, .{ .reqresp = .status_v1 }, pair.now));
     try std.testing.expectError(error.ProtocolDisabled, protocols.router.beginMeshsub(&pair.client, handles.client, pair.now));
     try std.testing.expectEqualDeep(before, pair.client.resourceSnapshot());
-    try std.testing.expectEqualDeep(requests, protocols.reqresp.pendingCounts());
+    try std.testing.expectEqualDeep(requests, protocols.control_reqresp.pendingCounts());
     try std.testing.expectEqual(negotiations, protocols.router.negotiator.active());
 }
 

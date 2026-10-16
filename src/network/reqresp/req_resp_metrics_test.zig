@@ -14,15 +14,15 @@ test "reqresp duration includes the final chunk hold until consume" {
     const reply = harness.statusBytes(9);
     const started = setup.shared.pair.now.millis();
     const handle = try harness.requestStatus(&setup, &request, &sink);
-    const counts = &setup.shared.client.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)];
+    const counts = &setup.shared.client.control_reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)];
     try std.testing.expectEqual(0, counts.outgoing_opened);
     var got_chunk = false;
     for (0..30) |_| {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
-                try setup.shared.server.reqresp.respond(incoming.request, &reply, null, setup.shared.pair.now);
-                try std.testing.expect(setup.shared.server.reqresp.finish(incoming.request, setup.shared.pair.now));
+                try setup.shared.server.control_reqresp.respond(incoming.request, &reply, null, setup.shared.pair.now);
+                try std.testing.expect(setup.shared.server.control_reqresp.finish(incoming.request, setup.shared.pair.now));
             },
             .failed => return error.TestUnexpectedResult,
             else => {},
@@ -37,7 +37,7 @@ test "reqresp duration includes the final chunk hold until consume" {
     try std.testing.expect(got_chunk);
     try std.testing.expectEqual(1, counts.outgoing_opened);
     try std.testing.expectEqual(0, counts.outgoing_closed);
-    const owner = &setup.shared.client.reqresp;
+    const owner = &setup.shared.client.control_reqresp;
     const times = &owner.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing_time;
     try std.testing.expectEqual(0, times.count);
     setup.shared.pair.now.monotonic = time.milliseconds(setup.shared.pair.now.millis() + 5000);
@@ -61,7 +61,7 @@ test "reqresp duration uses event time for cancellation negotiation and connecti
         var request: [ct.phase0.Status.fixed_size]u8 = undefined;
         var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
         const handle = try harness.requestStatus(&setup, &request, &sink);
-        const owner = &setup.shared.client.reqresp;
+        const owner = &setup.shared.client.control_reqresp;
         setup.shared.pair.now.monotonic = time.milliseconds(setup.shared.pair.now.millis() + 3000);
         const now = setup.shared.pair.now;
         switch (cause) {
@@ -104,7 +104,7 @@ test "reqresp stream metrics close a negotiated request exactly once on cancella
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
     const handle = try harness.requestStatus(&setup, &request, &sink);
     try harness.waitForRequest(&setup);
-    const owner = &setup.shared.client.reqresp;
+    const owner = &setup.shared.client.control_reqresp;
     const counts = &owner.protocol_counters[@intFromEnum(Protocol.status_v1)];
     try std.testing.expectEqual(1, counts.outgoing_opened);
     try std.testing.expectEqual(0, counts.outgoing_closed);
@@ -124,7 +124,7 @@ test "reqresp duration uses current time for inbound termination" {
         var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
         _ = try harness.requestStatus(&setup, &request, &sink);
         try harness.waitForRequest(&setup);
-        const owner = &setup.shared.server.reqresp;
+        const owner = &setup.shared.server.control_reqresp;
         const handle = setup.serverEvents()[0].request.request;
         const slot = &owner.inbound[handle.index];
         const started = slot.request.started_ms;
@@ -132,7 +132,7 @@ test "reqresp duration uses current time for inbound termination" {
         const now = setup.shared.pair.now;
         switch (cause) {
             .cancel => try std.testing.expect(owner.cancel(&setup.shared.pair.server, &setup.shared.server.router, handle, now)),
-            .reset => owner.streamClosed(&setup.shared.pair.server, &setup.shared.server.router, .{ .owner = .reqresp_inbound, .row = handle.index }, slot.request.stream, 7, now),
+            .reset => owner.streamClosed(&setup.shared.pair.server, &setup.shared.server.router, .{ .owner = .reqresp_control_inbound, .row = handle.index }, slot.request.stream, 7, now),
             .shutdown => owner.cancelAll(&setup.shared.pair.server, &setup.shared.server.router, now),
         }
         const times = &owner.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming_time;

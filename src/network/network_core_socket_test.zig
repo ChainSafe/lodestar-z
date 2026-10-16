@@ -230,7 +230,7 @@ test "core beacon idle scans do not manufacture immediate deadlines" {
     for (0..8) |_| {
         const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
         try std.testing.expect(result.failure == null);
-        try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(node.protocols.reqresp.schedule(.{}), now.millis()));
+        try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(node.protocols.reqresp.schedule(0), now.millis()));
         try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(now, .{}).schedule(), now.millis()).? > now.millis());
     }
     try std.testing.expectEqual(calls, backing_node.allocations);
@@ -258,7 +258,7 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
     const visits = .{ node.protocols.reqresp.visits, node.protocols.router.negotiator.visits };
     for (0..64) |_| {
         const now = try Now.read(std.testing.io);
-        if (schedule_test_support.wakeupMilliseconds(node.protocols.reqresp.schedule(.{ .application = 1, .control = 1 }), now.millis())) |wakeup| try std.testing.expect(wakeup > now.millis());
+        if (schedule_test_support.wakeupMilliseconds(node.protocols.reqresp.schedule(1), now.millis())) |wakeup| try std.testing.expect(wakeup > now.millis());
         try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.protocols.router.schedule(1), now.millis()).? > now.millis());
         try std.testing.expect(driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis()))).failure == null);
     }

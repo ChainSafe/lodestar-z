@@ -14,9 +14,8 @@ const Row = struct {
     identity: PeerId = undefined,
     occupied: bool = false,
     connections: u16 = 0,
-    debt: [Protocol.count]u128 = @splat(0),
     expires_ns: u128 = 0,
-    starts_ns: [2]u128 = @splat(0),
+    starts_ns: u128 = 0,
 
     fn reusable(self: *const Row, now_ns: u128) bool {
         return self.connections == 0 and (!self.occupied or self.expires_ns <= now_ns);
@@ -26,7 +25,9 @@ const Row = struct {
 pub const Limiter = struct {
     rows: []Row,
     options: Options,
-    global: [Protocol.count]u128 = @splat(0),
+    protocols: Protocol.Set,
+    debts: []u128,
+    global: []u128,
 
     pub fn validate(options: *const Options) error{ InvalidOptions, InvalidQuota }!void {
         if (options.identities == 0 or options.identities > identities_max) return error.InvalidOptions;
@@ -38,20 +39,36 @@ pub const Limiter = struct {
         }
     }
 
-    pub fn init(allocator: std.mem.Allocator, options: Options) InitError!Limiter {
+    pub fn init(allocator: std.mem.Allocator, protocols: Protocol.Set, options: Options) InitError!Limiter {
         try validate(&options);
+        if (protocols.len() == 0) return error.InvalidOptions;
         const rows = try allocator.alloc(Row, options.identities);
+        errdefer allocator.free(rows);
         @memset(rows, .{});
-        return .{ .rows = rows, .options = options };
+        const debts = try allocator.alloc(u128, (@as(usize, options.identities) + 1) * protocols.len());
+        @memset(debts, 0);
+        return .{ .rows = rows, .options = options, .protocols = protocols, .debts = debts, .global = debts[0..protocols.len()] };
     }
 
     pub fn deinit(self: *Limiter, allocator: std.mem.Allocator) void {
+        allocator.free(self.debts);
         allocator.free(self.rows);
         self.* = undefined;
     }
 
     pub fn memoryPlan(self: *const Limiter) struct { allocated_bytes: usize } {
-        return .{ .allocated_bytes = self.rows.len * @sizeOf(Row) };
+        return .{ .allocated_bytes = self.rows.len * @sizeOf(Row) + self.debts.len * @sizeOf(u128) };
+    }
+
+    fn debtRow(self: *const Limiter, row: *const Row) []u128 {
+        const index = (@intFromPtr(row) - @intFromPtr(self.rows.ptr)) / @sizeOf(Row);
+        std.debug.assert(index < self.rows.len and &self.rows[index] == row);
+        return self.debts[(index + 1) * self.protocols.len() ..][0..self.protocols.len()];
+    }
+
+    fn claim(self: *Limiter, row: *Row, identity: *const PeerId) void {
+        row.* = .{ .identity = identity.*, .occupied = true };
+        @memset(self.debtRow(row), 0);
     }
 
     /// Holds identity bookkeeping through connection retirement, without refunding existing debt.
@@ -66,7 +83,8 @@ pub const Limiter = struct {
             if (reclaim == null and row.reusable(@as(u128, now_ms) * ns_per_ms)) reclaim = @intCast(index);
         }
         const index = reclaim orelse return null;
-        self.rows[index] = .{ .identity = identity.*, .occupied = true, .connections = 1 };
+        self.claim(&self.rows[index], identity);
+        self.rows[index].connections = 1;
         return index;
     }
 
@@ -76,7 +94,7 @@ pub const Limiter = struct {
         row.connections -= 1;
     }
 
-    pub fn start(self: *Limiter, identity: *const PeerId, control: bool, now_ms: u64) Decision {
+    pub fn start(self: *Limiter, identity: *const PeerId, now_ms: u64) Decision {
         const now_ns = @as(u128, now_ms) * ns_per_ms;
         var reclaim: ?*Row = null;
         var found: ?*Row = null;
@@ -88,10 +106,9 @@ pub const Limiter = struct {
             if (reclaim == null and row.reusable(now_ns)) reclaim = row;
         }
         const row = found orelse reclaim orelse return .identity_capacity;
-        const class = @intFromBool(control);
-        const due = next(if (found != null) row.starts_ns[class] else 0, 1, self.options.starts, now_ns) orelse return .peer_quota;
-        if (found == null) row.* = .{ .identity = identity.*, .occupied = true };
-        row.starts_ns[class] = due;
+        const due = next(if (found != null) row.starts_ns else 0, 1, self.options.starts, now_ns) orelse return .peer_quota;
+        if (found == null) self.claim(row, identity);
+        row.starts_ns = due;
         row.expires_ns = @max(row.expires_ns, due);
         return .allowed;
     }
@@ -106,10 +123,10 @@ pub const Limiter = struct {
         return false;
     }
 
-    /// When `start` next admits the identity's class, in the style of `eligibleAt`: a retry hint
+    /// When `start` next admits the identity, in the style of `eligibleAt`: a retry hint
     /// that reserves nothing, so a waiting request rechecks then. Without a free row, the
     /// earliest row expiry.
-    pub fn startAt(self: *const Limiter, identity: *const PeerId, control: bool, now_ms: u64) u64 {
+    pub fn startAt(self: *const Limiter, identity: *const PeerId, now_ms: u64) u64 {
         const quota = self.options.starts;
         var previous: u128 = 0;
         var room = false;
@@ -117,7 +134,7 @@ pub const Limiter = struct {
         const now_ns = @as(u128, now_ms) * ns_per_ms;
         for (self.rows) |*row| {
             if (row.occupied and row.identity.eql(identity)) {
-                previous = row.starts_ns[@intFromBool(control)];
+                previous = row.starts_ns;
                 room = true;
                 break;
             }
@@ -141,7 +158,7 @@ pub const Limiter = struct {
         const now_ns = @as(u128, now_ms) * ns_per_ms;
         for (self.rows) |*row| {
             if (row.occupied and row.identity.eql(identity)) {
-                debt = row.debt[index];
+                debt = self.debtRow(row)[self.protocols.index(which).?];
                 room = true;
                 break;
             }
@@ -150,7 +167,7 @@ pub const Limiter = struct {
         }
         const peer_charge = (cost * peer.period_ms * ns_per_ms + peer.tokens - 1) / peer.tokens;
         const global_charge = (cost * global.period_ms * ns_per_ms + global.tokens - 1) / global.tokens;
-        const due = @max(if (room) 0 else expires, debt + peer_charge -| (@as(u128, peer.period_ms) * ns_per_ms), self.global[index] + global_charge -| (@as(u128, global.period_ms) * ns_per_ms));
+        const due = @max(if (room) 0 else expires, debt + peer_charge -| (@as(u128, peer.period_ms) * ns_per_ms), self.global[self.protocols.index(which).?] + global_charge -| (@as(u128, global.period_ms) * ns_per_ms));
         return @max(now_ms, std.math.cast(u64, (due +| (ns_per_ms - 1)) / ns_per_ms) orelse std.math.maxInt(u64));
     }
 
@@ -167,11 +184,11 @@ pub const Limiter = struct {
         const global = self.options.global[@intFromEnum(fork)][index];
         var debt: u128 = 0;
         for (self.rows) |*row| if (row.occupied and row.identity.eql(identity)) {
-            debt = row.debt[index];
+            debt = self.debtRow(row)[self.protocols.index(which).?];
             break;
         };
         const now_ns = @as(u128, now_ms) * ns_per_ms;
-        const cost = @min(remaining, available(debt, peer, now_ns), available(self.global[index], global, now_ns));
+        const cost = @min(remaining, available(debt, peer, now_ns), available(self.global[self.protocols.index(which).?], global, now_ns));
         if (cost == 0 or self.take(identity, which, cost, fork, now_ms) != .allowed) return 0;
         return cost;
     }
@@ -194,13 +211,13 @@ pub const Limiter = struct {
             if (reclaim == null and row.reusable(now_ns)) reclaim = row;
         }
         const row = found orelse reclaim orelse return .identity_capacity;
-        const previous = if (found != null) row.debt[index] else 0;
+        const previous = if (found != null) self.debtRow(row)[self.protocols.index(which).?] else 0;
         const peer_next = next(previous, cost, peer_quota, now_ns) orelse return .peer_quota;
-        const global_next = next(self.global[index], cost, global_quota, now_ns) orelse return .global_quota;
-        if (found == null) row.* = .{ .identity = identity.*, .occupied = true };
-        row.debt[index] = peer_next;
+        const global_next = next(self.global[self.protocols.index(which).?], cost, global_quota, now_ns) orelse return .global_quota;
+        if (found == null) self.claim(row, identity);
+        self.debtRow(row)[self.protocols.index(which).?] = peer_next;
         row.expires_ns = @max(row.expires_ns, peer_next);
-        self.global[index] = global_next;
+        self.global[self.protocols.index(which).?] = global_next;
         return .allowed;
     }
 };

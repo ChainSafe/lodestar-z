@@ -1,4 +1,5 @@
 const std = @import("std");
+const PeerId = @import("wire/peer_id.zig").PeerId;
 const Router = @import("router.zig").Router;
 const Engine = @import("quic/Engine.zig");
 const types = @import("types.zig");
@@ -13,6 +14,7 @@ pub const Protocols = struct {
     stopped: bool = false,
     router: Router,
     reqresp: reqresp_mod.ReqResp,
+    control_reqresp: reqresp_mod.ReqResp,
     gossipsub: *gossip_mod.Gossipsub,
     /// The router outcomes `dispatch` hands to their owners. A field rather than a local so
     /// ReleaseSafe does not fill it every turn.
@@ -22,6 +24,7 @@ pub const Protocols = struct {
         identify: identify_mod.Handler.Options = .{},
         router: Router.Options = .{},
         reqresp: reqresp_mod.ReqResp.Options,
+        control_reqresp: reqresp_mod.ReqResp.Options,
         gossipsub: gossip_mod.Gossipsub.Options = .{},
     };
     pub const Outputs = struct { application: []reqresp_mod.ReqResp.Event = &.{}, control: []reqresp_mod.ReqResp.Event = &.{}, identify: []identify_mod.Handler.Result = &.{} };
@@ -33,6 +36,11 @@ pub const Protocols = struct {
         try Router.validateOptions(options.router);
         try options.identify.validate();
         try options.reqresp.validate();
+        try options.control_reqresp.validate();
+        if (options.reqresp.protocols.bits != reqresp_mod.Protocol.Set.application.bits or
+            options.control_reqresp.protocols.bits != reqresp_mod.Protocol.Set.control.bits or
+            !std.meta.eql(options.reqresp.routes, reqresp_mod.ReqResp.Options.Routes.application) or
+            !std.meta.eql(options.control_reqresp.routes, reqresp_mod.ReqResp.Options.Routes.control)) return error.InvalidOptions;
         try options.gossipsub.validate();
     }
 
@@ -44,6 +52,8 @@ pub const Protocols = struct {
         errdefer router.deinit();
         var reqresp = try reqresp_mod.ReqResp.init(allocator, options.reqresp);
         errdefer reqresp.deinit();
+        var control_reqresp = try reqresp_mod.ReqResp.init(allocator, options.control_reqresp);
+        errdefer control_reqresp.deinit();
         const gossipsub = try allocator.create(gossip_mod.Gossipsub);
         errdefer allocator.destroy(gossipsub);
         gossipsub.* = try gossip_mod.Gossipsub.init(allocator, options.gossipsub);
@@ -53,6 +63,7 @@ pub const Protocols = struct {
             .identify = identify,
             .router = router,
             .reqresp = reqresp,
+            .control_reqresp = control_reqresp,
             .gossipsub = gossipsub,
         };
     }
@@ -63,6 +74,7 @@ pub const Protocols = struct {
         self.stopped = true;
         self.identify.shutdown(&self.router, engine);
         self.reqresp.cancelAll(engine, &self.router, now);
+        self.control_reqresp.cancelAll(engine, &self.router, now);
         self.gossipsub.closeSessions(&self.router, engine);
         self.router.negotiator.cancelAll(engine);
         self.applications_open = false;
@@ -74,6 +86,7 @@ pub const Protocols = struct {
         const allocator = self.gossipsub.allocator;
         self.gossipsub.deinit();
         allocator.destroy(self.gossipsub);
+        self.control_reqresp.deinit();
         self.reqresp.deinit();
         self.router.deinit();
         self.* = undefined;
@@ -89,7 +102,7 @@ pub const Protocols = struct {
         options: reqresp_mod.ReqResp.RequestOptions,
         now: types.Now,
     ) reqresp_mod.ReqResp.RequestError!reqresp_mod.ReqResp.RequestHandle {
-        if (self.stopped or (!self.applications_open and !protocol.isControl())) return error.ProtocolDisabled;
+        if (self.stopped or !self.applications_open) return error.ProtocolDisabled;
         return self.reqresp.request(
             engine,
             &self.router,
@@ -102,10 +115,18 @@ pub const Protocols = struct {
         );
     }
 
+    pub fn connectionOpened(self: *Protocols, conn: Engine.Handle, identity: *const PeerId, now: types.Now) bool {
+        if (!self.reqresp.connectionOpened(conn, identity, now)) return false;
+        if (self.control_reqresp.connectionOpened(conn, identity, now)) return true;
+        self.reqresp.admission.disconnected(conn);
+        return false;
+    }
+
     pub fn schedule(self: *const Protocols, capacities: Capacities) types.Schedule {
         std.debug.assert(!self.stopped);
         var result: types.Schedule = .{};
-        result = result.merge(self.reqresp.schedule(.{ .application = capacities.application, .control = capacities.control }));
+        result = result.merge(self.reqresp.schedule(capacities.application));
+        result = result.merge(self.control_reqresp.schedule(capacities.control));
         if (self.applications_open) result = result.merge(self.gossipsub.schedule());
         result = result.merge(self.identify.schedule(capacities.identify));
         result = result.merge(self.router.schedule(Router.outcomes_per_pump));
@@ -116,29 +137,18 @@ pub const Protocols = struct {
     pub fn process(self: *Protocols, engine: *Engine, events: []const Engine.Event, now: types.Now, outputs: Outputs) OutputCounts {
         std.debug.assert(!self.stopped);
         self.dispatch(engine, events, now);
-        const counts = self.reqresp.pump(engine, &self.router, now, .{ .application = outputs.application, .control = outputs.control });
+        const control = self.control_reqresp.pump(engine, &self.router, now, outputs.control);
+        const application = self.reqresp.pump(engine, &self.router, now, outputs.application);
         if (self.applications_open) self.gossipsub.pump(&self.router, engine, now);
-        return .{ .application = counts.application, .control = counts.control, .identify = self.identify.pump(&self.router, engine, now, outputs.identify) };
+        return .{ .application = application, .control = control, .identify = self.identify.pump(&self.router, engine, now, outputs.identify) };
     }
 
     /// Cancels application streams. Consume the previous process call's borrowed events first.
     pub fn closeApplications(self: *Protocols, engine: *Engine, now: types.Now) void {
         if (!self.applications_open) return;
         self.applications_open = false;
-        self.reqresp.cancelApplications(engine, &self.router, now);
+        self.reqresp.cancelAll(engine, &self.router, now);
         self.gossipsub.closeSessions(&self.router, engine);
-    }
-
-    fn rejectApplication(self: *const Protocols, outcome: *const Router.Outcome) bool {
-        if (self.applications_open) return false;
-        return switch (outcome.result) {
-            .ready => |selection| switch (selection.protocol) {
-                .reqresp => |which| !which.isControl(),
-                .meshsub => true,
-                .identify => false,
-            },
-            else => false,
-        };
     }
 
     /// Lifecycle events go to the router, reqresp, identify and gossip. Each stream readiness
@@ -153,8 +163,15 @@ pub const Protocols = struct {
         self.routeReadiness(engine, events);
         self.router.transportEvents(engine, events, now);
         for (events) |event| switch (event) {
-            .closed => |closed| self.reqresp.connectionClosed(engine, &self.router, closed.conn, now),
-            .stream_closed => |closed| self.reqresp.streamClosed(engine, &self.router, closed.route, closed.stream, closed.reset_code, now),
+            .closed => |closed| {
+                self.control_reqresp.connectionClosed(engine, &self.router, closed.conn, now);
+                self.reqresp.connectionClosed(engine, &self.router, closed.conn, now);
+            },
+            .stream_closed => |closed| switch (closed.route.owner) {
+                .reqresp_inbound, .reqresp_outbound => self.reqresp.streamClosed(engine, &self.router, closed.route, closed.stream, closed.reset_code, now),
+                .reqresp_control_inbound, .reqresp_control_outbound => self.control_reqresp.streamClosed(engine, &self.router, closed.route, closed.stream, closed.reset_code, now),
+                else => {},
+            },
             else => {},
         };
         self.identify.transportEvents(engine, events);
@@ -176,7 +193,8 @@ pub const Protocols = struct {
             switch (route.owner) {
                 .negotiation => self.router.negotiator.streamReady(route.row, ready.stream),
                 .identify => self.identify.streamReady(route.row, ready.stream),
-                .reqresp_outbound, .reqresp_inbound, .reqresp_control_outbound, .reqresp_control_inbound => self.reqresp.streamReady(route, ready.stream),
+                .reqresp_outbound, .reqresp_inbound => self.reqresp.streamReady(route, ready.stream),
+                .reqresp_control_outbound, .reqresp_control_inbound => self.control_reqresp.streamReady(route, ready.stream),
                 .gossip_inbound, .gossip_outbound => if (self.applications_open) self.gossipsub.streamReady(engine, route, ready.stream, ready.ready),
                 .none => {},
             }
@@ -188,16 +206,18 @@ pub const Protocols = struct {
         defer self.router.releaseOutcomes();
         for (self.outcomes[0..count]) |outcome| {
             const owner = outcome.protocol orelse continue;
-            if (self.rejectApplication(&outcome)) {
-                engine.closeStream(outcome.stream, 0);
-                continue;
-            }
             // The negotiator lets go of the stream; the new owner binds its own route.
             if (outcome.result == .ready) engine.bindStream(outcome.stream, .{}) catch {};
             switch (owner) {
                 .identify => self.identify.negotiationResult(&self.router, engine, outcome, now),
-                .reqresp => self.reqresp.negotiationResult(&self.router, engine, outcome, now),
-                .meshsub => self.gossipsub.negotiationResult(engine, outcome, now),
+                .reqresp => |which| {
+                    if (reqresp_mod.Protocol.Set.control.contains(which)) {
+                        self.control_reqresp.negotiationResult(&self.router, engine, outcome, now);
+                    } else if (!self.applications_open and outcome.direction == .inbound) {
+                        engine.closeStream(outcome.stream, 0);
+                    } else self.reqresp.negotiationResult(&self.router, engine, outcome, now);
+                },
+                .meshsub => if (self.applications_open) self.gossipsub.negotiationResult(engine, outcome, now) else engine.closeStream(outcome.stream, 0),
             }
         }
     }

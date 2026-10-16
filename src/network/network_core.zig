@@ -182,11 +182,12 @@ pub const NetworkCore = struct {
         };
         var protocols_options = resolved.core.protocols;
         protocols_options.reqresp.request_fork = local.fork.fork;
+        protocols_options.control_reqresp.request_fork = local.fork.fork;
         const identify_base = try protocols_options.identify.makeLocal(&self.transport.peerId(), &self.transport.sockets.localAddresses());
         const identify_local = try prepareIdentifyLocal(&identify_base, self.advertisementEndpoints(), router.Router.initialCapabilities(protocols_options.router));
         self.protocols = try Protocols.init(allocator, protocols_options, &identify_local);
         errdefer self.protocols.deinit();
-        self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, resolved.core.peerManager(), self.protocols.router.capabilities().receive, .{ .connections = self.transport.engine.limits.connections_max, .control_responses = protocols_options.reqresp.serving_control_reserved });
+        self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, resolved.core.peerManager(), self.protocols.router.capabilities().receive, .{ .connections = self.transport.engine.limits.connections_max, .control_responses = protocols_options.control_reqresp.serving_max });
         errdefer self.peer_manager.deinit();
         self.peer_manager.loadRemembered(startup.remembered, self.last_now);
         self.protocols.gossipsub.clock = io;
@@ -301,7 +302,7 @@ pub const NetworkCore = struct {
         if (self.peer_manager.phase != .running) return error.Stopped;
         try self.peer_manager.updateStatus(self.protocols.router.capabilities().receive, status);
     }
-    pub const RequestError = rr.ReqResp.RequestError || error{ StalePeer, Disconnected, Stopped, ControlProtocol };
+    pub const RequestError = rr.ReqResp.RequestError || error{ StalePeer, Disconnected, Stopped };
 
     /// Borrows request bytes and the exclusive response sink until terminal delivery or deinit.
     pub fn sendReqRespRequest(self: *NetworkCore, identity: *const t.PeerId, protocol: rr.Protocol, request: []const u8, sink: []u8, options: rr.ReqResp.RequestOptions, now: Now) RequestError!rr.ReqResp.RequestHandle {
@@ -309,7 +310,6 @@ pub const NetworkCore = struct {
         const snapshot = self.peer_manager.catalog.get(peer) orelse return error.StalePeer;
         const conn = snapshot.connection orelse return error.Disconnected;
         if (self.peer_manager.phase != .running) return error.Stopped;
-        if (protocol.isControl()) return error.ControlProtocol;
         return self.protocols.request(&self.transport.engine, conn, protocol, request, sink, options, now);
     }
     /// Releases the delivered response chunk and permits the next write into the sink.
@@ -488,6 +488,7 @@ pub const NetworkCore = struct {
         }
         pm.commitLocal(&prepared.local, now);
         self.protocols.reqresp.setRequestFork(prepared.local.fork.fork);
+        self.protocols.control_reqresp.setRequestFork(prepared.local.fork.fork);
         self.schedule = prepared.schedule;
     }
 
@@ -737,7 +738,7 @@ pub const NetworkCore = struct {
     }
 
     fn controlIo(self: *NetworkCore) peers.Control.Io {
-        return .{ .reqresp = &self.protocols.reqresp, .router = &self.protocols.router, .engine = &self.transport.engine };
+        return .{ .reqresp = &self.protocols.control_reqresp, .router = &self.protocols.router, .engine = &self.transport.engine };
     }
 
     fn transportEvent(self: *NetworkCore, event: *const Engine.Event, now: Now) void {
@@ -758,7 +759,7 @@ pub const NetworkCore = struct {
                 if (admission.displaced) |old| {
                     self.releaseConnection(.{ .peer = admission.peer, .conn = old }, now);
                 }
-                if (!self.protocols.reqresp.connectionOpened(connected.conn, &connected.peer_id, now)) {
+                if (!self.protocols.connectionOpened(connected.conn, &connected.peer_id, now)) {
                     std.log.scoped(.network_peers).debug("peer_admission_refused peer={f} connection={d}:{d} reason=reqresp_identity_capacity", .{ logging.peer(&connected.peer_id), connected.conn.index, connected.conn.generation });
                     self.closeConnection(admission.peer, connected.conn, .capacity, now);
                     return;
@@ -767,7 +768,7 @@ pub const NetworkCore = struct {
             },
             .closed => |*closed| {
                 const goodbye = if (pm.catalog.findConnection(closed.conn) != null)
-                    self.protocols.reqresp.closingGoodbye(quic, &self.protocols.router, closed.conn, now)
+                    self.protocols.control_reqresp.closingGoodbye(quic, &self.protocols.router, closed.conn, now)
                 else
                     null;
                 const retired = pm.transportClosed(closed, goodbye, now) orelse return;

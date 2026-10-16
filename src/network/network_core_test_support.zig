@@ -68,11 +68,10 @@ pub fn options() configuration.Options {
         .router = .{ .negotiations_max = 24, .outbound_reserved = 11 },
         .identify = .{ .inbound_max = 2, .outbound_max = 2 },
         .reqresp = .{
-            .outbound_max = 16,
-            .serving_max = 16,
+            .outbound_max = 13,
+            .serving_max = 13,
             .outbound_per_connection_max = 8,
-            .inbound_per_connection_max = 16,
-            .inbound_application_per_connection_max = 8,
+            .inbound_per_connection_max = 8,
         },
         .gossip = .{
             .topic_policy = comptime &.{topic_fixture.bytes(@splat(0))},
@@ -349,6 +348,7 @@ pub const Setup = struct {
         }
         var resolved = opts;
         resolved.core.protocols.reqresp.forks = self.forks[0..count];
+        resolved.core.protocols.control_reqresp.forks = self.forks[0..count];
         const io = self.pair.io();
         const client_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{1}));
         try self.client.init(std.testing.allocator, io, &resolved, .{ .host = &client_key, .bind = .{ .ip4 = .loopback(0) }, .local = local, .clock = slot_clock, .discovery = self.client_discovery });
@@ -465,7 +465,7 @@ pub fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
 pub fn failStatus(setup: *Setup, failure: ReqResp.Failure) !void {
     for (setup.client.peer_manager.control.connections) |operation| if (operation.request) |handle| {
         if (operation.protocol != .status_v1) continue;
-        const requests = &setup.client.protocols.reqresp;
+        const requests = &setup.client.protocols.control_reqresp;
         const slot = &requests.outbound[handle.index];
         slot.fail(requests, setup.pair.client, &setup.client.protocols.router, handle.index, failure, setup.pair.now);
 

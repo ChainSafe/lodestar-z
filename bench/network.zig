@@ -24,7 +24,7 @@ fn dueSources(node: *const network.NetworkCore, now: network.Now, outputs: netwo
     due[@intFromEnum(Source.transport_events)] = engine.eventsPending() or engine.releasesPending();
     due[@intFromEnum(Source.transport_timer)] = if (engine.nextDeadlineNs()) |deadline| deadline <= now.monotonic.raw.nanoseconds else false;
     due[@intFromEnum(Source.gossip)] = node.protocols.applications_open and node.protocols.gossipsub.schedule().due(now.monotonic);
-    due[@intFromEnum(Source.reqresp)] = node.protocols.reqresp.schedule(.{ .application = outputs.application.len, .control = network.NetworkCore.controls_per_turn }).due(now.monotonic);
+    due[@intFromEnum(Source.reqresp)] = node.protocols.reqresp.schedule(outputs.application.len).merge(node.protocols.control_reqresp.schedule(network.NetworkCore.controls_per_turn)).due(now.monotonic);
     due[@intFromEnum(Source.identify)] = node.protocols.identify.schedule(network.NetworkCore.identify_per_turn).due(now.monotonic);
     due[@intFromEnum(Source.negotiation)] = node.protocols.router.schedule(network.Router.outcomes_per_pump).due(now.monotonic);
     due[@intFromEnum(Source.peers)] = node.peer_manager.schedule(node.protocols.gossipsub, now, .{ .peers = outputs.peers.len, .dials = network.NetworkCore.dials_per_turn }).due(now.monotonic);
@@ -54,7 +54,7 @@ const Samples = struct {
     fn begin(node: *const network.NetworkCore) Samples {
         return .{
             .visits_start = node.transport.engine.visits,
-            .reqresp_visits_start = node.protocols.reqresp.visits,
+            .reqresp_visits_start = node.protocols.reqresp.visits + node.protocols.control_reqresp.visits,
             .negotiation_visits_start = node.protocols.router.negotiator.visits,
             .gossip_visits_start = node.protocols.gossipsub.sessions.visits,
             .control_visits_start = node.peer_manager.control.visits,
@@ -81,7 +81,7 @@ const Samples = struct {
         std.mem.sort(u64, &self.ns, {}, std.sort.asc(u64));
         const visits = node.transport.engine.visits;
         std.debug.print("case={s} turns={} wait_max_ms=0 p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} backlog_turns={} immediate_deadlines={} visits_timer={} visits_advance={} visits_flush={} uncapped_backlog_due={} uncapped_events_due={}\n", .{ name, turns, self.ns[turns / 2], self.ns[turns * 95 / 100], self.ns[turns * 99 / 100], self.ns[turns - 1], self.received, self.sent, self.backlog, self.immediate, visits.timer - self.visits_start.timer, visits.advance - self.visits_start.advance, visits.flush - self.visits_start.flush, self.uncapped_backlog, self.uncapped_events });
-        std.debug.print("case={s} visits_reqresp={} visits_negotiation={} visits_gossip={} visits_control={}\n", .{ name, node.protocols.reqresp.visits - self.reqresp_visits_start, node.protocols.router.negotiator.visits - self.negotiation_visits_start, node.protocols.gossipsub.sessions.visits - self.gossip_visits_start, node.peer_manager.control.visits - self.control_visits_start });
+        std.debug.print("case={s} visits_reqresp={} visits_negotiation={} visits_gossip={} visits_control={}\n", .{ name, node.protocols.reqresp.visits + node.protocols.control_reqresp.visits - self.reqresp_visits_start, node.protocols.router.negotiator.visits - self.negotiation_visits_start, node.protocols.gossipsub.sessions.visits - self.gossip_visits_start, node.peer_manager.control.visits - self.control_visits_start });
         std.debug.print("case={s} due_now", .{name});
         inline for (std.meta.fields(Source)) |field| {
             std.debug.print(" {s}={}", .{ field.name, self.due[field.value] });
@@ -93,7 +93,7 @@ const Samples = struct {
     fn visited(self: *const Samples, node: *const network.NetworkCore) u64 {
         const visits = node.transport.engine.visits;
         return (visits.timer - self.visits_start.timer) + (visits.advance - self.visits_start.advance) + (visits.flush - self.visits_start.flush) +
-            (node.protocols.reqresp.visits - self.reqresp_visits_start) + (node.protocols.router.negotiator.visits - self.negotiation_visits_start) +
+            (node.protocols.reqresp.visits + node.protocols.control_reqresp.visits - self.reqresp_visits_start) + (node.protocols.router.negotiator.visits - self.negotiation_visits_start) +
             (node.protocols.gossipsub.sessions.visits - self.gossip_visits_start) + (node.peer_manager.control.visits - self.control_visits_start);
     }
 };

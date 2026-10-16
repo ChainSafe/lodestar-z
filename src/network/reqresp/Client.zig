@@ -57,7 +57,7 @@ pub fn advance(self: *Client, ctx: *ReqResp, engine: *Engine, router: *Router, i
             .host_timeout
         else
             .timeout;
-        if (reason == .timeout and self.phase == .response and !request.protocol.isControl() and
+        if (reason == .timeout and self.phase == .response and ctx.options.report_non_completion and
             self.host_held_ms == 0 and !request.io.unread(engine, request.stream))
             request.peer_fault = .non_completion;
         self.fail(ctx, engine, router, index, reason, now);

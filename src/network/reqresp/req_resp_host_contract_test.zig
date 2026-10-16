@@ -4,11 +4,11 @@ const rr = @import("ReqResp.zig");
 const Pair = @import("test_pair.zig").Pair;
 
 fn request(pair: *Pair, bytes: []const u8, sink: []u8) !rr.RequestHandle {
-    _ = try pair.shared.client.reqresp.request(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.handles.client, .ping_v1, bytes, sink, .{}, pair.shared.pair.now);
+    _ = try pair.shared.client.control_reqresp.request(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.handles.client, .ping_v1, bytes, sink, .{}, pair.shared.pair.now);
     pair.server_event_capacity = 0;
     for (0..32) |_| {
         try pair.pumpOnce();
-        for (pair.shared.server.reqresp.inbound, 0..) |*slot, index| {
+        for (pair.shared.server.control_reqresp.inbound, 0..) |*slot, index| {
             if (slot.request.pendingEvent()) |event| if (event == .request) return slot.request.handle(@intCast(index));
         }
     }
@@ -16,7 +16,7 @@ fn request(pair: *Pair, bytes: []const u8, sink: []u8) !rr.RequestHandle {
 }
 
 fn drain(pair: *Pair, output: []rr.Event) usize {
-    return pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = output }).control;
+    return pair.shared.server.control_reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, output);
 }
 
 test "reqresp host readiness distinguishes notification pressure terminal race and stale handles" {
@@ -26,7 +26,7 @@ test "reqresp host readiness distinguishes notification pressure terminal race a
     const bytes = [_]u8{9} ** 8;
     var sink: [8]u8 = undefined;
     const handle = try request(&pair, &bytes, &sink);
-    const owner = &pair.shared.server.reqresp;
+    const owner = &pair.shared.server.control_reqresp;
     try std.testing.expectEqual(.backpressured, owner.responseReadiness(handle));
     try std.testing.expectError(error.Busy, owner.respond(handle, &bytes, null, pair.shared.pair.now));
     var events: [1]rr.Event = undefined;
@@ -74,7 +74,7 @@ test "reqresp queued chunk acknowledgement precedes cancellation terminal after 
     const bytes = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;
     const handle = try request(&pair, &bytes, &sink);
-    const owner = &pair.shared.server.reqresp;
+    const owner = &pair.shared.server.control_reqresp;
     var events: [1]rr.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), drain(&pair, &events));
     try owner.respond(handle, &bytes, null, pair.shared.pair.now);
@@ -103,7 +103,7 @@ test "reqresp finish while writing retains its independent host operation contra
     const bytes = [_]u8{4} ** 8;
     var sink: [8]u8 = undefined;
     const handle = try request(&pair, &bytes, &sink);
-    const owner = &pair.shared.server.reqresp;
+    const owner = &pair.shared.server.control_reqresp;
     var events: [1]rr.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), drain(&pair, &events));
     try owner.respond(handle, &bytes, null, pair.shared.pair.now);
@@ -124,7 +124,7 @@ test "reqresp abandonment releases negotiating request buffers and ignores stale
     var pair: Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    const owner = &pair.shared.client.reqresp;
+    const owner = &pair.shared.client.control_reqresp;
     const engine = &pair.shared.pair.client;
     const router = &pair.shared.client.router;
     var bytes = [_]u8{1} ** 8;
@@ -143,7 +143,7 @@ test "reqresp abandonment releases negotiating request buffers and ignores stale
     try std.testing.expectEqual(second, owner.outbound[second.index].request.handle(second.index));
     try std.testing.expect(owner.abandon(engine, router, second, pair.shared.pair.now) == null);
     var events: [4]rr.Event = undefined;
-    try std.testing.expectEqual(@as(usize, 0), owner.pump(engine, router, pair.shared.pair.now, .{ .control = &events }).control);
+    try std.testing.expectEqual(@as(usize, 0), owner.pump(engine, router, pair.shared.pair.now, &events));
 }
 
 test "reqresp abandonment returns recorded peer faults exactly once" {
@@ -152,7 +152,7 @@ test "reqresp abandonment returns recorded peer faults exactly once" {
     defer pair.deinit();
     const bytes = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;
-    const owner = &pair.shared.client.reqresp;
+    const owner = &pair.shared.client.control_reqresp;
     const engine = &pair.shared.pair.client;
     const router = &pair.shared.client.router;
     const handle = try owner.request(engine, router, pair.shared.handles.client, .ping_v1, &bytes, &sink, .{}, pair.shared.pair.now);
@@ -166,7 +166,7 @@ test "reqresp abandonment returns recorded peer faults exactly once" {
     try std.testing.expect(owner.abandon(engine, router, handle, pair.shared.pair.now) == null);
     try std.testing.expectEqualDeep(before, owner.protocol_counters[@intFromEnum(Protocol.ping_v1)]);
     var events: [1]rr.Event = undefined;
-    try std.testing.expectEqual(@as(usize, 0), owner.pump(engine, router, pair.shared.pair.now, .{ .control = &events }).control);
+    try std.testing.expectEqual(@as(usize, 0), owner.pump(engine, router, pair.shared.pair.now, &events));
 }
 
 test "reqresp abandonment ends queued and delivered outbound chunk borrows" {
@@ -177,12 +177,12 @@ test "reqresp abandonment ends queued and delivered outbound chunk borrows" {
         const bytes = [_]u8{5} ** 8;
         var sink: [8]u8 = undefined;
         const incoming = try request(&pair, &bytes, &sink);
-        const owner = &pair.shared.client.reqresp;
+        const owner = &pair.shared.client.control_reqresp;
         const client = &owner.outbound[0];
         const handle = client.request.handle(0);
         var events: [1]rr.Event = undefined;
         try std.testing.expectEqual(@as(usize, 1), drain(&pair, &events));
-        try pair.shared.server.reqresp.respond(incoming, &bytes, null, pair.shared.pair.now);
+        try pair.shared.server.control_reqresp.respond(incoming, &bytes, null, pair.shared.pair.now);
         for (0..32) |_| {
             _ = pair.shared.processServer(.{});
             try pair.shared.pair.pump();
@@ -193,13 +193,13 @@ test "reqresp abandonment ends queued and delivered outbound chunk borrows" {
         const engine = &pair.shared.pair.client;
         const router = &pair.shared.client.router;
         if (delivered) {
-            try std.testing.expectEqual(@as(usize, 1), owner.pump(engine, router, pair.shared.pair.now, .{ .control = &events }).control);
+            try std.testing.expectEqual(@as(usize, 1), owner.pump(engine, router, pair.shared.pair.now, &events));
             try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
         }
         try std.testing.expect(owner.cancel(engine, router, handle, pair.shared.pair.now));
         try std.testing.expect(owner.abandon(engine, router, handle, pair.shared.pair.now) == null);
         @memset(&sink, 99);
-        try std.testing.expectEqual(@as(usize, 0), owner.pump(engine, router, pair.shared.pair.now, .{ .control = &events }).control);
+        try std.testing.expectEqual(@as(usize, 0), owner.pump(engine, router, pair.shared.pair.now, &events));
         try std.testing.expectEqualSlices(u8, &([_]u8{99} ** 8), &sink);
         try std.testing.expect(client.request.available());
     }

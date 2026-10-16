@@ -22,7 +22,7 @@ fn refusals(owner: *const reqresp, reason: reqresp.metrics.AdmissionRefusal) u64
 }
 
 fn request(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u8, sink: []u8, options: reqresp.RequestOptions) !reqresp.RequestHandle {
-    return setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, which, bytes, sink, options, setup.shared.pair.now);
+    return setup.shared.client.requests(which).request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, which, bytes, sink, options, setup.shared.pair.now);
 }
 
 test "reqresp active new methods enforce request ceilings through real exchanges and reuse" {
@@ -299,8 +299,11 @@ test "reqresp active light client traffic preserves control reserve and cancella
     const handles = try support.connectPair(&pair);
     var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var owner = try reqresp.init(std.testing.allocator, try control_fixture.reservedOptions());
+    var owner = try reqresp.init(std.testing.allocator, try control_fixture.applicationOptions());
     defer owner.deinit();
+    var control_owner = try reqresp.init(std.testing.allocator, try control_fixture.controlOptions());
+    defer control_owner.deinit();
+    defer control_owner.cancelAll(&pair.client, &router, pair.now);
     const which = protocol.Protocol.light_client_finality_update_v1;
     const capacity = protocol.Protocol.light_client_updates_by_range_v1.info().response_max;
     const sink = try std.testing.allocator.alloc(u8, capacity * 2);
@@ -313,19 +316,18 @@ test "reqresp active light client traffic preserves control reserve and cancella
         const b = try owner.request(&pair.client, &router, handles.client, .light_client_optimistic_update_v1, "", sink[capacity..], .{}, pair.now);
         try std.testing.expectError(error.SlotsExhausted, owner.request(&pair.client, &router, handles.client, .light_client_updates_by_range_v1, &([_]u8{0} ** 16), sink, .{}, pair.now));
         var ping: [8]u8 = @splat(0);
-        const control = try owner.request(&pair.client, &router, handles.client, .ping_v1, &ping, &ping, .{}, pair.now);
+        const control = try control_owner.request(&pair.client, &router, handles.client, .ping_v1, &ping, &ping, .{}, pair.now);
         try std.testing.expect(owner.cancel(&pair.client, &router, a, pair.now));
         try std.testing.expect(owner.cancel(&pair.client, &router, b, pair.now));
-        try std.testing.expect(owner.cancel(&pair.client, &router, control, pair.now));
+        try std.testing.expect(control_owner.cancel(&pair.client, &router, control, pair.now));
         var events: [2]reqresp.Event = undefined;
-        const controls = owner.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &events });
-        try std.testing.expectEqual(@as(usize, 0), controls.application);
-        try std.testing.expectEqual(@as(usize, 1), controls.control);
+        const controls = control_owner.pump(&pair.client, &router, pair.now, &events);
+        try std.testing.expectEqual(@as(usize, 1), controls);
         try std.testing.expectEqual(control, events[0].failed.request);
-        const applications = owner.pump(&pair.client, &router, pair.now, .{ .application = &events, .control = &.{} });
-        try std.testing.expectEqual(@as(usize, 2), applications.application);
+        const applications = owner.pump(&pair.client, &router, pair.now, &events);
+        try std.testing.expectEqual(@as(usize, 2), applications);
         for (events) |event| try std.testing.expect(event.failed.reason == .cancelled);
-        _ = owner.pump(&pair.client, &router, pair.now, .{ .application = &.{} }).application;
+        _ = owner.pump(&pair.client, &router, pair.now, &.{});
         try std.testing.expectEqual(@as(u16, 0), owner.pendingCounts().outbound);
         try std.testing.expectEqual(@as(usize, 0), router.negotiator.active());
     }
@@ -377,7 +379,7 @@ fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const 
             .request => |incoming| {
                 received += 1;
                 try std.testing.expect(allowed);
-                try std.testing.expect(setup.shared.server.reqresp.finish(incoming.request, setup.shared.pair.now));
+                try std.testing.expect(setup.shared.server.requests(which).finish(incoming.request, setup.shared.pair.now));
             },
             .served => served = true,
             .failed => return error.TestUnexpectedResult,
@@ -408,8 +410,8 @@ fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const 
     try std.testing.expect(terminal and served);
     try std.testing.expectEqual(@as(u32, if (allowed) 1 else 0), received);
     try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.requests(which).pendingCounts().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.requests(which).pendingCounts().inbound);
 }
 
 fn waitExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u8) !void {
@@ -421,7 +423,7 @@ fn waitExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(usize, 0), setup.clientEvents().len);
         try std.testing.expectEqual(@as(usize, 0), setup.serverEvents().len);
-        for (setup.shared.server.reqresp.inbound) |*slot| {
+        for (setup.shared.server.requests(which).inbound) |*slot| {
             if (slot.request.running() and slot.state == .ready and slot.admission.eligible_ms > setup.shared.pair.now.millis()) {
                 waiting = true;
             }
@@ -429,17 +431,17 @@ fn waitExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u
         if (waiting) break;
     }
     try std.testing.expect(waiting);
-    try std.testing.expect(setup.shared.client.reqresp.cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
+    try std.testing.expect(setup.shared.client.requests(which).cancel(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
     for (0..20) |_| {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| {
             try std.testing.expectEqual(.failed, std.meta.activeTag(event));
             try std.testing.expectEqual(reqresp.Failure.stream_closed, event.failed.reason);
         }
-        if (setup.shared.server.reqresp.pendingCounts().inbound == 0) break;
+        if (setup.shared.server.requests(which).pendingCounts().inbound == 0) break;
     }
     try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.requests(which).pendingCounts().inbound);
 }
 
 fn refusedStart(setup: *harness.Pair, which: protocol.Protocol) !void {

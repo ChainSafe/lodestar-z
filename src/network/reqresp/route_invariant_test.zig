@@ -64,10 +64,8 @@ test "reqresp routes negotiated streams through the configured instance" {
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{});
     defer setup.deinit();
-    const client = &setup.shared.client.reqresp;
-    const server = &setup.shared.server.reqresp;
-    client.options.routes = .control;
-    server.options.routes = .control;
+    const client = &setup.shared.client.control_reqresp;
+    const server = &setup.shared.server.control_reqresp;
     var request: [ct.phase0.Status.fixed_size]u8 = undefined;
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
     const handle = try harness.requestStatus(&setup, &request, &sink);

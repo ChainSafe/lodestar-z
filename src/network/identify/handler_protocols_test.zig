@@ -78,7 +78,7 @@ test "identify saturation leaves reserved Ping negotiation usable" {
     var opts = try options("small");
     opts.router = .{ .negotiations_max = 2, .outbound_control_reserved = 1 };
     opts.reqresp.outbound_max = 2;
-    opts.reqresp.outbound_control_reserved = 1;
+    opts.control_reqresp.outbound_max = 1;
     var client = try protocols_test_support.initProtocols(std.testing.allocator, opts, &pair.client);
     defer client.deinit();
     opts.router.negotiations_max = 4;
@@ -87,7 +87,7 @@ test "identify saturation leaves reserved Ping negotiation usable" {
     try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     const ping = [_]u8{1} ++ [_]u8{0} ** 7;
     var sink: [8]u8 = undefined;
-    _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
+    _ = try client.control_reqresp.request(&pair.client, &client.router, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
     var received = false;
     for (0..32) |_| {
         var events: [64]Engine.Event = undefined;
@@ -95,14 +95,14 @@ test "identify saturation leaves reserved Ping negotiation usable" {
         const cc = client.process(&pair.client, pair.events(&pair.client, &events), pair.now, .{ .control = &requests });
         for (requests[0..cc.control]) |event| if (event == .chunk) {
             try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);
-            try std.testing.expect(client.reqresp.consume(&pair.client, &client.router, event.chunk.request, pair.now));
+            try std.testing.expect(client.control_reqresp.consume(&pair.client, &client.router, event.chunk.request, pair.now));
             received = true;
         };
         try pair.pump();
         const sc = server.process(&pair.server, pair.events(&pair.server, &events), pair.now, .{ .control = &requests });
         for (requests[0..sc.control]) |event| switch (event) {
-            .request => |request| try server.reqresp.respond(request.request, &ping, null, pair.now),
-            .chunk_sent => |sent| _ = server.reqresp.finish(sent.request, pair.now),
+            .request => |request| try server.control_reqresp.respond(request.request, &ping, null, pair.now),
+            .chunk_sent => |sent| _ = server.control_reqresp.finish(sent.request, pair.now),
             else => {},
         };
         try pair.pump();

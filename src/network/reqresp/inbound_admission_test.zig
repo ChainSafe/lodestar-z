@@ -88,14 +88,14 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
             .leftover = leftover,
             .fin = false,
         }, pair.now));
-        try std.testing.expectEqual(pair.now.millis(), owner.admission.limiter.startAt(&identity, true, pair.now.millis()));
+        try std.testing.expectEqual(pair.now.millis(), owner.admission.limiter.startAt(&identity, pair.now.millis()));
         const third = try owner.accept(&pair.server, try inboundStream(&pair, handles.client), .{
             .protocol = .{ .reqresp = .metadata_v2 },
             .leftover = &.{},
             .fin = false,
         }, pair.now);
         try std.testing.expect(!owner.inbound[third.index].admission.start_pending);
-        try std.testing.expectEqual(pair.now.millis() + 500, owner.admission.limiter.startAt(&identity, true, pair.now.millis()));
+        try std.testing.expectEqual(pair.now.millis() + 500, owner.admission.limiter.startAt(&identity, pair.now.millis()));
     }
 }
 
@@ -124,7 +124,7 @@ fn readySlot(owner: *rr, peer: u16, which: Protocol, ordinal: u16, identity: Pee
 fn deferStart(owner: *rr, index: u16, now_ms: u64) void {
     const slot = &owner.inbound[index];
     slot.admission.start_pending = true;
-    slot.admission.eligible_ms = owner.admission.limiter.startAt(&slot.identity, slot.request.protocol.isControl(), now_ms);
+    slot.admission.eligible_ms = owner.admission.limiter.startAt(&slot.identity, now_ms);
     slot.admission.wait = if (slot.admission.eligible_ms > now_ms) .start else .none;
     owner.settleSlot(.inbound, index);
 }
@@ -152,7 +152,7 @@ test "inbound admission delayed decode and equal timestamps retain acceptance th
     // Reverse readiness order and start the round-robin scan at the higher slot.
     deferStart(&ties, high, 20);
     deferStart(&ties, low, 20);
-    ties.admission.connection_cursors[0].admission[0] = @intCast(high);
+    ties.admission.connection_cursors[0].admission = @intCast(high);
     ties.admission.promoteReady(&ties, Now.fromMilliseconds(.{ .mono_ms = 20, .unix_s = 0 }));
     try std.testing.expect(ties.inbound[low].request.pendingEvent() != null);
     try std.testing.expect(ties.inbound[high].admission.start_pending);
@@ -218,7 +218,7 @@ test "inbound admission cancellation removes each wait without refunding or spin
         const holder: rr.RequestHandle = .{ .direction = .inbound, .index = index + 1, .generation = 1 };
         switch (wait) {
             .start => {
-                for (0..2) |_| try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&identity, false, 0));
+                for (0..2) |_| try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&identity, 0));
                 deferStart(&owner, index, 0);
             },
             .tokens => {
@@ -227,8 +227,8 @@ test "inbound admission cancellation removes each wait without refunding or spin
             },
             .serving => {
                 owner.serving.per_peer_max = 1;
-                const execution = owner.serving.available(&identity, false).?;
-                _ = owner.serving.acquire(execution, holder, &identity, false);
+                const execution = owner.serving.available(&identity).?;
+                _ = owner.serving.acquire(execution, holder, &identity);
                 serving = owner.retainServing(holder) orelse return error.TestUnexpectedResult;
                 owner.serving.retire(execution);
             },
@@ -237,18 +237,18 @@ test "inbound admission cancellation removes each wait without refunding or spin
         owner.admission.promoteReady(&owner, Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 }));
         try std.testing.expectEqualStrings(@tagName(wait), @tagName(slot.admission.wait));
         if (wait == .tokens) try std.testing.expectEqual(@as(u128, 1), slot.admission.paid);
-        const start_due = owner.admission.limiter.startAt(&identity, false, 0);
+        const start_due = owner.admission.limiter.startAt(&identity, 0);
         const tokens_due = owner.admission.limiter.eligibleAt(&identity, .blocks_by_root_v2, 1, .phase0, 0);
         try std.testing.expect(owner.cancel(&pair.server, &router, slot.request.handle(index), Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 })));
         if (wait == .serving) try std.testing.expect(owner.releaseServing(serving.?));
-        try std.testing.expectEqual(start_due, owner.admission.limiter.startAt(&identity, false, 0));
+        try std.testing.expectEqual(start_due, owner.admission.limiter.startAt(&identity, 0));
         try std.testing.expectEqual(tokens_due, owner.admission.limiter.eligibleAt(&identity, .blocks_by_root_v2, 1, .phase0, 0));
         try std.testing.expect(!owner.admission.due());
         const visits = owner.visits;
         for (0..32) |_| owner.admission.promoteReady(&owner, Now.fromMilliseconds(.{ .mono_ms = 1000, .unix_s = 0 }));
         try std.testing.expectEqual(visits, owner.visits);
         try std.testing.expectEqual(@as(usize, 0), owner.resourceSnapshot().serving_occupied);
-        try std.testing.expectEqual(@as(u32, 0), owner.admission.ready[0].len);
+        try std.testing.expectEqual(@as(u32, 0), owner.admission.ready.len);
         owner.admission.checkSlot(slot, index);
     }
 }

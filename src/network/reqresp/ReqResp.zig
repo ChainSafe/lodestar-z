@@ -49,12 +49,10 @@ pub const outbound_stream_headroom = options_mod.outbound_stream_headroom;
 
 const Settings = struct {
     routes: Options.Routes,
+    report_non_completion: bool,
     connections: u16,
-    outbound_control_reserved: u16,
-    serving_control_reserved: u16,
     outbound_per_connection_max: u8,
     inbound_per_connection_max: u8,
-    inbound_application_per_connection_max: u8,
     progress_timeout_ms: u64,
     host_timeout_ms: u64,
     quota_timeout_ms: u64,
@@ -78,10 +76,6 @@ pub const RequestPhase = events_mod.RequestPhase;
 pub const RequestHandle = events_mod.RequestHandle;
 pub const Failure = events_mod.Failure;
 pub const Event = events_mod.Event;
-
-pub const Outputs = struct { application: []Event = &.{}, control: []Event = &.{} };
-pub const OutputCounts = struct { application: usize, control: usize };
-pub const Capacities = struct { application: usize = 0, control: usize = 0 };
 
 pub const InitError = admission_mod.InitError || error{InvalidPolicy};
 
@@ -154,9 +148,8 @@ serving: ServingPool,
 links: []SlotLinks,
 /// Running slots whose next advance can progress without a new stream event.
 ready: index_list.List = .{},
-/// Slots with a pending notification or an undelivered terminal, per class
-/// (application, control).
-deliver: [2]index_list.List = .{ .{}, .{} },
+/// Slots with a pending notification or an undelivered terminal.
+deliver: index_list.List = .{},
 /// Running slots keyed on their deadline, or on their admission eligibility while waiting
 /// for their start or tokens.
 deadlines: DeadlineHeap,
@@ -231,7 +224,7 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
     try options.validate();
     const policy = try request_policy.Policy.init(&options.admission.policy);
     const receive = ReceiveLayout.init(&policy, options.protocols);
-    var admission = try InboundAdmission.init(allocator, options.admission.limits, options.connections, receive.slots_per_connection);
+    var admission = try InboundAdmission.init(allocator, options.admission.limits, options.connections, options.protocols, receive.slots_per_connection);
     errdefer admission.deinit(allocator);
 
     const outbound = try allocator.alloc(Client, options.outbound_max);
@@ -245,14 +238,12 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
     errdefer allocator.free(request_sinks);
 
     const outbound_sizes = RequestIO.BufferSizes.init(options.protocols);
-    const control_buffers = RequestIO.BufferSizes.init(.control);
-    const outbound_bytes = @as(usize, options.outbound_max - options.outbound_control_reserved) * outbound_sizes.bytes() +
-        @as(usize, options.outbound_control_reserved) * control_buffers.bytes();
+    const outbound_bytes = @as(usize, options.outbound_max) * outbound_sizes.bytes();
     const inbound_bytes = @as(usize, options.connections) * receive.io_bytes;
     const arena = try allocator.alloc(u8, outbound_bytes + inbound_bytes);
     errdefer allocator.free(arena);
     var cursor: usize = 0;
-    for (outbound, 0..) |*slot, index| cursor = slot.request.io.assignBuffers(arena, cursor, if (index < options.outbound_control_reserved) control_buffers else outbound_sizes);
+    for (outbound) |*slot| cursor = slot.request.io.assignBuffers(arena, cursor, outbound_sizes);
     for (inbound, 0..) |*slot, index| {
         const buffers = receive.buffers(index, request_sinks, arena[outbound_bytes..]);
         slot.receive = buffers;
@@ -260,7 +251,7 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
     }
     assert(cursor == arena.len);
 
-    var serving = try ServingPool.init(allocator, options.serving_max, options.serving_control_reserved, options.serving_per_peer_max);
+    var serving = try ServingPool.init(allocator, options.serving_max, options.serving_per_peer_max, outbound_sizes.scratch);
     errdefer serving.deinit(allocator);
     const links = try allocator.alloc(SlotLinks, outbound.len + inbound.len);
     errdefer allocator.free(links);
@@ -275,12 +266,10 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
         .allocator = allocator,
         .options = .{
             .routes = options.routes,
+            .report_non_completion = options.report_non_completion,
             .connections = options.connections,
-            .outbound_control_reserved = options.outbound_control_reserved,
-            .serving_control_reserved = options.serving_control_reserved,
             .outbound_per_connection_max = options.outbound_per_connection_max,
             .inbound_per_connection_max = options.inbound_per_connection_max,
-            .inbound_application_per_connection_max = options.inbound_application_per_connection_max,
             .progress_timeout_ms = options.progress_timeout_ms,
             .host_timeout_ms = options.host_timeout_ms,
             .quota_timeout_ms = options.quota_timeout_ms,
@@ -368,10 +357,10 @@ pub fn request(
     if (self.outboundProtocolPendingCount(conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
         return error.TooManyRequests;
     }
-    if (!which.isControl() and self.options.outbound_per_connection_max > 0 and
-        self.outboundApplicationOccupiedCount(conn) >= self.options.outbound_per_connection_max)
+    if (self.options.outbound_per_connection_max > 0 and
+        self.outboundOccupiedCount(conn) >= self.options.outbound_per_connection_max)
         return error.TooManyRequests;
-    const index = self.availableOutboundFor(which) orelse return error.SlotsExhausted;
+    const index = self.availableOutbound() orelse return error.SlotsExhausted;
     const slot = &self.outbound[index];
     assert(!slot.conn_link.linked);
     const stream = router.beginReqRespTimed(engine, conn, which, now, request_options.timeouts.negotiation) catch |err| {
@@ -649,11 +638,10 @@ fn schedulerBytes(self: *const ReqResp) usize {
 
 /// Zero capacity suppresses event-only work. Reads list lengths and the heap top only.
 /// Router negotiation and transport deadlines remain separate.
-pub fn schedule(self: *const ReqResp, capacities: Capacities) types.Schedule {
+pub fn schedule(self: *const ReqResp, event_capacity: usize) types.Schedule {
     return .{
         .runnable = self.ready.len > 0 or
-            (capacities.application > 0 and self.deliver[0].len > 0) or
-            (capacities.control > 0 and self.deliver[1].len > 0) or self.admission.due(),
+            (event_capacity > 0 and self.deliver.len > 0) or self.admission.due(),
         .deadline = time.optionalMilliseconds(if (self.deadlines.peek()) |top| top.deadline else null),
     };
 }
@@ -685,19 +673,6 @@ fn recordOf(self: *const ReqResp, id: u32) *RequestState {
     return &self.inbound[id - self.outbound.len].request;
 }
 
-fn eventList(self: *ReqResp, which: EventList) *index_list.List {
-    return switch (which) {
-        .none => unreachable,
-        .application => &self.deliver[0],
-        .control => &self.deliver[1],
-    };
-}
-
-fn wantedEvent(record: *const RequestState) EventList {
-    if (!record.deliverable()) return .none;
-    return if (record.protocol.isControl()) .control else .application;
-}
-
 fn deadlineOf(self: *const ReqResp, id: u32) ?u64 {
     if (id < self.outbound.len) return self.outbound[id].deadline();
     const slot = &self.inbound[id - self.outbound.len];
@@ -719,22 +694,16 @@ pub fn settleSlot(self: *ReqResp, direction: types.Direction, index: u16) void {
 fn settle(self: *ReqResp, id: u32) void {
     const links = &self.links[id];
     const record = self.recordOf(id);
-    const wanted = wantedEvent(record);
-    if (wanted != links.event_list) {
-        if (links.event_list != .none) self.eventList(links.event_list).remove(self.links, "event", id);
-        if (wanted != .none) self.eventList(wanted).append(self.links, "event", id);
-        links.event_list = wanted;
-    }
+    const wanted = record.deliverable();
+    if (wanted and !links.event.linked) self.deliver.append(self.links, "event", id);
+    if (!wanted and links.event.linked) self.deliver.remove(self.links, "event", id);
     if (!record.running() and links.ready.linked) self.ready.remove(self.links, "ready", id);
     if (self.deadlineOf(id)) |key| self.deadlines.set(id, key) else self.deadlines.clear(id);
     if (id >= self.outbound.len) self.admission.settle(self.inbound, @intCast(id - self.outbound.len));
 }
 
-fn availableOutboundFor(self: *ReqResp, which: Protocol) ?u16 {
-    const reserved = self.options.outbound_control_reserved;
-    const start: usize = if (which.isControl()) 0 else reserved;
-    const end: usize = if (which.isControl() and reserved > 0) reserved else self.outbound.len;
-    for (self.outbound[start..end], start..) |*slot, index| {
+fn availableOutbound(self: *ReqResp) ?u16 {
+    for (self.outbound, 0..) |*slot, index| {
         if (slot.request.available()) return @intCast(index);
     }
     return null;
@@ -829,19 +798,10 @@ pub fn abandon(self: *ReqResp, engine: *Engine, router: *Router, handle: Request
     const terminal = record.terminalEvent().?;
     const fault = if (terminal.peerFault()) |value| value.* else null;
     record.notification = .none;
-    _ = record.deliver(record.protocol.isControl()).?;
+    _ = record.deliver().?;
     self.retire(handle.index);
     self.settle(handle.index);
     return fault;
-}
-
-pub fn cancelApplications(self: *ReqResp, engine: *Engine, router: *Router, now: Now) void {
-    for (self.outbound, 0..) |*slot, index| if (slot.request.occupied() and !slot.request.protocol.isControl()) {
-        _ = self.cancel(engine, router, slot.request.handle(@intCast(index)), now);
-    };
-    for (self.inbound, 0..) |*slot, index| if (slot.request.occupied() and !slot.request.protocol.isControl()) {
-        _ = self.cancel(engine, router, slot.request.handle(@intCast(index)), now);
-    };
 }
 
 /// Cancels current operations. Admission stays enabled; pump delivers notifications and terminals.
@@ -854,14 +814,11 @@ pub fn cancelAll(self: *ReqResp, engine: *Engine, router: *Router, now: Now) voi
     };
 }
 
-pub fn pump(self: *ReqResp, engine: *Engine, router: *Router, now: Now, outputs: Outputs) OutputCounts {
+pub fn pump(self: *ReqResp, engine: *Engine, router: *Router, now: Now, events: []Event) usize {
     const exhausted = self.advance(engine, router, now);
-    const counts: OutputCounts = .{
-        .application = self.drain(now, outputs.application, false),
-        .control = self.drain(now, outputs.control, true),
-    };
+    const count = self.drain(now, events);
     if (@import("builtin").is_test) self.checkInvariants(engine, now, exhausted);
-    return counts;
+    return count;
 }
 
 /// Services the due keys and the ready slots up to
@@ -915,21 +872,19 @@ fn advance(self: *ReqResp, engine: *Engine, router: *Router, now: Now) bool {
 }
 
 /// Delivers at most one event per queued slot, in queue order.
-fn drain(self: *ReqResp, now: Now, events: []Event, control: bool) usize {
-    const class: EventList = if (control) .control else .application;
-    const list = self.eventList(class);
+fn drain(self: *ReqResp, now: Now, events: []Event) usize {
+    const list = &self.deliver;
     const queued = list.len;
     var count: usize = 0;
     for (0..queued) |_| {
         if (count == events.len) break;
         const id = list.pop(self.links, "event").?;
-        self.links[id].event_list = .none;
         self.visits +|= 1;
         if (id < self.outbound.len) {
-            events[count] = self.outbound[id].request.deliver(control).?;
+            events[count] = self.outbound[id].request.deliver().?;
         } else {
             const slot = &self.inbound[id - self.outbound.len];
-            events[count] = slot.deliver(control, now).?;
+            events[count] = slot.deliver(now).?;
             if (slot.request.running() and slot.state == .finishing) self.markId(id);
         }
         if (!self.recordOf(id).occupied()) self.retire(id);
@@ -959,14 +914,14 @@ fn retire(self: *ReqResp, id: u32) void {
 /// budget to spare left no due key, and that each live stream a slot holds routes to it and
 /// back.
 fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhausted: bool) void {
-    var lengths: struct { ready: usize = 0, events: [3]usize = @splat(0) } = .{};
+    var lengths: struct { ready: usize = 0, events: usize = 0 } = .{};
     for (self.links, 0..) |*links, position| {
         const id: u32 = @intCast(position);
         const record = self.recordOf(id);
         lengths.ready += @intFromBool(links.ready.linked);
-        lengths.events[@intFromEnum(links.event_list)] += 1;
+        lengths.events += @intFromBool(links.event.linked);
         if (record.completion == .terminal) assert(record.stream_owner == .closed);
-        assert(links.event_list == wantedEvent(record));
+        assert(links.event.linked == record.deliverable());
         assert(!links.ready.linked or record.running());
         if (!record.running()) {
             assert(self.deadlines.get(id) == null);
@@ -1008,8 +963,7 @@ fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhaus
         }
     }
     assert(lengths.ready == self.ready.len);
-    assert(lengths.events[@intFromEnum(EventList.application)] == self.deliver[0].len);
-    assert(lengths.events[@intFromEnum(EventList.control)] == self.deliver[1].len);
+    assert(lengths.events == self.deliver.len);
     route_invariant.check(engine, self.options.routes, self.outbound, self.inbound) catch unreachable;
 }
 
@@ -1060,14 +1014,14 @@ pub fn outboundProtocolPendingCount(self: *const ReqResp, conn: Handle, which: P
     return count;
 }
 
-pub fn outboundApplicationOccupiedCount(self: *const ReqResp, conn: Handle) u16 {
+pub fn outboundOccupiedCount(self: *const ReqResp, conn: Handle) u16 {
     var count: u16 = 0;
     var cursor = if (conn.index < self.options.connections) self.outbound_by_connection[conn.index].head else index_list.none;
     for (0..self.outbound.len) |_| {
         if (cursor == index_list.none) break;
         const slot = &self.outbound[cursor];
         cursor = slot.conn_link.next;
-        if (!slot.request.occupied() or slot.request.protocol.isControl()) continue;
+        if (!slot.request.occupied()) continue;
         if (std.meta.eql(slot.request.conn, conn)) count += 1;
     }
     return count;
@@ -1077,15 +1031,6 @@ pub fn outboundApplicationOccupiedCount(self: *const ReqResp, conn: Handle) u16 
 fn inboundOf(self: *const ReqResp, conn: Handle) []const Server {
     if (conn.index >= self.options.connections) return &.{};
     return self.inbound[@as(usize, conn.index) * self.receive_layout.slots_per_connection ..][0..self.receive_layout.slots_per_connection];
-}
-
-pub fn inboundApplicationOccupiedCount(self: *const ReqResp, conn: Handle) u16 {
-    var count: u16 = 0;
-    for (self.inboundOf(conn)) |*slot| {
-        if (!slot.request.occupied() or slot.request.protocol.isControl()) continue;
-        if (std.meta.eql(slot.request.conn, conn)) count += 1;
-    }
-    return count;
 }
 
 pub fn inboundProtocolRunningCount(self: *const ReqResp, conn: Handle, which: Protocol) u8 {
@@ -1116,13 +1061,9 @@ pub fn forkFor(
     return null;
 }
 
-const EventList = enum(u2) { none, application, control };
-
 const SlotLinks = struct {
     ready: index_list.Link = .{},
-    /// On `deliver[class]`, as `event_list` names.
     event: index_list.Link = .{},
-    event_list: EventList = .none,
 };
 
 comptime {

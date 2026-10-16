@@ -275,7 +275,7 @@ pub fn armRetirement(runtime: *Runtime, cell: *Cell, awaited: bool) void {
     runtime.notifyIfReadyLocked();
 }
 
-fn rejection(err: n.NetworkCore.RequestError) error{ InvalidCapacity, SinkTooSmall, ControlProtocol }!Rejection {
+fn rejection(err: n.NetworkCore.RequestError) error{ InvalidCapacity, SinkTooSmall }!Rejection {
     return switch (err) {
         error.StalePeer, error.StaleHandle, error.Disconnected => .disconnected,
         error.ProtocolDisabled => .protocol_disabled,
@@ -287,7 +287,6 @@ fn rejection(err: n.NetworkCore.RequestError) error{ InvalidCapacity, SinkTooSma
         error.Transport, error.Stopped => .transport,
         error.InvalidCapacity => error.InvalidCapacity,
         error.SinkTooSmall => error.SinkTooSmall,
-        error.ControlProtocol => error.ControlProtocol,
     };
 }
 

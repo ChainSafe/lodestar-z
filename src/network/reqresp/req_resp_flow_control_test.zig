@@ -33,7 +33,7 @@ fn pumpRawServer(setup: *Pair, comptime reply: RawReply) !usize {
     const dialed = setup.shared.client.router.pump(&setup.shared.pair.client, now, &outcomes);
     for (outcomes[0..dialed]) |outcome| {
         if (outcome.result == .ready) leftover += outcome.result.ready.leftover.len;
-        try std.testing.expect(setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, &setup.shared.client.router, outcome, now));
+        try std.testing.expect(setup.shared.client.control_reqresp.negotiated(&setup.shared.pair.client, &setup.shared.client.router, outcome, now));
     }
     setup.forwardEvents();
     const listened = setup.shared.server.router.pump(&setup.shared.pair.server, now, &outcomes);
@@ -41,7 +41,7 @@ fn pumpRawServer(setup: *Pair, comptime reply: RawReply) !usize {
         .ready => try reply(setup, outcome.stream),
         else => return error.TestUnexpectedResult,
     };
-    setup.client_count = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, now, .{ .control = &setup.client_events }).control;
+    setup.client_count = setup.shared.client.control_reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, now, &setup.client_events);
     try setup.shared.pair.pump();
     return leftover;
 }
@@ -62,7 +62,7 @@ fn expectSingleChunk(setup: *Pair, comptime reply: RawReply, expected: []const u
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, expected, chunk.bytes);
-                try std.testing.expect(setup.shared.client.reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, chunk.request, setup.shared.pair.now));
+                try std.testing.expect(setup.shared.client.control_reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, chunk.request, setup.shared.pair.now));
             },
             .done => |finished| {
                 try std.testing.expectEqual(@as(u32, 1), finished.chunks);
@@ -82,30 +82,30 @@ fn finishAfterNotification(delay_ms: u64) !void {
     defer setup.deinit();
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
-    _ = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
+    _ = try setup.shared.client.control_reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
     try waitForRequest(&setup);
     const incoming = setup.serverEvents()[0].request.request;
-    try setup.shared.server.reqresp.respond(incoming, &bytes, null, setup.shared.pair.now);
+    try setup.shared.server.control_reqresp.respond(incoming, &bytes, null, setup.shared.pair.now);
     var pending = false;
     for (0..30) |_| {
-        _ = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &.{} }).control;
+        _ = setup.shared.server.control_reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, &.{});
         try setup.shared.pair.pump();
-        if (setup.shared.server.reqresp.inbound[incoming.index].request.pendingEvent() != null) {
+        if (setup.shared.server.control_reqresp.inbound[incoming.index].request.pendingEvent() != null) {
             pending = true;
             break;
         }
     }
     try std.testing.expect(pending);
-    try std.testing.expect(setup.shared.server.reqresp.finish(incoming, setup.shared.pair.now));
-    try std.testing.expect(!setup.shared.server.reqresp.finish(incoming, setup.shared.pair.now));
+    try std.testing.expect(setup.shared.server.control_reqresp.finish(incoming, setup.shared.pair.now));
+    try std.testing.expect(!setup.shared.server.control_reqresp.finish(incoming, setup.shared.pair.now));
     setup.shared.pair.advance(delay_ms);
     var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control);
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.control_reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, &events));
     try std.testing.expect(events[0] == .chunk_sent);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
-    const next = schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()).?;
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.server.control_reqresp.schedule(1), setup.shared.pair.now.millis()));
+    const next = schedule_test_support.wakeupMilliseconds(setup.shared.server.control_reqresp.schedule(1), setup.shared.pair.now.millis()).?;
     setup.shared.pair.advance(next - setup.shared.pair.now.millis());
-    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control);
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.control_reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, &events));
     try std.testing.expect(events[0] == .served);
 }
 
@@ -125,7 +125,7 @@ test "reqresp finishes after the last allowed chunk without waiting for the peer
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
-                try setup.shared.server.reqresp.respond(incoming.request, &reply, null, setup.shared.pair.now);
+                try setup.shared.server.control_reqresp.respond(incoming.request, &reply, null, setup.shared.pair.now);
             },
             .failed => |failed| {
                 try std.testing.expectEqual(reqresp.Failure.stream_closed, failed.reason);
@@ -135,13 +135,13 @@ test "reqresp finishes after the last allowed chunk without waiting for the peer
             .chunk_sent => |progress| {
                 try std.testing.expectError(
                     error.TooManyChunks,
-                    setup.shared.server.reqresp.respond(progress.request, &reply, null, setup.shared.pair.now),
+                    setup.shared.server.control_reqresp.respond(progress.request, &reply, null, setup.shared.pair.now),
                 );
             },
             else => {},
         };
         for (setup.clientEvents()) |event| switch (event) {
-            .chunk => |chunk| try std.testing.expect(setup.shared.client.reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, chunk.request, setup.shared.pair.now)),
+            .chunk => |chunk| try std.testing.expect(setup.shared.client.control_reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, chunk.request, setup.shared.pair.now)),
             .done => |finished| {
                 try std.testing.expectEqual(@as(u32, 1), finished.chunks);
                 done = true;
@@ -152,7 +152,7 @@ test "reqresp finishes after the last allowed chunk without waiting for the peer
     }
     try std.testing.expect(done);
     try std.testing.expect(stopped);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.control_reqresp.pendingCounts().inbound);
 }
 
 test "reqresp holds the next chunk until the host consumes the previous one" {
@@ -232,7 +232,7 @@ test "reqresp decodes response bytes that arrive with the multistream echo" {
     defer setup.deinit();
 
     var sink: [ct.altair.MetaDataV2.fixed_size]u8 = undefined;
-    _ = try setup.shared.client.reqresp.request(
+    _ = try setup.shared.client.control_reqresp.request(
         &setup.shared.pair.client,
         &setup.shared.client.router,
         setup.shared.handles.client,
@@ -271,9 +271,9 @@ test "reqresp serves a request whose body and fin arrive with the proposal" {
             .request => |incoming| {
                 try std.testing.expectEqual(Protocol.status_v1, incoming.protocol);
                 try std.testing.expectEqualSlices(u8, &request_ssz, incoming.bytes);
-                try setup.shared.server.reqresp.respond(incoming.request, &reply, null, setup.shared.pair.now);
+                try setup.shared.server.control_reqresp.respond(incoming.request, &reply, null, setup.shared.pair.now);
             },
-            .chunk_sent => |sent| try std.testing.expect(setup.shared.server.reqresp.finish(sent.request, setup.shared.pair.now)),
+            .chunk_sent => |sent| try std.testing.expect(setup.shared.server.control_reqresp.finish(sent.request, setup.shared.pair.now)),
             .served => |finished| {
                 try std.testing.expectEqual(@as(u32, 1), finished.chunks);
                 served = true;
@@ -291,7 +291,7 @@ test "reqresp retires a consumed terminal stream without FIN or event space" {
     defer pair.deinit();
     var request_bytes: [8]u8 = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
-    const h = try pair.shared.client.reqresp.request(
+    const h = try pair.shared.client.control_reqresp.request(
         &pair.shared.pair.client,
         &pair.shared.client.router,
         pair.shared.handles.client,
@@ -305,30 +305,30 @@ test "reqresp retires a consumed terminal stream without FIN or event space" {
     for (0..50) |_| {
         try pair.pumpOnce();
         for (pair.serverEvents()) |event| switch (event) {
-            .request => |r| try pair.shared.server.reqresp.respond(r.request, &request_bytes, null, pair.shared.pair.now),
+            .request => |r| try pair.shared.server.control_reqresp.respond(r.request, &request_bytes, null, pair.shared.pair.now),
             else => {},
         };
         for (pair.clientEvents()) |event| switch (event) {
             .chunk => |r| {
-                consumed = pair.shared.client.reqresp.consume(&pair.shared.pair.client, &pair.shared.client.router, r.request, pair.shared.pair.now);
+                consumed = pair.shared.client.control_reqresp.consume(&pair.shared.pair.client, &pair.shared.client.router, r.request, pair.shared.pair.now);
             },
             else => {},
         };
         if (consumed) break;
     }
     try std.testing.expect(consumed);
-    const stream = pair.shared.client.reqresp.outbound[h.index].request.stream;
+    const stream = pair.shared.client.control_reqresp.outbound[h.index].request.stream;
     var out: [8]Event = undefined;
     try std.testing.expectEqual(
         @as(usize, 0),
-        pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .control = &.{} }).control,
+        pair.shared.client.control_reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, &.{}),
     );
     try std.testing.expect(
         !pair.shared.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id),
     );
-    _ = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .control = &out }).control;
-    _ = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .control = &out }).control;
-    try std.testing.expectEqual(@as(u16, 0), pair.shared.client.reqresp.pendingCounts().outbound);
+    _ = pair.shared.client.control_reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, &out);
+    _ = pair.shared.client.control_reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, &out);
+    try std.testing.expectEqual(@as(u16, 0), pair.shared.client.control_reqresp.pendingCounts().outbound);
     try std.testing.expect(
         !pair.shared.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id),
     );
@@ -341,25 +341,25 @@ test "reqresp refuses serving actions until the request notification is delivere
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
     setup.server_event_capacity = 0;
-    _ = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
+    _ = try setup.shared.client.control_reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
     var incoming: ?reqresp.RequestHandle = null;
     for (0..50) |_| {
         try setup.pumpOnce();
-        for (setup.shared.server.reqresp.inbound) |*slot| if (slot.request.pendingEvent()) |event| {
+        for (setup.shared.server.control_reqresp.inbound) |*slot| if (slot.request.pendingEvent()) |event| {
             if (event == .request) incoming = event.request.request;
         };
         if (incoming != null) break;
     }
     const request = incoming orelse return error.RequestNotReceived;
-    try std.testing.expect(!setup.shared.server.reqresp.finish(request, setup.shared.pair.now));
-    try std.testing.expectError(error.Busy, setup.shared.server.reqresp.respond(request, &bytes, null, setup.shared.pair.now));
-    try std.testing.expectError(error.Busy, setup.shared.server.reqresp.respondError(request, 1, "early", setup.shared.pair.now));
+    try std.testing.expect(!setup.shared.server.control_reqresp.finish(request, setup.shared.pair.now));
+    try std.testing.expectError(error.Busy, setup.shared.server.control_reqresp.respond(request, &bytes, null, setup.shared.pair.now));
+    try std.testing.expectError(error.Busy, setup.shared.server.control_reqresp.respondError(request, 1, "early", setup.shared.pair.now));
     var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control);
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.control_reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, &events));
     try std.testing.expectEqual(request, events[0].request.request);
     try std.testing.expectEqualSlices(u8, &bytes, events[0].request.bytes);
-    try std.testing.expect(setup.shared.server.reqresp.finish(request, setup.shared.pair.now));
-    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control);
+    try std.testing.expect(setup.shared.server.control_reqresp.finish(request, setup.shared.pair.now));
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.control_reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, &events));
     try std.testing.expect(events[0] == .served);
 }
 
@@ -409,11 +409,11 @@ test "reqresp narrowed chunks retire without FIN after a host pause" {
     try std.testing.expect(held);
     setup.shared.pair.advance(2000);
     var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &events }).application);
+    try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, &events));
     try std.testing.expect(setup.shared.client.reqresp.consume(&setup.shared.pair.client, &setup.shared.client.router, handle, setup.shared.pair.now));
-    _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &.{} }).application;
+    _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, &.{});
     const stream = setup.shared.client.reqresp.outbound[handle.index].request.stream;
     try std.testing.expect(!setup.shared.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));
-    try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &events }).application);
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, &events));
     try std.testing.expectEqual(@as(u32, 1), events[0].done.chunks);
 }

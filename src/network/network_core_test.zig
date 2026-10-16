@@ -61,8 +61,8 @@ const MaintenancePeers = struct {
             opts.resolved.core.peers.max_peers = 4;
             opts.resolved.core.control.starts_per_turn_max = 1;
             opts.resolved.core.protocols.reqresp.outbound_max = 6;
-            opts.resolved.core.protocols.reqresp.outbound_control_reserved = 4;
-            opts.resolved.core.protocols.reqresp.serving_control_reserved = 4;
+            opts.resolved.core.protocols.control_reqresp.outbound_max = 4;
+            opts.resolved.core.protocols.control_reqresp.serving_max = 4;
             opts.resolved.core.protocols.reqresp.outbound_per_connection_max = 2;
             opts.resolved.core.protocols.router = .{ .negotiations_max = 16, .outbound_control_reserved = 4, .outbound_reserved = 8 };
             try node.init(if (index == 0) hub_allocator else std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
@@ -153,7 +153,7 @@ test "core maintenance isolates slow peers and full application capacity" {
     }
     try std.testing.expectEqual(@as(u64, 42), hub.peer_manager.catalog.get(healthy_peer).?.status.?.head_slot);
     try std.testing.expectEqual(@as(usize, 2), core_test.controlOperations(hub));
-    try std.testing.expectEqual(@as(u16, 2), hub.protocols.reqresp.outboundApplicationOccupiedCount(conn));
+    try std.testing.expectEqual(@as(u16, 2), hub.protocols.reqresp.outboundOccupiedCount(conn));
     try std.testing.expectEqual(calls, backing_hub.allocations);
 }
 

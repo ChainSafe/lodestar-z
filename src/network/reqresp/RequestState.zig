@@ -66,8 +66,7 @@ pub fn queue(self: *RequestState, event: Event) void {
     self.notification = .{ .pending = event };
 }
 
-pub fn deliver(self: *RequestState, control: bool) ?Event {
-    if (self.protocol.isControl() != control) return null;
+pub fn deliver(self: *RequestState) ?Event {
     if (self.pendingEvent()) |event| {
         self.notification = if (event == .chunk) .borrowed_chunk else .none;
         return event;

@@ -5,6 +5,7 @@ const control = @import("peer_control.zig");
 const snapshot = @import("peer_snapshot.zig");
 const Gossip = network.gossipsub;
 const Engine = network.quic.Engine;
+const ReqResp = network.reqresp.ReqResp;
 const max_payload = 10 * 1024 * 1024;
 const topic = "/eth2/01000000/beacon_block/ssz_snappy";
 const ping = [_]u8{ 1, 0, 0, 0, 0, 0, 0, 0 };
@@ -39,7 +40,7 @@ pub const Peer = struct {
     outbound: bool = false,
     paused: bool = false,
     hold_fin: bool = false,
-    held_finish: ?network.reqresp.ReqResp.RequestHandle = null,
+    held_finish: ?struct { owner: *ReqResp, request: ReqResp.RequestHandle } = null,
     held_since: ?u64 = null,
     finish_calls: usize = 0,
     quit: bool = false,
@@ -65,7 +66,7 @@ pub const Peer = struct {
     fn admit(context: *anyopaque, candidate: *Gossip.Gossipsub.MessageAdmission) bool {
         const self: *Peer = @ptrCast(@alignCast(context));
         if (self.delivery_count == self.deliveries.len) return false;
-        if (!candidate.feasible(&.{})) return false;
+        if (!candidate.sourceRoom() or !candidate.fits(&candidate.room())) return false;
         candidate.commit();
         const event = &candidate.event;
         const delivery = &self.deliveries[self.delivery_count];
@@ -111,8 +112,8 @@ pub const Peer = struct {
         var controls: [16]network.reqresp.ReqResp.Event = undefined;
         var identified: [4]network.identify.Handler.Result = undefined;
         const counts = self.protocols.process(&self.transport.engine, events[0..result.events], self.now, .{ .application = &requests, .control = &controls, .identify = &identified });
-        for (requests[0..counts.application]) |event| try self.requestEvent(event);
-        for (controls[0..counts.control]) |event| try self.requestEvent(event);
+        for (requests[0..counts.application]) |event| try self.requestEvent(&self.protocols.reqresp, event);
+        for (controls[0..counts.control]) |event| try self.requestEvent(&self.protocols.control_reqresp, event);
         for (identified[0..counts.identify]) |*completion| switch (completion.outcome) {
             .success => |*metadata| try control.emit(self.allocator, .{ .event = "identified", .agent = if (metadata.agent) |*agent| agent.slice() else null, .identify = metadata.protocols.contains(.identify), .meshsub = metadata.protocols.contains(.{ .meshsub = .v1_2 }), .status2 = metadata.protocols.contains(.{ .reqresp = .status_v2 }) }),
             .failed => |failure| try control.emit(self.allocator, .{ .event = "identifyFailed", .reason = @tagName(failure) }),
@@ -123,12 +124,12 @@ pub const Peer = struct {
         if (stepped.failure) |err| return err;
     }
 
-    fn requestEvent(self: *Peer, event: network.reqresp.ReqResp.Event) !void {
+    fn requestEvent(self: *Peer, owner: *ReqResp, event: network.reqresp.ReqResp.Event) !void {
         switch (event) {
             .request => |r| {
-                if (self.application and r.protocol.isControl()) {
+                if (self.application and owner == &self.protocols.control_reqresp) {
                     if (r.protocol == .goodbye_v1) {
-                        std.debug.assert(self.protocols.reqresp.finish(r.request, self.now));
+                        std.debug.assert(owner.finish(r.request, self.now));
                         return;
                     }
                     const out = &self.control_responses[r.request.index];
@@ -146,14 +147,14 @@ pub const Peer = struct {
                         },
                         else => unreachable,
                     };
-                    try self.protocols.reqresp.respond(r.request, out[0..len], null, self.now);
+                    try owner.respond(r.request, out[0..len], null, self.now);
                     return;
                 }
                 if (r.protocol == .status_v2) {
                     const remote = try network.control_wire.decodeStatus(.status_v2, r.bytes);
                     const local = try network.control_wire.decodeStatus(.status_v2, &identify_status);
                     if (!std.meta.eql(remote, local)) return error.InvalidStatus;
-                    try self.protocols.reqresp.respond(r.request, &identify_status, null, self.now);
+                    try owner.respond(r.request, &identify_status, null, self.now);
                     self.status_accepted = true;
                     try control.emit(self.allocator, .{ .event = "statusAccepted", .protocol = r.protocol.id() });
                     return;
@@ -162,17 +163,17 @@ pub const Peer = struct {
                 if (!std.mem.eql(u8, r.bytes, if (r.protocol == .ping_v1) &ping else &range)) return error.InvalidRequestBytes;
                 try control.emit(self.allocator, .{ .event = "request", .protocol = r.protocol.id(), .length = r.bytes.len, .sha256 = hash(r.bytes) });
                 if (r.protocol == .ping_v1) {
-                    try self.protocols.reqresp.respond(r.request, &ping, null, self.now);
+                    try owner.respond(r.request, &ping, null, self.now);
                 } else {
                     generate(self.response[0..self.response_size], self.response_seed);
-                    try self.protocols.reqresp.respond(r.request, self.response[0..self.response_size], .{ .digest = if (self.application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }, self.now);
+                    try owner.respond(r.request, self.response[0..self.response_size], .{ .digest = if (self.application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }, self.now);
                 }
             },
             .chunk => |c| {
-                const decoded_context = self.protocols.reqresp.outbound[c.request.index].request.io.decoder.context();
+                const decoded_context = owner.outbound[c.request.index].request.io.decoder.context();
                 const context_hex = if (decoded_context) |digest| std.fmt.bytesToHex(digest, .lower) else null;
                 try control.emit(self.allocator, .{ .event = "chunk", .length = c.bytes.len, .sha256 = hash(c.bytes), .context = if (context_hex) |*value| @as(?[]const u8, value) else null, .result = 0 });
-                std.debug.assert(self.protocols.reqresp.consume(&self.transport.engine, &self.protocols.router, c.request, self.now));
+                std.debug.assert(owner.consume(&self.transport.engine, &self.protocols.router, c.request, self.now));
             },
             .done => {
                 self.outbound = false;
@@ -184,11 +185,11 @@ pub const Peer = struct {
             },
             .chunk_sent => |c| {
                 if (self.hold_fin) {
-                    self.held_finish = c.request;
+                    self.held_finish = .{ .owner = owner, .request = c.request };
                     self.held_since = self.now.millis();
                 } else {
                     self.finish_calls += 1;
-                    std.debug.assert(self.protocols.reqresp.finish(c.request, self.now));
+                    std.debug.assert(owner.finish(c.request, self.now));
                 }
             },
             else => {},
@@ -251,7 +252,8 @@ pub const Peer = struct {
         } else if (std.mem.eql(u8, c.op, "request")) {
             if (self.outbound) return error.Busy;
             const large = c.large orelse false;
-            _ = try self.protocols.request(&self.transport.engine, self.conn orelse return error.NoConnection, if (large) .blocks_by_range_v2 else .ping_v1, if (large) &range else &ping, self.sink, .{ .expected_chunks = 1 }, self.now);
+            const owner = if (large) &self.protocols.reqresp else &self.protocols.control_reqresp;
+            _ = try owner.request(&self.transport.engine, &self.protocols.router, self.conn orelse return error.NoConnection, if (large) .blocks_by_range_v2 else .ping_v1, if (large) &range else &ping, self.sink, .{ .expected_chunks = 1 }, self.now);
             self.outbound = true;
         } else return self.schedule(c);
         try control.emit(self.allocator, .{ .id = c.id, .ok = true });
@@ -263,7 +265,7 @@ pub const Peer = struct {
         } else if (std.mem.eql(u8, c.op, "releaseFin")) {
             const request = self.held_finish orelse return error.NoHeldFin;
             self.finish_calls += 1;
-            _ = self.protocols.reqresp.finish(request, self.now);
+            _ = request.owner.finish(request.request, self.now);
             self.held_finish = null;
             self.held_since = null;
             self.hold_fin = false;
@@ -318,8 +320,9 @@ pub fn main(init: std.process.Init) !void {
     const application = args.len == 2 and std.mem.eql(u8, args[1], "--application");
     var blob_schedule: [network.reqresp.request_policy.schedule_max]network.reqresp.request_policy.BlobLimit = undefined;
     const policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&config.mainnet.config, &blob_schedule);
-    var admission = try network.reqresp.ReqResp.Options.Admission.defaults(&policy, 4, 4, if (application) 6 else 1);
-    for (&admission.limits.peer, &admission.limits.global) |*peer_quotas, *global_quotas| {
+    const admission = try ReqResp.Options.Admission.defaults(&policy, 4, 1);
+    var control_admission = try ReqResp.Options.Admission.defaults(&policy, 4, 4);
+    for (&control_admission.limits.peer, &control_admission.limits.global) |*peer_quotas, *global_quotas| {
         peer_quotas[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 16, .period_ms = 30_000 };
         global_quotas[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 4 * 16, .period_ms = 30_000 };
     }
@@ -331,11 +334,39 @@ pub fn main(init: std.process.Init) !void {
     const key = try network.wire.keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ .{31}));
     try peer.transport.init(a, init.io, .{ .host = &key, .bind = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2, .outbound_max = 3 } });
     defer peer.transport.deinit(init.io);
-    const protocols_options: network.Protocols.Options = .{ .identify = .{ .agent = "lodestar-z-identify" }, .reqresp = .{ .admission = admission, .connections = 4, .outbound_max = 1, .serving_max = if (application) 8 else 1, .inbound_per_connection_max = if (application) 8 else 1, .serving_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000 }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .topic_policy = &gossip_topics, .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } };
+    const forks: []const network.types.ForkEntry = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }};
+    const protocols_options: network.Protocols.Options = .{
+        .identify = .{ .agent = "lodestar-z-identify" },
+        .reqresp = .{
+            .protocols = .application,
+            .admission = admission,
+            .connections = 4,
+            .outbound_max = 1,
+            .serving_max = if (application) 6 else 1,
+            .inbound_per_connection_max = if (application) 8 else 1,
+            .forks = forks,
+            .progress_timeout_ms = 5000,
+        },
+        .control_reqresp = .{
+            .protocols = .control,
+            .routes = .control,
+            .report_non_completion = false,
+            .admission = control_admission,
+            .connections = 4,
+            .outbound_max = 1,
+            .serving_max = if (application) 2 else 1,
+            .serving_per_peer_max = 1,
+            .inbound_per_connection_max = 8,
+            .forks = forks,
+            .progress_timeout_ms = 5000,
+        },
+        .router = .{ .negotiations_max = 16 },
+        .gossipsub = .{ .topic_policy = &gossip_topics, .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 },
+    };
     const local = try protocols_options.identify.makeLocal(&peer.transport.peerId(), &peer.transport.sockets.localAddresses());
     peer.protocols = try network.Protocols.init(a, protocols_options, &local);
     defer peer.protocols.deinit();
-    peer.control_responses = try a.alloc([92]u8, peer.protocols.reqresp.inbound.len);
+    peer.control_responses = try a.alloc([92]u8, peer.protocols.control_reqresp.inbound.len);
     defer a.free(peer.control_responses);
     peer.attachSink();
     peer.sink = try a.alloc(u8, max_payload);
@@ -343,8 +374,7 @@ pub fn main(init: std.process.Init) !void {
     peer.response = try a.alloc(u8, max_payload);
     defer a.free(peer.response);
 
-    defer peer.protocols.identify.shutdown(&peer.protocols.router, &peer.transport.engine);
-    defer peer.protocols.reqresp.cancelAll(&peer.transport.engine, &peer.protocols.router, peer.now);
+    defer peer.protocols.shutdown(&peer.transport.engine, peer.now);
     try control.run(peer);
 }
 

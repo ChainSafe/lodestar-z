@@ -19,7 +19,7 @@ pub const Io = struct {
     }
 
     pub fn controlIo(self: *Io) Control.Io {
-        return .{ .reqresp = &self.pair.shared.client.reqresp, .router = &self.pair.shared.client.router, .engine = &self.pair.shared.pair.client };
+        return .{ .reqresp = &self.pair.shared.client.control_reqresp, .router = &self.pair.shared.client.router, .engine = &self.pair.shared.pair.client };
     }
 
     pub fn deinit(self: *Io) void {
@@ -48,7 +48,7 @@ pub const Io = struct {
     /// Injects a decoded response into a real request slot, then delivers its chunk and terminal.
     pub fn reply(self: *Io, control: *Control, catalog: *Catalog, local: *const types.LocalState, request: rr.ReqResp.RequestHandle, bytes: []const u8, now: Now) !void {
         self.pair.shared.pair.now = now;
-        const requests = &self.pair.shared.client.reqresp;
+        const requests = &self.pair.shared.client.control_reqresp;
         const engine = &self.pair.shared.pair.client;
         const router = &self.pair.shared.client.router;
         const client = &requests.outbound[request.index];
@@ -58,7 +58,7 @@ pub const Io = struct {
         client.complete(requests, engine, router, request.index, .{ .done = .{ .request = request, .chunks = 1 } }, now);
         for (0..2) |_| {
             var events: [1]rr.ReqResp.Event = undefined;
-            try std.testing.expectEqual(@as(usize, 1), requests.pump(engine, router, now, .{ .control = &events }).control);
+            try std.testing.expectEqual(@as(usize, 1), requests.pump(engine, router, now, &events));
             self.receive(control, catalog, local, events[0], now, 0);
         }
     }

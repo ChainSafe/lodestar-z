@@ -53,9 +53,9 @@ fn failIo(self: *Server, owner: *ReqResp, engine: *Engine, router: *Router, inde
 }
 
 /// A finishing slot resumes its FIN once the host has taken its last event.
-pub fn deliver(self: *Server, control: bool, now: Now) ?Event {
+pub fn deliver(self: *Server, now: Now) ?Event {
     const request = &self.request;
-    const event = request.deliver(control) orelse return null;
+    const event = request.deliver() orelse return null;
     if (request.running() and self.state == .finishing) self.progress_ms = now.millis();
     return event;
 }
@@ -102,7 +102,7 @@ pub fn advance(self: *Server, ctx: *ReqResp, engine: *Engine, router: *Router, i
             .quota_timeout
         else
             .timeout;
-        if (reason == .timeout and self.state == .receiving_request and !request.protocol.isControl() and
+        if (reason == .timeout and self.state == .receiving_request and ctx.options.report_non_completion and
             !request.io.unread(engine, request.stream))
             request.peer_fault = .non_completion;
         self.fail(ctx, engine, router, index, reason, now);

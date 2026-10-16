@@ -33,7 +33,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     var protocol_buffer: [128]u8 = undefined;
     const protocol_len = try decode.text(protocol, &protocol_buffer);
     const which = n.reqresp.Protocol.fromId(protocol_buffer[0..protocol_len]) orelse return error.UnknownProtocol;
-    if (which.isControl()) return error.ControlProtocol;
+    if (!n.reqresp.Protocol.Set.application.contains(which)) return error.ProtocolDisabled;
     const request_options = try optionsFor(options);
     const identity = try decode.peerIdFrom(peer);
     const len = (try decode.byteView(data)).len;

@@ -1,6 +1,5 @@
 const Protocol = @import("protocol.zig").Protocol;
 const ForkSeq = @import("config").ForkSeq;
-const constants = @import("constants.zig");
 const request_policy = @import("request_policy.zig");
 
 const ten_seconds_ms: u64 = 10_000;
@@ -18,13 +17,11 @@ pub const Options = struct {
     peer: ByFork,
     global: ByFork,
     /// Limits fixed per-request overhead independently of the requested blocks or columns.
-    /// Each identity has separate control and application allowances.
-    starts: Quota = .{ .tokens = Protocol.count * constants.MAX_CONCURRENT_REQUESTS, .period_ms = ten_seconds_ms },
+    starts: Quota = .{ .tokens = 36, .period_ms = ten_seconds_ms },
 
-    pub fn defaults(configuration: *const request_policy.Config, identities: u16, control_peers: u16, application_max: u16) error{InvalidPolicy}!Options {
-        if (control_peers == 0 or control_peers > identities) return error.InvalidPolicy;
+    pub fn defaults(configuration: *const request_policy.Config, identities: u16, global_scale: u16) error{InvalidPolicy}!Options {
+        if (global_scale == 0) return error.InvalidPolicy;
         const policy = try request_policy.Policy.init(configuration);
-        const application_scale = @max(1, @as(u32, application_max) / (2 * constants.MAX_CONCURRENT_REQUESTS));
         var result: Options = .{ .identities = identities, .peer = undefined, .global = undefined };
         for (0..ForkSeq.count) |i| {
             for (0..Protocol.count) |j| {
@@ -32,7 +29,7 @@ pub const Options = struct {
                 const quota = peerQuota(&policy, which, @enumFromInt(i));
                 result.peer[i][j] = quota;
                 result.global[i][j] = .{
-                    .tokens = quota.tokens * (if (which.isControl()) @as(u32, control_peers) else application_scale),
+                    .tokens = quota.tokens * @as(u32, global_scale),
                     .period_ms = quota.period_ms,
                 };
             }
