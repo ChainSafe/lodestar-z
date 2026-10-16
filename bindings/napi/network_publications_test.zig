@@ -4,7 +4,7 @@ const Budget = @import("network_budget.zig").Budget;
 
 test "publication admission protects urgent slots and charges the shared byte budget" {
     var budget: Budget = .{ .limit = 100 };
-    var table = try p.Table.init(std.testing.allocator, 4, &budget);
+    var table = try p.Table.init(std.testing.allocator, 4, &budget, 12_000);
     defer table.deinit();
     try std.testing.expectError(error.ResourceExhausted, table.reserve(.beacon_block, 101));
     var tokens: [4]p.Token = undefined;
@@ -20,7 +20,7 @@ test "publication admission protects urgent slots and charges the shared byte bu
 
 test "publication close preserves pins and completed results and releases queued payloads" {
     var budget: Budget = .{ .limit = 100 };
-    var table = try p.Table.init(std.testing.allocator, 4, &budget);
+    var table = try p.Table.init(std.testing.allocator, 4, &budget, 12_000);
     defer table.deinit();
     const preparing = try table.reserve(.beacon_block, 10);
     const copying = try table.reserve(.beacon_block, 10);
@@ -47,7 +47,7 @@ test "publication close preserves pins and completed results and releases queued
 
 test "publication scheduling follows admission order across reused slots" {
     var budget: Budget = .{ .limit = 100 };
-    var table = try p.Table.init(std.testing.allocator, 2, &budget);
+    var table = try p.Table.init(std.testing.allocator, 2, &budget, 12_000);
     defer table.deinit();
     const first = try table.reserve(.beacon_block, 1);
     table.retire(first);
@@ -62,4 +62,31 @@ test "publication scheduling follows admission order across reused slots" {
     table.retire(earlier);
     try std.testing.expectEqual(later, table.oldest().?);
     table.retire(later);
+}
+
+test "publication queue expiry releases copied bytes before publication and keeps the terminal outcome" {
+    var budget: Budget = .{ .limit = 100 };
+    var table = try p.Table.init(std.testing.allocator, 2, &budget, 1000);
+    defer table.deinit();
+    const first = try table.reserve(.beacon_block, 10);
+    defer table.retire(first);
+    const expired = try table.reserve(.beacon_block, 10);
+    defer table.retire(expired);
+    for ([_]p.Token{ first, expired }) |token| {
+        const cell = table.get(token).?;
+        cell.queued_ms = 10;
+        cell.payload = try std.testing.allocator.alloc(u8, 10);
+        table.transition(cell, .queued);
+    }
+    try std.testing.expect(table.begin(first, 1009));
+    try std.testing.expectEqual(p.State.executing, table.get(first).?.state);
+    table.releasePayload(table.get(first).?);
+    table.transition(table.get(first).?, .terminal);
+    try std.testing.expect(!table.begin(expired, 1010));
+    try std.testing.expectEqual(error.PublicationExpired, table.get(expired).?.failure.?);
+    try std.testing.expectEqual(p.State.terminal, table.get(expired).?.state);
+    try std.testing.expectEqual(@as(usize, 0), budget.used);
+    table.close(error.NetworkClosed);
+    try std.testing.expectEqual(error.PublicationExpired, table.get(expired).?.failure.?);
+    try std.testing.expectEqual(@as(u64, 2), table.latency.count);
 }

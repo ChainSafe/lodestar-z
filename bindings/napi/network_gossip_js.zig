@@ -53,6 +53,7 @@ pub fn publishError(env: napi.Env, err: anyerror) !Value {
         error.CompressFailed => "compress_failed",
         error.PublicationQueueFull, error.NetworkBridgeFull => "admission_full",
         error.ResourceExhausted => "resource_exhausted",
+        error.PublicationExpired => "expired",
         error.Duplicate => "duplicate",
         error.NoPeersSubscribedToTopic => "no_peers_subscribed_to_topic",
         else => null,

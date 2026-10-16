@@ -50,6 +50,7 @@ pub const Diagnostics = struct {
 };
 pub const Table = struct {
     cells: []Cell,
+    max_wait_ms: u64,
     /// The terminal cells awaiting Promise settlement. `transition` keeps it current.
     terminal: std.StaticBitSet(capacity_max) = .empty,
     /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
@@ -60,11 +61,12 @@ pub const Table = struct {
     diag: Diagnostics,
     latency: n.metrics.histogram.Duration(&.{ 0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 5000 }) = .{},
 
-    pub fn init(backing: std.mem.Allocator, capacity: usize, budget: *Budget) !Table {
+    pub fn init(backing: std.mem.Allocator, capacity: usize, budget: *Budget, max_wait_ms: u64) !Table {
         std.debug.assert(capacity > 0 and capacity <= capacity_max);
+        std.debug.assert(max_wait_ms > 0 and max_wait_ms <= 86_400_000);
         const cells = try backing.alloc(Cell, capacity);
         @memset(cells, .{});
-        return .{ .cells = cells, .backing = backing, .budget = budget, .diag = .{
+        return .{ .cells = cells, .max_wait_ms = max_wait_ms, .backing = backing, .budget = budget, .diag = .{
             .capacity = capacity,
             .urgentReserved = @max(1, capacity / 16),
         } };
@@ -119,6 +121,20 @@ pub const Table = struct {
             selected = .{ .index = @intCast(i), .generation = cell.generation };
         }
         return selected;
+    }
+    pub fn begin(self: *Table, token: Token, now_ms: u64) bool {
+        const cell = self.get(token).?;
+        std.debug.assert(cell.state == .queued and now_ms >= cell.queued_ms);
+        const waited = now_ms - cell.queued_ms;
+        self.latency.observe(waited);
+        if (waited >= self.max_wait_ms) {
+            self.releasePayload(cell);
+            cell.failure = error.PublicationExpired;
+            self.transition(cell, .terminal);
+            return false;
+        }
+        self.transition(cell, .executing);
+        return true;
     }
     pub fn releasePayload(self: *Table, cell: *Cell) void {
         self.backing.free(cell.payload);
@@ -192,11 +208,11 @@ pub fn execute(runtime: *Runtime, token: Token, now: n.Now, executed_ms: u64) vo
     runtime.lock();
     const table = &runtime.bridge.publications.?;
     const cell = table.get(token).?;
-    std.debug.assert(cell.state == .queued);
-    table.transition(cell, .executing);
-    std.debug.assert(executed_ms >= cell.queued_ms);
-    const latency = executed_ms - cell.queued_ms;
-    table.latency.observe(latency);
+    if (!table.begin(token, executed_ms)) {
+        runtime.notifyIfReadyLocked();
+        runtime.unlock();
+        return;
+    }
     runtime.unlock();
 
     const outcome = runtime.owner.?.core.publishGossipWithOptions(cell.topic[0..cell.topic_len], cell.payload, cell.options, now);

@@ -500,7 +500,7 @@ test "publication completions batch terminal cells while unfinished work stays a
     try fixture.init(false, 2);
     defer fixture.deinit();
     const runtime = &fixture.runtime;
-    runtime.bridge.publications = try publications.Table.init(std.testing.allocator, 4, &runtime.bridge.payload_budget);
+    runtime.bridge.publications = try publications.Table.init(std.testing.allocator, 4, &runtime.bridge.payload_budget, 12_000);
     defer runtime.bridge.publications.?.deinit();
     const table = &runtime.bridge.publications.?;
     const low = try completePublication(runtime);
@@ -533,7 +533,7 @@ test "a stopped environment during Promise settlement retires the borrowed publi
     try fixture.init(false, 2);
     defer fixture.deinit();
     const runtime = &fixture.runtime;
-    runtime.bridge.publications = try publications.Table.init(std.testing.allocator, 4, &runtime.bridge.payload_budget);
+    runtime.bridge.publications = try publications.Table.init(std.testing.allocator, 4, &runtime.bridge.payload_budget, 12_000);
     defer runtime.bridge.publications.?.deinit();
     const tokens = [_]publications.Token{ try completePublication(runtime), try completePublication(runtime) };
     var host: Host = .{ .runtime = runtime, .fail = .publication };
@@ -653,7 +653,7 @@ test "a failed command settlement releases diagnostic admission without replayin
         try fixture.init(false, 2);
         defer fixture.deinit();
         const runtime = &fixture.runtime;
-        runtime.bridge.publications = try publications.Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget);
+        runtime.bridge.publications = try publications.Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget, 12_000);
         defer runtime.bridge.publications.?.deinit();
         const published = try completePublication(runtime);
         const command = try completeCommand(runtime, .getPeerScores);
@@ -1009,7 +1009,7 @@ test "publication delivery bounds each exchange and reaches higher cells before 
     try fixture.init(false, 2);
     defer fixture.deinit();
     const runtime = &fixture.runtime;
-    runtime.bridge.publications = try publications.Table.init(std.testing.allocator, 64, &runtime.bridge.payload_budget);
+    runtime.bridge.publications = try publications.Table.init(std.testing.allocator, 64, &runtime.bridge.payload_budget, 12_000);
     defer runtime.bridge.publications.?.deinit();
     for (0..64) |_| _ = try completePublication(runtime);
     var host: Host = .{ .runtime = runtime };

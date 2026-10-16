@@ -37,7 +37,7 @@ test "stop preserves latched success and cancels accepted nonterminal commands" 
 
 test "terminal cleanup releases pending Promise references without running JavaScript" {
     var runtime: Runtime = .{ .env = undefined, .refs = .init(2), .bridge = .{ .env_alive = false, .notify_live = false } };
-    runtime.bridge.publications = try publications_mod.Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget);
+    runtime.bridge.publications = try publications_mod.Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget, 12_000);
     defer runtime.bridge.publications.?.deinit();
     const command = try runtime.reserveCommand(.disconnect);
     const publication = try runtime.reservePublication(.beacon_block, 0);
@@ -379,7 +379,7 @@ fn expectDueMatchesScan(runtime: *Runtime) !void {
 test "the O(1) completion-ready state matches a full scan across state transitions" {
     var runtime: Runtime = .{ .env = undefined, .bridge = .{ .notify_live = false, .env_alive = false } };
     runtime.bridge.payload_budget.limit = 1 << 30;
-    runtime.bridge.publications = try publications_mod.Table.init(std.testing.allocator, 4, &runtime.bridge.payload_budget);
+    runtime.bridge.publications = try publications_mod.Table.init(std.testing.allocator, 4, &runtime.bridge.payload_budget, 12_000);
     defer runtime.bridge.publications.?.deinit();
     runtime.bridge.requests = try requests_mod.Table.init(std.testing.allocator, 2, &runtime.bridge.payload_budget);
     defer runtime.bridge.requests.?.deinit();

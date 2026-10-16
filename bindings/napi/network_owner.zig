@@ -447,7 +447,7 @@ test "a command queued after wait planning executes in the turn whose poll obser
     defer runtime.bridge.wake.?.deinit();
     try owner.core.setHostWake(runtime.bridge.wake.?.read_fd);
     runtime.bridge.payload_budget.limit = 1 << 20;
-    runtime.bridge.publications = try publications.Table.init(testing, 1, &runtime.bridge.payload_budget);
+    runtime.bridge.publications = try publications.Table.init(testing, 1, &runtime.bridge.payload_budget, 12_000);
     defer runtime.bridge.publications.?.deinit();
     runtime.bridge.requests = try requests_mod.Table.init(testing, 1, &runtime.bridge.payload_budget);
     defer runtime.bridge.requests.?.deinit();
@@ -581,7 +581,7 @@ test "queued request and disconnect share the protocol turn clock while latency 
     vtable.now = Clock.read;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     runtime.bridge.payload_budget.limit = 64 << 20;
-    runtime.bridge.publications = try publications.Table.init(testing, 1, &runtime.bridge.payload_budget);
+    runtime.bridge.publications = try publications.Table.init(testing, 1, &runtime.bridge.payload_budget, 12_000);
     defer runtime.bridge.publications.?.deinit();
     runtime.bridge.requests = try requests_mod.Table.init(testing, 1, &runtime.bridge.payload_budget);
     defer runtime.bridge.requests.?.deinit();

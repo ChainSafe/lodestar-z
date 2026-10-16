@@ -398,6 +398,7 @@ export type NetworkGossipPublishFailed = Error & {
     | "payload_too_large"
     | "compress_failed"
     | "admission_full"
+    | "expired"
     | "resource_exhausted"
     | "duplicate"
     | "no_peers_subscribed_to_topic";
@@ -583,7 +584,10 @@ export interface NativeNetwork {
    * Completions and administrative operations continue; already started host tasks must still retire.
    */
   stopDelivery(): void;
-  /** Copies admitted input. Admission pressure rejects with admission_full before any publication. */
+  /**
+   * Copies input into a bounded native queue. A full queue rejects with admission_full before publication.
+   * Queued input expires after the shortest configured slot duration, with reason expired and no publication.
+   */
   publish(topic: string, data: Uint8Array, options?: NativeGossipPublishOptions): Promise<NativeGossipPublishResult>;
   /** Throws synchronously for invalid input, admission refusal or a closed network; admitted failures reject next(). */
   request(

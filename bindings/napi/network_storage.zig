@@ -39,7 +39,10 @@ pub fn initialize(runtime: *Runtime, app: *const application_cfg.Config) !void {
     }
     // Keep one serving response, two local RPCs, and two urgent publications independently admissible.
     try runtime.bridge.payload_budget.protect(response_max + 2 * request_max * incoming_capacity, 2 * (request_max + 2 * response_max), 2 * gossip.payload_max);
-    runtime.bridge.publications = try publications.Table.init(r.allocator, publication_capacity, &runtime.bridge.payload_budget);
+    const clock = &runtime.owner.?.config.clock.config;
+    var publication_wait_ms = clock.slot_duration_ms;
+    for (clock.transitions()) |transition| publication_wait_ms = @min(publication_wait_ms, transition.new_duration_ms);
+    runtime.bridge.publications = try publications.Table.init(r.allocator, publication_capacity, &runtime.bridge.payload_budget, publication_wait_ms);
     runtime.bridge.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.bridge.payload_budget);
     runtime.bridge.gossip = try gossip.Table.init(r.allocator, processor_options);
     runtime.bridge.diagnostics = try diagnostics.Buffer.create(r.allocator, runtime.peer_capacity, resident_topics);
