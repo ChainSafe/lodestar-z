@@ -101,8 +101,6 @@ pub const NetworkCore = struct {
     /// Dials the owner started or deferred, which the health log reports, and failed clock reads,
     /// transport steps and readiness polls.
     pub const Counters = struct {
-        dial_started: u64 = 0,
-        dial_deferred: u64 = 0,
         transport_failures: u64 = 0,
         readiness_failures: u64 = 0,
     };
@@ -595,7 +593,6 @@ pub const NetworkCore = struct {
         defer {
             const end = timing.now(io);
             self.step_duration.observe(end -| start);
-            self.turn_timing.finish(end, result.transport.datagrams_received, result.transport.datagrams_sent);
         }
         const slot: u64 = @intCast(@max(0, self.clock.read(tick) catch |err| {
             self.counters.transport_failures +|= 1;
@@ -673,8 +670,6 @@ pub const NetworkCore = struct {
             result.dial_started += 1;
         }
         self.peer_manager.finishDialBatch(tick);
-        self.counters.dial_started +|= result.dial_started;
-        self.counters.dial_deferred +|= result.dial_deferred;
     }
 
     /// Delivers the turn's transport events, runs the one Protocols pass, applies its faults and

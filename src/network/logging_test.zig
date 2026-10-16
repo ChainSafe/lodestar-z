@@ -1,3 +1,4 @@
+const prom = @import("metrics/registry.zig");
 const Record = @import("logging.zig").Record;
 const Sink = @import("logging.zig").Sink;
 const bind = @import("logging.zig").bind;
@@ -35,7 +36,7 @@ test "native logging bounds records, sanitizes text and isolates sinks" {
     first.commit(1);
     first.write(.info, .network_core, 10, 20, "{s}", .{&([_]u8{'x'} ** (message_capacity + 1))});
     _ = first.peek(&records);
-    try std.testing.expect(records[0].truncated);
+    try std.testing.expectEqual(@as(u64, 1), first.snapshot().total("truncated"));
     try std.testing.expectEqual(@as(u16, message_capacity), records[0].len);
     first.configure(null);
     first.write(.err, .network_runtime, 10, 20, "disabled", .{});
@@ -112,17 +113,36 @@ test "native logging preserves copied records and ordering across queue wrap and
     try std.testing.expectEqualStrings("event index=0", records[0].message[0..records[0].len]);
     sink.commit(drain_max);
     for (0..512) |i| sink.write(.err, .network_runtime, (capacity + i) * 1000, 0, "critical index={d}", .{i});
-    var sequence: u64 = drain_max;
+    var expected: usize = drain_max;
+    var text: [40]u8 = undefined;
     for (0..capacity / drain_max) |_| {
         const batch = sink.peek(&records);
         for (records[0..batch.count]) |*record| {
-            try std.testing.expect(record.sequence > sequence);
-            sequence = record.sequence;
+            const message = if (expected < capacity - 256) try std.fmt.bufPrint(&text, "event index={d}", .{expected}) else try std.fmt.bufPrint(&text, "critical index={d}", .{expected - (capacity - 256)});
+            try std.testing.expectEqualStrings(message, record.message[0..record.len]);
+            expected += 1;
         }
         sink.commit(batch.count);
         if (!batch.more) break;
     }
     try std.testing.expectEqual(@as(u16, 0), sink.len);
     try std.testing.expectEqual(@as(u64, 256), sink.snapshot().total("dropped"));
-    try std.testing.expectEqual(@as(u64, capacity + 512), sequence);
+    try std.testing.expectEqual(@as(usize, capacity + 256), expected);
+}
+
+test "native logging exports every loss kind" {
+    var sink: Sink = .{};
+    sink.configure(.debug);
+    for (0..capacity) |i| sink.write(.debug, .network_gossip, i * 1000, 0, "busy", .{});
+    for (0..129) |_| sink.write(.info, .network_core, capacity * 1000, 0, "{s}", .{&([_]u8{'x'} ** (message_capacity + 1))});
+    var bytes: [32 * 1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&bytes);
+    var encoder: prom.Encoder = .{ .writer = &writer };
+    const stats = sink.snapshot();
+    try stats.write(&encoder);
+    for ([_][]const u8{
+        "scope=\"network_gossip\",level=\"debug\",kind=\"dropped\"} 512",
+        "scope=\"network_core\",level=\"info\",kind=\"suppressed\"} 1",
+        "scope=\"network_core\",level=\"info\",kind=\"truncated\"} 128",
+    }) |sample| try std.testing.expect(std.mem.find(u8, writer.buffered(), sample) != null);
 }

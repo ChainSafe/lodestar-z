@@ -99,9 +99,6 @@ export type NativeRuntimeCloseResult = {reason: "requested"} | {reason: "failed"
 export interface NativeLogBatch {
   records: NativeLogRecord[];
   more: boolean;
-  dropped: bigint;
-  suppressed: bigint;
-  truncated: bigint;
 }
 
 export interface NativeBridge {

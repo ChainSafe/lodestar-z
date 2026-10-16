@@ -9,7 +9,6 @@ const network_logs = @import("network_logs.zig");
 pub const Config = struct {
     resources: Resources,
     trace_gossip: bool = false,
-    trace_turns: bool = false,
     xray: ?struct { endpoint: n.xray.Endpoint, wait_for_attach: bool } = null,
     transport: Transport = .{},
     agent: [256]u8,
@@ -70,12 +69,10 @@ const resource_maxima = .{
 const required = .{ "beaconConfig", "activeValidatorCount", "identitySecretKey", "bind", "local", "discovery", "genesisTime", "resources", "identify", "serveLightClients", "logLevel" };
 
 pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out: *Config) !void {
-    try decode.object(value, &(required ++ .{ "gossipPolicy", "subscriptions", "peerStoreDir", "transport", "traceGossip", "traceTurns", "xray" }));
+    try decode.object(value, &(required ++ .{ "gossipPolicy", "subscriptions", "peerStoreDir", "transport", "traceGossip", "xray" }));
     inline for (required) |name| _ = try decode.get(value, name);
     const trace_gossip = try decode.get(value, "traceGossip");
-    const trace_turns = try decode.get(value, "traceTurns");
     out.trace_gossip = if (try trace_gossip.typeof() == .undefined) false else try decode.boolean(trace_gossip);
-    out.trace_turns = if (try trace_turns.typeof() == .undefined) false else try decode.boolean(trace_turns);
     out.xray = null;
     if (try value.hasNamedProperty("xray")) {
         const xray = try decode.get(value, "xray");

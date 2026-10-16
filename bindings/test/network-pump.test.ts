@@ -4,7 +4,6 @@ import type {
   GossipJob,
   HostCapacity,
   IncomingRequest,
-  NativeLogLoss,
   NativeLogRecord,
   NativePeerObservation,
   NativeTopicKind,
@@ -47,7 +46,7 @@ const handle = (index: number, generation = 1n): NativeGossipHandle => ({generat
 const running: {resolve(result: {reason: "requested"}): void}[] = [];
 /** The pump's log delivery timer, armed until native closes. */
 const LOG_TIMER = 1;
-const noLogs = {dropped: 0n, more: false, records: [], suppressed: 0n, truncated: 0n};
+const noLogs = {more: false, records: []};
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -148,7 +147,7 @@ function fixture() {
     checkDependencies: vi.fn((checks: readonly DependencyCheck[]): readonly boolean[] => checks.map(() => true)),
     error: vi.fn((_error: unknown): void => undefined),
     failed: vi.fn((_error: Error): void => undefined),
-    logs: vi.fn((_records: readonly NativeLogRecord[], _lost: NativeLogLoss | null): void => undefined),
+    logs: vi.fn((_records: readonly NativeLogRecord[]): void => undefined),
     peers: vi.fn((_events: readonly NativePeerObservation[]): void => undefined),
     serve: vi.fn((_request: IncomingRequest): Promise<void> => Promise.resolve()),
     subscribeCapacity: vi.fn((_wake: () => void) => vi.fn()),

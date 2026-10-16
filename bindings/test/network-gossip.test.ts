@@ -239,7 +239,7 @@ test.each([
       ]);
       for (const record of receivedTrace) {
         expect(record.message).toContain(`message_id=${id}`);
-        expect(record.truncated).toBe(false);
+        expect(Buffer.byteLength(record.message)).toBeLessThan(768);
       }
       const receive = receivedTrace.find((r) => r.message.startsWith("receive "));
       expect(receive?.message).toMatch(/frame_started_ms=\d+ frame_complete_ms=\d+/);

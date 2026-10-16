@@ -3,8 +3,6 @@ export const LOG_MS = 100;
 export const LOG_RECORDS = 256;
 /** Deliveries of the final drain once native closed. */
 const LOG_FINAL = 8;
-/** Record loss is reported at most this often, with every loss since the last report. */
-const LOG_LOSS_MS = 30000;
 export const LOG_ERRORS_NAME = "lodestar_network_log_delivery_errors_total";
 export const LOG_DRAIN_ERRORS_NAME = "lodestar_network_log_drain_errors_total";
 
@@ -17,7 +15,6 @@ export class LogDelivery {
   #logTimer = undefined;
   #logErrors = 0;
   #drainErrors = 0;
-  #logLoss = {at: Number.NEGATIVE_INFINITY, dropped: 0n, suppressed: 0n, truncated: 0n};
 
   constructor(runtime, host, onError) {
     this.#runtime = runtime;
@@ -42,10 +39,6 @@ export class LogDelivery {
     logs.start();
   }
 
-  /**
-   * Hands up to `deliveries` batches of native log records to the host, with the record loss since the last report
-   * when it grew. Records a throwing handler did not take count as delivery errors; delivery never fails the network.
-   */
   #deliverLogs(deliveries) {
     for (let i = 0; i < deliveries; i++) {
       let batch;
@@ -56,42 +49,15 @@ export class LogDelivery {
         this.#onError(error);
         return;
       }
-      const loss = this.#lostLogs(batch);
-      if (batch.records.length > 0 || loss !== null) {
+      if (batch.records.length > 0) {
         try {
-          this.#host.logs(batch.records, loss);
-          if (loss !== null) {
-            this.#logLoss = {
-              at: performance.now(),
-              dropped: batch.dropped,
-              suppressed: batch.suppressed,
-              truncated: batch.truncated,
-            };
-          }
+          this.#host.logs(batch.records);
         } catch {
           this.#logErrors += batch.records.length;
         }
       }
       if (!batch.more) return;
     }
-  }
-
-  /** Record loss since the last report, at most every `LOG_LOSS_MS` while running. */
-  #lostLogs(batch) {
-    const reported = this.#logLoss;
-    if (
-      batch.dropped === reported.dropped &&
-      batch.suppressed === reported.suppressed &&
-      batch.truncated === reported.truncated
-    )
-      return null;
-    const now = performance.now();
-    if (!this.#stopped && now - reported.at < LOG_LOSS_MS) return null;
-    return {
-      dropped: batch.dropped - reported.dropped,
-      suppressed: batch.suppressed - reported.suppressed,
-      truncated: batch.truncated - reported.truncated,
-    };
   }
 
   metrics() {

@@ -17,18 +17,12 @@ pub fn drain(runtime: *Runtime, limit: Value) !js.Value {
         try value.setNamedProperty("level", try env.createStringUtf8(logging.levelName(record.level)));
         try value.setNamedProperty("scope", try env.createStringUtf8(@tagName(record.scope)));
         try value.setNamedProperty("message", try env.createStringUtf8(record.message[0..record.len]));
-        try value.setNamedProperty("sequence", try env.createBigintUint64(record.sequence));
-        try value.setNamedProperty("timestampMs", try env.createBigintUint64(record.timestamp_ms));
-        try value.setNamedProperty("monotonicMs", try env.createBigintUint64(record.monotonic_ms));
-        try value.setNamedProperty("truncated", try env.getBoolean(record.truncated));
+        try value.setNamedProperty("timestampMs", try env.createDouble(@floatFromInt(record.timestamp_ms)));
         try array.setElement(@intCast(i), value);
     }
     const result = try env.createObject();
     try result.setNamedProperty("records", array);
     try result.setNamedProperty("more", try env.getBoolean(batch.more));
-    inline for (.{ "dropped", "suppressed", "truncated" }) |kind| {
-        try result.setNamedProperty(kind, try env.createBigintUint64(batch.stats.total(kind)));
-    }
     runtime.logs.commit(batch.count);
     return .{ .val = result };
 }

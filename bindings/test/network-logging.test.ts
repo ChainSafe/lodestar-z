@@ -28,14 +28,10 @@ test("native std.log captures lifecycle, timestamps and isolated processes throu
       expect(records.some((r) => r.message.startsWith("owner_initializing"))).toBe(true);
       expect(records.some((r) => r.message.startsWith("owner_initialized "))).toBe(true);
       expect(records.some((r) => r.message.startsWith("owner_stopped reason=requested "))).toBe(true);
-      let sequence = 0n;
       for (const record of records) {
-        expect(record.sequence).toBeGreaterThan(sequence);
-        expect(record.timestampMs).toBeGreaterThan(BigInt(Date.now() - 20000));
-        expect(record.monotonicMs).toBeGreaterThan(0n);
+        expect(record.timestampMs).toBeGreaterThan(Date.now() - 20000);
         expect(Buffer.byteLength(record.message)).toBeLessThanOrEqual(768);
         expect([...record.message].every((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) <= 126)).toBe(true);
-        sequence = record.sequence;
       }
       expect((await runtime.drainLogs()).records).toEqual([]);
     }

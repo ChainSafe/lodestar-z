@@ -232,9 +232,10 @@ const contract = [_]Series{
     .{ .name = "lodestar_udp_socket_buffer_bytes", .kind = "gauge", .labels = &.{ "role", "family", "direction" } },
     // Owner and resources
     .{ .name = "lodestar_network_step_seconds", .kind = "histogram" },
+    .{ .name = "lodestar_network_turn_phase_seconds", .kind = "histogram", .labels = &.{"phase"} },
     .{ .name = "lodestar_network_transport_failures_total", .kind = "counter" },
     .{ .name = "lodestar_network_readiness_failures_total", .kind = "counter" },
-    .{ .name = "lodestar_network_logs_dropped_total", .kind = "counter", .labels = &.{ "level", "scope" } },
+    .{ .name = "lodestar_network_logs_dropped_total", .kind = "counter", .labels = &.{ "kind", "level", "scope" } },
     .{ .name = "gossipsub_storage_refusals_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "gossipsub_mcache_not_validated_count", .kind = "gauge" },
     .{ .name = "gossipsub_validation_capacity_count", .kind = "gauge" },
@@ -378,7 +379,6 @@ test "metrics maximum configured topic domain fits its startup exposition reserv
         var name: [topic_mod.topic_max_len]u8 = undefined;
         try gossip_test.subscribe(g, topic_mod.build(value.digest, "beacon_block", &name));
     }
-    f.node.counters.dial_started = std.math.maxInt(u64);
     const output = try f.render();
     try std.testing.expect(output.len < f.buffer.len);
     try std.testing.expectEqual(@as(usize, 64 * 128), std.mem.count(u8, output, "lodestar_gossip_topic_peers_by_data_column_subnet_count{subnet="));

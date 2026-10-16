@@ -97,7 +97,6 @@ pub fn initialize(self: *Runtime) !void {
     self.owner.?.core_live = true;
     self.owner.?.state = try n.application_state.State.init(&self.owner.?.config.state, &self.owner.?.config.chain, &self.owner.?.core.peerId(), &self.owner.?.config.local);
     try self.owner.?.state.?.advance(&self.owner.?.core, &self.owner.?.config.chain, now);
-    self.owner.?.core.turn_timing.enabled = self.owner.?.application.trace_turns;
     self.owner.?.core.protocols.gossipsub.trace_gossip = self.owner.?.application.trace_gossip;
     if (self.owner.?.application.xray) |*options| {
         const peer = self.owner.?.core.peerId();
@@ -231,16 +230,15 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
     try requests_mod.capture(self, self.owner.?.application_outputs[0..result.counts.application], tick);
     commands.completeConnects(self, result.transport_events, tick);
     publishIdentity(self);
-    publishTurn(self, &result, tick);
+    publishTurn(self, &result);
     return result;
 }
 
-/// The earliest host-owned deadline, read under the lock: the health log,
-/// slot clock, peer checkpoint, connect timeouts, graceful close and gossip processor expiry. Host work
+/// The earliest host-owned deadline, read under the lock: the slot clock, peer checkpoint, connect timeouts, graceful close and gossip processor expiry. Host work
 /// found by the previous turn's event capture is due now.
 fn hostDeadline(self: *Runtime, timestamp: n.Now) !u64 {
     if (self.host_due) return timestamp.millis();
-    var deadline = self.health_log_due_ms;
+    var deadline: u64 = std.math.maxInt(u64);
     if (!self.bridge.stop and self.owner.?.checkpoint != null) deadline = @min(deadline, self.owner.?.remembered_due_ms);
     if (!self.bridge.stop) if (self.owner.?.state) |*state| {
         if (try self.owner.?.core.clock.read(timestamp) != state.applied_slot) return timestamp.millis();
@@ -383,15 +381,8 @@ pub fn publishIdentity(self: *Runtime) void {
     self.notifyIfReadyLocked();
 }
 
-fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n.Now) void {
+fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result) void {
     self.lock();
-    if (timestamp.millis() >= self.health_log_due_ms) {
-        const counts = self.owner.?.core.peerCounts();
-        const active_requests = self.owner.?.core.protocols.reqresp.pendingCounts();
-        const control_requests = self.owner.?.core.protocols.control_reqresp.pendingCounts();
-        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.owner.?.resolved.core.peers.target_peers, @as(usize, active_requests.outbound) + control_requests.outbound, @as(usize, active_requests.inbound) + control_requests.inbound, self.owner.?.core.counters.dial_started, self.owner.?.core.counters.dial_deferred, if (self.owner.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.owner.?.core.protocols.gossipsub.counters.local_pressure_resets, self.owner.?.core.transport.counters.received_bytes, self.owner.?.core.transport.counters.sent_bytes });
-        self.health_log_due_ms = timestamp.millis() +| 30000;
-    }
     if (self.bridge.peer_updates) |lane| lane.publish(self.owner.?.outputs[0..result.counts.peers]);
     self.notifyIfReadyLocked();
     if (result.failure) |err| {
@@ -510,7 +501,6 @@ test "a command queued after wait planning executes in the turn whose poll obser
     owner.state = try n.application_state.State.init(&state_config, &owner.config.chain, &owner.core.peerId(), &initial.local);
     const first_slot = n.Now.fromMilliseconds(.{ .mono_ms = result.transport.now.millis() + 1, .unix_s = 1000 });
     _ = try applyWork(&runtime, io, first_slot);
-    runtime.health_log_due_ms = first_slot.millis() + 30000;
     try std.testing.expectEqual(first_slot.millis() + 1000, try hostDeadline(&runtime, first_slot));
     const duration = beacon.chain.SLOT_DURATION_MS;
     const next_slot = n.Now.fromMilliseconds(.{ .mono_ms = first_slot.millis() + duration, .unix_s = 1000 + @as(i64, @intCast(duration / 1000)) });

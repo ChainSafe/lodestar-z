@@ -24,12 +24,9 @@ pub const scope_levels: []const std.log.ScopeLevel = &.{
 };
 
 pub const Record = struct {
-    sequence: u64,
     timestamp_ms: u64,
-    monotonic_ms: u64,
     scope: Scope,
     level: std.log.Level,
-    truncated: bool,
     len: u16,
     message: [message_capacity]u8,
 };
@@ -49,12 +46,14 @@ pub const Stats = struct {
         const records = try writer.family(.{
             .name = "lodestar_network_logs_dropped_total",
             .kind = .counter,
-            .help = "Native log records dropped by scope and level",
-            .labels = &.{ "scope", "level" },
+            .help = "Native log record loss by scope, level and kind",
+            .labels = &.{ "scope", "level", "kind" },
         });
         inline for (@typeInfo(Scope).@"enum".fields) |scope| {
             inline for (@typeInfo(std.log.Level).@"enum".fields) |level| {
-                try records.sample(.{ scope.name, levelName(@enumFromInt(level.value)) }, self.counts[scope.value][level.value].dropped);
+                inline for (.{ "dropped", "suppressed", "truncated" }) |kind| {
+                    try records.sample(.{ scope.name, levelName(@enumFromInt(level.value)), kind }, @field(self.counts[scope.value][level.value], kind));
+                }
             }
         }
     }
@@ -66,7 +65,6 @@ pub const Sink = struct {
     records: [capacity]Record = undefined,
     head: u16 = 0,
     len: u16 = 0,
-    sequence: u64 = 0,
     stats: Stats = .{},
     window_start: ?u64 = null,
     window_levels: [level_count]u16 = @splat(0),
@@ -87,11 +85,6 @@ pub const Sink = struct {
         const s = @intFromEnum(scope);
         const l = @intFromEnum(level);
         const counts = &self.stats.counts[s][l];
-        if (self.sequence == std.math.maxInt(u64)) {
-            counts.dropped +|= 1;
-            return;
-        }
-        self.sequence += 1;
         if (self.window_start == null or monotonic_ms -| self.window_start.? >= 1000) {
             self.window_start = monotonic_ms;
             self.window_levels = @splat(0);
@@ -124,24 +117,21 @@ pub const Sink = struct {
         for (message) |*byte| if (byte.* < 32 or byte.* > 126) {
             byte.* = '?';
         };
-        record.sequence = self.sequence;
         record.timestamp_ms = timestamp_ms;
-        record.monotonic_ms = monotonic_ms;
         record.scope = scope;
         record.level = level;
-        record.truncated = truncated;
         record.len = @intCast(message.len);
         counts.truncated +|= @intFromBool(truncated);
         self.len += 1;
     }
 
-    pub fn peek(self: *Sink, out: []Record) struct { count: usize, stats: Stats, more: bool } {
+    pub fn peek(self: *Sink, out: []Record) struct { count: usize, more: bool } {
         std.debug.assert(out.len > 0 and out.len <= drain_max);
         self.lock();
         defer self.unlock();
         const count = @min(out.len, self.len);
         for (0..count) |i| out[i] = self.records[(@as(usize, self.head) + i) % capacity];
-        return .{ .count = count, .stats = self.stats, .more = self.len > count };
+        return .{ .count = count, .more = self.len > count };
     }
 
     /// Commit only after the host has copied the entire batch. Producers never evict queued records.

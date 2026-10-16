@@ -630,7 +630,6 @@ fn failureAndReplacement(a: *NetworkCore, b: *NetworkCore) !void {
     }
     try std.testing.expectEqual(@as(u16, 1), a.peerCounts().relevant);
     try std.testing.expectEqual(@as(u16, 1), replacement.peerCounts().relevant);
-    try std.testing.expect(replacement.counters.dial_started > 0);
     replacement.shutdown(try Now.read(std.testing.io));
 }
 

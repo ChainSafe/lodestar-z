@@ -90,7 +90,6 @@ pub const Runtime = struct {
     closed: Promise = .{},
 
     // Network thread scheduling and counters, read after joining at teardown.
-    health_log_due_ms: u64 = 0,
     closing_deadline: ?u64 = null,
     /// Owner thread: an event capture left host work for the next apply, so the next turn is due now.
     host_due: bool = false,

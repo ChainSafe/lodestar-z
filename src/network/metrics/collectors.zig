@@ -5,6 +5,7 @@ const rr = @import("../reqresp/root.zig");
 const prom = @import("registry.zig");
 const peer_metrics = @import("../peers/metrics_export.zig");
 const gossip_metrics = @import("../gossipsub/metrics_export.zig");
+const turn_timing = @import("../turn_timing.zig");
 const timing = @import("timing.zig");
 const topic_metrics = @import("../gossipsub/topic_metrics.zig");
 const gossip_turn = @import("../gossipsub/turn.zig");
@@ -51,6 +52,10 @@ fn writeRuntime(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.scalar(.{ .name = "lodestar_network_readiness_failures_total", .kind = .counter, .help = "Failed owner readiness polls" }, self.owner.counters.readiness_failures);
     const steps = try w.histograms(.{ .name = "lodestar_network_step_seconds", .kind = .histogram, .help = "Network step duration after native readiness polling, covering transport, protocols and discovery", .unit = .seconds }, timing.Duration);
     try steps.histogram(.{}, &self.owner.step_duration);
+    const phases = try w.histograms(.{ .name = "lodestar_network_turn_phase_seconds", .kind = .histogram, .help = "Network turn duration by phase, excluding readiness polling", .labels = &.{"phase"}, .unit = .seconds }, timing.Duration);
+    inline for (std.meta.fields(turn_timing.Phase)) |phase| {
+        try phases.histogram(.{phase.name}, &self.owner.turn_timing.phases[phase.value]);
+    }
 }
 
 fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {

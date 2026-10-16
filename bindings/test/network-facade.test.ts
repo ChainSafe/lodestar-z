@@ -308,8 +308,6 @@ test.each([
     expect(records.slice(0, closedAt).some(({message}) => message.startsWith("owner_stopped reason=requested "))).toBe(
       true
     );
-    const sequences = records.map(({sequence}) => sequence);
-    expect(sequences).toEqual([...sequences].sort((a, b) => (a < b ? -1 : 1)));
   },
   15000
 );

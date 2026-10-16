@@ -123,17 +123,7 @@ export interface NativeLogRecord {
   level: Exclude<NativeLogLevel, "off">;
   scope: string;
   message: string;
-  sequence: bigint;
-  timestampMs: bigint;
-  monotonicMs: bigint;
-  truncated: boolean;
-}
-
-/** Native log records lost since the last report: past capacity, over the rate limits, or cut to fit. */
-export interface NativeLogLoss {
-  dropped: bigint;
-  suppressed: bigint;
-  truncated: bigint;
+  timestampMs: number;
 }
 
 export interface NativeResources {
@@ -151,8 +141,6 @@ export interface NativeResources {
 export interface NativeApplicationConfig extends NativeRuntimeConfig {
   /** Bounded lifecycle logs for blocks and a stable 1/64 column sample. Defaults to false. */
   traceGossip?: boolean;
-  /** Network phase timing totals logged at most once per 50 ms. Defaults to false. */
-  traceTurns?: boolean;
   /** Native exporter. Disabled by default. Owns bounded capture/replay and a dedicated thread. */
   xray?: {
     /** Filesystem Unix socket or numeric IP:port. */
@@ -562,12 +550,11 @@ export interface NativeHost {
    */
   failed(error: Error): void;
   /**
-   * Native log records at or above the configured level, up to 256 every 100 ms and up to 2,048 after close, with the
-   * records native lost since the last report when that grew, at most every 30 s while running. A throw counts the
+   * Native log records at or above the configured level, up to 256 every 100 ms and up to 2,048 after close. A throw counts the
    * delivery's records in lodestar_network_log_delivery_errors_total and never fails the network. Failed native drains count
    * separately in lodestar_network_log_drain_errors_total.
    */
-  logs(records: readonly NativeLogRecord[], lost: NativeLogLoss | null): void;
+  logs(records: readonly NativeLogRecord[]): void;
   /** A failure the binding recovered from: one of the above that threw, rejected or broke its contract. */
   error?(error: unknown): void;
 }
