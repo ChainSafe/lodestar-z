@@ -114,7 +114,7 @@ pub const Owners = struct {
             switch (bound.owner) {
                 .negotiation => if (self.negotiator) |owner| owner.streamReady(bound.row, stream),
                 .identify => if (self.identify) |owner| owner.streamReady(bound.row, stream),
-                .reqresp_outbound, .reqresp_inbound => if (self.reqresp) |owner| owner.streamReady(bound, stream),
+                .reqresp_outbound, .reqresp_inbound, .reqresp_control_outbound, .reqresp_control_inbound => if (self.reqresp) |owner| owner.streamReady(bound, stream),
                 .gossip_inbound, .gossip_outbound => if (self.gossip) |owner| if (event == .stream_ready) owner.streamReady(engine, bound, stream, event.stream_ready.ready),
                 .none => {},
             }

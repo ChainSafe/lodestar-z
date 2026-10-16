@@ -62,7 +62,7 @@ pub const Endpoint = struct {
             };
             switch (route.owner) {
                 .negotiation => self.router.negotiator.streamReady(route.row, stream),
-                .reqresp_outbound, .reqresp_inbound => self.reqresp.streamReady(route, stream),
+                .reqresp_outbound, .reqresp_inbound, .reqresp_control_outbound, .reqresp_control_inbound => self.reqresp.streamReady(route, stream),
                 .none => {},
                 else => unreachable,
             }

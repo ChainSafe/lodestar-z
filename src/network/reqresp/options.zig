@@ -5,7 +5,8 @@ const request_policy = @import("request_policy.zig");
 const admission_mod = @import("admission.zig");
 const quotas = @import("quotas.zig");
 const limits = @import("../quic/limits.zig");
-const ForkEntry = @import("../types.zig").ForkEntry;
+const types = @import("../types.zig");
+const ForkEntry = types.ForkEntry;
 
 pub const Error = error{ InvalidOptions, InvalidQuota, InvalidPolicy };
 
@@ -22,6 +23,8 @@ pub fn validateForkTable(table: []const ForkEntry) error{InvalidOptions}!void {
 }
 
 pub const Options = struct {
+    routes: Routes = .application,
+
     connections: u16 = limits.connections_max_default,
     outbound_max: u16 = constants.outbound_max_default,
     /// Shared execution slots, including the control reserve.
@@ -45,6 +48,21 @@ pub const Options = struct {
     quota_timeout_ms: u64 = 60_000,
     work_per_pump_max: u16 = 32,
 
+    pub const Routes = struct {
+        inbound: types.StreamOwner,
+        outbound: types.StreamOwner,
+
+        pub const application: Routes = .{ .inbound = .reqresp_inbound, .outbound = .reqresp_outbound };
+        pub const control: Routes = .{ .inbound = .reqresp_control_inbound, .outbound = .reqresp_control_outbound };
+
+        pub fn owner(self: Routes, direction: types.Direction) types.StreamOwner {
+            return switch (direction) {
+                .inbound => self.inbound,
+                .outbound => self.outbound,
+            };
+        }
+    };
+
     pub const Admission = struct {
         policy: request_policy.Config,
         limits: quotas.Options,
@@ -55,6 +73,7 @@ pub const Options = struct {
     };
 
     pub fn validate(options: Options) Error!void {
+        if (!std.meta.eql(options.routes, Routes.application) and !std.meta.eql(options.routes, Routes.control)) return error.InvalidOptions;
         _ = try request_policy.Policy.init(&options.admission.policy);
         try admission_mod.Limiter.validate(&options.admission.limits);
         if (options.outbound_max == 0 or options.outbound_max > constants.slots_ceiling) {

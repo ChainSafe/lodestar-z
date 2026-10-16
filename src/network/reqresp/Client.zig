@@ -268,7 +268,7 @@ pub fn negotiated(slot: *Client, owner: *ReqResp, engine: *Engine, router: *Rout
                 return;
             }
             // A stream that is already gone fails on the slot's first write.
-            engine.bindStream(outcome.stream, .{ .owner = .reqresp_outbound, .row = index }) catch {};
+            engine.bindStream(outcome.stream, .{ .owner = owner.options.routes.outbound, .row = index }) catch {};
             assert(ready.leftover.len <= request.io.read_buffer.len);
             @memcpy(request.io.read_buffer[0..ready.leftover.len], ready.leftover);
             request.io.buffered_start = 0;

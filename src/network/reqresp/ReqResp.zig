@@ -48,6 +48,7 @@ pub const validateForkTable = options_mod.validateForkTable;
 pub const outbound_stream_headroom = options_mod.outbound_stream_headroom;
 
 const Settings = struct {
+    routes: Options.Routes,
     connections: u16,
     outbound_control_reserved: u16,
     serving_control_reserved: u16,
@@ -270,6 +271,7 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
     var result: ReqResp = .{
         .allocator = allocator,
         .options = .{
+            .routes = options.routes,
             .connections = options.connections,
             .outbound_control_reserved = options.outbound_control_reserved,
             .serving_control_reserved = options.serving_control_reserved,
@@ -448,7 +450,7 @@ pub fn accept(
     std.log.scoped(.network_reqresp).debug("request_started direction=inbound request={d}:{d} connection={d}:{d} stream={d} method={s}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which) });
     if (slot.admission.start_pending) std.log.scoped(.network_reqresp_errors).debug("request_start_wait request={d}:{d} connection={d}:{d} stream={d} method={s} due_in_ms={d}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which), slot.admission.eligible_ms - now.millis() });
     // A stream that is already gone fails on the slot's first read.
-    engine.bindStream(stream, .{ .owner = .reqresp_inbound, .row = index }) catch {};
+    engine.bindStream(stream, .{ .owner = self.options.routes.inbound, .row = index }) catch {};
     self.markReady(.inbound, index);
     self.settle(self.inboundId(index));
     return slot.request.handle(index);
@@ -597,7 +599,7 @@ pub fn streamReady(self: *ReqResp, route: types.Route, stream: StreamHandle) voi
 /// any other close is observed by the slot's next stream call.
 pub fn streamClosed(self: *ReqResp, engine: *Engine, router: *Router, route: types.Route, stream: StreamHandle, reset_code: ?u64, now: Now) void {
     const id = self.routedSlot(route, stream) orelse return;
-    if (reset_code != null and route.owner == .reqresp_inbound) {
+    if (reset_code != null and route.owner == self.options.routes.inbound) {
         const index: u16 = @intCast(route.row);
         const slot = &self.inbound[index];
         if (slot.state != .writing_chunk and slot.state != .finishing) {
@@ -609,11 +611,12 @@ pub fn streamClosed(self: *ReqResp, engine: *Engine, router: *Router, route: typ
 }
 
 fn routedSlot(self: *const ReqResp, route: types.Route, stream: StreamHandle) ?u32 {
-    const id: u32 = switch (route.owner) {
-        .reqresp_outbound => if (route.row < self.outbound.len) route.row else return null,
-        .reqresp_inbound => if (route.row < self.inbound.len) self.inboundId(@intCast(route.row)) else return null,
-        else => return null,
-    };
+    const id: u32 = if (route.owner == self.options.routes.outbound)
+        (if (route.row < self.outbound.len) route.row else return null)
+    else if (route.owner == self.options.routes.inbound)
+        (if (route.row < self.inbound.len) self.inboundId(@intCast(route.row)) else return null)
+    else
+        return null;
     const record = self.recordOf(id);
     if (!record.running() or !std.meta.eql(record.stream, stream)) return null;
     return id;
@@ -976,7 +979,7 @@ fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhaus
         if (direction == .inbound) self.admission.checkSlot(&self.inbound[index], index);
         if (!record.occupied() or record.stream_owner != .protocol) continue;
         const bound = engine.route(record.stream) orelse continue;
-        assert(bound.owner == (if (direction == .outbound) types.StreamOwner.reqresp_outbound else .reqresp_inbound) and bound.row == index);
+        assert(bound.owner == self.options.routes.owner(direction) and bound.row == index);
         if (!record.running() or links.ready.linked) continue;
         const waits = engine.streamWaits(record.stream) orelse continue;
         switch (direction) {
@@ -1003,7 +1006,7 @@ fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhaus
     assert(lengths.ready == self.ready.len);
     assert(lengths.events[@intFromEnum(EventList.application)] == self.deliver[0].len);
     assert(lengths.events[@intFromEnum(EventList.control)] == self.deliver[1].len);
-    route_invariant.check(engine, self.outbound, self.inbound) catch unreachable;
+    route_invariant.check(engine, self.options.routes, self.outbound, self.inbound) catch unreachable;
 }
 
 /// A reading slot off `ready` has consumed its buffered input and read its last delivered

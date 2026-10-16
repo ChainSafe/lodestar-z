@@ -176,7 +176,7 @@ pub const Protocols = struct {
             switch (route.owner) {
                 .negotiation => self.router.negotiator.streamReady(route.row, ready.stream),
                 .identify => self.identify.streamReady(route.row, ready.stream),
-                .reqresp_outbound, .reqresp_inbound => self.reqresp.streamReady(route, ready.stream),
+                .reqresp_outbound, .reqresp_inbound, .reqresp_control_outbound, .reqresp_control_inbound => self.reqresp.streamReady(route, ready.stream),
                 .gossip_inbound, .gossip_outbound => if (self.applications_open) self.gossipsub.streamReady(engine, route, ready.stream, ready.ready),
                 .none => {},
             }
