@@ -678,8 +678,8 @@ pub const Pool = struct {
             const states = self.nodes.items(.state);
             const k = states[@intFromEnum(id)].kind();
 
-            // Rollback errdefers unref the same spine twice (via node_id and
-            // path_parents); tolerate the already-freed slot, don't panic.
+            // Batch rollback can reach a node through both a pass's parents and an
+            // unfinalized parent; tolerate the already-freed slot, don't panic.
             if (k == .free) {
                 current = null;
                 continue;
@@ -1139,6 +1139,7 @@ pub const Id = enum(u32) {
     /// - indexes MUST be sorted in ascending order beforehand.
     /// - All indexes must be at the exact same depth.
     /// - Depth must be > 0, if 0 just replace the root node.
+    /// - On error, inputs with refcount 0 may be freed; ref them to keep them.
     pub fn setNodesAtDepth(root_node: Id, pool: *Pool, depth: Depth, indices: []const usize, nodes_in: []Id) Error!Id {
         std.debug.assert(nodes_in.len == indices.len);
         if (indices.len == 0) {
@@ -1177,7 +1178,8 @@ pub const Id = enum(u32) {
         var node_id = root_node;
         // Subtrees finished by earlier passes hang from unfinalized parents until a later pass
         // attaches them. `node_id` is only a cursor and can point into the original tree, so it is
-        // not released. A node reached twice was freed by its first unref, which `unref` skips.
+        // not released. Both sets name only nodes this call allocated, so overlapping unrefs only
+        // free them earlier; `unref` skips freed slots.
         errdefer for (unfinalized_parents_buf) |parent| {
             if (parent) |id| pool.unref(id);
         };
@@ -1202,6 +1204,7 @@ pub const Id = enum(u32) {
                 0
             else
                 path_len - @as(Depth, @intCast(@bitSizeOf(usize) - @clz(index ^ indices[i + 1])));
+
             try pool.alloc(path_parents[next_d_offset..path_len]);
             errdefer pool.free(path_parents[next_d_offset..path_len]);
 
@@ -1397,6 +1400,7 @@ pub const Id = enum(u32) {
 
     /// Set multiple nodes in batch, editing and traversing nodes strictly once.
     /// - gindexes MUST be sorted in ascending order beforehand.
+    /// - On error, inputs with refcount 0 may be freed; ref them to keep them.
     pub fn setNodes(root_node: Id, pool: *Pool, gindices: []const Gindex, nodes_in: []Id) Error!Id {
         std.debug.assert(nodes_in.len == gindices.len);
         if (gindices.len == 0) {
@@ -1426,7 +1430,8 @@ pub const Id = enum(u32) {
         var node_id = root_node;
         // Subtrees finished by earlier passes hang from unfinalized parents until a later pass
         // attaches them. `node_id` is only a cursor and can point into the original tree, so it is
-        // not released. A node reached twice was freed by its first unref, which `unref` skips.
+        // not released. Both sets name only nodes this call allocated, so overlapping unrefs only
+        // free them earlier; `unref` skips freed slots.
         errdefer for (unfinalized_parents_buf) |parent| {
             if (parent) |id| pool.unref(id);
         };
