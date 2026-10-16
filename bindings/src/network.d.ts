@@ -520,7 +520,10 @@ export interface IncomingRequest {
 export interface HostCapacity {
   /** Native still delivers urgent gossip while validation is backpressured. */
   gossipValidation: "ready" | "backpressured";
-  /** Excludes active requests. Finite; the binding floors and clamps it to 0..32. */
+  /**
+   * Additional host allowance, clamped to 0..32. Native also counts its occupied serving slots.
+   * May stay at limits.incomingCapacity when native leases are the host's only request limit.
+   */
   incomingRequestSlots: number;
 }
 
