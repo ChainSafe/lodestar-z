@@ -227,40 +227,43 @@ test "computeSyncCommitteeIndices matches reference vectors" {
     const data = testBalances(1000);
     const rounds = 90;
 
-    const phase0 = try shuffle.computeSyncCommitteeIndices(
+    var phase0: [32]u32 = undefined;
+    try shuffle.computeSyncCommitteeIndicesInto(
         allocator,
         seed[0..],
         data.indices[0..],
         data.increments[0..],
         .one,
-        32,
         MAX_EFFECTIVE_BALANCE,
         EFFECTIVE_BALANCE_INCREMENT,
         rounds,
+        &phase0,
     );
-    defer allocator.free(phase0);
+
     const expected_phase0 = [_]u32{
         293, 726, 771, 677, 530, 475, 322, 66,  521, 106, 774, 23,  508, 410, 526, 44,
         213, 948, 248, 903, 85,  853, 171, 679, 309, 791, 851, 817, 609, 119, 128, 983,
     };
-    try std.testing.expectEqualSlices(u32, expected_phase0[0..], phase0);
+    try std.testing.expectEqualSlices(u32, expected_phase0[0..], phase0[0..expected_phase0.len]);
 
-    const electra = try shuffle.computeSyncCommitteeIndicesElectra(
+    var electra: [32]u32 = undefined;
+    try shuffle.computeSyncCommitteeIndicesInto(
         allocator,
         seed[0..],
         data.indices[0..],
         data.increments[0..],
-        32,
+        .two,
         MAX_EFFECTIVE_BALANCE_ELECTRA,
         EFFECTIVE_BALANCE_INCREMENT,
         rounds,
+        &electra,
     );
-    defer allocator.free(electra);
+
     const expected_electra = [_]u32{
         726, 475, 521, 23,  508, 410, 213, 948, 248, 85,  171, 309, 791, 817, 119, 126,
         651, 416, 273, 471, 739, 290, 588, 840, 665, 945, 496, 158, 757, 616, 226, 766,
     };
-    try std.testing.expectEqualSlices(u32, expected_electra[0..], electra);
+    try std.testing.expectEqualSlices(u32, expected_electra[0..], electra[0..expected_electra.len]);
 }
 
 fn expectSyncCommitteeMatchesGetCommitteeIndices(
@@ -272,9 +275,9 @@ fn expectSyncCommitteeMatchesGetCommitteeIndices(
     const allocator = std.testing.allocator;
     const committee_size = 32;
 
-    const expected = try shuffle.getCommitteeIndices(
+    var expected: [committee_size]u32 = undefined;
+    try shuffle.getCommitteeIndices(
         allocator,
-        committee_size,
         seed,
         active_indices,
         effective_balance_increments,
@@ -282,22 +285,23 @@ fn expectSyncCommitteeMatchesGetCommitteeIndices(
         MAX_EFFECTIVE_BALANCE_ELECTRA,
         EFFECTIVE_BALANCE_INCREMENT,
         rounds,
+        &expected,
     );
-    defer allocator.free(expected);
 
-    const actual = try shuffle.computeSyncCommitteeIndicesElectra(
+    var actual: [committee_size]u32 = undefined;
+    try shuffle.computeSyncCommitteeIndicesInto(
         allocator,
         seed,
         active_indices,
         effective_balance_increments,
-        committee_size,
+        .two,
         MAX_EFFECTIVE_BALANCE_ELECTRA,
         EFFECTIVE_BALANCE_INCREMENT,
         rounds,
+        &actual,
     );
-    defer allocator.free(actual);
 
-    try std.testing.expectEqualSlices(u32, expected, actual);
+    try std.testing.expectEqualSlices(u32, &expected, &actual);
 }
 
 /// The random value the samplers draw for their first candidate.
@@ -307,13 +311,11 @@ fn firstRandomValue(seed: *const [SEED_SIZE]u8) u16 {
     return std.mem.readInt(u16, hash[0..2], .little);
 }
 
-test "computeSyncCommitteeIndicesElectra matches getCommitteeIndices on low-balance sets" {
+test "computeSyncCommitteeIndicesInto matches getCommitteeIndices on low-balance sets" {
     const allocator = std.testing.allocator;
     const seed = [_]u8{0xc3} ** SEED_SIZE;
 
-    // Sizes below and above the roughly 500 candidates each case examines, so the candidate
-    // order wraps around in some cases and not in others. 255 to 257 straddle the 256 positions
-    // that one shuffle hash covers.
+    // Cover candidate wraparound and 256-position shuffle-hash boundaries.
     for ([_]usize{ 1, 2, 17, 255, 256, 257, 1000, 4097 }) |active_count| {
         const active_indices = try allocator.alloc(u32, active_count);
         defer allocator.free(active_indices);
@@ -339,7 +341,7 @@ test "computeSyncCommitteeIndicesElectra matches getCommitteeIndices on low-bala
     }
 }
 
-test "computeSyncCommitteeIndicesElectra accepts a full balance on the largest random value" {
+test "computeSyncCommitteeIndicesInto accepts a full balance on the largest random value" {
     var seed = [_]u8{0} ** SEED_SIZE;
     std.mem.writeInt(u64, seed[0..8], 14867, .little);
     try std.testing.expectEqual(65535, firstRandomValue(&seed));
@@ -355,7 +357,7 @@ test "computeSyncCommitteeIndicesElectra accepts a full balance on the largest r
     );
 }
 
-test "computeSyncCommitteeIndicesElectra rejects a 32 ETH validator on random value 1024" {
+test "computeSyncCommitteeIndicesInto rejects a 32 ETH validator on random value 1024" {
     var seed = [_]u8{0} ** SEED_SIZE;
     std.mem.writeInt(u64, seed[0..8], 46894, .little);
     try std.testing.expectEqual(1024, firstRandomValue(&seed));
@@ -371,65 +373,70 @@ test "computeSyncCommitteeIndicesElectra rejects a 32 ETH validator on random va
     );
 }
 
-test "computeSyncCommitteeIndicesElectra reports the same input errors as getCommitteeIndices" {
+test "computeSyncCommitteeIndicesInto reports the same input errors as getCommitteeIndices" {
     const allocator = std.testing.allocator;
     const seed = [_]u8{1} ** SEED_SIZE;
     const short_seed = [_]u8{1} ** 31;
     const one_index = [_]u32{0};
     const one_increment = [_]u16{32};
+    var out: [32]u32 = undefined;
 
     // A one-entry list is never shuffled, so the seed length has to be checked separately.
-    try std.testing.expectError(error.InvalidSeedLength, shuffle.computeSyncCommitteeIndicesElectra(
+    try std.testing.expectError(error.InvalidSeedLength, shuffle.computeSyncCommitteeIndicesInto(
         allocator,
         &short_seed,
         &one_index,
         &one_increment,
-        4,
+        .two,
         MAX_EFFECTIVE_BALANCE_ELECTRA,
         EFFECTIVE_BALANCE_INCREMENT,
         90,
+        &out,
     ));
 
     const out_of_bounds_index = [_]u32{5};
     try std.testing.expectError(
         error.EffectiveBalanceIncrementsOutOfBounds,
-        shuffle.computeSyncCommitteeIndicesElectra(
+        shuffle.computeSyncCommitteeIndicesInto(
             allocator,
             &seed,
             &out_of_bounds_index,
             &one_increment,
-            4,
+            .two,
             MAX_EFFECTIVE_BALANCE_ELECTRA,
             EFFECTIVE_BALANCE_INCREMENT,
             90,
+            &out,
         ),
     );
 
     try std.testing.expectError(
         error.EmptyActiveIndices,
-        shuffle.computeSyncCommitteeIndicesElectra(
+        shuffle.computeSyncCommitteeIndicesInto(
             allocator,
             &seed,
             &[_]u32{},
             &one_increment,
-            4,
+            .two,
             MAX_EFFECTIVE_BALANCE_ELECTRA,
             EFFECTIVE_BALANCE_INCREMENT,
             90,
+            &out,
         ),
     );
 
     try std.testing.expectError(
         error.InvalidEffectiveBalanceIncrement,
-        shuffle.computeSyncCommitteeIndicesElectra(
+        shuffle.computeSyncCommitteeIndicesInto(
             allocator,
             &seed,
             &one_index,
             &one_increment,
-            4,
+            .two,
             MAX_EFFECTIVE_BALANCE_ELECTRA,
             0,
             90,
+            &out,
         ),
     );
 }
@@ -441,9 +448,9 @@ test "computeSyncCommitteeIndices with one random byte matches getCommitteeIndic
     // Below the 32 increment maximum, so one and two random bytes select different committees.
     const effective_balance_increments = [_]u16{ 16, 18, 20, 22, 24, 26, 28, 30 };
 
-    const expected = try shuffle.getCommitteeIndices(
+    var expected: [32]u32 = undefined;
+    try shuffle.getCommitteeIndices(
         allocator,
-        32,
         &seed,
         &active_indices,
         &effective_balance_increments,
@@ -451,26 +458,26 @@ test "computeSyncCommitteeIndices with one random byte matches getCommitteeIndic
         MAX_EFFECTIVE_BALANCE,
         EFFECTIVE_BALANCE_INCREMENT,
         90,
+        &expected,
     );
-    defer allocator.free(expected);
 
-    const actual = try shuffle.computeSyncCommitteeIndices(
+    var actual: [32]u32 = undefined;
+    try shuffle.computeSyncCommitteeIndicesInto(
         allocator,
         &seed,
         &active_indices,
         &effective_balance_increments,
         .one,
-        32,
         MAX_EFFECTIVE_BALANCE,
         EFFECTIVE_BALANCE_INCREMENT,
         90,
+        &actual,
     );
-    defer allocator.free(actual);
 
-    try std.testing.expectEqualSlices(u32, expected, actual);
+    try std.testing.expectEqualSlices(u32, &expected, &actual);
 }
 
-test "computeSyncCommitteeIndicesElectra wraps like getCommitteeIndices on an oversized balance" {
+test "computeSyncCommitteeIndicesInto wraps like getCommitteeIndices on an oversized balance" {
     const allocator = std.testing.allocator;
     const seed = [_]u8{0x5a} ** SEED_SIZE;
     const active_indices = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7 };
@@ -479,9 +486,9 @@ test "computeSyncCommitteeIndicesElectra wraps like getCommitteeIndices on an ov
     const max_effective_balance = std.math.maxInt(i64);
     const effective_balance_increment = 1;
 
-    const expected = try shuffle.getCommitteeIndices(
+    var expected: [32]u32 = undefined;
+    try shuffle.getCommitteeIndices(
         allocator,
-        32,
         &seed,
         &active_indices,
         &effective_balance_increments,
@@ -489,34 +496,35 @@ test "computeSyncCommitteeIndicesElectra wraps like getCommitteeIndices on an ov
         max_effective_balance,
         effective_balance_increment,
         90,
+        &expected,
     );
-    defer allocator.free(expected);
 
-    const actual = try shuffle.computeSyncCommitteeIndicesElectra(
+    var actual: [32]u32 = undefined;
+    try shuffle.computeSyncCommitteeIndicesInto(
         allocator,
         &seed,
         &active_indices,
         &effective_balance_increments,
-        32,
+        .two,
         max_effective_balance,
         effective_balance_increment,
         90,
+        &actual,
     );
-    defer allocator.free(actual);
 
-    try std.testing.expectEqualSlices(u32, expected, actual);
+    try std.testing.expectEqualSlices(u32, &expected, &actual);
 }
 
-test "computeSyncCommitteeIndicesElectra falls back on a negative maximum balance" {
+test "computeSyncCommitteeIndicesInto matches getCommitteeIndices on a negative maximum balance" {
     const allocator = std.testing.allocator;
     const seed = [_]u8{0x5a} ** SEED_SIZE;
     const active_indices = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7 };
     const effective_balance_increments = [_]u16{ 16, 18, 20, 22, 24, 26, 28, 30 };
     const max_effective_balance = -EFFECTIVE_BALANCE_INCREMENT;
 
-    const expected = try shuffle.getCommitteeIndices(
+    var expected: [32]u32 = undefined;
+    try shuffle.getCommitteeIndices(
         allocator,
-        32,
         &seed,
         &active_indices,
         &effective_balance_increments,
@@ -524,22 +532,23 @@ test "computeSyncCommitteeIndicesElectra falls back on a negative maximum balanc
         max_effective_balance,
         EFFECTIVE_BALANCE_INCREMENT,
         90,
+        &expected,
     );
-    defer allocator.free(expected);
 
-    const actual = try shuffle.computeSyncCommitteeIndicesElectra(
+    var actual: [32]u32 = undefined;
+    try shuffle.computeSyncCommitteeIndicesInto(
         allocator,
         &seed,
         &active_indices,
         &effective_balance_increments,
-        32,
+        .two,
         max_effective_balance,
         EFFECTIVE_BALANCE_INCREMENT,
         90,
+        &actual,
     );
-    defer allocator.free(actual);
 
-    try std.testing.expectEqualSlices(u32, expected, actual);
+    try std.testing.expectEqualSlices(u32, &expected, &actual);
 }
 
 fn sampleLowBalanceSyncCommittee(allocator: std.mem.Allocator) !void {
@@ -547,20 +556,21 @@ fn sampleLowBalanceSyncCommittee(allocator: std.mem.Allocator) !void {
     const active_indices = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7 };
     const effective_balance_increments = [_]u16{32} ** 8;
 
-    const committee = try shuffle.computeSyncCommitteeIndicesElectra(
+    var committee: [32]u32 = undefined;
+    try shuffle.computeSyncCommitteeIndicesInto(
         allocator,
         &seed,
         &active_indices,
         &effective_balance_increments,
-        4,
+        .two,
         MAX_EFFECTIVE_BALANCE_ELECTRA,
         EFFECTIVE_BALANCE_INCREMENT,
         90,
+        &committee,
     );
-    allocator.free(committee);
 }
 
-test "computeSyncCommitteeIndicesElectra frees everything when an allocation fails" {
+test "memory_safety: computeSyncCommitteeIndicesInto frees everything when an allocation fails" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         sampleLowBalanceSyncCommittee,
@@ -568,25 +578,53 @@ test "computeSyncCommitteeIndicesElectra frees everything when an allocation fai
     );
 }
 
-test "computeSyncCommitteeIndicesElectra samples a low-balance set from one list shuffle" {
-    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+test "computeSyncCommitteeIndicesInto uses only shuffle scratch for low and high balances" {
+    const seed = [_]u8{0x5a} ** SEED_SIZE;
+    var active_indices: [4097]u32 = undefined;
+    for (&active_indices, 0..) |*index, i| index.* = @intCast(i);
 
-    // The list shuffle sampler allocates the committee and the shuffled positions.
-    // `getCommitteeIndices` allocates per-round caches on top of its committee, so the count
-    // tells the two apart.
-    try sampleLowBalanceSyncCommittee(counting.allocator());
-    try std.testing.expectEqual(2, counting.allocations);
+    for ([_]u16{ 32, 2048 }) |balance| {
+        const effective_balance_increments = [_]u16{balance} ** active_indices.len;
+        var out: [32]u32 = undefined;
+        var expected: [out.len]u32 = undefined;
+        try shuffle.getCommitteeIndices(
+            std.testing.allocator,
+            &seed,
+            &active_indices,
+            &effective_balance_increments,
+            .two,
+            MAX_EFFECTIVE_BALANCE_ELECTRA,
+            EFFECTIVE_BALANCE_INCREMENT,
+            90,
+            &expected,
+        );
+
+        var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        try shuffle.computeSyncCommitteeIndicesInto(
+            counting.allocator(),
+            &seed,
+            &active_indices,
+            &effective_balance_increments,
+            .two,
+            MAX_EFFECTIVE_BALANCE_ELECTRA,
+            EFFECTIVE_BALANCE_INCREMENT,
+            90,
+            &out,
+        );
+        try std.testing.expectEqualSlices(u32, &expected, &out);
+        try std.testing.expect(counting.allocations <= 1);
+    }
 }
 
 test "getCommitteeIndices rejects empty active indices" {
     const allocator = std.testing.allocator;
+    var out: [1]u32 = undefined;
     const seed = [_]u8{1} ** SEED_SIZE;
     const active_indices = [_]u32{};
     const increments = [_]u16{};
 
     try std.testing.expectError(error.EmptyActiveIndices, shuffle.getCommitteeIndices(
         allocator,
-        1,
         seed[0..],
         active_indices[0..],
         increments[0..],
@@ -594,18 +632,19 @@ test "getCommitteeIndices rejects empty active indices" {
         MAX_EFFECTIVE_BALANCE,
         EFFECTIVE_BALANCE_INCREMENT,
         90,
+        &out,
     ));
 }
 
 test "getCommitteeIndices rejects zero effective balance increment" {
     const allocator = std.testing.allocator;
+    var out: [1]u32 = undefined;
     const seed = [_]u8{1} ** SEED_SIZE;
     const active_indices = [_]u32{0};
     const increments = [_]u16{32};
 
     try std.testing.expectError(error.InvalidEffectiveBalanceIncrement, shuffle.getCommitteeIndices(
         allocator,
-        1,
         seed[0..],
         active_indices[0..],
         increments[0..],
@@ -613,11 +652,13 @@ test "getCommitteeIndices rejects zero effective balance increment" {
         MAX_EFFECTIVE_BALANCE,
         0,
         90,
+        &out,
     ));
 }
 
 test "getCommitteeIndices rejects out-of-bounds candidate index" {
     const allocator = std.testing.allocator;
+    var out: [1]u32 = undefined;
     const seed = [_]u8{1} ** SEED_SIZE;
     // a single active index >= effective_balance_increments.len (1) triggers
     // the out-of-bounds lookup on the very first candidate.
@@ -626,7 +667,6 @@ test "getCommitteeIndices rejects out-of-bounds candidate index" {
 
     try std.testing.expectError(error.EffectiveBalanceIncrementsOutOfBounds, shuffle.getCommitteeIndices(
         allocator,
-        1,
         seed[0..],
         active_indices[0..],
         increments[0..],
@@ -634,6 +674,7 @@ test "getCommitteeIndices rejects out-of-bounds candidate index" {
         MAX_EFFECTIVE_BALANCE,
         EFFECTIVE_BALANCE_INCREMENT,
         90,
+        &out,
     ));
 }
 

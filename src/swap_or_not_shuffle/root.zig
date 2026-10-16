@@ -316,11 +316,10 @@ pub const ByteCount = enum(u8) {
     two = 2,
 };
 
-/// Draws `committee_size` indices from `active_indices` weighted by effective
-/// balance. Caller owns the returned slice.
+/// Fills caller-owned `out` with indices weighted by effective balance.
+/// `out` must not alias the inputs. An error may leave it partially written.
 pub fn getCommitteeIndices(
     allocator: Allocator,
-    committee_size: u32,
     seed: []const u8,
     active_indices: []const u32,
     effective_balance_increments: []const u16,
@@ -328,7 +327,8 @@ pub fn getCommitteeIndices(
     max_effective_balance: i64,
     effective_balance_increment: i64,
     rounds: u32,
-) ![]u32 {
+    out: []u32,
+) !void {
     // reference divergence: error instead of risking invoking unchecked arithmetic
     if (active_indices.len == 0) {
         return error.EmptyActiveIndices;
@@ -336,9 +336,6 @@ pub fn getCommitteeIndices(
     if (effective_balance_increment == 0) {
         return error.InvalidEffectiveBalanceIncrement;
     }
-
-    var committee_indices = try std.ArrayList(u32).initCapacity(allocator, committee_size);
-    errdefer committee_indices.deinit(allocator);
 
     const max_random_value: i64 = switch (rand_byte_count) {
         .one => 0xff,
@@ -357,6 +354,7 @@ pub fn getCommitteeIndices(
     defer shuffled_result.deinit();
 
     var i: u32 = 0;
+    var count: usize = 0;
     // seed + 8 bytes of little-endian counter; only the low 4 bytes are ever
     // written, matching the reference which hashes the full 40-byte buffer.
     var cached_hash_input = [_]u8{0} ** (SEED_SIZE + 8);
@@ -364,7 +362,7 @@ pub fn getCommitteeIndices(
     @memcpy(cached_hash_input[0..SEED_SIZE], seed);
     var cached_hash: [Sha256.digest_length]u8 = undefined;
 
-    while (committee_indices.items.len < committee_size) {
+    while (count < out.len) {
         const index: u32 = @intCast(i % active_indices.len);
         const shuffled = try shuffled_result.getOrPut(index);
         if (!shuffled.found_existing) {
@@ -393,14 +391,13 @@ pub fn getCommitteeIndices(
         // absurd (but JS-reachable) maxEffectiveBalanceElectra values; valid
         // inputs never approach overflow so their results are unaffected
         if (candidate_effective_balance_increment *% max_random_value >= max_effective_balance_increment *% random_value) {
-            committee_indices.appendAssumeCapacity(candidate_index);
+            out[count] = candidate_index;
+            count += 1;
         }
 
         // wrapping add matches the reference release-mode behavior
         i +%= 1;
     }
-
-    return committee_indices.toOwnedSlice(allocator);
 }
 
 pub fn computeProposerIndex(
@@ -413,9 +410,9 @@ pub fn computeProposerIndex(
     effective_balance_increment: i64,
     rounds: u32,
 ) !u32 {
-    const indices = try getCommitteeIndices(
+    var indices: [1]u32 = undefined;
+    try getCommitteeIndices(
         allocator,
-        1,
         seed,
         active_indices,
         effective_balance_increments,
@@ -423,8 +420,8 @@ pub fn computeProposerIndex(
         max_effective_balance,
         effective_balance_increment,
         rounds,
+        &indices,
     );
-    defer allocator.free(indices);
     return indices[0];
 }
 
@@ -449,75 +446,24 @@ pub fn computeProposerIndexElectra(
     );
 }
 
-/// How many list entries `unshuffleList` handles in the time `getCommitteeIndices` examines one
-/// candidate. Measured at about 90 with software SHA-256 and 190 with hardware; the low end
-/// keeps `getCommitteeIndices` when the two are close.
-const LIST_ENTRIES_PER_CANDIDATE = 90;
-
-/// Whether sampling a committee from one list shuffle should beat one shuffled index per
-/// candidate. A candidate is accepted with probability balance / max balance, so with `count`
-/// active indices a committee examines about
-/// `committee_size * max_increments * count / total_increments` candidates. The list shuffle
-/// wins when that exceeds `count / LIST_ENTRIES_PER_CANDIDATE`, and `count` cancels.
-///
-/// Also the input check for `getCommitteeIndicesFromListShuffle`: returns false unless the seed
-/// has `SEED_SIZE` bytes, `rounds` is between 1 and 255, `active_indices` has between 1 and
-/// `maxInt(u32)` entries, the balance increment and the maximum increment count are positive,
-/// and every active index is inside `effective_balance_increments`. Inputs that fail a check
-/// go to `getCommitteeIndices` unchanged.
-fn listShuffleSamplingIsCheaper(
-    committee_size: u32,
-    seed: []const u8,
-    active_indices: []const u32,
-    effective_balance_increments: []const u16,
-    max_effective_balance: i64,
-    effective_balance_increment: i64,
-    rounds: u32,
-) bool {
-    if (seed.len != SEED_SIZE) return false;
-    if (rounds == 0 or rounds > std.math.maxInt(u8)) return false;
-    if (active_indices.len == 0 or active_indices.len > std.math.maxInt(u32)) return false;
-    if (effective_balance_increment <= 0) return false;
-
-    const max_increments = @divTrunc(max_effective_balance, effective_balance_increment);
-    if (max_increments <= 0) return false;
-
-    var total_increments: u64 = 0;
-    for (active_indices) |index| {
-        if (index >= effective_balance_increments.len) return false;
-        total_increments += effective_balance_increments[index];
-    }
-
-    const max_increments_u64: u64 = @intCast(max_increments);
-    return total_increments < committee_size *| max_increments_u64 *| LIST_ENTRIES_PER_CANDIDATE;
-}
-
-/// `getCommitteeIndices` with two random bytes, taking every candidate from one list shuffle.
-/// The inputs must have passed `listShuffleSamplingIsCheaper`.
 fn getCommitteeIndicesFromListShuffle(
     allocator: Allocator,
-    committee_size: u32,
     seed: []const u8,
     active_indices: []const u32,
     effective_balance_increments: []const u16,
     max_effective_balance: i64,
     effective_balance_increment: i64,
     rounds: u32,
-) ![]u32 {
-    std.debug.assert(seed.len == SEED_SIZE);
-    std.debug.assert(active_indices.len > 0);
-    std.debug.assert(effective_balance_increment > 0);
-    std.debug.assert(rounds > 0);
-    std.debug.assert(rounds <= std.math.maxInt(u8));
+    out: []u32,
+) !void {
+    if (active_indices.len == 0) return error.EmptyActiveIndices;
+    if (effective_balance_increment == 0) return error.InvalidEffectiveBalanceIncrement;
+    if (seed.len != SEED_SIZE) return error.InvalidSeedLength;
 
-    var committee_indices = try std.ArrayList(u32).initCapacity(allocator, committee_size);
-    errdefer committee_indices.deinit(allocator);
+    const shuffled_indices = try allocator.dupe(u32, active_indices);
+    defer allocator.free(shuffled_indices);
 
-    const positions = try allocator.alloc(u32, active_indices.len);
-    defer allocator.free(positions);
-
-    for (positions, 0..) |*position, i| position.* = @intCast(i);
-    try unshuffleList(u32, positions, seed, @intCast(rounds));
+    try unshuffleList(u32, shuffled_indices, seed, @intCast(rounds));
 
     const max_random_value: i64 = 0xffff;
     const max_increments = @divTrunc(max_effective_balance, effective_balance_increment);
@@ -527,60 +473,58 @@ fn getCommitteeIndicesFromListShuffle(
     var cached_hash: [Sha256.digest_length]u8 = undefined;
 
     var i: u32 = 0;
-    while (committee_indices.items.len < committee_size) {
-        const candidate_index = active_indices[positions[i % active_indices.len]];
+    var count: usize = 0;
+    while (count < out.len) {
+        const candidate_index = shuffled_indices[i % shuffled_indices.len];
 
         if (i % 16 == 0) {
             std.mem.writeInt(u32, cached_hash_input[SEED_SIZE..][0..4], i / 16, .little);
             Sha256.hash(&cached_hash_input, &cached_hash, .{});
         }
         const random_value: i64 = std.mem.readInt(u16, cached_hash[(i % 16) * 2 ..][0..2], .little);
+        if (candidate_index >= effective_balance_increments.len) {
+            return error.EffectiveBalanceIncrementsOutOfBounds;
+        }
         const candidate_increments: i64 = effective_balance_increments[candidate_index];
 
         // `getCommitteeIndices` wraps on overflow here and in the counter, so this does too.
         if (candidate_increments *% max_random_value >= max_increments *% random_value) {
-            committee_indices.appendAssumeCapacity(candidate_index);
+            out[count] = candidate_index;
+            count += 1;
         }
         i +%= 1;
     }
-
-    return committee_indices.toOwnedSlice(allocator);
 }
 
-pub fn computeSyncCommitteeIndices(
+/// Fills caller-owned `out`, which must not alias the inputs. An error may leave it partially written.
+pub fn computeSyncCommitteeIndicesInto(
     allocator: Allocator,
     seed: []const u8,
     active_indices: []const u32,
     effective_balance_increments: []const u16,
     rand_byte_count: ByteCount,
-    sync_committee_size: u32,
     max_effective_balance: i64,
     effective_balance_increment: i64,
     rounds: u32,
-) ![]u32 {
-    if (rand_byte_count == .two and listShuffleSamplingIsCheaper(
-        sync_committee_size,
-        seed,
-        active_indices,
-        effective_balance_increments,
-        max_effective_balance,
-        effective_balance_increment,
-        rounds,
-    )) {
+    out: []u32,
+) !void {
+    // Preserve the per-candidate sampler's round-count behavior outside the list shuffle's range.
+    if (rand_byte_count == .two and rounds > 0 and rounds <= std.math.maxInt(u8) and
+        active_indices.len <= std.math.maxInt(u32))
+    {
         return getCommitteeIndicesFromListShuffle(
             allocator,
-            sync_committee_size,
             seed,
             active_indices,
             effective_balance_increments,
             max_effective_balance,
             effective_balance_increment,
             rounds,
+            out,
         );
     }
     return getCommitteeIndices(
         allocator,
-        sync_committee_size,
         seed,
         active_indices,
         effective_balance_increments,
@@ -588,29 +532,7 @@ pub fn computeSyncCommitteeIndices(
         max_effective_balance,
         effective_balance_increment,
         rounds,
-    );
-}
-
-pub fn computeSyncCommitteeIndicesElectra(
-    allocator: Allocator,
-    seed: []const u8,
-    active_indices: []const u32,
-    effective_balance_increments: []const u16,
-    sync_committee_size: u32,
-    max_effective_balance_electra: i64,
-    effective_balance_increment: i64,
-    rounds: u32,
-) ![]u32 {
-    return computeSyncCommitteeIndices(
-        allocator,
-        seed,
-        active_indices,
-        effective_balance_increments,
-        .two,
-        sync_committee_size,
-        max_effective_balance_electra,
-        effective_balance_increment,
-        rounds,
+        out,
     );
 }
 

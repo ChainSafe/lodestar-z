@@ -2,6 +2,7 @@ const std = @import("std");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Allocator = std.mem.Allocator;
 const swap_or_not_shuffle = @import("swap_or_not_shuffle");
+const preset = @import("preset").preset;
 
 const ACTIVE_INDICES_LENGTH_MAX: usize = std.math.maxInt(u32);
 // The active-index bound keeps shuffled positions in u32; validator indices remain u64.
@@ -27,7 +28,7 @@ pub fn computeProposerIndex(
         max_effective_balance,
         effective_balance_increment,
         rounds,
-        out[0..],
+        &out,
     );
     return out[0];
 }
@@ -41,7 +42,7 @@ pub fn computeSyncCommitteeIndices(
     max_effective_balance_electra: u64,
     effective_balance_increment: u32,
     rounds: u32,
-    out: []u64,
+    out: *[preset.SYNC_COMMITTEE_SIZE]u64,
 ) !void {
     try getCommitteeIndices(
         allocator,
@@ -69,7 +70,7 @@ pub fn computeSyncCommitteeIndicesElectra(
     max_effective_balance: u64,
     effective_balance_increment: u32,
     rounds: u32,
-    out: []u64,
+    out: *[preset.SYNC_COMMITTEE_SIZE]u64,
 ) !void {
     if (active_indices.len == 0) {
         return error.InvalidIndexCount;
@@ -292,8 +293,7 @@ test "compute_sync_committee_indices" {
         effective_balance_increments[i] = @intCast(32 + 32 * (i % 64));
     }
 
-    // only get first 32 indices to make it easier to test
-    var out = [_]u64{0} ** 32;
+    var out: [preset.SYNC_COMMITTEE_SIZE]u64 = undefined;
 
     // phase0
     const MAX_EFFECTIVE_BALANCE: u64 = 32000000000;
@@ -307,10 +307,10 @@ test "compute_sync_committee_indices" {
         MAX_EFFECTIVE_BALANCE,
         EFFECTIVE_BALANCE_INCREMENT,
         rounds,
-        out[0..],
+        &out,
     );
     const expected_phase0 = [_]u64{ 293, 726, 771, 677, 530, 475, 322, 66, 521, 106, 774, 23, 508, 410, 526, 44, 213, 948, 248, 903, 85, 853, 171, 679, 309, 791, 851, 817, 609, 119, 128, 983 };
-    try std.testing.expectEqualSlices(u64, expected_phase0[0..], out[0..]);
+    try std.testing.expectEqualSlices(u64, expected_phase0[0..], out[0..expected_phase0.len]);
 
     // electra
     const MAX_EFFECTIVE_BALANCE_ELECTRA: u64 = 2048000000000;
@@ -323,12 +323,12 @@ test "compute_sync_committee_indices" {
         MAX_EFFECTIVE_BALANCE_ELECTRA,
         EFFECTIVE_BALANCE_INCREMENT,
         rounds,
-        out[0..],
+        &out,
     );
     const expected_electra = [_]u64{ 726, 475, 521, 23, 508, 410, 213, 948, 248, 85, 171, 309, 791, 817, 119, 126, 651, 416, 273, 471, 739, 290, 588, 840, 665, 945, 496, 158, 757, 616, 226, 766 };
-    try std.testing.expectEqualSlices(u64, expected_electra[0..], out[0..]);
+    try std.testing.expectEqualSlices(u64, expected_electra[0..], out[0..expected_electra.len]);
 
-    out = [_]u64{0} ** 32;
+    @memset(&out, 0);
     try computeSyncCommitteeIndicesElectra(
         allocator,
         seed[0..],
@@ -337,9 +337,9 @@ test "compute_sync_committee_indices" {
         MAX_EFFECTIVE_BALANCE_ELECTRA,
         EFFECTIVE_BALANCE_INCREMENT,
         rounds,
-        out[0..],
+        &out,
     );
-    try std.testing.expectEqualSlices(u64, expected_electra[0..], out[0..]);
+    try std.testing.expectEqualSlices(u64, expected_electra[0..], out[0..expected_electra.len]);
 }
 
 const test_max_effective_balance_electra: u64 = 2048000000000;
@@ -353,7 +353,7 @@ fn expectMatchesPerCandidateSampler(
 ) !void {
     const allocator = std.testing.allocator;
 
-    var expected: [32]u64 = undefined;
+    var expected: [preset.SYNC_COMMITTEE_SIZE]u64 = undefined;
     try computeSyncCommitteeIndices(
         allocator,
         seed,
@@ -366,7 +366,7 @@ fn expectMatchesPerCandidateSampler(
         &expected,
     );
 
-    var actual: [32]u64 = undefined;
+    var actual: [preset.SYNC_COMMITTEE_SIZE]u64 = undefined;
     try computeSyncCommitteeIndicesElectra(
         allocator,
         seed,
@@ -391,10 +391,8 @@ test "computeSyncCommitteeIndicesElectra matches the per-candidate sampler" {
     const allocator = std.testing.allocator;
     const seed = [_]u8{0xc3} ** 32;
 
-    // Sizes below and above the roughly 500 candidates each case examines, so the candidate
-    // order wraps around in some cases and not in others. 255 to 257 straddle the 256 positions
-    // that one shuffle hash covers.
-    for ([_]usize{ 1, 2, 17, 255, 256, 257, 1000, 4097 }) |active_count| {
+    // Cover candidate wraparound and 256-position shuffle-hash boundaries.
+    for ([_]usize{ 1, 2, 17, 255, 256, 257, 1000, 4097, 32 * preset.SYNC_COMMITTEE_SIZE + 1 }) |active_count| {
         const active_indices = try allocator.alloc(u64, active_count);
         defer allocator.free(active_indices);
 
@@ -444,7 +442,7 @@ test "computeSyncCommitteeIndicesElectra rejects empty indices and unusable roun
     const seed = [_]u8{1} ** 32;
     const active_indices = [_]u64{ 0, 1 };
     const effective_balance_increments = [_]u16{ 32, 32 };
-    var out: [4]u64 = undefined;
+    var out: [preset.SYNC_COMMITTEE_SIZE]u64 = undefined;
 
     try std.testing.expectError(error.InvalidIndexCount, computeSyncCommitteeIndicesElectra(
         std.testing.allocator,

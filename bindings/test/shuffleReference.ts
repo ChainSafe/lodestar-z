@@ -259,10 +259,11 @@ export function naiveComputeSyncCommitteeIndices(
   activeValidatorIndices: ArrayLike<number>,
   effectiveBalanceIncrements: Uint16Array,
   randByteCount: NaiveByteCount,
-  maxEffectiveBalance: number
+  maxEffectiveBalance: number,
+  committeeSize = SYNC_COMMITTEE_SIZE
 ): number[] {
   return naiveGetCommitteeIndices(
-    SYNC_COMMITTEE_SIZE,
+    committeeSize,
     seed,
     activeValidatorIndices,
     effectiveBalanceIncrements,

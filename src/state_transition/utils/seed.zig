@@ -69,7 +69,7 @@ test "computeProposers - sanity" {
     try computeProposers(ForkSeq.electra, allocator, epoch_seed, 0, active_indices[0..], effective_balance_increments, &out);
 }
 
-pub fn getNextSyncCommitteeIndices(comptime fork: ForkSeq, allocator: Allocator, state: *BeaconState(fork), active_indices: []const ValidatorIndex, effective_balance_increments: EffectiveBalanceIncrements, out: []ValidatorIndex) !void {
+pub fn getNextSyncCommitteeIndices(comptime fork: ForkSeq, allocator: Allocator, state: *BeaconState(fork), active_indices: []const ValidatorIndex, effective_balance_increments: EffectiveBalanceIncrements, out: *[preset.SYNC_COMMITTEE_SIZE]ValidatorIndex) !void {
     const epoch = computeEpochAtSlot(try state.slot()) + 1;
     var seed: [32]u8 = undefined;
     try getSeed(fork, state, epoch, c.DOMAIN_SYNC_COMMITTEE, &seed);
