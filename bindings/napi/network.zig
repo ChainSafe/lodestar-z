@@ -87,7 +87,7 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
 pub fn deinit(self: *@This()) void {
     if (self.runtime) |runtime| {
         std.debug.assert(runtime.bridge.quiescent and runtime.thread == null);
-        std.debug.assert(!runtime.hook_live and runtime.closed.resolvers == null and runtime.host_failure == null);
+        std.debug.assert(!runtime.hook_live and runtime.closed.resolvers == null);
         runtime.release();
         self.runtime = null;
     }
@@ -132,22 +132,6 @@ pub fn exchange(self: *@This()) !js.Value {
         return err;
     };
     return .{ .val = result };
-}
-
-/// Records the first host delivery failure without ending host cleanup. The host calls close when cleanup finishes.
-pub fn reportFailure(self: *@This(), failure: js.Value) !js.Value {
-    const runtime = try self.owner();
-    const ref = try napi.Ref.create(runtime.env.env, failure.val, 1);
-    runtime.lock();
-    defer runtime.unlock();
-    if (runtime.bridge.reason == .failed or runtime.closed.resolvers == null) {
-        ref.delete() catch unreachable;
-        return .{ .val = try js.env().getBoolean(false) };
-    }
-    runtime.host_failure = ref;
-    runtime.bridge.reason = .failed;
-    runtime.bridge.terminal_error = error.NativeHostFailure;
-    return .{ .val = try js.env().getBoolean(true) };
 }
 
 /// Updates the remaining host allowance without notifying JS; the caller drives exchange when capacity recovers.

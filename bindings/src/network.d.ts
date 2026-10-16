@@ -458,8 +458,8 @@ export interface NativeGossipDiagnosticsPage {
 export type Verdict = "accept" | "reject" | "ignore";
 
 /**
- * A failed close carries the first failure, a delivery failure the host's `failed` received or the owner's terminal
- * error, also when a requested close was already underway.
+ * A failed close carries the owner's terminal error, also when a requested close was already underway.
+ * Host delivery failures are reported separately through `NativeHost.failed`.
  */
 export type CloseResult = {readonly reason: "requested"} | {readonly reason: "failed"; readonly error: Error};
 
@@ -555,7 +555,7 @@ export interface NativeHost {
   /** Updates replace the previous state of the same peer. A throw fails the network. */
   peers(events: readonly NativePeerObservation[]): void;
   /**
-   * A host capacity or peer callback failed the network with `error`, which the close result reports first. Payload delivery
+   * A host capacity or peer callback failed with `error`. Payload delivery
    * has stopped and settlement continues: finish bounded cleanup, such as outstanding request handlers, then
    * close the network. A throw closes it at once.
    * An owner failure arrives through `closed` with reason `failed`.

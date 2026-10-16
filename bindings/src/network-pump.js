@@ -18,7 +18,7 @@ import {TurnScheduler} from "./network-turn-scheduler.js";
  * @typedef {import("./network-runtime.js").NativeGossipBatch} NativeGossipBatch
  * @typedef {import("./network-runtime.js").NativeGossipDependencyCheck} NativeGossipDependencyCheck
  * @typedef {{adopted: boolean, handles: Handle[], job: GossipJob | null}} Job
- * @typedef {Pick<NativeNetworkApplicationRuntime, "reportFailure" | "drainLogs" | "setCapacity" | "reportGossip" | "classifyGossip"> & {
+ * @typedef {Pick<NativeNetworkApplicationRuntime, "drainLogs" | "setCapacity" | "reportGossip" | "classifyGossip"> & {
  * close(): void,
  * exchange(): Exchange,
  * }} Runtime
@@ -142,28 +142,14 @@ export class NativePump {
   }
 
   /**
-   * Decides whether a delivery failure is the network's first, before cleanup whose native calls could record a later
-   * owner failure: the first is the close result's error, and one that follows an owner failure goes to the error sink.
-   *
+   * Reports one host failure after delivery cleanup; settlement continues until the host closes native.
    * @param {unknown} error
    */
-  #arbitrate(error) {
+  #fail(error) {
     if (this.#stopped || this.#failure) return;
     const failure = error instanceof Error ? error : Object.assign(new Error("NativeHostFailure"), {cause: error});
-    if (this.#runtime?.reportFailure(failure)) this.#failure = failure;
-    else this.#error(failure);
-  }
-
-  /**
-   * After an arbitrated failure and the delivery's cleanup: payload delivery stops while settlement continues, and a
-   * first failure reaches the host's `failed` once, so the host can finish bounded cleanup before it closes.
-   */
-  #fail() {
-    if (this.#stopped) return;
+    this.#failure = failure;
     this.stopDelivery();
-    const failure = this.#failure;
-    if (failure === null) return;
-    this.#failure = null;
     try {
       this.#host.failed(failure);
     } catch (thrown) {
@@ -253,8 +239,7 @@ export class NativePump {
     try {
       demand = this.#demand();
     } catch (error) {
-      this.#arbitrate(error);
-      this.#fail();
+      this.#fail(error);
     }
     let result;
     try {
@@ -262,15 +247,13 @@ export class NativePump {
       result = this.#runtime.exchange();
       if (result.identity) this.#onIdentity(result.identity);
     } catch (error) {
-      this.#arbitrate(error);
-      this.#fail();
+      this.#fail(error);
       return "idle";
     }
     try {
       this.#deliver(result);
-    } catch {
-      // The delivery arbitrated it before its cleanup.
-      this.#fail();
+    } catch (error) {
+      this.#fail(error);
     }
     return result.needsAnotherExchange ? "now" : "idle";
   }
@@ -309,10 +292,6 @@ export class NativePump {
         job.adopted = true;
         this.#validate(job);
       }
-    } catch (error) {
-      // Decided before the cleanup below, whose cancellations reach native and could record a later owner failure.
-      this.#arbitrate(error);
-      throw error;
     } finally {
       for (const job of jobs) if (!job.adopted) this.#verdicts(job, null);
       for (const start of starts) if (!start.adopted) void start.incoming.cancel().catch(noop);

@@ -92,7 +92,6 @@ pub const Runtime = struct {
     hook_live: bool = false,
     env: napi.Env,
     closed: Promise = .{},
-    host_failure: ?napi.Ref = null,
 
     // Network thread scheduling and counters, read after joining at teardown.
     health_log_due_ms: u64 = 0,
@@ -274,8 +273,6 @@ pub const Runtime = struct {
     }
     pub fn disposeJsReferences(self: *Runtime) void {
         self.closed.deinit();
-        if (self.host_failure) |ref| ref.delete() catch unreachable;
-        self.host_failure = null;
     }
     /// Joins the owner and retires abandoned work before Node runs object finalizers.
     pub fn cleanup(self: *Runtime) void {

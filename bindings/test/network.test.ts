@@ -229,16 +229,6 @@ it("rejects invalid standing capacity without changing the running runtime", asy
   }
 });
 
-it("keeps the first host failure as the native close result", async () => {
-  const runtime = startRuntime(applicationConfig());
-  const failure = new Error("host failed");
-  expect(runtime.reportFailure(failure)).toBe(true);
-  expect(runtime.reportFailure(new Error("later"))).toBe(false);
-  expect(await runtime.close()).toEqual({error: failure, reason: "failed"});
-  expect((await runtime.closed).reason).toBe("failed");
-  expect(runtime.reportFailure(new Error("after close"))).toBe(false);
-});
-
 it.each([
   ["closed-gc", "closed-gc-rebound"],
   ["open", "open-until-close"],

@@ -44,14 +44,10 @@ pub const Host = struct {
         const value = try self.env.createObject();
         try value.setNamedProperty("reason", try self.env.createStringUtf8(@tagName(self.runtime.bridge.reason)));
         if (self.runtime.bridge.reason == .failed) {
-            const failure = if (self.runtime.host_failure) |ref| try ref.getValue() else try network_js.settled(self.env, network_js.errorValue(self.env, @errorName(self.runtime.bridge.terminal_error.?)));
+            const failure = try network_js.settled(self.env, network_js.errorValue(self.env, @errorName(self.runtime.bridge.terminal_error.?)));
             try value.setNamedProperty("error", failure);
         }
         try promise.settle(self.env, .resolve, value);
-        if (self.runtime.host_failure) |ref| {
-            ref.delete() catch unreachable;
-            self.runtime.host_failure = null;
-        }
     }
     pub fn build(self: *Host, selection: *exchange_mod.Selection) !Value {
         return try buildResult(self.env, self.runtime, selection);

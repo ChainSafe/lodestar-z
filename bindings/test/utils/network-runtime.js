@@ -96,9 +96,6 @@ class NativeRuntime {
     }
     return result;
   }
-  reportFailure(error) {
-    return this.#native.reportFailure(error);
-  }
   setCapacity(capacity) {
     this.#native.setCapacity(capacity);
   }

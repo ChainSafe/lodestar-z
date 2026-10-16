@@ -72,8 +72,6 @@ export interface NativeNetworkApplicationRuntime
   notifyBlock(root: Uint8Array): void;
   dropQueuedGossip(): void;
   reportPeer(peerId: PeerIdStr, action: NativePeerAction, context?: NativePeerReportContext): void;
-  /** Records the first host failure; the host closes after its cleanup finishes. */
-  reportFailure(error: Error): boolean;
   /**
    * Private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied. Expiry
    * still disposes of them.

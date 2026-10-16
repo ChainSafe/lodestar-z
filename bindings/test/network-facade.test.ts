@@ -271,8 +271,10 @@ test.each([
   peerConfig.identitySecretKey[31] = 2;
   let network: NativeNetwork | undefined;
   let cleanup: Promise<unknown> | undefined;
+  const failures: Error[] = [];
   const networkHost = host({
     failed(error) {
+      failures.push(error);
       expect(error).toBe(failure);
       // Settlement continues while the host finishes cleanup.
       if (mode === "after the host's cleanup") cleanup = network?.getIdentity().finally(() => network?.close());
@@ -290,7 +292,8 @@ test.each([
     await peer.applyIntent(localIntent(peerConfig));
     // The connection's first peer event reaches the throwing handler.
     await peer.connect(remote.peerId, [remote.localEndpoint], 5000n).catch(() => undefined);
-    expect(await network.closed).toEqual({error: failure, reason: "failed"});
+    expect(await network.closed).toEqual({reason: "requested"});
+    expect(failures).toEqual([failure]);
     if (mode === "after the host's cleanup") await expect(cleanup).resolves.toMatchObject({peerId: remote.peerId});
   } finally {
     await Promise.allSettled([network?.close(), peer.stop()]);

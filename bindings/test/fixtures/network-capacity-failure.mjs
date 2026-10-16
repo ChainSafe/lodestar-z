@@ -18,5 +18,5 @@ const runtime = createNativeNetwork(applicationConfig(), {
 await runtime.getIdentity();
 assert.equal(await failed, error);
 assert.equal(capacityReads, 1);
-assert.deepEqual(await runtime.close(), {reason: "failed", error});
+assert.deepEqual(await runtime.close(), {reason: "requested"});
 console.log("capacity failed; identity settled; closed");
