@@ -73,6 +73,45 @@ test "core peer admission refuses new identities while limiter debt fills the ta
     }
 }
 
+test "core control identity refusal rolls back application admission and closes the connection" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    const application = &setup.client.protocols.reqresp.admission.limiter;
+    const control = &setup.client.protocols.control_reqresp.admission.limiter;
+    const remote = setup.server.peerId();
+    const now = setup.pair.now.millis();
+    for (0..control.rows.len) |index| {
+        const identity: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 10))) };
+        try std.testing.expectEqual(.allowed, control.start(&identity, now));
+    }
+    try std.testing.expect(application.tracks(&remote, now));
+    try std.testing.expect(!control.tracks(&remote, now));
+    for (application.rows) |row| try std.testing.expect(!row.occupied);
+    _ = try setup.pair.dial();
+    try setup.pair.pump();
+    _ = try setup.turn(&setup.client, .{});
+    const accepted = for (application.rows) |row| {
+        if (row.occupied and row.identity.eql(&remote)) break row;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 0), accepted.connections);
+    try std.testing.expectEqual(@as(u128, 0), accepted.expires_ns);
+    inline for (.{ "reqresp", "control_reqresp" }) |field| {
+        const admission = &@field(setup.client.protocols, field).admission;
+        for (admission.connection_cursors) |cursor| try std.testing.expect(cursor.identity == null);
+        for (admission.limiter.rows) |row| try std.testing.expectEqual(@as(u16, 0), row.connections);
+    }
+    for (0..80) |_| try setup.step(0);
+    const catalog = &setup.client.peer_manager.catalog;
+    try std.testing.expectEqual(@as(u16, 0), catalog.connectedCount());
+    try std.testing.expectEqual(@as(usize, 0), setup.pair.client.registry.activeIndices().len);
+    var events: [2]t.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), catalog.pollEvents(&events));
+    try std.testing.expectEqual(t.DisconnectReason.capacity, events[0].closed.reason);
+    const refused = catalog.get(catalog.find(&remote).?).?;
+    try std.testing.expectEqual(@as(u64, 0), refused.ban_until_ms);
+}
+
 fn reply(node: *NetworkCore, event: rr.ReqResp.Event, now: Now) void {
     const pm = &node.peer_manager;
     pm.control.receive(&pm.catalog, &pm.local, &.{ .reqresp = &node.protocols.control_reqresp, .router = &node.protocols.router, .engine = &node.transport.engine }, &.{event}, now, @intCast(@max(0, node.clock.read(now) catch unreachable)));

@@ -1,5 +1,6 @@
 const Protocol = @import("protocol.zig").Protocol;
 const ForkSeq = @import("config").ForkSeq;
+const constants = @import("constants.zig");
 const request_policy = @import("request_policy.zig");
 
 const ten_seconds_ms: u64 = 10_000;
@@ -17,7 +18,7 @@ pub const Options = struct {
     peer: ByFork,
     global: ByFork,
     /// Limits fixed per-request overhead independently of the requested blocks or columns.
-    starts: Quota = .{ .tokens = 36, .period_ms = ten_seconds_ms },
+    starts: Quota = .{ .tokens = Protocol.count * constants.MAX_CONCURRENT_REQUESTS, .period_ms = ten_seconds_ms },
 
     pub fn defaults(configuration: *const request_policy.Config, identities: u16, global_scale: u16) error{InvalidPolicy}!Options {
         if (global_scale == 0) return error.InvalidPolicy;

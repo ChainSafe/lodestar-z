@@ -632,3 +632,160 @@ test "protocol stack reqresp retains request and chunk bytes through control pro
     );
     try std.testing.expectEqual(app, output[0].failed.request);
 }
+
+test "protocol stack routes failed control negotiations without disturbing the application instance" {
+    for ([_]bool{ false, true }) |timeout| {
+        const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
+        defer std.testing.allocator.free(sink);
+        var setup: Pair = .{};
+        try setup.init(.{}, .{});
+        defer setup.deinit();
+        const shared = &setup.shared;
+        var active = shared.server.router.capabilities();
+        active.receive = .initEmpty();
+        active.receive.insert(.{ .reqresp = .blocks_by_root_v2 });
+        shared.server.router.setCapabilities(active);
+        const root = [_]u8{1} ** 32;
+        const application = try shared.client.request(&shared.pair.client, shared.handles.client, .blocks_by_root_v2, &root, sink, .{}, shared.pair.now);
+        const status = statusBytes(1);
+        var status_sink: [ct.phase0.Status.fixed_size]u8 = undefined;
+        const control = try shared.client.control_reqresp.request(&shared.pair.client, &shared.client.router, shared.handles.client, .status_v1, &status, &status_sink, .{ .timeouts = .{ .negotiation = .fromMilliseconds(5) } }, shared.pair.now);
+        try std.testing.expectEqual(application, control);
+        var applications: [2]Event = undefined;
+        var controls: [2]Event = undefined;
+        var failed = false;
+        for (0..32) |_| {
+            const counts = if (timeout) blk: {
+                shared.pair.advance(6);
+                break :blk shared.client.process(&shared.pair.client, &.{}, shared.pair.now, .{ .application = &applications, .control = &controls });
+            } else (try shared.step(.{ .application = &applications, .control = &controls }, .{})).client;
+            try std.testing.expectEqual(@as(usize, 0), counts.application);
+            if (counts.control == 0) continue;
+            try std.testing.expectEqual(@as(usize, 1), counts.control);
+            try std.testing.expectEqual(control, controls[0].failed.request);
+            const expected: reqresp.Failure = if (timeout) .timeout else .negotiation_rejected;
+            try std.testing.expectEqual(expected, controls[0].failed.reason);
+            try std.testing.expectEqual(.negotiation, controls[0].failed.phase.?);
+            failed = true;
+            break;
+        }
+        try std.testing.expect(failed);
+        try std.testing.expect(shared.client.reqresp.outbound[application.index].request.running());
+        try std.testing.expectEqual(@as(u16, 1), shared.client.reqresp.pendingCounts().outbound);
+        try std.testing.expectEqual(@as(u16, 0), shared.client.control_reqresp.pendingCounts().outbound);
+    }
+}
+
+test "protocol stack serves pings with the application instance saturated or closed" {
+    for ([_]bool{ false, true }) |closed| {
+        const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
+        defer std.testing.allocator.free(sink);
+        var setup: Pair = .{};
+        try setup.init(.{ .outbound_max = 1 }, .{ .serving_max = 1 });
+        defer setup.deinit();
+        const shared = &setup.shared;
+        const root = [_]u8{1} ** 32;
+        _ = try shared.client.request(&shared.pair.client, shared.handles.client, .blocks_by_root_v2, &root, sink, .{}, shared.pair.now);
+        var incoming: ?reqresp.RequestHandle = null;
+        var applications: [2]Event = undefined;
+        for (0..32) |_| {
+            const counts = try shared.step(.{}, .{ .application = &applications });
+            if (counts.server.application == 0) continue;
+            try std.testing.expectEqual(@as(usize, 1), counts.server.application);
+            incoming = applications[0].request.request;
+            break;
+        }
+        try std.testing.expect(incoming != null);
+        try std.testing.expectEqual(@as(usize, 1), shared.server.reqresp.resourceSnapshot().serving_occupied);
+        try std.testing.expectError(error.SlotsExhausted, shared.client.request(&shared.pair.client, shared.handles.client, .blocks_by_root_v2, &root, sink, .{}, shared.pair.now));
+        if (closed) {
+            shared.client.closeApplications(&shared.pair.client, shared.pair.now);
+            shared.server.closeApplications(&shared.pair.server, shared.pair.now);
+        }
+        try pingRoundTrip(&setup);
+        if (!closed) {
+            try std.testing.expectEqual(@as(usize, 1), shared.server.reqresp.resourceSnapshot().serving_occupied);
+            try std.testing.expect(shared.server.reqresp.inbound[incoming.?.index].request.running());
+            try std.testing.expectEqual(@as(u16, 1), shared.client.reqresp.pendingCounts().outbound);
+        }
+    }
+}
+
+fn pingRoundTrip(setup: *Pair) !void {
+    const shared = &setup.shared;
+    const bytes = [_]u8{7} ** 8;
+    var sink: [8]u8 = undefined;
+    const request = try shared.client.control_reqresp.request(&shared.pair.client, &shared.client.router, shared.handles.client, .ping_v1, &bytes, &sink, .{}, shared.pair.now);
+    defer _ = shared.client.control_reqresp.cancel(&shared.pair.client, &shared.client.router, request, shared.pair.now);
+    var received: usize = 0;
+    var chunks: usize = 0;
+    var done = false;
+    for (0..40) |_| {
+        var client: [2]Event = undefined;
+        var server: [2]Event = undefined;
+        const counts = try shared.step(.{ .control = &client }, .{ .control = &server });
+        for (server[0..counts.server.control]) |event| switch (event) {
+            .request => |incoming| {
+                try std.testing.expectEqual(Protocol.ping_v1, incoming.protocol);
+                try std.testing.expectEqualSlices(u8, &bytes, incoming.bytes);
+                received += 1;
+                try shared.server.control_reqresp.respond(incoming.request, &bytes, null, shared.pair.now);
+            },
+            .chunk_sent => |sent| try std.testing.expect(shared.server.control_reqresp.finish(sent.request, shared.pair.now)),
+            .served => {},
+            else => return error.TestUnexpectedResult,
+        };
+        for (client[0..counts.client.control]) |event| switch (event) {
+            .chunk => |chunk| {
+                try std.testing.expectEqual(request, chunk.request);
+                try std.testing.expectEqualSlices(u8, &bytes, chunk.bytes);
+                chunks += 1;
+                try std.testing.expect(shared.client.control_reqresp.consume(&shared.pair.client, &shared.client.router, chunk.request, shared.pair.now));
+            },
+            .done => done = true,
+            else => return error.TestUnexpectedResult,
+        };
+        if (done) break;
+    }
+    try std.testing.expect(done);
+    try std.testing.expectEqual(@as(usize, 1), received);
+    try std.testing.expectEqual(@as(usize, 1), chunks);
+}
+
+test "protocol stack shutdown retains both instances terminals across graceful application close" {
+    for ([_]bool{ false, true }) |graceful| {
+        const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
+        defer std.testing.allocator.free(sink);
+        var setup: Pair = .{};
+        try setup.init(.{}, .{});
+        defer setup.deinit();
+        const shared = &setup.shared;
+        const root = [_]u8{1} ** 32;
+        const application = try shared.client.request(&shared.pair.client, shared.handles.client, .blocks_by_root_v2, &root, sink, .{}, shared.pair.now);
+        const bytes = [_]u8{7} ** 8;
+        var pong: [8]u8 = undefined;
+        const control = try shared.client.control_reqresp.request(&shared.pair.client, &shared.client.router, shared.handles.client, .ping_v1, &bytes, &pong, .{}, shared.pair.now);
+        try std.testing.expectEqual(application, control);
+        var controls: [1]Event = undefined;
+        if (graceful) {
+            shared.client.closeApplications(&shared.pair.client, shared.pair.now);
+            const counts = shared.client.process(&shared.pair.client, &.{}, shared.pair.now, .{ .control = &controls });
+            try std.testing.expectEqual(@as(usize, 0), counts.application);
+            try std.testing.expectEqual(@as(usize, 0), counts.control);
+            try std.testing.expect(shared.client.control_reqresp.outbound[control.index].request.running());
+        }
+        shared.client.shutdown(&shared.pair.client, shared.pair.now);
+        try std.testing.expectEqual(@as(usize, 0), shared.client.router.negotiator.active());
+        var applications: [1]Event = undefined;
+        try std.testing.expectEqual(@as(usize, 1), shared.client.reqresp.pump(&shared.pair.client, &shared.client.router, shared.pair.now, &applications));
+        try std.testing.expectEqual(@as(usize, 1), shared.client.control_reqresp.pump(&shared.pair.client, &shared.client.router, shared.pair.now, &controls));
+        try std.testing.expectEqual(application, applications[0].failed.request);
+        try std.testing.expectEqual(reqresp.Failure.cancelled, applications[0].failed.reason);
+        try std.testing.expectEqual(control, controls[0].failed.request);
+        try std.testing.expectEqual(reqresp.Failure.cancelled, controls[0].failed.reason);
+        try std.testing.expectEqual(@as(usize, 0), shared.client.reqresp.pump(&shared.pair.client, &shared.client.router, shared.pair.now, &applications));
+        try std.testing.expectEqual(@as(usize, 0), shared.client.control_reqresp.pump(&shared.pair.client, &shared.client.router, shared.pair.now, &controls));
+        try std.testing.expectEqual(@as(u16, 0), shared.client.reqresp.pendingCounts().outbound);
+        try std.testing.expectEqual(@as(u16, 0), shared.client.control_reqresp.pendingCounts().outbound);
+    }
+}
