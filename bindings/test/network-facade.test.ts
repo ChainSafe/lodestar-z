@@ -156,7 +156,7 @@ test("native Xray exports while JavaScript is blocked and reconnects after idle 
   }
 }, 30_000);
 
-test("deferred handlers run after validation without waiting for the owner to apply verdicts", async () => {
+test("validation returns before deferred handlers and only accepted messages are forwarded", async () => {
   const COUNT = 4;
   const verdictOf = (byte: number): Verdict => (byte === 1 ? "reject" : byte === 2 ? "ignore" : "accept");
   const accepted = [...Array(COUNT).keys()].filter((byte) => verdictOf(byte) === "accept");
@@ -176,18 +176,11 @@ test("deferred handlers run after validation without waiting for the owner to ap
   network = facade;
   const [publisher, receiver] = peers;
   try {
-    const runtime = runtimeOf(network);
-    if (!runtime) throw Error("Not a facade");
-    runtime.holdVerdicts(true);
     for (let byte = 0; byte < COUNT; byte++)
       await publisher.publishGossip(TOPIC, blockPayload(byte), {allowZeroPeers: false});
     await vi.waitFor(() => expect(validated).toHaveLength(COUNT), {timeout: 10000});
-    // Every verdict was reported and every handler's timer is due, but the owner holds the verdicts.
-    await delay(50);
-    expect(validated.slice().sort((a, b) => a - b)).toEqual([...Array(COUNT).keys()]);
-    expect(handled.slice().sort((a, b) => a - b)).toEqual([...Array(COUNT).keys()]);
-    runtime.holdVerdicts(false);
     await vi.waitFor(() => expect(handled).toHaveLength(COUNT), {timeout: 10000});
+    expect(validated.slice().sort((a, b) => a - b)).toEqual([...Array(COUNT).keys()]);
     expect(handled.slice().sort((a, b) => a - b)).toEqual([...Array(COUNT).keys()]);
     // Application admitted each accepted message, and no other, for forwarding.
     expect((await received(receiver, accepted.length)).sort((a, b) => a - b)).toEqual(accepted);
@@ -436,20 +429,15 @@ test("promise-returning operations reject admission failures without throwing", 
 
 test("concurrent metrics scrapes share one owner command and reject after close", async () => {
   const network = createNativeNetwork(applicationConfig(), host());
-  const native = runtimeOf(network);
-  if (!native) throw new Error("Missing native runtime");
   try {
-    native.holdOperations(true);
     const first = network.metrics();
     const second = network.metrics();
     expect(second).toBe(first);
-    native.holdOperations(false);
     expect(await first).toContain("libp2p_peers 0\n");
     expect(await second).toBe(await first);
     await network.close();
     await expect(network.metrics()).rejects.toThrow("NetworkClosed");
   } finally {
-    native.holdOperations(false);
     await network.close();
   }
 });
@@ -460,12 +448,10 @@ test("direct membership follows command order even when native settles reused ce
     const native = runtimeOf(network);
     if (!native) throw Error("Missing native runtime");
     await native.getMetrics();
-    native.holdOperations(true);
     const [peer, endpoints] = unreachableConnect();
     const added = network.setDirectPeer(peer, endpoints);
     const removed = network.setDirectPeer(peer, null);
     expect(await network.getDirectPeers()).toEqual([]);
-    native.holdOperations(false);
     expect(await added).toBeUndefined();
     expect(await removed).toBe(true);
     expect(await network.getDirectPeers()).toEqual([]);

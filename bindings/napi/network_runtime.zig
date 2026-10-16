@@ -65,10 +65,6 @@ const Bridge = struct {
     notify_live: bool = true,
     notification_armed: bool = true,
     capacity: ?Capacity = null,
-    /// The owner leaves reported verdicts unapplied while an ownership test holds them.
-    verdicts_held: bool = false,
-    /// The owner starts no admitted command, publication or request while an ownership test holds them.
-    operations_held: bool = false,
     env_alive: bool = true,
     graceful: bool = false,
     stop: bool = false,

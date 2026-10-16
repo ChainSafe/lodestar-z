@@ -702,9 +702,9 @@ pub fn outcome(self: *GossipProcessor, result: native.Gossipsub.ReportOutcome) v
 }
 
 /// Work the owner carries over turns in bounded batches: slot pruning, dependency promotion and submitted verdicts.
-pub fn pending(self: *const GossipProcessor, verdicts: bool) bool {
+pub fn pending(self: *const GossipProcessor) bool {
     if (self.closed) return false;
-    return self.prune_remaining > 0 or self.dependencies.promoting.len > 0 or (verdicts and self.diag.pendingVerdicts > 0);
+    return self.prune_remaining > 0 or self.dependencies.promoting.len > 0 or self.diag.pendingVerdicts > 0;
 }
 /// Earliest attestation group or expiry deadline. O(1).
 pub fn deadline(self: *const GossipProcessor) ?u64 {

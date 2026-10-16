@@ -196,27 +196,6 @@ pub fn reportPeer(self: *@This(), peer: js.Value, action: js.Value, context: js.
     runtime.wakeOwnerLocked();
 }
 
-/// Holds verdict application for ownership tests. Expiry continues; a release wakes the owner.
-pub fn holdVerdicts(self: *@This(), held: js.Value) !void {
-    const runtime = try self.owner();
-    const value = try decode.boolean(held.val);
-    runtime.lock();
-    defer runtime.unlock();
-    runtime.bridge.verdicts_held = value;
-    if (!value) runtime.wakeOwnerLocked();
-}
-
-/// A private control for binding ownership tests: while held, the owner starts no admitted command, publication or
-/// request, which keep their admission order; a release wakes the owner.
-pub fn holdOperations(self: *@This(), held: js.Value) !void {
-    const runtime = try self.owner();
-    const value = try decode.boolean(held.val);
-    runtime.lock();
-    defer runtime.unlock();
-    runtime.bridge.operations_held = value;
-    if (!value) runtime.wakeOwnerLocked();
-}
-
 const Exchange = exchange_js.Host;
 
 fn owner(self: *@This()) !*Runtime {

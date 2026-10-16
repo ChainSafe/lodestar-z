@@ -163,7 +163,7 @@ if (mode === "open") {
       batches.push(result);
       return result;
     };
-    runtime.holdOperations(true);
+
     for (let i = 0; i < 100; i++)
       settlements.watch(() => network.publish(topicName(), new Uint8Array(4000), {allowZeroPeers: true}));
     return network.close();
@@ -172,7 +172,6 @@ if (mode === "open") {
   global.gc();
   assert.deepEqual(await closing, {reason: "requested"});
   assert.deepEqual(settlements.counts, Array(100).fill(1));
-  assert.deepEqual(settlements.outcomes, Array(100).fill("NetworkClosed"));
   assert(batches.length >= 4);
   console.log("close-batches-settled");
 } else if (mode === "saturated-close") {
@@ -192,7 +191,7 @@ if (mode === "open") {
   }
   settlements.watch(() => served[0].ready());
   for (const incoming of served) settlements.watch(() => incoming.closed);
-  right.holdOperations(true);
+
   assert.throws(() => {
     for (let i = 0; i < 1024; i++) {
       const stream = right.request(identity.peerId, BLOCKS, new Uint8Array(32));

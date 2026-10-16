@@ -40,7 +40,7 @@ test("publication pressure preserves urgent, control and request admission", asy
   const runtime = startRuntime(config);
   try {
     await runtime.applyIntent(localIntent(config));
-    runtime.holdOperations(true);
+    holdSettling(runtime, true);
     const options = {allowZeroPeers: true, ignoreDuplicate: true};
     const publications: Promise<unknown>[] = [];
     let refusal: unknown;
@@ -56,7 +56,7 @@ test("publication pressure preserves urgent, control and request admission", asy
     const urgent = runtime.publishGossip(BLOCK, new Uint8Array(4000), options);
     const control = runtime.reStatusPeers([]);
     const request = runtime.request(runtime.identity.peerId, REQUEST, new Uint8Array(0));
-    runtime.holdOperations(false);
+    holdSettling(runtime, false);
     const [results] = await Promise.all([
       Promise.allSettled(publications),
       urgent,

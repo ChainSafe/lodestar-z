@@ -99,11 +99,11 @@ test("identity observations coalesce queued updates and callers own the returned
   const runtime = startRuntime(config);
   try {
     const initial = await runtime.getIdentity();
-    runtime.holdOperations(true);
+
     const first = runtime.applyIntent({...localIntent(config), syncCommittees: [{subnet: 0, untilSlot: 200}]});
     const second = runtime.applyIntent({...localIntent(config), syncCommittees: [{subnet: 1, untilSlot: 200}]});
     expect(await runtime.getIdentity()).toEqual(initial);
-    runtime.holdOperations(false);
+
     await Promise.all([first, second]);
     const latest = await runtime.getIdentity();
     expect(latest.metadata.syncnets).toBe(3);

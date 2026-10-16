@@ -114,12 +114,6 @@ class NativeRuntime {
   reportPeer(peerId, action, context) {
     this.#native.reportPeer(peerId, action, context);
   }
-  holdVerdicts(held) {
-    this.#native.holdVerdicts(held);
-  }
-  holdOperations(held) {
-    this.#native.holdOperations(held);
-  }
   async publishGossip(topic, data, options) {
     return this.#native.publishGossip(topic, data, options);
   }

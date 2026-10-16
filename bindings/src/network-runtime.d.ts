@@ -72,16 +72,6 @@ export interface NativeNetworkApplicationRuntime
   notifyBlock(root: Uint8Array): void;
   dropQueuedGossip(): void;
   reportPeer(peerId: PeerIdStr, action: NativePeerAction, context?: NativePeerReportContext): void;
-  /**
-   * Private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied. Expiry
-   * still disposes of them.
-   */
-  holdVerdicts(held: boolean): void;
-  /**
-   * Private control for binding ownership tests: while held, the owner starts no admitted command, publication or
-   * request; each keeps its admission order.
-   */
-  holdOperations(held: boolean): void;
   close(): Promise<NativeRuntimeCloseResult>;
 }
 

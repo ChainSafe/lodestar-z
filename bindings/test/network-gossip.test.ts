@@ -281,27 +281,35 @@ test.each([
 
 test("gossip delivery and direct verdict reports progress with a full command table", async () => {
   const pair = await gossipPair();
-  let commands: Promise<PromiseSettledResult<unknown>[]> | undefined;
+  const commands: Promise<PromiseSettledResult<unknown>[]>[] = [];
   try {
     holdSettling(pair.right, true);
-    pair.right.holdOperations(true);
-    commands = Promise.allSettled(Array.from({length: 31}, () => pair.right.getMetrics()));
+
+    commands.push(Promise.allSettled(Array.from({length: 31}, () => pair.right.getMetrics())));
     expect(() => pair.right.getMetrics()).toThrow("NetworkCommandFull");
 
     await pair.left.publishGossip(TOPIC, blockPayload(4000, 4), {allowZeroPeers: false});
     const message = await nextGossip(pair.right);
+    const refill: Promise<string>[] = [];
+    for (let i = 0; i < 31; i++) {
+      try {
+        refill.push(pair.right.getMetrics());
+      } catch (error) {
+        expect(error).toMatchObject({code: "NetworkCommandFull"});
+        break;
+      }
+    }
+    commands.push(Promise.allSettled(refill));
     expect(() => pair.right.getMetrics()).toThrow("NetworkCommandFull");
     pair.right.reportGossip(message.handle, "accept");
     expect(() => pair.right.getMetrics()).toThrow("NetworkCommandFull");
 
-    pair.right.holdOperations(false);
     holdSettling(pair.right, false);
-    expect((await commands).map((outcome) => outcome.status)).toEqual(Array(31).fill("fulfilled"));
+    for (const outcome of (await Promise.all(commands)).flat()) expect(outcome.status).toBe("fulfilled");
   } finally {
-    pair.right.holdOperations(false);
     holdSettling(pair.right, false);
     await Promise.all([pair.left.stop(), pair.right.close()]);
-    await commands;
+    await Promise.all(commands);
   }
 }, 15000);
 

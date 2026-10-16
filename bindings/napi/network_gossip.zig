@@ -42,7 +42,7 @@ pub fn maintain(runtime: *Runtime, io: std.Io, tick: n.Now) !bool {
     const clock = try sample(io);
     table.maintain(clock.millis(), @intCast(@max(0, try core.clock.read(tick))));
     var retired_bytes: usize = 0;
-    for (0..if (runtime.bridge.verdicts_held) 0 else batch_max) |_| {
+    for (0..batch_max) |_| {
         const token = table.nextVerdict() orelse break;
         const cell = table.get(token).?;
         if (retired_bytes > 0 and cell.input.len > batch_bytes -| retired_bytes) break;
@@ -52,7 +52,7 @@ pub fn maintain(runtime: *Runtime, io: std.Io, tick: n.Now) !bool {
         table.retire(token);
     }
     runtime.notifyIfReadyLocked();
-    return table.pending(!runtime.bridge.verdicts_held);
+    return table.pending();
 }
 pub const Ingress = struct {
     runtime: *Runtime,

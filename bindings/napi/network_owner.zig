@@ -321,7 +321,7 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
     var bytes: usize = 0;
     for (0..commands.turn_max + publications.turn_max + requests_mod.turn_max) |_| {
         self.lock();
-        if (self.bridge.stop or self.bridge.operations_held) {
+        if (self.bridge.stop) {
             self.unlock();
             return false;
         }

@@ -146,7 +146,7 @@ fn endLocked(runtime: *Runtime, selection: *const Selection) Outcome {
 
 fn gossipMarks(runtime: *Runtime) struct { bool, ?u64 } {
     const table = if (runtime.bridge.gossip) |*table| table else return .{ false, null };
-    return .{ table.pending(true), table.deadline() };
+    return .{ table.pending(), table.deadline() };
 }
 
 /// Builds payloads outside the mutex. Failed construction is terminal; teardown releases the abandoned pins.

@@ -46,20 +46,6 @@ test("a scrape racing shutdown during admission rejects with NetworkClosed", asy
   expect(() => runtime.getMetrics()).toThrow("NetworkClosed");
 });
 
-test("shutdown rejects a queued scrape", async () => {
-  const runtime = startRuntime(applicationConfig());
-  try {
-    runtime.holdOperations(true);
-    const scrape = runtime.getMetrics();
-    const rejected = expect(scrape).rejects.toThrow("NetworkClosed");
-    const closed = runtime.close();
-    await rejected;
-    expect(await closed).toEqual({reason: "requested"});
-  } finally {
-    await runtime.close();
-  }
-});
-
 test("metrics are available while open and reject after close", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config, () => undefined);

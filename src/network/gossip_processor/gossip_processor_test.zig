@@ -356,11 +356,11 @@ test "gossip processor retains reported verdicts across bounded drains" {
     }
     try t.expectEqual(count, table.diag.pendingVerdicts);
     for (0..p.GossipProcessor.batch_max) |_| table.retire(table.nextVerdict().?);
-    try t.expect(table.pending(true));
+    try t.expect(table.pending());
     try t.expectEqual(16, table.diag.pendingVerdicts);
     for (0..16) |_| table.retire(table.nextVerdict().?);
     try t.expectEqual(0, table.diag.occupied);
-    try t.expect(!table.pending(true));
+    try t.expect(!table.pending());
     try t.expectEqual(null, table.nextVerdict());
 }
 
@@ -379,9 +379,9 @@ test "gossip processor retires expired verdicts and rejects stale generations" {
         try std.testing.expect(!table.report(token, .reject, 2));
     }
     try std.testing.expectEqual(@as(usize, 64), table.snapshot(1).pendingVerdicts);
-    try std.testing.expect(table.pending(true));
+    try std.testing.expect(table.pending());
     table.expire(100);
-    try std.testing.expect(!table.pending(true) and table.deadline() == null);
+    try std.testing.expect(!table.pending() and table.deadline() == null);
     try std.testing.expectEqual(@as(usize, 0), table.snapshot(1).occupied);
     _ = try capture(&table, .beacon_block, "y", .{}, 100, 200);
     try std.testing.expect(!table.report(handles[0], .accept, 101));
