@@ -29,8 +29,6 @@ pub const Discovery = struct {
         bind: Sockets.Bindings,
         sequence: u64 = 1,
         bootstrap: []const d.identity.enr.Record = &.{},
-        engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
-        coordinator: Options = .{},
     };
     pub const Error = d.Transport.Error || d.Maintenance.Error || d.Lookup.Error || adapter.Error || std.mem.Allocator.Error || error{ Stopped, InvalidOptions, InvalidDemand, InvalidAdvertisement, InvalidBootstrap, TooManyBootstraps };
     pub const bootstrap_max: usize = 64;
@@ -57,10 +55,9 @@ pub const Discovery = struct {
         attnets: [8]u8 = @splat(0),
         syncnets: u8 = 0,
         custody: bool = false,
-        expires_ms: u64 = std.math.maxInt(u64),
 
-        fn active(self: *const Demand, now_ms: u64) bool {
-            return now_ms < self.expires_ms and (self.general or self.custody or self.syncnets != 0 or !std.mem.allEqual(u8, &self.attnets, 0));
+        fn active(self: *const Demand) bool {
+            return (self.general or self.custody or self.syncnets != 0 or !std.mem.allEqual(u8, &self.attnets, 0));
         }
         fn matches(self: *const Demand, candidate: *const adapter.Candidate, context: *const types.ForkContext) bool {
             if (self.general or (self.custody and (candidate.hints.custody_group_count != null or context.custody_requirement > 0))) return true;
@@ -120,18 +117,17 @@ pub const Discovery = struct {
         const announced = advertisementFor(local, fork_schedule, resolved.endpoints);
         const record = try adapter.build(&host.inner, options.sequence, &announced, &local.fork);
         try adapter.requireIdentity(&record, &types.PeerId.fromPublicKey(&host.publicKey()));
-        var coordinator_options = options.coordinator;
+        var coordinator_options: Options = .{};
         coordinator_options.observations = resolved.observations;
         coordinator_options.quic_mode = if (quic[0] == null) .ip6 else if (quic[1] == null) .ip4 else .dual;
-        try self.initBound(allocator, sockets, &host.inner, &record, &local.fork, options.bootstrap, now_ms, coordinator_options, .{ .engine = options.engine });
+        try self.initBound(allocator, sockets, &host.inner, &record, &local.fork, options.bootstrap, now_ms, coordinator_options, .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms });
         self.endpoints = resolved.endpoints;
         self.quic_ports = resolved.quic_ports;
         self.quic_bound = quic_bound;
     }
 
     /// Takes ownership of bound sockets on success. Records are immutable authenticated values.
-    /// This entry supports hosts that construct their own initial application advertisement.
-    pub fn initBound(self: *Discovery, allocator: std.mem.Allocator, sockets: Sockets, key: *const d.identity.crypto.KeyPair, record: *const d.identity.enr.Record, context: *const types.ForkContext, bootstrap: []const d.identity.enr.Record, now_ms: u64, options: Options, transport_options: d.Transport.Options) !void {
+    pub fn initBound(self: *Discovery, allocator: std.mem.Allocator, sockets: Sockets, key: *const d.identity.crypto.KeyPair, record: *const d.identity.enr.Record, context: *const types.ForkContext, bootstrap: []const d.identity.enr.Record, now_ms: u64, options: Options, engine_config: d.Engine.Config) !void {
         try context.validate();
         if (options.query_interval_ms == 0 or options.query_interval_ms > 86_400_000 or options.local_retry_ms == 0 or options.local_retry_ms > 86_400_000) return error.InvalidOptions;
         if (bootstrap.len > bootstrap_max) return error.TooManyBootstraps;
@@ -143,7 +139,7 @@ pub const Discovery = struct {
         storage.observations.init(options.observations);
         maintenance.observations = &storage.observations;
         self.* = .{ .allocator = allocator, .transport = undefined, .storage = storage, .maintenance = maintenance, .context = context.*, .options = options, .query_due_ms = now_ms };
-        try self.transport.init(allocator, sockets, key.*, record.*, transport_options);
+        try self.transport.init(allocator, sockets, key.*, record.*, engine_config);
         for (bootstrap) |*seed| {
             const address = seed.endpointFor(sockets.mode()) orelse continue;
             const peer: d.types.Endpoint = .{ .node_id = seed.node_id, .address = address };
@@ -201,21 +197,21 @@ pub const Discovery = struct {
         return endpoints;
     }
 
-    pub fn request(self: *Discovery, demand: Demand, now_ms: u64) Error!void {
+    /// Replaces demand until the next update or shutdown. Empty demand cancels the foreground walk.
+    pub fn request(self: *Discovery, demand: Demand) Error!void {
         if (self.stopped) return error.Stopped;
-        if (demand.syncnets & 0xf0 != 0 or demand.expires_ms < now_ms) return error.InvalidDemand;
+        if (demand.syncnets & 0xf0 != 0) return error.InvalidDemand;
         self.demand = demand;
-        self.expireForeground(now_ms);
+        if (!demand.active()) self.cancelForeground();
     }
 
-    pub fn schedule(self: *const Discovery, now_ms: u64) types_mod.Schedule {
+    pub fn schedule(self: *const Discovery) types_mod.Schedule {
         if (self.stopped) return .{};
         var next = self.transport.engine.nextDeadlineMs() orelse std.math.maxInt(u64);
         if (self.maintenance.nextDeadlineMs(&self.transport.engine)) |deadline| next = @min(next, @max(deadline, self.resource_retry_ms));
         if (self.lookup) |*lookup| {
             if (lookup.waitingCount() < d.Lookup.parallelism) next = @min(next, @max(self.refill_due_ms, self.resource_retry_ms));
-        } else if (self.demand.active(now_ms)) next = @min(next, @max(self.query_due_ms, self.resource_retry_ms));
-        if (self.demand.active(now_ms)) next = @min(next, self.demand.expires_ms);
+        } else if (self.demand.active()) next = @min(next, @max(self.query_due_ms, self.resource_retry_ms));
         return .{ .deadline = time.optionalMilliseconds(next) };
     }
 
@@ -294,9 +290,8 @@ pub const Discovery = struct {
     }
 
     fn refill(self: *Discovery, io: std.Io, now_ms: u64) Error!void {
-        self.expireForeground(now_ms);
         if (now_ms < self.resource_retry_ms) return;
-        if (self.lookup == null and self.demand.active(now_ms) and now_ms >= self.query_due_ms) {
+        if (self.lookup == null and self.demand.active() and now_ms >= self.query_due_ms) {
             self.query_due_ms = now_ms +| self.options.query_interval_ms;
             var target: d.types.NodeId = undefined;
             try std.Io.randomSecure(io, &target);
@@ -320,10 +315,6 @@ pub const Discovery = struct {
         for (0..d.Lookup.parallelism) |_| {
             if (!try self.start(io, now_ms, false)) break;
         }
-    }
-
-    fn expireForeground(self: *Discovery, now_ms: u64) void {
-        if (!self.demand.active(now_ms)) self.cancelForeground();
     }
 
     fn cancelForeground(self: *Discovery) void {
@@ -359,21 +350,21 @@ pub const Discovery = struct {
         if (!consumption.consumed) return;
         if (progress.event == .response) {
             const response = &progress.event.response;
-            if (consumption.responder) |*record| self.publishResponse(response, record, progress.now_ms, out, result);
-            self.publishReferrals(response, progress.now_ms, out, result);
+            if (consumption.responder) |*record| self.publishResponse(response, record, out, result);
+            self.publishReferrals(response, out, result);
         }
     }
 
-    fn publishReferrals(self: *Discovery, response: *const d.Engine.AuthenticatedResponse, now_ms: u64, out: []adapter.Candidate, result: *Result) void {
+    fn publishReferrals(self: *Discovery, response: *const d.Engine.AuthenticatedResponse, out: []adapter.Candidate, result: *Result) void {
         std.debug.assert(response.node_records.len <= d.types.findnode_result_max);
         for (response.node_records) |*record| {
             if (std.mem.eql(u8, &record.node_id, &response.peer.node_id) or
                 std.mem.eql(u8, &record.node_id, &self.transport.engine.localRecord().node_id)) continue;
-            self.publish(record, response.peer.address, now_ms, out, result);
+            self.publish(record, response.peer.address, out, result);
         }
     }
 
-    fn publishResponse(self: *Discovery, response: *const d.Engine.AuthenticatedResponse, known: *const d.identity.enr.Record, now_ms: u64, out: []adapter.Candidate, result: *Result) void {
+    fn publishResponse(self: *Discovery, response: *const d.Engine.AuthenticatedResponse, known: *const d.identity.enr.Record, out: []adapter.Candidate, result: *Result) void {
         std.debug.assert(response.matched.terminal);
         std.debug.assert(std.mem.eql(u8, &known.node_id, &response.peer.node_id));
         var record = known.*;
@@ -384,15 +375,15 @@ pub const Discovery = struct {
         for (response.node_records) |*updated| {
             if (updated.sequence > record.sequence and std.mem.eql(u8, &updated.node_id, &response.peer.node_id)) record = updated.*;
         }
-        self.publish(&record, response.peer.address, now_ms, out, result);
+        self.publish(&record, response.peer.address, out, result);
     }
 
     fn rejected(self: *Discovery, reason: Rejection) void {
         self.rejections[@intFromEnum(reason)] +|= 1;
     }
 
-    fn publish(self: *Discovery, record: *const d.identity.enr.Record, source: d.types.Address, now_ms: u64, out: []adapter.Candidate, result: *Result) void {
-        if (!self.demand.active(now_ms)) return;
+    fn publish(self: *Discovery, record: *const d.identity.enr.Record, source: d.types.Address, out: []adapter.Candidate, result: *Result) void {
+        if (!self.demand.active()) return;
         var candidate = adapter.decode(record, &self.context) catch |err| {
             self.rejected(switch (err) {
                 error.MissingEth2 => .missing_eth2,

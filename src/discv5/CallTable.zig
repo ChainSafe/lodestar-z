@@ -15,7 +15,6 @@ pub const InitError = std.mem.Allocator.Error || error{InvalidCapacity};
 
 pub const Error = message.Error || error{
     CallExpired,
-    GenerationExhausted,
     HandshakeAttempted,
     DuplicateResponse,
     InvalidNodeCount,
@@ -136,8 +135,8 @@ pub fn begin(
     if (request_bytes.len > request_capacity) return error.RequestTooLarge;
     const index = try self.availableIndex();
     const generation = self.next_generations[index];
-    const successor = std.math.add(u64, generation, 1) catch
-        return error.GenerationExhausted;
+    std.debug.assert(generation < std.math.maxInt(u64));
+    const successor = generation + 1;
     var entry = Entry{
         .generation = generation,
         .peer = peer,
@@ -409,16 +408,8 @@ fn complete(
 }
 
 fn availableIndex(self: *const CallTable) Error!usize {
-    var saw_exhausted = false;
-    for (self.entries, self.next_generations, 0..) |entry, generation, index| {
-        if (entry != null) continue;
-        if (generation == std.math.maxInt(u64)) {
-            saw_exhausted = true;
-            continue;
-        }
-        return index;
-    }
-    return if (saw_exhausted) error.GenerationExhausted else error.TableFull;
+    for (self.entries, 0..) |entry, index| if (entry == null) return index;
+    return error.TableFull;
 }
 
 fn get(self: *const CallTable, handle: Handle) ?*const Entry {

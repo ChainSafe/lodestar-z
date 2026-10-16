@@ -272,7 +272,7 @@ const Chain = struct {
             }
         }
         const intent: network.NetworkCore.LocalIntent = .{
-            .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
+            .update = .{ .local = node.localState(), .schedule = node.fork_schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
             .demand = node.peer_manager.demand,
             .subscriptions = &.{boundary},
         };

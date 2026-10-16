@@ -69,8 +69,8 @@ test "core peer close delivery schedules transport retirement" {
     try std.testing.expectEqual(@as(usize, 1), closed_count);
     try std.testing.expect(core.transport.engine.releasesPending());
     try std.testing.expectEqual(@as(u16, 1), core.transport.engine.resourceSnapshot().active);
-    const pending = core.wakeups(now, .{});
-    try std.testing.expect(pending.other.runnable);
+    const pending = core.schedule(now, .{});
+    try std.testing.expect(pending.runnable);
     const retired = core.advance(setup.pair.io(), .{ .now = now, .readiness = .{} }, .{}, .{});
     try std.testing.expect(retired.failure == null);
     try std.testing.expectEqual(@as(usize, 0), retired.transport_events.len);

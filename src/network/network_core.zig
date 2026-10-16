@@ -33,16 +33,6 @@ const SlotClock = @import("slot_clock.zig").SlotClock;
 pub const NetworkCore = struct {
     pub const wait = @import("wait.zig");
 
-    /// Discovery may run alone when no other owner has work due.
-    pub const Wakeups = struct {
-        discovery: Schedule = .{},
-        other: Schedule = .{},
-
-        pub fn schedule(self: Wakeups) Schedule {
-            return self.discovery.merge(self.other);
-        }
-    };
-
     pub const controls_per_turn = 32;
     pub const identify_per_turn = 8;
     pub const dials_per_turn = 4;
@@ -101,8 +91,6 @@ pub const NetworkCore = struct {
         /// Authenticated transport events, borrowed until the next advance,
         /// beginGracefulClose, shutdown or deinit.
         transport_events: []const Engine.Event = &.{},
-        /// Only discovery performed protocol work; transport retirement still ran.
-        discovery_only: bool = false,
         /// Stops further external I/O independently of the first diagnostic failure.
         cancelled: bool = false,
         failure: ?OperationalError = null,
@@ -128,7 +116,7 @@ pub const NetworkCore = struct {
     discovery: ?*peers.Discovery,
     native_events: []Engine.Event,
     local_intent_workspace: *gossip.local_intent.Workspace,
-    schedule: local_state.ForkSchedule,
+    fork_schedule: local_state.ForkSchedule,
     counters: Counters = .{},
     step_duration: timing.Duration = .{},
     turn_timing: TurnTiming = .{},
@@ -159,7 +147,7 @@ pub const NetworkCore = struct {
         errdefer std.debug.assert(self.allocations.bytes == 0);
         const allocator = self.allocations.allocator();
         self.allocator = allocator;
-        self.schedule = startup.schedule;
+        self.fork_schedule = startup.schedule;
         self.counters = .{};
         self.step_duration = .{};
         self.turn_timing = .{};
@@ -398,10 +386,10 @@ pub const NetworkCore = struct {
         self.protocols.router.setCapabilities(active);
     }
 
-    fn updateLocalWithEndpoints(self: *NetworkCore, desired: *const t.LocalState, schedule: local_state.ForkSchedule, endpoints: ?advertisement.Endpoints, now: Now) !bool {
+    fn updateLocalWithEndpoints(self: *NetworkCore, desired: *const t.LocalState, fork_schedule: local_state.ForkSchedule, endpoints: ?advertisement.Endpoints, now: Now) !bool {
         return self.applyLocal(&.{
             .local = desired.*,
-            .schedule = schedule,
+            .schedule = fork_schedule,
             .endpoints = endpoints,
             .capabilities = self.protocols.router.capabilities(),
         }, now);
@@ -439,7 +427,7 @@ pub const NetworkCore = struct {
 
     fn prepareLocal(self: *const NetworkCore, update: *const local_state.LocalUpdate) !PreparedLocal {
         if (self.peer_manager.phase != .running) return error.Stopped;
-        const schedule = update.schedule;
+        const fork_schedule = update.schedule;
         const endpoints = update.endpoints;
         const capabilities = update.capabilities;
         try self.protocols.router.validateCapabilities(capabilities);
@@ -448,7 +436,7 @@ pub const NetworkCore = struct {
         var local = update.local;
         local.metadata.seq_number = self.peer_manager.local.metadata.seq_number;
         try local_state.copyServingLocal(&local, &local, capabilities.receive);
-        try validateSchedule(&local, schedule);
+        try validateSchedule(&local, fork_schedule);
         const request = &self.protocols.reqresp;
         try validateForkTable(request.forks[0..request.fork_count], &local.fork);
         const identify_local = try prepareIdentifyLocal(&self.protocols.identify.local, endpoints, capabilities);
@@ -456,16 +444,16 @@ pub const NetworkCore = struct {
         if (metadata_changed) local.metadata.seq_number = try peers.enr.nextSequence(local.metadata.seq_number);
         var prepared: PreparedLocal = .{
             .local = local,
-            .schedule = schedule,
+            .schedule = fork_schedule,
             .endpoints = endpoints,
             .capabilities = capabilities,
             .identify = identify_local,
-            .changed = !(std.meta.eql(local, self.peer_manager.local) and std.meta.eql(schedule, self.schedule) and
+            .changed = !(std.meta.eql(local, self.peer_manager.local) and std.meta.eql(fork_schedule, self.fork_schedule) and
                 std.meta.eql(endpoints, self.advertisementEndpoints()) and std.meta.eql(capabilities, self.protocols.router.capabilities())),
         };
         if (prepared.changed) if (self.discovery) |owned| {
-            const announced = advertisementFor(&local, schedule, endpoints.?);
-            const previous = advertisementFor(&self.peer_manager.local, self.schedule, owned.endpoints);
+            const announced = advertisementFor(&local, fork_schedule, endpoints.?);
+            const previous = advertisementFor(&self.peer_manager.local, self.fork_schedule, owned.endpoints);
             prepared.record = try owned.prepareAdvertisement(if (!std.meta.eql(announced, previous)) &announced else null, endpoints.?, &local.fork);
         };
         return prepared;
@@ -489,7 +477,7 @@ pub const NetworkCore = struct {
         pm.commitLocal(&prepared.local, now);
         self.protocols.reqresp.setRequestFork(prepared.local.fork.fork);
         self.protocols.control_reqresp.setRequestFork(prepared.local.fork.fork);
-        self.schedule = prepared.schedule;
+        self.fork_schedule = prepared.schedule;
     }
 
     /// Caller sequence input is ignored; all fallible preparation precedes installation.
@@ -533,20 +521,19 @@ pub const NetworkCore = struct {
     }
 
     /// Scheduling is a snapshot for the supplied output capacities; recompute after mutation.
-    pub fn wakeups(self: *const NetworkCore, now: Now, outputs: Outputs) Wakeups {
+    pub fn schedule(self: *const NetworkCore, now: Now, outputs: Outputs) Schedule {
         std.debug.assert(self.phase() != .stopped);
-        var result: Wakeups = .{};
         const pm = &self.peer_manager;
-        result.other = pm.schedule(self.protocols.gossipsub, now, .{ .peers = outputs.peers.len, .dials = dials_per_turn });
-        result.other = result.other.merge(self.protocols.schedule(.{ .application = outputs.application.len, .control = controls_per_turn, .identify = identify_per_turn }));
+        var result = pm.schedule(self.protocols.gossipsub, now, .{ .peers = outputs.peers.len, .dials = dials_per_turn });
+        result = result.merge(self.protocols.schedule(.{ .application = outputs.application.len, .control = controls_per_turn, .identify = identify_per_turn }));
         const quic = &self.transport.engine;
-        result.other = result.other.merge(.{ .runnable = quic.backlog() });
-        result.other = result.other.merge(.{ .runnable = quic.eventsPending() or quic.releasesPending() });
-        result.other = result.other.merge(.{ .deadline = if (quic.nextDeadlineNs()) |deadline| .{ .clock = .awake, .raw = .fromNanoseconds(deadline) } else null });
+        result = result.merge(.{ .runnable = quic.backlog() });
+        result = result.merge(.{ .runnable = quic.eventsPending() or quic.releasesPending() });
+        result = result.merge(.{ .deadline = if (quic.nextDeadlineNs()) |deadline| .{ .clock = .awake, .raw = .fromNanoseconds(deadline) } else null });
         if (pm.phase == .running) if (self.discovery) |owned| {
-            result.discovery = owned.schedule(now.millis());
+            result = result.merge(owned.schedule());
         };
-        result.other = result.other.merge(.{ .runnable = self.host_runnable });
+        result = result.merge(.{ .runnable = self.host_runnable });
         return result;
     }
 
@@ -559,8 +546,8 @@ pub const NetworkCore = struct {
     /// Borrows descriptors until the next owner mutation. Waiting does not consume events.
     pub fn waitPlan(self: *const NetworkCore, observed: Now, outputs: Outputs, host: Host) WaitPlan {
         const now = observed.floor(self.last_now);
-        var pending = self.wakeups(now, outputs);
-        pending.other = pending.other.merge(.{ .deadline = host.deadline });
+        var pending = self.schedule(now, outputs);
+        pending = pending.merge(.{ .deadline = host.deadline });
         return .{
             .now = now,
             .sources = .{
@@ -571,7 +558,7 @@ pub const NetworkCore = struct {
                     .{ null, null },
                 .host = self.host_wake,
             },
-            .timeout = pending.schedule().timeout(now.monotonic, .fromMilliseconds(wait.native_wait_max_ms)),
+            .timeout = pending.timeout(now.monotonic, .fromMilliseconds(wait.native_wait_max_ms)),
         };
     }
 
@@ -615,12 +602,6 @@ pub const NetworkCore = struct {
             result.failure = result.failure orelse err;
             return result;
         }));
-        if (!result.cancelled and self.discoveryOnly(&result.readiness, tick, outputs, host)) {
-            result.discovery_only = true;
-            self.discover(io, tick, &result);
-            self.turn_timing.mark(io, .maintenance);
-            return result;
-        }
         // A failed poll reports no readiness, so both sockets are drained anyway.
         const quic: [2]bool = if (result.readiness.failure == null) result.readiness.quic else @splat(true);
         if (!result.cancelled and (quic[0] or quic[1])) {
@@ -792,29 +773,17 @@ pub const NetworkCore = struct {
         _ = quic.close(retired.conn, 0);
     }
 
-    /// A turn drains discovery alone when discovery is readable or due, the QUIC sockets and the
-    /// host are not readable, and every other source, re-read at the post-poll time, is in the future.
-    fn discoveryOnly(self: *NetworkCore, readiness: *const wait.Result, tick: Now, outputs: Outputs, host: Host) bool {
-        if (readiness.quicReady() or readiness.host or readiness.failure != null) return false;
-        if (self.discovery == null or self.peer_manager.phase != .running) return false;
-        var pending = self.wakeups(tick, outputs);
-        pending.other = pending.other.merge(.{ .deadline = host.deadline });
-        const discovery_due = pending.discovery.due(tick.monotonic);
-        if (!readiness.discoveryReady() and !discovery_due) return false;
-        return !pending.other.due(tick.monotonic);
-    }
-
     /// Each response may verify several ENRs; return to polling between datagrams.
     fn discover(self: *NetworkCore, io: std.Io, tick: Now, result: *Result) void {
         const owned = self.discovery.?;
         const need = self.peer_manager.discoveryNeed();
-        owned.request(need.query(tick.millis() +| 1_000), tick.millis()) catch unreachable;
+        owned.request(need.query()) catch unreachable;
         const candidates = &owned.candidates;
         var eligible: [2]bool = if (result.readiness.failure == null) result.readiness.discovery else @splat(true);
         const progress = owned.advance(io, tick.millis(), &eligible, candidates) catch |err| peers.Discovery.Result{ .cancelled = err == error.Canceled, .failure = .{ .cause = err, .stage = .coordinator } };
         const endpoints = owned.learnedEndpoints(progress.learned);
         if (!std.meta.eql(endpoints, owned.endpoints)) {
-            _ = self.updateLocalWithEndpoints(&self.peer_manager.local, self.schedule, endpoints, tick) catch |err| {
+            _ = self.updateLocalWithEndpoints(&self.peer_manager.local, self.fork_schedule, endpoints, tick) catch |err| {
                 std.log.scoped(.network_discovery).warn("endpoint_update_failed reason={s}", .{@errorName(err)});
             };
         }

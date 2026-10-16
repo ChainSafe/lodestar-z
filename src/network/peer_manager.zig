@@ -30,8 +30,8 @@ pub const DiscoveryNeed = struct {
     custody: bool = false,
 
     /// Query lifetime bounds discovery work independently of the desired peer coverage.
-    pub fn query(self: DiscoveryNeed, expires_ms: u64) peers.Discovery.Demand {
-        return .{ .general = self.general, .attnets = self.attnets, .syncnets = self.syncnets, .custody = self.custody, .expires_ms = expires_ms };
+    pub fn query(self: DiscoveryNeed) peers.Discovery.Demand {
+        return .{ .general = self.general, .attnets = self.attnets, .syncnets = self.syncnets, .custody = self.custody };
     }
 };
 

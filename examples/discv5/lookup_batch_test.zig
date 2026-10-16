@@ -78,19 +78,32 @@ test "lookup batch preserves response and unrelated expiry after refill failure"
         try Transport.monotonicMilliseconds(std.testing.io),
         &sealEntropy(1),
     )).?;
-    network.transport.engine.calls.next_generations[2] = std.math.maxInt(u64);
+    const Entropy = struct {
+        threadlocal var failed = false;
+        fn random(userdata: ?*anyopaque, bytes: []u8) std.Io.RandomSecureError!void {
+            if (!failed) {
+                failed = true;
+                return error.EntropyUnavailable;
+            }
+            return std.testing.io.vtable.randomSecure(userdata, bytes);
+        }
+    };
+    Entropy.failed = false;
+    var vtable = std.testing.io.vtable.*;
+    vtable.randomSecure = Entropy.random;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     try network.sendNodes(seeds[0].peer.node_id, request_id);
     var expired: [3]CallTable.Expired = undefined;
     var cursor = lookup_batch.Cursor{};
 
     const result = try lookup_batch.step(
         &network.transport,
-        std.testing.io,
+        io,
         &.{&operation},
         &cursor,
         &expired,
     );
-    try std.testing.expectEqual(error.GenerationExhausted, result.failure.?);
+    try std.testing.expectEqual(error.EntropyUnavailable, result.failure.?);
     try std.testing.expectEqual(@as(u16, 1), result.progress.responses);
     try std.testing.expectEqual(@as(?u16, 0), result.consumed);
     try std.testing.expectEqual(@as(usize, 1), result.transport.calls_expired);
@@ -289,14 +302,14 @@ const Network = struct {
         errdefer self.remote.close(std.testing.io);
         const key = try keyPair(0x11);
         const record = try enr.Record.create(&key, 1, discv5.types.Address.fromNetwork(self.transport.sockets.primary().address));
-        try self.transport.init(std.testing.allocator, self.transport.sockets, key, record, .{ .engine = .{
+        try self.transport.init(std.testing.allocator, self.transport.sockets, key, record, .{
             .session_capacity = 8,
             .challenge_capacity = 4,
             .call_capacity = call_capacity,
             .request_timeout_ms = 100_000,
             .challenge_timeout_ms = 1_000,
             .session_idle_timeout_ms = std.math.maxInt(u64),
-        } });
+        });
     }
 
     fn deinit(self: *Network) void {
@@ -642,11 +655,11 @@ const LookupNetwork = struct {
             .challenge_timeout_ms = 1_000,
             .session_idle_timeout_ms = std.math.maxInt(u64),
         };
-        try self.transport_a.init(std.testing.allocator, self.transport_a.sockets, key_a, self.record_a, .{ .engine = config });
+        try self.transport_a.init(std.testing.allocator, self.transport_a.sockets, key_a, self.record_a, config);
         errdefer self.transport_a.engine.deinit(std.testing.allocator);
-        try self.transport_b.init(std.testing.allocator, self.transport_b.sockets, key_b, self.record_b, .{ .engine = config });
+        try self.transport_b.init(std.testing.allocator, self.transport_b.sockets, key_b, self.record_b, config);
         errdefer self.transport_b.engine.deinit(std.testing.allocator);
-        try self.transport_c.init(std.testing.allocator, self.transport_c.sockets, key_c, self.record_c, .{ .engine = config });
+        try self.transport_c.init(std.testing.allocator, self.transport_c.sockets, key_c, self.record_c, config);
         errdefer self.transport_c.engine.deinit(std.testing.allocator);
 
         installSession(&self.transport_a.engine, endpoint(&self.record_b), 0x51);

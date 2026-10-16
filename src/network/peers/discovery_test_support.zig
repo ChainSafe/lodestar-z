@@ -42,11 +42,11 @@ pub const Node = struct {
         };
         const record = try adapter.build(&key, 1, &local, &options.fork);
         const now = try d.Transport.monotonicMilliseconds(io);
-        try self.owner.initBound(std.testing.allocator, sockets, &key, &record, &options.fork, options.bootstrap, now, options.discovery, .{ .engine = .{
+        try self.owner.initBound(std.testing.allocator, sockets, &key, &record, &options.fork, options.bootstrap, now, options.discovery, .{
             .session_capacity = 8,
             .challenge_capacity = 8,
             .call_capacity = 8,
-        } });
+        });
         self.transport = &self.owner.transport;
     }
     pub fn deinit(self: *Node) void {

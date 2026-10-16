@@ -52,14 +52,10 @@ response: PendingResponse = .{},
 output: [constants.packet_size_max]u8 = undefined,
 receive_buffer: [constants.packet_size_max]u8 = undefined,
 
-pub const Options = struct {
-    engine: Engine.Config = .{},
-};
-
 /// Takes ownership of bound sockets on success. Initialize at the final address.
-pub fn init(self: *Transport, allocator: std.mem.Allocator, sockets: Sockets, key: KeyPair, record: enr.Record, options: Options) !void {
+pub fn init(self: *Transport, allocator: std.mem.Allocator, sockets: Sockets, key: KeyPair, record: enr.Record, config: Engine.Config) !void {
     self.* = .{ .engine = undefined, .sockets = sockets };
-    try self.engine.init(allocator, key, record, options.engine);
+    try self.engine.init(allocator, key, record, config);
 }
 
 pub fn deinit(self: *Transport, allocator: std.mem.Allocator, io: std.Io) void {

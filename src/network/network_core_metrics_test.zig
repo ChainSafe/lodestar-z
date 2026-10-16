@@ -582,7 +582,7 @@ test "metrics export cumulative dial time by outcome in seconds" {
 }
 
 test "metrics export cumulative discovery lookups and datagram rejections" {
-    var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{ .session_capacity = 8, .challenge_capacity = 8, .call_capacity = 8 } });
+    var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) } });
     defer f.deinit();
     const coordinator = f.node.discovery.?;
     coordinator.counters.lookups_started = 5;

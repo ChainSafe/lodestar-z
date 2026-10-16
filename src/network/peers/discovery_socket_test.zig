@@ -17,7 +17,7 @@ test "peer discovery independent local nodes confirm signed candidates and cance
     defer a.deinit();
     const now = try d.Transport.monotonicMilliseconds(io);
     const controller = &a.owner;
-    try controller.request(.{ .general = true }, now);
+    try controller.request(.{ .general = true });
     var output: [1]adapter.Candidate = undefined;
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
     var found = false;
@@ -42,8 +42,8 @@ test "peer discovery independent local nodes confirm signed candidates and cance
     controller.shutdown();
     controller.shutdown();
     try std.testing.expectEqual(@as(usize, 0), a.transport.engine.calls.count());
-    try std.testing.expect(schedule_test_support.wakeupMilliseconds(controller.schedule(now), now) == null);
-    try std.testing.expectError(error.Stopped, controller.request(.{ .general = true }, now));
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(controller.schedule(), now) == null);
+    try std.testing.expectError(error.Stopped, controller.request(.{ .general = true }));
 }
 
 test "dual-stack discovery confirms both families in one routing table" {
@@ -57,9 +57,8 @@ test "dual-stack discovery confirms both families in one routing table" {
     var hub: Node = undefined;
     try hub.init(io, 91, null, &.{ .bindings = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } }, .bootstrap = &.{ ipv4.transport.engine.localRecord().*, ipv6.transport.engine.localRecord().* } });
     defer hub.deinit();
-    const now = try d.Transport.monotonicMilliseconds(io);
     const controller = &hub.owner;
-    try controller.request(.{ .general = true }, now);
+    try controller.request(.{ .general = true });
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
     for (0..400) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);
@@ -87,9 +86,8 @@ test "IPv6-only discovery bootstraps a dual-stack record over IPv6" {
     var node: Node = undefined;
     try node.init(io, 94, null, &.{ .bindings = .{ .ip6 = .loopback(0) }, .bootstrap = &.{seed.transport.engine.localRecord().*} });
     defer node.deinit();
-    const now = try d.Transport.monotonicMilliseconds(io);
     const controller = &node.owner;
-    try controller.request(.{ .general = true }, now);
+    try controller.request(.{ .general = true });
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
     for (0..100) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);

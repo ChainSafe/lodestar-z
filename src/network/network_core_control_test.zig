@@ -522,7 +522,7 @@ test "core native stalled fork transition only wakes for eligible work" {
     const service_due = schedule_test_support.wakeupMilliseconds(schedule_test_support.protocolsSchedule(&setup.client.protocols, .{ .application = 0, .control = 32 }), setup.pair.now.millis()).?;
     try std.testing.expect(service_due > setup.pair.now.millis());
     try std.testing.expect(schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now), setup.pair.now.millis()) == null);
-    const core_due = schedule_test_support.wakeupMilliseconds(setup.client.wakeups(setup.pair.now, .{}).schedule(), setup.pair.now.millis()).?;
+    const core_due = schedule_test_support.wakeupMilliseconds(setup.client.schedule(setup.pair.now, .{}), setup.pair.now.millis()).?;
     try std.testing.expect(core_due > setup.pair.now.millis() and core_due <= service_due);
     try network_core_test_support.updateLocal(&setup.server, &updated, setup.pair.now);
     for (0..80) |_| try setup.step(0);

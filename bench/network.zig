@@ -28,7 +28,7 @@ fn dueSources(node: *const network.NetworkCore, now: network.Now, outputs: netwo
     due[@intFromEnum(Source.identify)] = node.protocols.identify.schedule(network.NetworkCore.identify_per_turn).due(now.monotonic);
     due[@intFromEnum(Source.negotiation)] = node.protocols.router.schedule(network.Router.outcomes_per_pump).due(now.monotonic);
     due[@intFromEnum(Source.peers)] = node.peer_manager.schedule(node.protocols.gossipsub, now, .{ .peers = outputs.peers.len, .dials = network.NetworkCore.dials_per_turn }).due(now.monotonic);
-    due[@intFromEnum(Source.discovery)] = node.wakeups(now, outputs).discovery.due(now.monotonic);
+    due[@intFromEnum(Source.discovery)] = if (node.peer_manager.phase == .running and node.discovery != null) node.discovery.?.schedule().due(now.monotonic) else false;
     due[@intFromEnum(Source.host)] = node.host_runnable or if (host_deadline) |deadline| deadline.compare(.lte, now.monotonic) else false;
     return due;
 }
@@ -171,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
     var samples: Samples = .begin(a);
     for (0..turns) |i| {
         const now = try network.Now.read(io);
-        const immediate = a.wakeups(now, .{}).schedule().due(now.monotonic);
+        const immediate = a.schedule(now, .{}).due(now.monotonic);
         const due_before = dueSources(a, now, .{}, now.monotonic);
         const start = timestamp(io);
         const result = try turn(a, io, .{});
@@ -242,7 +242,7 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
     subscription.lengths[@intFromEnum(network.gossipsub.topic.Kind.beacon_block)] = 1;
     for ([_]*network.NetworkCore{ a, b }) |node| {
         const intent: network.NetworkCore.LocalIntent = .{
-            .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
+            .update = .{ .local = node.localState(), .schedule = node.fork_schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
             .demand = node.peer_manager.demand,
             .subscriptions = &.{subscription},
         };
@@ -302,7 +302,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
         peak_descriptors = @max(peak_descriptors, sender.queued_descriptors);
         peak_validations = @max(peak_validations, receiver.pending_validations);
         const now = try network.Now.read(io);
-        const immediate = a.wakeups(now, .{}).schedule().due(now.monotonic);
+        const immediate = a.schedule(now, .{}).due(now.monotonic);
         const due_before = dueSources(a, now, .{}, now.monotonic);
         const start = timestamp(io);
         const result = try turn(a, io, .{});
@@ -427,7 +427,7 @@ fn idleWait(init: std.process.Init) !void {
         const before = timestamp(io);
         if (before - start >= 1_000_000_000) break;
         const now = try network.Now.read(io);
-        immediate += @intFromBool(node.wakeups(now, .{}).schedule().due(now.monotonic));
+        immediate += @intFromBool(node.schedule(now, .{}).due(now.monotonic));
         for (dueSources(node, now, .{}, network.time.optionalMilliseconds(window_end_ms)), &due) |ready, *total| total.* += @intFromBool(ready);
         const result = network.driver.step(node, io, now, .{}, .{ .handler = .{ .context = &host, .apply = IdleHost.apply }, .deadline = network.time.optionalMilliseconds(window_end_ms) });
         if (result.failure) |err| return err;
@@ -628,7 +628,7 @@ fn idleConnections(init: std.process.Init) !void {
     var samples: Samples = .begin(hub);
     for (0..turns) |i| {
         const now = try network.Now.read(io);
-        const immediate = hub.wakeups(now, outputs).schedule().due(now.monotonic);
+        const immediate = hub.schedule(now, outputs).due(now.monotonic);
         const due_before = dueSources(hub, now, outputs, now.monotonic);
         const start = timestamp(io);
         const result = try turn(hub, io, outputs);

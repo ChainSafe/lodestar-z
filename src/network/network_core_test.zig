@@ -219,11 +219,7 @@ test "core signed bootstrap reaches relevant peer with zero and one outputs" {
     const key_a = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{11}));
     const key_b = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{12}));
     var opts_b = options(&key_b);
-    opts_b.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{
-        .session_capacity = 8,
-        .challenge_capacity = 8,
-        .call_capacity = 8,
-    } };
+    opts_b.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var b: NetworkCore = undefined;
     var backing_b = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     try b.init(backing_b.allocator(), std.testing.io, &opts_b.resolved, opts_b.startup);
@@ -410,11 +406,7 @@ fn applicationAndFork(a: *NetworkCore, b: *NetworkCore, b_inbox: *Inbox) !void {
 test "core every allocation prefix cleans up and reservations count owned storage" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{21}));
     var opts = options(&key);
-    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{
-        .session_capacity = 8,
-        .challenge_capacity = 8,
-        .call_capacity = 8,
-    } };
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
 
     opts.resolved.core.protocols.reqresp.admission = .{ .policy = policy_fixture.config(), .limits = .{
         .identities = opts.resolved.core.peers.capacity,
@@ -463,7 +455,7 @@ test "core demand persists until replacement and reaches discovery after selecti
     const evaluated = view.peer_manager.coverageDeficits();
     desired.demand = .{ .attnets = 2 };
     _ = try node.applyIntent(&desired, node.last_now);
-    try std.testing.expectEqual(node.last_now.millis(), schedule_test_support.wakeupMilliseconds(node.wakeups(node.last_now, .{}).schedule(), node.last_now.millis()).?);
+    try std.testing.expectEqual(node.last_now.millis(), schedule_test_support.wakeupMilliseconds(node.schedule(node.last_now, .{}), node.last_now.millis()).?);
     try std.testing.expectEqualDeep(evaluated, view.peer_manager.coverageDeficits());
     try std.testing.expectEqual(@as(u8, 1), view.peer_manager.discoveryNeed().attnets[0]);
     try std.testing.expectEqual(@as(u8, 1), node.discovery.?.demand.attnets[0]);
@@ -520,7 +512,7 @@ test "core socket faults preserve the other owner and local dial refusal is defe
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
     const remote_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
     var opts = options(&key);
-    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .coordinator = .{ .query_interval_ms = 100 } };
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: NetworkCore = undefined;
     var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     try node.init(backing_node.allocator(), std.testing.io, &opts.resolved, opts.startup);
@@ -546,12 +538,13 @@ test "core socket faults preserve the other owner and local dial refusal is defe
     const idle = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
     try std.testing.expect(idle.failure == null);
     const settled = node.last_now;
-    const discovery_due = schedule_test_support.wakeupMilliseconds(node.discovery.?.schedule(settled.millis()), settled.millis()).?;
+    const discovery_due = schedule_test_support.wakeupMilliseconds(node.discovery.?.schedule(), settled.millis()).?;
     try std.testing.expect(discovery_due > settled.millis());
-    try std.testing.expectEqual(discovery_due, schedule_test_support.wakeupMilliseconds(node.wakeups(settled, .{}).schedule(), settled.millis()).?);
+    const due = schedule_test_support.wakeupMilliseconds(node.schedule(settled, .{}), settled.millis()).?;
+    try std.testing.expect(due > settled.millis() and due <= discovery_due);
     const peer = t.PeerId.fromPublicKey(&remote_key.publicKey());
     try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, settled, time.milliseconds(settled.millis() +| Dialing.connect_timeout_ms));
-    try std.testing.expectEqual(settled.millis(), schedule_test_support.wakeupMilliseconds(node.wakeups(settled, .{}).schedule(), settled.millis()).?);
+    try std.testing.expectEqual(settled.millis(), schedule_test_support.wakeupMilliseconds(node.schedule(settled, .{}), settled.millis()).?);
     faults.send = .{};
     faults.send_calls = 0;
     faults.send_failure = error.Unexpected;
@@ -620,7 +613,7 @@ fn failureAndReplacement(a: *NetworkCore, b: *NetworkCore) !void {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{24}));
     var opts = options(&key);
     opts.startup.local = a.localState();
-    opts.startup.schedule = a.schedule;
+    opts.startup.schedule = a.fork_schedule;
     var replacement: NetworkCore = undefined;
     try replacement.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer replacement.deinit(std.testing.io);

@@ -147,7 +147,7 @@ test "core native wait honors engine timers and pending lifecycle work" {
     const deadline = node.transport.nextDeadlineNs().?;
     const deadline_ms = deadline / std.time.ns_per_ms + @intFromBool(deadline % std.time.ns_per_ms != 0);
     try std.testing.expect(deadline_ms <= now.millis() + 80);
-    try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(current, .{}).schedule(), current.millis()).? <= deadline_ms);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.schedule(current, .{}), current.millis()).? <= deadline_ms);
     const timer = driver.step(&node, std.testing.io, current, .{}, .deadlineOnly(time.optionalMilliseconds(current.millis() +| 100)));
     try std.testing.expect(timer.failure == null);
     const failed = try node.transport.engine.dial(&destination, node.peerId(), node.last_now);
@@ -231,7 +231,7 @@ test "core beacon idle scans do not manufacture immediate deadlines" {
         const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
         try std.testing.expect(result.failure == null);
         try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(node.protocols.reqresp.schedule(0), now.millis()));
-        try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(now, .{}).schedule(), now.millis()).? > now.millis());
+        try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.schedule(now, .{}), now.millis()).? > now.millis());
     }
     try std.testing.expectEqual(calls, backing_node.allocations);
 }

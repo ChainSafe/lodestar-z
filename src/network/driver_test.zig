@@ -96,7 +96,7 @@ const Pair = struct {
 
 fn intent(node: *const NetworkCore, subscriptions: []const local_intent.Boundary) NetworkCore.LocalIntent {
     return .{
-        .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
+        .update = .{ .local = node.localState(), .schedule = node.fork_schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
         .demand = node.peer_manager.demand,
         .subscriptions = subscriptions,
     };
@@ -219,7 +219,7 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
 
     // The host deadline bounds the wait and is applied when it passes.
     now = try currentTime();
-    const expected = schedule_test_support.waitMilliseconds(node.wakeups(now, .{}).schedule(), now.millis(), 150);
+    const expected = schedule_test_support.waitMilliseconds(node.schedule(now, .{}), now.millis(), 150);
     const timed = driver.step(&node, std.testing.io, now, .{}, host.seam(now.millis() + 150));
     try std.testing.expect(timed.failure == null and !timed.readiness.host);
     if (expected == 150) {
@@ -235,7 +235,7 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
     const capped = driver.step(&node, std.testing.io, now, .{}, host.seam(now.millis() +| 5_000));
     try std.testing.expect(capped.readiness.host);
     try std.testing.expectEqual(applied + 1, host.applies);
-    try std.testing.expect(node.wakeups(now, .{}).other.runnable);
+    try std.testing.expect(node.schedule(now, .{}).runnable);
     now = try currentTime();
     const carried = driver.step(&node, std.testing.io, now, .{}, host.seam(now.millis() +| 5_000));
     try std.testing.expect(!carried.readiness.host);
@@ -284,7 +284,7 @@ fn datagramsCounted(node: *const NetworkCore) u64 {
     return total;
 }
 
-test "discovery returns to polling after each datagram without waking unrelated owners" {
+test "discovery returns to polling after each datagram within a bounded network turn" {
     if (!NetworkCore.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{64}));
     var opts = options(&key);
@@ -297,7 +297,7 @@ test "discovery returns to polling after each datagram without waking unrelated 
         _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis())));
     }
     const settled = try currentTime();
-    try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(settled, .{}).schedule(), settled.millis()).? > settled.millis());
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.schedule(settled, .{}), settled.millis()).? > settled.millis());
     const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer sender.close(std.testing.io);
     const target = node.discovery.?.transport.sockets.primary().address;
@@ -309,7 +309,7 @@ test "discovery returns to polling after each datagram without waking unrelated 
         const now = try currentTime();
         const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 5_000)));
         try std.testing.expect(result.failure == null);
-        try std.testing.expect(result.readiness.discoveryReady() and result.discovery_only);
+        try std.testing.expect(result.readiness.discoveryReady());
         try std.testing.expectEqual(@as(u64, 1), datagramsCounted(&node) - before);
         try std.testing.expectEqual(@as(u32, 0), result.transport.datagrams_sent);
     }
@@ -338,7 +338,6 @@ test "discovery readiness with other work due runs a full turn" {
     const now = try currentTime();
     const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis() +| 5_000)));
     try std.testing.expect(result.failure == null and result.readiness.discoveryReady());
-    try std.testing.expect(!result.discovery_only);
     try std.testing.expectEqual(@as(u64, 1), datagramsCounted(&node));
     try std.testing.expect(result.transport.datagrams_sent > 0);
 }
@@ -362,7 +361,7 @@ test "an idle owner waits until the host deadline" {
     const now = try Now.read(std.testing.io);
     for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(time.optionalMilliseconds(now.millis()))).failure == null);
     const settled = node.last_now;
-    try std.testing.expect(!node.wakeups(settled, .{}).schedule().due(settled.monotonic));
+    try std.testing.expect(!node.schedule(settled, .{}).due(settled.monotonic));
     const plan = node.waitPlan(settled, .{}, .deadlineOnly(time.optionalMilliseconds(settled.millis() + 2)));
     try std.testing.expectEqualDeep(time.milliseconds(settled.millis() + 2), plan.timeout.deadline);
 }

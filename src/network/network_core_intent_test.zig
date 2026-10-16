@@ -53,7 +53,7 @@ fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
 
 fn intentFor(node: *const NetworkCore) NetworkCore.LocalIntent {
     return .{
-        .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
+        .update = .{ .local = node.localState(), .schedule = node.fork_schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() },
         .demand = node.peer_manager.demand,
         .subscriptions = &.{},
     };
@@ -101,7 +101,7 @@ const ActivationSnapshot = struct {
     fn capture(node: *const NetworkCore) ActivationSnapshot {
         return .{
             .local = node.localState(),
-            .schedule = node.schedule,
+            .schedule = node.fork_schedule,
             .endpoints = node.advertisementEndpoints(),
             .capabilities = node.protocols.router.capabilities(),
             .request_fork = node.protocols.reqresp.request_fork,
@@ -113,7 +113,7 @@ const ActivationSnapshot = struct {
     fn expectUnchanged(self: *const ActivationSnapshot, node: *const NetworkCore) !void {
         try std.testing.expectEqualDeep(self.local, node.localState());
         try std.testing.expectEqualDeep(self.identify, node.protocols.identify.local);
-        try std.testing.expectEqualDeep(self.schedule, node.schedule);
+        try std.testing.expectEqualDeep(self.schedule, node.fork_schedule);
         try std.testing.expectEqualDeep(self.endpoints, node.advertisementEndpoints());
         try std.testing.expectEqualDeep(self.capabilities, node.protocols.router.capabilities());
         try std.testing.expectEqual(self.request_fork, node.protocols.reqresp.request_fork);
@@ -161,11 +161,7 @@ const BoundaryUnion = struct {
 test "core local transaction sequences no-op schedule and rollback" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var opts = options(&key);
-    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{
-        .session_capacity = 8,
-        .challenge_capacity = 8,
-        .call_capacity = 8,
-    } };
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
@@ -476,7 +472,7 @@ test "identify advertisement follows committed endpoints and rejected updates pr
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{24}));
     var opts = options(&key);
     opts.resolved.core.protocols.identify = .{ .agent = "core", .addresses = &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19009 } }} };
-    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{ .session_capacity = 8, .challenge_capacity = 8, .call_capacity = 8 } };
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
@@ -486,12 +482,12 @@ test "identify advertisement follows committed endpoints and rejected updates pr
     var endpoints = node.advertisementEndpoints().?;
     endpoints.quic = 443;
     const now = node.last_now;
-    try std.testing.expect(try updateLocalWithEndpoints(&node, &node.peer_manager.local, node.schedule, endpoints, now));
+    try std.testing.expect(try updateLocalWithEndpoints(&node, &node.peer_manager.local, node.fork_schedule, endpoints, now));
     const updated = node.protocols.identify.local;
     const next = try Multiaddr.decode(updated.addresses[0].bytes[0..updated.addresses[0].len]);
     try std.testing.expectEqual(@as(u16, 443), next.address.port());
     endpoints.quic = 0;
-    try std.testing.expectError(error.InvalidAdvertisement, updateLocalWithEndpoints(&node, &node.peer_manager.local, node.schedule, endpoints, now));
+    try std.testing.expectError(error.InvalidAdvertisement, updateLocalWithEndpoints(&node, &node.peer_manager.local, node.fork_schedule, endpoints, now));
     try std.testing.expectEqualDeep(updated, node.protocols.identify.local);
 }
 
@@ -505,7 +501,7 @@ test "core complete local intent rejects invalid last topic atomically" {
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const block_topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    const update: local_state.LocalUpdate = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() };
+    const update: local_state.LocalUpdate = .{ .local = node.localState(), .schedule = node.fork_schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() };
     var desired: NetworkCore.LocalIntent = .{ .update = update, .demand = .{}, .subscriptions = topic_fixture.subscriptions(&.{block_topic}) };
     const now = node.last_now;
     try std.testing.expect(try node.applyIntent(&desired, now));

@@ -423,7 +423,7 @@ pub fn intent(node: *const NetworkCore, subscriptions: []const local_intent.Boun
     return .{
         .update = .{
             .local = node.localState(),
-            .schedule = node.schedule,
+            .schedule = node.fork_schedule,
             .endpoints = node.advertisementEndpoints(),
             .capabilities = node.protocols.router.capabilities(),
         },
@@ -454,7 +454,7 @@ fn setSubscription(node: *NetworkCore, name: []const u8, subscribed: bool) !void
 }
 
 pub fn clientWakeup(setup: *Setup) ?u64 {
-    return schedule_test_support.wakeupMilliseconds(setup.client.wakeups(setup.pair.now, .{}).schedule(), setup.pair.now.millis());
+    return schedule_test_support.wakeupMilliseconds(setup.client.schedule(setup.pair.now, .{}), setup.pair.now.millis());
 }
 
 pub fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
