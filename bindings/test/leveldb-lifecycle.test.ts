@@ -57,7 +57,7 @@ it("cleans up failed opens and can immediately retry after the lock owner closes
     await expect(LevelDb.open(path, {errorIfExists: true})).rejects.toMatchObject({code: "InvalidArgument"});
     const retry = await LevelDb.open(path, {createIfMissing: false});
     try {
-      expect(await retry.get(Uint8Array.of(1), {maxValueBytes: 1})).toEqual(Uint8Array.of(2));
+      expect(await retry.get(Uint8Array.of(1))).toEqual(Uint8Array.of(2));
     } finally {
       await retry.close();
     }
@@ -88,12 +88,12 @@ const {parentPort, workerData} = require("node:worker_threads");
     {type: "put", key: Uint8Array.of(1), value: Uint8Array.of(2)},
     {type: "put", key: Uint8Array.of(3), value: Uint8Array.of(4)},
   ], {sync: true});
-  const iterator = db.iterator({maxValueBytes: 1, maxTotalBytes: 2, maxEntries: 1});
+  const iterator = db.iterator();
   await iterator.next();
   const pending = [];
   for (let index = 0; index < 16; index++) {
     pending.push(db.put(Uint8Array.of(100 + index), new Uint8Array(1024 * 1024)));
-    pending.push(db.getMany([Uint8Array.of(1), Uint8Array.of(3)], {maxValueBytes: 1, maxTotalBytes: 2}));
+    pending.push(db.getMany([Uint8Array.of(1), Uint8Array.of(3)]));
   }
   Promise.all(pending).catch((error) => { throw error; });
   parentPort.postMessage("queued");
@@ -121,7 +121,7 @@ try {
   await worker.terminate();
   const reopened = await LevelDb.open(path, {createIfMissing: false});
   try {
-    assert.deepEqual(await reopened.get(Uint8Array.of(1), {maxValueBytes: 1}), Uint8Array.of(2));
+    assert.deepEqual(await reopened.get(Uint8Array.of(1)), Uint8Array.of(2));
     await reopened.put(Uint8Array.of(9), Uint8Array.of(10), {sync: true});
   } finally {
     await reopened.close();
@@ -178,10 +178,7 @@ for (let attempt = 0; attempt < 200; attempt++) {
 }
 assert.ok(reopened, "Collected database did not release its lock");
 try {
-  const values = await reopened.getMany([Uint8Array.of(0), Uint8Array.of(15)], {
-    maxValueBytes: 1024 * 1024,
-    maxTotalBytes: 2 * 1024 * 1024,
-  });
+  const values = await reopened.getMany([Uint8Array.of(0), Uint8Array.of(15)]);
   assert.equal(values[0].length, 1024 * 1024);
   assert.equal(values[0][0], 0);
   assert.equal(values[1].length, 1024 * 1024);
@@ -208,7 +205,7 @@ try {
     {type: "put", key: Uint8Array.of(1), value: Uint8Array.of(1)},
     {type: "put", key: Uint8Array.of(2), value: Uint8Array.of(2)},
   ]);
-  const cursor = db.iterator({maxEntries: 1, maxTotalBytes: 8, maxValueBytes: 4});
+  const cursor = db.iterator();
   const injected = new Error("InjectedPublicationFailure");
   Object.defineProperty(Object.prototype, "entries", {
     configurable: true,
@@ -221,7 +218,7 @@ try {
   await Promise.resolve();
   const queued = db.put(Uint8Array.of(3), Uint8Array.of(3));
   await Promise.all([failing, queued]);
-  assert.deepEqual(await db.get(Uint8Array.of(3), {maxValueBytes: 1}), Uint8Array.of(3));
+  assert.deepEqual(await db.get(Uint8Array.of(3)), Uint8Array.of(3));
   await cursor.close();
 } finally {
   delete Object.prototype.entries;

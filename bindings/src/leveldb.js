@@ -1,10 +1,7 @@
 import {types} from "node:util";
 import bindings from "./bindings.js";
 
-const MAX_BYTES = 1024 * 1024 * 1024;
-const MAX_PAGE_ENTRIES = 1024;
 const DEFAULT_PAGE_ENTRIES = 1000;
-const DEFAULT_HIGH_WATER_MARK_BYTES = 16 * 1024;
 const MAX_BATCH_ENTRIES = 16_777_216;
 const MAX_LIMIT = 0xffffffff;
 
@@ -12,9 +9,9 @@ function failure(code) {
   return Object.assign(new Error(code), {code});
 }
 
-function readLimit(value, maximum, minimum = 0, fallback = maximum) {
-  if (value === undefined) return fallback;
-  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw failure("InvalidLimit");
+function readLimit(value, maximum) {
+  if (value === undefined) return maximum;
+  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) throw failure("InvalidLimit");
   return value;
 }
 
@@ -56,21 +53,13 @@ export class LevelDb {
 
   async get(key, options = {}) {
     this.#assertOpen();
-    const maxValueBytes = readLimit(options.maxValueBytes, MAX_BYTES);
-    const values = await submit(this.#native, "getMany", [
-      [key],
-      maxValueBytes,
-      maxValueBytes,
-      options.fillCache ?? true,
-    ]);
+    const values = await submit(this.#native, "getMany", [[key], options.fillCache ?? true]);
     return values[0];
   }
 
   async getMany(keys, options = {}) {
     this.#assertOpen();
-    const maxValueBytes = readLimit(options.maxValueBytes, MAX_BYTES);
-    const maxTotalBytes = readLimit(options.maxTotalBytes, MAX_BYTES);
-    return submit(this.#native, "getMany", [keys, maxValueBytes, maxTotalBytes, options.fillCache ?? true]);
+    return submit(this.#native, "getMany", [keys, options.fillCache ?? true]);
   }
 
   async put(key, value, options = {}) {
@@ -117,10 +106,6 @@ export class LevelDb {
 
   #iterator(options, projection) {
     this.#assertOpen();
-    const maxValueBytes = readLimit(options.maxValueBytes, MAX_BYTES, 1);
-    const maxTotalBytes = readLimit(options.maxTotalBytes, MAX_BYTES, 1);
-    const maxEntries = readLimit(options.maxEntries, MAX_PAGE_ENTRIES, 1, DEFAULT_PAGE_ENTRIES);
-    const highWaterMarkBytes = readLimit(options.highWaterMarkBytes, MAX_LIMIT, 0, DEFAULT_HIGH_WATER_MARK_BYTES);
     const limit = readLimit(options.limit, MAX_LIMIT);
     const cursor = submit(this.#native, "cursor", [
       {
@@ -135,16 +120,7 @@ export class LevelDb {
         values: projection === "entries" ? (options.values ?? true) : projection === "values",
       },
     ]);
-    return new LevelDbIterator(
-      this.#native,
-      cursor,
-      () => this.#closing,
-      maxValueBytes,
-      maxTotalBytes,
-      maxEntries,
-      highWaterMarkBytes,
-      projection
-    );
+    return new LevelDbIterator(this.#native, cursor, () => this.#closing, projection);
   }
 
   async clear() {
@@ -199,10 +175,6 @@ class LevelDbIterator {
   #native;
   #cursor;
   #databaseClosing;
-  #maxValueBytes;
-  #maxTotalBytes;
-  #maxEntries;
-  #highWaterMarkBytes;
   #projection;
   #entries = [];
   #index = 0;
@@ -213,26 +185,13 @@ class LevelDbIterator {
   #closing;
   #seekTarget;
 
-  constructor(
-    native,
-    cursor,
-    databaseClosing,
-    maxValueBytes,
-    maxTotalBytes,
-    maxEntries,
-    highWaterMarkBytes,
-    projection
-  ) {
+  constructor(native, cursor, databaseClosing, projection) {
     this.#native = native;
     this.#cursor = cursor.then(
       (id) => ({id}),
       (error) => ({error})
     );
     this.#databaseClosing = databaseClosing;
-    this.#maxValueBytes = maxValueBytes;
-    this.#maxTotalBytes = maxTotalBytes;
-    this.#maxEntries = maxEntries;
-    this.#highWaterMarkBytes = highWaterMarkBytes;
     this.#projection = projection;
   }
 
@@ -292,7 +251,7 @@ class LevelDbIterator {
     this.#busy = true;
     try {
       if (this.#databaseClosing() !== undefined) throw failure("DatabaseClosed");
-      const count = cache ? (this.#first ? 1 : this.#maxEntries) : size;
+      const count = cache ? (this.#first ? 1 : DEFAULT_PAGE_ENTRIES) : size;
       this.#first = false;
       if (this.#index === this.#entries.length) {
         const cursor = await this.#cursor;
@@ -306,13 +265,7 @@ class LevelDbIterator {
           if (this.#finished) return [];
           if (this.#databaseClosing() !== undefined) throw failure("DatabaseClosed");
         }
-        const page = await submit(this.#native, "readCursor", [
-          cursor.id,
-          this.#maxValueBytes,
-          this.#maxTotalBytes,
-          count,
-          this.#highWaterMarkBytes,
-        ]);
+        const page = await submit(this.#native, "readCursor", [cursor.id, count]);
         if (this.#finished) return [];
         if (this.#databaseClosing() !== undefined) throw failure("DatabaseClosed");
         this.#entries = page.entries;

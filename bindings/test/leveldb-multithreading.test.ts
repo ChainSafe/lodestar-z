@@ -48,7 +48,7 @@ it("shares the first engine's options while keeping admission and snapshots loca
         {key: bytes(2), type: "put", value: bytes(20)},
       ]);
       expect(await second.get(bytes(1))).toEqual(bytes(10));
-      const iterator = second.iterator({maxEntries: 1});
+      const iterator = second.iterator();
       try {
         expect((await iterator.next()).value).toEqual({key: bytes(1), value: bytes(10)});
         await first.put(bytes(2), bytes(21));
@@ -116,16 +116,16 @@ const {parentPort, workerData} = require("node:worker_threads");
       if (command.kind === "get") result = Array.from(await db.get(Uint8Array.of(command.key)));
       if (command.kind === "put") await db.put(Uint8Array.of(command.key), Uint8Array.of(command.value));
       if (command.kind === "cursor") {
-        cursor = db.iterator({maxEntries: 1});
+        cursor = db.iterator();
         await cursor.next();
       }
       if (command.kind === "next") result = (await cursor.next()).value;
       if (command.kind === "cursors") {
-        for (let index = 0; index < 32; index++) cursors.push(db.iterator({maxEntries: 1}));
+        for (let index = 0; index < 32; index++) cursors.push(db.iterator());
         await Promise.all(cursors.map((item) => item.next()));
       }
       if (command.kind === "park") {
-        cursor = db.iterator({maxEntries: 1});
+        cursor = db.iterator();
         await cursor.next();
         const pending = [];
         for (let index = 0; index < 16; index++) {
@@ -256,7 +256,7 @@ try {
   await db.compactRange(bytes(), bytes(255));
   const worker = await start();
   assert.deepEqual(await command(worker, {kind: "get", key: 1}), [10]);
-  const cursor = db.iterator({maxEntries: 1});
+  const cursor = db.iterator();
   const injected = new Error("InjectedPublicationFailure");
   Object.defineProperty(Object.prototype, "entries", {
     configurable: true,
@@ -298,11 +298,11 @@ try {
     command(first, {kind: "cursors"}),
     command(second, {kind: "cursors"}),
   ]);
-  const refused = db.iterator({maxEntries: 1});
+  const refused = db.iterator();
   await assert.rejects(refused.next(), {message: "CursorCapacity"});
   await refused.close();
   await command(first, {kind: "close"});
-  const admitted = db.iterator({maxEntries: 1});
+  const admitted = db.iterator();
   assert.deepEqual((await admitted.next()).value, {key: bytes(1), value: bytes(10)});
   await admitted.close();
   await second.terminate();

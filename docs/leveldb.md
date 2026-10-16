@@ -12,14 +12,11 @@ const db = await LevelDb.open("./beacon-db");
 try {
   const key = new Uint8Array([1, 2, 3]);
   await db.put(key, new Uint8Array([4, 5]), {sync: true});
-  const value = await db.get(key, {maxValueBytes: 1024});
+  const value = await db.get(key);
 
   for await (const {key, value} of db.iterator({
     gte: new Uint8Array([1]),
     lt: new Uint8Array([2]),
-    maxValueBytes: 1024,
-    maxTotalBytes: 64 * 1024,
-    maxEntries: 128,
   })) {
     console.log(key, value);
   }
@@ -37,10 +34,10 @@ input buffers are rejected.
 ## Workload and limits
 
 Point reads seek an iterator to the exact key, inspect its borrowed value length,
-and then copy into a bounded result buffer. `getMany(keys, {maxValueBytes,
-maxTotalBytes})` reuses a single iterator for up to 16,777,216 keys, preserves input
-order and duplicates, and returns a consistent view. It avoids a C `leveldb_get`
-allocation of the full value before enforcing the caller's limit. Reads and cursors
+and then copy into a bounded result buffer. `getMany(keys)` reuses a single iterator
+for up to 16,777,216 keys, preserves input order and duplicates, and returns a
+consistent view. It avoids a C `leveldb_get`
+allocation of the full value before enforcing the output bound. Reads and cursors
 expose `fillCache`. Point reads default to filling the cache; native cursors default
 to bypassing it. The Lodestar controller preserves its existing cache defaults.
 
@@ -54,9 +51,9 @@ native write batch. Operations have the form `{type: "put", key, value}` or
 | Key | 4 KiB |
 | Individual value | 1 GiB |
 | Atomic write batch | 16,777,216 operations and 4 GiB of keys plus values |
-| Multi-get | 16,777,216 keys; 1 GiB default per-value and aggregate result limits |
-| Cursor refill | First pull: 1 row; later: up to 1,000 by default (configurable through 1,024), with a soft 16 KiB watermark |
-| Explicit cursor batch | Up to 16,777,216 entries; 1 GiB default hard selected key-plus-value byte limit |
+| Multi-get | 16,777,216 keys; 1 GiB aggregate result limit |
+| Cursor refill | First pull: 1 row; later: up to 1,000, with a fixed soft 16 KiB watermark |
+| Explicit cursor batch | Up to 16,777,216 entries; same watermark and 1 GiB hard selected key-plus-value byte limit |
 | Diagnostic property copy | 1 MiB |
 | Live cursors per database | 64 |
 | Admitted operations per database | 4,096 by default, configurable up to 65,536 |
@@ -66,7 +63,7 @@ Configure admission with `maxPendingOperations` and `maxPendingBytes` at open.
 These are finite operating limits, not consensus maxima. A request must fit its
 payload and metadata budget; batches are never split into separate commits.
 Queue saturation rejects before copying payloads. Read results allocate their
-actual sizes on the worker after checking the requested bounds, rather than
+actual sizes on the worker after checking the fixed output bounds, rather than
 allocating each read's maximum in advance. Each handle can retain two point/multi-get
 results and one cursor/maintenance result until JavaScript delivery. Each result has
 its own output bound, separate from queued input admission. Engine memory,
@@ -91,18 +88,18 @@ Cursors use a stable snapshot, `gt`/`gte` and `lt`/`lte` bounds, `reverse`, and 
 optional total row `limit`. Inclusive bounds take precedence when both forms are
 provided. `keys()` and `values()` project inside the native iterator, so a key-only
 scan never copies stored values. The first `next()` and the first `next()` after
-`seek(target)` read one row; later refills read up to 1000 rows by default.
-`highWaterMarkBytes` is a soft projected-byte watermark, defaulting to 16 KiB.
+`seek(target)` read one row; later refills read up to 1000 rows.
+Pages have a fixed soft watermark of 16 KiB of projected bytes.
 A batch includes the row that takes it above the watermark, including a single
 oversized row, and then stops. Equality does not stop a batch. Discarded projection
 components do not count. `nextv(size)` returns up to the requested number, draining
 an existing cache first without combining it with another native read; explicit
 bulk requests can exceed the ordinary refill size.
 
-`maxValueBytes` and `maxTotalBytes` are separate hard limits. A row that fits an
-empty hard-bounded page but not its remaining space stays pending for the next
-page. A row exceeding the per-value or whole-page limit fails the iteration;
-partial results of a failing read are freed, and no row is silently skipped.
+Read results and cursor pages have a fixed 1 GiB hard limit. A row that fits an
+empty page but not its remaining space stays pending for the next page. A row
+exceeding the whole-page limit fails the iteration; partial results of a failing
+read are freed, and no row is silently skipped.
 
 `seek(target)` discards prefetched rows and repositions within the original
 snapshot and bounds, in the iterator's direction. Out-of-range targets end the
@@ -137,8 +134,8 @@ or refusing an exclusive open, and rejects destruction while a handle remains op
 The host must still prevent concurrent access through independent engine copies
 or filesystem aliases not resolved by `realpath`: POSIX process-scoped locks do
 not reliably enforce that requirement. Existing databases keep their binary key
-and value encodings. Lodestar forwards its serving value and batch/page output
-limits to native reads; serving admission and lease accounting remain in Lodestar.
+and value encodings. Lodestar forwards `fillCache` to native reads; the binding
+owns the read-output limits and cursor batching policy.
 
 Storage bounds do not certify a block's consensus validity, canonicality,
 execution status, or provenance. Those checks remain with Lodestar. Returned-value

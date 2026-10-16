@@ -3,7 +3,7 @@ import {expect, it} from "vitest";
 import {LevelDb, type LevelDbOperation} from "../src/leveldb.js";
 import {bytes, collect, withDatabase} from "./utils/leveldb.js";
 
-it("uses optional read limits with cache options and allocates only actual outputs", async () => {
+it("honors cache options and allocates only actual outputs", async () => {
   await withDatabase(async (db, path) => {
     const value = new Uint8Array(64 * 1024).fill(7);
     await db.put(bytes(1), value);
@@ -19,7 +19,7 @@ it("uses optional read limits with cache options and allocates only actual outpu
       const [first, second] = await Promise.all([constrained.get(bytes(1)), constrained.get(bytes(1))]);
       expect(first).toEqual(value);
       expect(second).toEqual(value);
-      const cursor = constrained.values({maxEntries: 1});
+      const cursor = constrained.values();
       expect(await collect(cursor)).toEqual([value]);
     } finally {
       await constrained.close();
@@ -30,8 +30,8 @@ it("uses optional read limits with cache options and allocates only actual outpu
 it("implements exclusive and inclusive bounds in both directions with inclusive precedence", async () => {
   await withDatabase(async (db) => {
     await db.batch(Array.from({length: 6}, (_, index) => ({key: bytes(index), type: "put", value: bytes(index)})));
-    expect(await collect(db.keys({gt: bytes(1), lt: bytes(4), maxEntries: 1}))).toEqual([bytes(2), bytes(3)]);
-    expect(await collect(db.keys({gte: bytes(1), lte: bytes(4), maxEntries: 1, reverse: true}))).toEqual([
+    expect(await collect(db.keys({gt: bytes(1), lt: bytes(4)}))).toEqual([bytes(2), bytes(3)]);
+    expect(await collect(db.keys({gte: bytes(1), lte: bytes(4), reverse: true}))).toEqual([
       bytes(4),
       bytes(3),
       bytes(2),
@@ -51,7 +51,7 @@ it("implements exclusive and inclusive bounds in both directions with inclusive 
   });
 });
 
-it("projects keys and values natively without charging or copying discarded components", async () => {
+it("returns the selected key and value projections", async () => {
   await withDatabase(async (db) => {
     const largeValue = new Uint8Array(64 * 1024).fill(9);
     const largeKey = new Uint8Array(4096).fill(255);
@@ -59,21 +59,11 @@ it("projects keys and values natively without charging or copying discarded comp
       {key: bytes(1), type: "put", value: largeValue},
       {key: largeKey, type: "put", value: bytes(3)},
     ]);
-    expect(await collect(db.keys({fillCache: true, lt: bytes(2), maxTotalBytes: 1, maxValueBytes: 1}))).toEqual([
-      bytes(1),
-    ]);
-    expect(await collect(db.values({fillCache: false, gte: largeKey, maxTotalBytes: 1, maxValueBytes: 1}))).toEqual([
-      bytes(3),
-    ]);
-    expect(await collect(db.iterator({lt: bytes(2), maxTotalBytes: 1, maxValueBytes: 1, values: false}))).toEqual([
-      {key: bytes(1), value: bytes()},
-    ]);
-    expect(await collect(db.iterator({gte: largeKey, keys: false, maxTotalBytes: 1, maxValueBytes: 1}))).toEqual([
-      {key: bytes(), value: bytes(3)},
-    ]);
-    expect(
-      await collect(db.iterator({keys: false, maxEntries: 1, maxTotalBytes: 1, maxValueBytes: 1, values: false}))
-    ).toEqual([
+    expect(await collect(db.keys({fillCache: true, lt: bytes(2)}))).toEqual([bytes(1)]);
+    expect(await collect(db.values({fillCache: false, gte: largeKey}))).toEqual([bytes(3)]);
+    expect(await collect(db.iterator({lt: bytes(2), values: false}))).toEqual([{key: bytes(1), value: bytes()}]);
+    expect(await collect(db.iterator({gte: largeKey, keys: false}))).toEqual([{key: bytes(), value: bytes(3)}]);
+    expect(await collect(db.iterator({keys: false, values: false}))).toEqual([
       {key: bytes(), value: bytes()},
       {key: bytes(), value: bytes()},
     ]);
@@ -88,7 +78,7 @@ it("keeps reverse snapshots and copied bounds stable while clear and later write
     ]);
     const gte = bytes(1);
     const lte = bytes(2);
-    const snapshot = db.iterator({gte, lte, maxEntries: 1, reverse: true});
+    const snapshot = db.iterator({gte, lte, reverse: true});
     gte.fill(9);
     lte.fill(0);
     const before = db.put(bytes(3), bytes(33));
@@ -196,8 +186,7 @@ it("persists and reads an archived-state-sized value above 64 MiB", async () => 
     value[value.length - 1] = 255;
     const expected = createHash("sha256").update(value).digest("hex");
     await db.put(bytes(1), value, {sync: true});
-    await expect(db.get(bytes(1), {maxValueBytes: 64 * 1024 * 1024})).rejects.toThrow("ValueTooLarge");
-    expect(await collect(db.keys({maxTotalBytes: 1, maxValueBytes: 1}))).toEqual([bytes(1)]);
+    expect(await collect(db.keys())).toEqual([bytes(1)]);
     await db.close();
     const reopened = await LevelDb.open(path);
     try {
@@ -205,7 +194,7 @@ it("persists and reads an archived-state-sized value above 64 MiB", async () => 
       expect(actual?.length).toBe(value.length);
       if (actual === null) throw new Error("Archived state was not persisted");
       expect(createHash("sha256").update(actual).digest("hex")).toBe(expected);
-      const cursor = reopened.values({maxEntries: 1});
+      const cursor = reopened.values();
       try {
         const row = await cursor.next();
         expect(row.done).toBe(false);
@@ -228,7 +217,7 @@ it("keeps concurrent multi-gets consistent while atomic batches replace their ke
     const writes = Array.from({length: 32}, (_, index) =>
       db.batch(keys.map((key) => ({key, type: "put", value: bytes(index + 1)})))
     );
-    const reads = Array.from({length: 32}, () => db.getMany(keys, {maxTotalBytes: 32, maxValueBytes: 1}));
+    const reads = Array.from({length: 32}, () => db.getMany(keys));
     const results = await Promise.all(reads);
     for (const [index, values] of results.entries()) {
       expect(values[0], `read ${index} has a committed value`).not.toBeNull();
@@ -243,8 +232,7 @@ it("drains concurrent reads and serialized writes before close", async () => {
   await withDatabase(async (db, path) => {
     const value = new Uint8Array(1024 * 1024).fill(7);
     await db.put(bytes(1), value);
-    const rejected = expect(db.get(bytes(1), {maxValueBytes: value.length - 1})).rejects.toThrow("ValueTooLarge");
-    const reads = Array.from({length: 16}, () => db.get(bytes(1), {maxValueBytes: value.length}));
+    const reads = Array.from({length: 16}, () => db.get(bytes(1)));
     const writes = Array.from({length: 16}, (_, index) => db.put(bytes(2), bytes(index)));
     const closing = db.close();
     const results = await Promise.all(reads);
@@ -255,7 +243,6 @@ it("drains concurrent reads and serialized writes before close", async () => {
         `read ${index} contents`
       ).toBe(true);
     }
-    await rejected;
     await Promise.all(writes);
     await closing;
     const reopened = await LevelDb.open(path);

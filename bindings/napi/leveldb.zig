@@ -115,17 +115,15 @@ fn copyInputs(job: *Job, inputs: []const Input) !void {
     std.debug.assert(offset == job.input.len);
 }
 
-pub fn getMany(self: *@This(), keys: js.Value, max_value: js.Value, max_total: js.Value, fill_cache: js.Value, callback: js.Value) !void {
+pub fn getMany(self: *@This(), keys: js.Value, fill_cache: js.Value, callback: js.Value) !void {
     try self.enter();
     defer self.entered = false;
     const runtime = try self.owner();
-    const value_limit = try v.integer(max_value.val, leveldb.max_owned_value_bytes);
-    const total_limit = try v.integer(max_total.val, leveldb.max_owned_batch_bytes);
     const cache = try v.boolean(fill_cache.val);
     const inputs = try collect(runtime, keys.val, null);
     defer std.heap.c_allocator.free(inputs);
     const input_size = try measure(inputs);
-    const job = try Job.create(runtime, &.{ .get_many = .{ .value_limit = value_limit, .total_limit = total_limit, .fill_cache = cache } }, input_size, inputs.len, callback.val);
+    const job = try Job.create(runtime, &.{ .get_many = .{ .fill_cache = cache } }, input_size, inputs.len, callback.val);
     errdefer job.destroy();
     try copyInputs(job, inputs);
     try runtime.enqueue(job);
@@ -190,21 +188,13 @@ pub fn cursor(self: *@This(), options: js.Value, callback: js.Value) !void {
     try runtime.enqueue(job);
 }
 
-pub fn readCursor(self: *@This(), id: js.Value, max_value: js.Value, max_total: js.Value, max_entries: js.Value, high_water_mark: js.Value, callback: js.Value) !void {
+pub fn readCursor(self: *@This(), id: js.Value, max_entries: js.Value, callback: js.Value) !void {
     try self.enter();
     defer self.entered = false;
     const runtime = try self.owner();
     const cursor_id = try v.positive(id.val, std.math.maxInt(u32));
-    const value_limit = try v.positive(max_value.val, leveldb.max_owned_value_bytes);
-    const total_limit = try v.positive(max_total.val, leveldb.max_owned_batch_bytes);
     const count = try v.positive(max_entries.val, leveldb.max_bulk_entries);
-    const watermark = try v.integer(high_water_mark.val, std.math.maxInt(u32));
-    const job = try Job.create(runtime, &.{ .read_cursor = .{
-        .id = @intCast(cursor_id),
-        .value_limit = value_limit,
-        .total_limit = total_limit,
-        .high_water_mark_bytes = @intCast(watermark),
-    } }, 0, count, callback.val);
+    const job = try Job.create(runtime, &.{ .read_cursor = .{ .id = @intCast(cursor_id) } }, 0, count, callback.val);
     errdefer job.destroy();
     try runtime.enqueue(job);
 }

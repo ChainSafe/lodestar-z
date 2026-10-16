@@ -58,26 +58,7 @@ it("reads one row first, refills 1000, and drains cached rows before a mixed nex
   });
 });
 
-it("first pull and first pull after seek do not prefetch a following hard-limit failure", async () => {
-  await withDatabase(async (db) => {
-    await db.batch([
-      {key: key(0), type: "put", value: bytes(0)},
-      {key: key(1), type: "put", value: bytes(1, 1)},
-      {key: key(2), type: "put", value: bytes(2)},
-    ]);
-    for (const seek of [false, true]) {
-      const iterator = db.iterator({maxValueBytes: 1});
-      if (seek) iterator.seek(key(0));
-      expect(await nextIndex(iterator)).toBe(0);
-      await expect(iterator.next()).rejects.toThrow("ValueTooLarge");
-      expect(await iterator.nextv(10)).toEqual([]);
-      await iterator.close();
-    }
-    expect(await db.get(key(2))).toEqual(bytes(2));
-  });
-});
-
-it("includes the row crossing the default 16 KiB soft watermark, including an oversized first row", async () => {
+it("includes the row crossing the fixed 16 KiB soft watermark, including an oversized first row", async () => {
   await withDatabase(async (db) => {
     await db.batch(Array.from({length: 5}, (_, i) => ({key: key(i), type: "put", value: new Uint8Array(8190)})));
     const iterator = db.iterator();
@@ -104,60 +85,37 @@ it("includes the row crossing the default 16 KiB soft watermark, including an ov
 it("charges only projected bytes against the watermark and preserves empty projections", async () => {
   await withDatabase(async (db) => {
     await db.batch(Array.from({length: 4}, (_, i) => ({key: key(i), type: "put", value: new Uint8Array(20_000)})));
-    const keys = db.keys({highWaterMarkBytes: 2, maxValueBytes: 1});
+    const keys = db.keys();
     try {
-      expect(await keys.nextv(100)).toEqual([key(0), key(1)]);
-      expect(await keys.nextv(100)).toEqual([key(2), key(3)]);
+      expect(await keys.nextv(100)).toEqual([key(0), key(1), key(2), key(3)]);
+      expect(await keys.nextv(100)).toEqual([]);
     } finally {
       await keys.close();
     }
     await db.clear();
-    const largeKeys = Array.from({length: 4}, (_, i) => new Uint8Array(4096).fill(i));
+    const largeKeys = Array.from({length: 5}, (_, i) => new Uint8Array(4096).fill(i));
     await db.batch(largeKeys.map((key, i) => ({key, type: "put", value: bytes(i)})));
-    const values = db.values({highWaterMarkBytes: 2, maxTotalBytes: 4});
+    const values = db.values();
     try {
-      expect(await values.nextv(100)).toEqual([bytes(0), bytes(1), bytes(2)]);
-      expect(await values.nextv(100)).toEqual([bytes(3)]);
+      expect(await values.nextv(100)).toEqual([bytes(0), bytes(1), bytes(2), bytes(3), bytes(4)]);
+      expect(await values.nextv(100)).toEqual([]);
     } finally {
       await values.close();
     }
-    const neither = db.iterator({highWaterMarkBytes: 0, keys: false, values: false});
+    const neither = db.iterator({keys: false, values: false});
     try {
       expect(await neither.nextv(2)).toEqual([
         {key: bytes(), value: bytes()},
         {key: bytes(), value: bytes()},
       ]);
-      expect(await neither.nextv(10)).toHaveLength(2);
+      expect(await neither.nextv(10)).toHaveLength(3);
     } finally {
       await neither.close();
     }
   });
 });
 
-it("keeps hard value and aggregate refusal independent of soft batching", async () => {
-  await withDatabase(async (db) => {
-    await db.batch([
-      {key: key(0), type: "put", value: bytes(0)},
-      {key: key(1), type: "put", value: bytes(1, 1)},
-    ]);
-    const failing = db.iterator({highWaterMarkBytes: 1000, maxValueBytes: 1});
-    await expect(failing.nextv(100)).rejects.toThrow("ValueTooLarge");
-    expect(await failing.nextv(100)).toEqual([]);
-    await failing.close();
-    const aggregate = db.iterator({highWaterMarkBytes: 0, maxTotalBytes: 2});
-    await expect(aggregate.nextv(100)).rejects.toThrow("BatchTooLarge");
-    await aggregate.close();
-    const deferred = db.iterator({highWaterMarkBytes: 1000, maxTotalBytes: 4});
-    try {
-      expect((await deferred.nextv(100)).map(indexOf)).toEqual([0]);
-      expect((await deferred.nextv(100)).map(indexOf)).toEqual([1]);
-    } finally {
-      await deferred.close();
-    }
-  });
-});
-
-it("supports explicit bulk nextv above 1024 and validates watermark and size independently", async () => {
+it("supports explicit bulk nextv above 1024 and validates its size", async () => {
   await withDatabase(async (db) => {
     await seed(db, 4097);
     const bulk = db.iterator();
@@ -167,7 +125,7 @@ it("supports explicit bulk nextv above 1024 and validates watermark and size ind
     } finally {
       await bulk.close();
     }
-    const iterator = db.iterator({highWaterMarkBytes: 0});
+    const iterator = db.iterator();
     try {
       expect((await iterator.nextv(0)).map(indexOf)).toEqual([0]);
       expect((await iterator.nextv(-10)).map(indexOf)).toEqual([1]);
@@ -178,10 +136,6 @@ it("supports explicit bulk nextv above 1024 and validates watermark and size ind
     } finally {
       await iterator.close();
     }
-    for (const invalid of [-1, NaN, Infinity, 0x100000000, null as unknown as number]) {
-      expect(() => db.iterator({highWaterMarkBytes: invalid})).toThrow("InvalidLimit");
-    }
-    expect(() => db.iterator({maxEntries: null as unknown as number})).toThrow("InvalidLimit");
   });
 });
 
@@ -265,7 +219,7 @@ it("seek preserves consumed limits including discarded prefetched rows", async (
     } finally {
       await iterator.close();
     }
-    const single = db.iterator({limit: 3, maxEntries: 1});
+    const single = db.iterator({limit: 3});
     try {
       for (let i = 0; i < 3; i++) {
         single.seek(key(2));

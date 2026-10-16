@@ -5,6 +5,8 @@ const shared = @import("leveldb_shared.zig");
 const runtime = @import("leveldb_runtime.zig");
 const values = @import("leveldb_values.zig");
 const allocator = std.heap.c_allocator;
+const read_total_bytes_max = leveldb.max_owned_value_bytes;
+const cursor_watermark_bytes = 16 * 1024;
 
 pub const Job = struct {
     owner: *runtime.Runtime,
@@ -40,16 +42,11 @@ pub const Job = struct {
     const ReadMany = struct {
         keys: [][]const u8 = &.{},
         results: []?[]const u8 = &.{},
-        value_limit: usize,
-        total_limit: usize,
         fill_cache: bool,
     };
     const ReadCursor = struct {
         id: u32,
         entries: []leveldb.Entry = &.{},
-        value_limit: usize,
-        total_limit: usize,
-        high_water_mark_bytes: u32,
         page: leveldb.Page = .{ .count = 0, .bytes = 0, .done = false },
     };
 
@@ -171,7 +168,7 @@ pub const Job = struct {
             .approximate_size => |*estimate| estimate.bytes = try database.approximateSize(estimate.bounds.start, estimate.bounds.end),
             .compact_range => |bounds| try database.compactRange(bounds.start, bounds.end),
             .property => |*result| result.* = try database.propertyValue(self.input[0 .. self.input.len - 1 :0]),
-            .get_many => |read| try database.getManyOwned(read.keys, read.results, read.value_limit, read.total_limit, read.fill_cache, &self.diagnostics),
+            .get_many => |read| try database.getManyOwned(read.keys, read.results, leveldb.max_owned_value_bytes, read_total_bytes_max, read.fill_cache, &self.diagnostics),
             .write => |write| try database.writeWithLimits(write.operations, write.sync, .{
                 .max_value_bytes = leveldb.max_owned_value_bytes,
                 .max_total_bytes = leveldb.max_owned_batch_bytes,
@@ -213,7 +210,7 @@ pub const Job = struct {
             self.cursor_retired = true;
             return error.CursorClosed;
         };
-        read.page = slot.cursor.?.readOwned(read.entries, read.value_limit, read.total_limit, read.high_water_mark_bytes, &self.diagnostics) catch |err| {
+        read.page = slot.cursor.?.readOwned(read.entries, leveldb.max_owned_value_bytes, read_total_bytes_max, cursor_watermark_bytes, &self.diagnostics) catch |err| {
             self.retireCursor();
             return err;
         };

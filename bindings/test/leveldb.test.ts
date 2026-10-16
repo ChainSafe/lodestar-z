@@ -4,13 +4,10 @@ import {bytes, collect, withDatabase} from "./utils/leveldb.js";
 
 const MAX_BYTES = 1024 * 1024 * 1024;
 const MAX_BATCH_ENTRIES = 16_777_216;
-const READ = {maxValueBytes: 64};
-const READ_MANY = {maxTotalBytes: 64, maxValueBytes: 64};
-const PAGE = {maxEntries: 1, maxTotalBytes: 64, maxValueBytes: 64};
 
 it("persists binary keys, empty values, ordered batches, and deletions across reopen", async () => {
   await withDatabase(async (db, path) => {
-    expect(await db.get(bytes(9), READ)).toBeNull();
+    expect(await db.get(bytes(9))).toBeNull();
     await db.put(bytes(), bytes(), {sync: true});
     await db.batch(
       [
@@ -21,20 +18,23 @@ it("persists binary keys, empty values, ordered batches, and deletions across re
       ],
       {sync: true}
     );
-    expect(await db.get(bytes(), {maxValueBytes: 0})).toEqual(bytes());
-    expect(
-      await db.getMany([bytes(0, 255), bytes(9), bytes(), bytes(0, 255)], {maxTotalBytes: 4, maxValueBytes: 2})
-    ).toEqual([bytes(3, 4), null, bytes(), bytes(3, 4)]);
-    expect(await db.getMany([], {maxTotalBytes: 0, maxValueBytes: 0})).toEqual([]);
+    expect(await db.get(bytes())).toEqual(bytes());
+    expect(await db.getMany([bytes(0, 255), bytes(9), bytes(), bytes(0, 255)])).toEqual([
+      bytes(3, 4),
+      null,
+      bytes(),
+      bytes(3, 4),
+    ]);
+    expect(await db.getMany([])).toEqual([]);
     await db.batch([]);
     await db.del(bytes(9));
     await db.del(bytes(1), {sync: true});
     await db.close();
     const reopened = await LevelDb.open(path, {createIfMissing: false});
     try {
-      expect(await reopened.get(bytes(0, 255), READ)).toEqual(bytes(3, 4));
-      expect(await reopened.get(bytes(), {maxValueBytes: 0})).toEqual(bytes());
-      expect(await reopened.get(bytes(1), READ)).toBeNull();
+      expect(await reopened.get(bytes(0, 255))).toEqual(bytes(3, 4));
+      expect(await reopened.get(bytes())).toEqual(bytes());
+      expect(await reopened.get(bytes(1))).toBeNull();
     } finally {
       await reopened.close();
     }
@@ -50,13 +50,13 @@ it("copies offset input views before returning and gives callers independent val
     value.fill(8);
     await writing;
     const query = bytes(1, 2);
-    const reading = db.get(query, READ);
+    const reading = db.get(query);
     query.fill(9);
     const result = await reading;
     expect(result).toEqual(bytes(3, 4));
     if (result === null) throw new Error("Missing copied value");
     result.fill(10);
-    expect(await db.get(bytes(1, 2), READ)).toEqual(bytes(3, 4));
+    expect(await db.get(bytes(1, 2))).toEqual(bytes(3, 4));
     const batchKey = bytes(5);
     const batchValue = bytes(6);
     const operations: LevelDbOperation[] = [{key: batchKey, type: "put", value: batchValue}];
@@ -65,16 +65,16 @@ it("copies offset input views before returning and gives callers independent val
     batchValue.fill(8);
     operations.length = 0;
     await batching;
-    expect(await db.get(bytes(5), READ)).toEqual(bytes(6));
+    expect(await db.get(bytes(5))).toEqual(bytes(6));
     const keys = [bytes(5), bytes(5)];
-    const many = db.getMany(keys, {maxTotalBytes: 2, maxValueBytes: 1});
+    const many = db.getMany(keys);
     keys[0].fill(9);
     keys.length = 0;
     const values = await many;
     expect(values).toEqual([bytes(6), bytes(6)]);
     values[0]?.fill(10);
     expect(values[1]).toEqual(bytes(6));
-    expect(await db.get(bytes(5), READ)).toEqual(bytes(6));
+    expect(await db.get(bytes(5))).toEqual(bytes(6));
   });
 });
 
@@ -94,17 +94,17 @@ it("validates an entire batch before mutation and rejects malformed byte inputs"
       ])
     ).rejects.toThrow("InvalidBytes");
     await expect(db.put(bytes(1), null as unknown as Uint8Array)).rejects.toThrow("InvalidBytes");
-    await expect(db.get(new Uint16Array(1) as unknown as Uint8Array, READ)).rejects.toThrow("InvalidBytes");
+    await expect(db.get(new Uint16Array(1) as unknown as Uint8Array)).rejects.toThrow("InvalidBytes");
     await expect(db.batch([{key: bytes(1), type: "clear"} as unknown as LevelDbOperation])).rejects.toThrow(
       "InvalidBatchOperation"
     );
     await expect(db.batch(new Array<LevelDbOperation>(MAX_BATCH_ENTRIES + 1))).rejects.toThrow("BatchTooLarge");
-    await expect(db.getMany(new Array<Uint8Array>(MAX_BATCH_ENTRIES + 1), READ_MANY)).rejects.toThrow("BatchTooLarge");
-    expect(await db.get(bytes(1), READ)).toEqual(bytes(7));
+    await expect(db.getMany(new Array<Uint8Array>(MAX_BATCH_ENTRIES + 1))).rejects.toThrow("BatchTooLarge");
+    expect(await db.get(bytes(1))).toEqual(bytes(7));
     const largestKey = new Uint8Array(4096).fill(255);
     await db.put(largestKey, bytes(2));
-    expect(await db.get(largestKey, READ)).toEqual(bytes(2));
-    await expect(db.get(new Uint8Array(4097), READ)).rejects.toThrow("KeyTooLarge");
+    expect(await db.get(largestKey)).toEqual(bytes(2));
+    await expect(db.get(new Uint8Array(4097))).rejects.toThrow("KeyTooLarge");
   });
 });
 
@@ -125,49 +125,29 @@ it("rejects values and aggregate batches beyond the hard byte limit before mutat
         ),
       ])
     ).rejects.toThrow("BatchTooLarge");
-    expect(await db.get(bytes(1), READ)).toBeNull();
-    expect(await db.get(bytes(2), READ)).toBeNull();
+    expect(await db.get(bytes(1))).toBeNull();
+    expect(await db.get(bytes(2))).toBeNull();
   });
 });
 
-it("enforces per-value and aggregate read bounds without poisoning subsequent reads", async () => {
+it("validates the iterator's total row limit", async () => {
   await withDatabase(async (db) => {
-    await db.batch([
-      {key: bytes(1), type: "put", value: bytes(2, 3)},
-      {key: bytes(4), type: "put", value: bytes(5, 6)},
-    ]);
-    await expect(db.get(bytes(1), {maxValueBytes: 1})).rejects.toThrow("ValueTooLarge");
-    await expect(db.getMany([bytes(1), bytes(4)], {maxTotalBytes: 3, maxValueBytes: 2})).rejects.toThrow(
-      "BatchTooLarge"
-    );
-    expect(await db.getMany([bytes(1), bytes(4)], {maxTotalBytes: 4, maxValueBytes: 2})).toEqual([
-      bytes(2, 3),
-      bytes(5, 6),
-    ]);
-    for (const invalid of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, MAX_BYTES + 1]) {
-      await expect(db.get(bytes(1), {maxValueBytes: invalid})).rejects.toThrow("InvalidLimit");
-      await expect(db.getMany([], {maxTotalBytes: invalid, maxValueBytes: 1})).rejects.toThrow("InvalidLimit");
+    for (const limit of [-1, 1.5, NaN, Infinity, 0x100000000, null as unknown as number]) {
+      expect(() => db.iterator({limit})).toThrow("InvalidLimit");
     }
-    for (const invalid of [0, -1, 1.5, 1025]) {
-      expect(() => db.iterator({...PAGE, maxEntries: invalid})).toThrow("InvalidLimit");
-    }
-    expect(() => db.iterator({...PAGE, maxTotalBytes: 0})).toThrow("InvalidLimit");
-    expect(() => db.iterator({...PAGE, maxValueBytes: 0})).toThrow("InvalidLimit");
-    expect(() => db.iterator({...PAGE, limit: -1})).toThrow("InvalidLimit");
-    expect(() => db.iterator({...PAGE, limit: 0x100000000})).toThrow("InvalidLimit");
   });
 });
 
-it("iterates byte-sorted half-open ranges with page and total row limits", async () => {
+it("iterates byte-sorted half-open ranges with a total row limit", async () => {
   await withDatabase(async (db) => {
     const keys = [bytes(255), bytes(1), bytes(0, 255), bytes(0, 0), bytes(0), bytes()];
     await db.batch(keys.map((key) => ({key, type: "put", value: bytes(9)})));
-    expect((await collect(db.iterator(PAGE))).map(({key}) => key)).toEqual(keys.slice().reverse());
-    const options = {gte: bytes(0), lt: bytes(1), maxEntries: 1, maxTotalBytes: 3, maxValueBytes: 1};
+    expect((await collect(db.iterator())).map(({key}) => key)).toEqual(keys.slice().reverse());
+    const options = {gte: bytes(0), lt: bytes(1)};
     expect((await collect(db.iterator(options))).map(({key}) => key)).toEqual([bytes(0), bytes(0, 0), bytes(0, 255)]);
     expect((await collect(db.iterator({...options, limit: 2}))).map(({key}) => key)).toEqual([bytes(0), bytes(0, 0)]);
     expect(await collect(db.iterator({...options, limit: 0}))).toEqual([]);
-    expect(await collect(db.iterator({...PAGE, gte: bytes(2), lt: bytes(1)}))).toEqual([]);
+    expect(await collect(db.iterator({gte: bytes(2), lt: bytes(1)}))).toEqual([]);
   });
 });
 
@@ -177,7 +157,7 @@ it("takes its snapshot and copies range bounds at iterator creation before the f
     const beforeSnapshot = db.put(bytes(2), bytes(22));
     const gte = bytes(1);
     const lt = bytes(3);
-    const iterator = db.iterator({...PAGE, gte, lt});
+    const iterator = db.iterator({gte, lt});
     gte.fill(9);
     lt.fill(0);
     const afterSnapshot = db.batch([
@@ -191,54 +171,48 @@ it("takes its snapshot and copies range bounds at iterator creation before the f
       {key: bytes(1), value: bytes(11)},
       {key: bytes(2), value: bytes(22)},
     ]);
-    expect(await db.get(bytes(2), READ)).toEqual(bytes(33));
+    expect(await db.get(bytes(2))).toEqual(bytes(33));
     entries[1].value.fill(0);
-    expect(await db.get(bytes(2), READ)).toEqual(bytes(33));
+    expect(await db.get(bytes(2))).toEqual(bytes(33));
   });
 });
 
-it("releases cursors on early return, exhaustion, cancellation before opening, and read errors", async () => {
+it("releases cursors on early return, exhaustion, and cancellation before opening", async () => {
   await withDatabase(async (db) => {
     await db.batch([
       {key: bytes(1), type: "put", value: bytes(2)},
       {key: bytes(3), type: "put", value: bytes(4, 5, 6)},
     ]);
     for (let count = 0; count < 65; count++) {
-      for await (const entry of db.iterator(PAGE)) {
+      for await (const entry of db.iterator()) {
         expect(entry.key).toEqual(bytes(1));
         break;
       }
-      const unstarted = db.iterator(PAGE);
+      const unstarted = db.iterator();
       const closing = unstarted.close();
       expect(unstarted.close()).toBe(closing);
       await closing;
       expect(await unstarted.next()).toEqual({done: true, value: undefined});
-      expect((await collect(db.iterator({...PAGE, limit: 1}))).length).toBe(1);
-      const oversized = db.iterator({...PAGE, maxValueBytes: 1});
-      expect((await oversized.next()).value).toEqual({key: bytes(1), value: bytes(2)});
-      await expect(oversized.next()).rejects.toThrow("ValueTooLarge");
-      expect(await oversized.next()).toEqual({done: true, value: undefined});
-      const pageTooSmall = db.iterator({...PAGE, maxTotalBytes: 1});
-      await expect(pageTooSmall.next()).rejects.toThrow("BatchTooLarge");
+      expect((await collect(db.iterator({limit: 1}))).length).toBe(1);
     }
-    expect((await collect(db.iterator(PAGE))).length).toBe(2);
+    expect((await collect(db.iterator())).length).toBe(2);
   });
 }, 15000);
 
 it("allows only one pending pull and cleans up a pull cancelled before the cursor opens", async () => {
   await withDatabase(async (db) => {
     await db.put(bytes(1), bytes(2));
-    const iterator = db.iterator(PAGE);
+    const iterator = db.iterator();
     const first = iterator.next();
     await expect(iterator.next()).rejects.toThrow("IteratorBusy");
     expect(await first).toEqual({done: false, value: {key: bytes(1), value: bytes(2)}});
     await iterator.close();
-    const cancelled = db.iterator(PAGE);
+    const cancelled = db.iterator();
     const pending = cancelled.next();
     const returning = cancelled.return();
     expect(await pending).toEqual({done: true, value: undefined});
     expect(await returning).toEqual({done: true, value: undefined});
-    const thrown = db.iterator(PAGE);
+    const thrown = db.iterator();
     const error = new Error("stop iteration");
     await expect(thrown.throw(error)).rejects.toBe(error);
     expect(await thrown.next()).toEqual({done: true, value: undefined});
@@ -253,7 +227,7 @@ it("rejects excess pending operations immediately and admits later work after se
       await expect(rejected).rejects.toThrow("PendingOperationsExceeded");
       await accepted;
       await db.put(bytes(3), bytes(4));
-      expect(await db.get(bytes(3), READ)).toEqual(bytes(4));
+      expect(await db.get(bytes(3))).toEqual(bytes(4));
     },
     {maxPendingOperations: 1}
   );
@@ -282,25 +256,25 @@ it("closes cursors and databases despite saturated admission and persists accept
         {key: bytes(1), type: "put", value: bytes(2)},
         {key: bytes(3), type: "put", value: bytes(4)},
       ]);
-      const iterator = db.iterator(PAGE);
+      const iterator = db.iterator();
       await iterator.next();
       const writing = db.put(bytes(5), bytes(6));
       await Promise.all([writing, iterator.close()]);
-      const abandoned = db.iterator(PAGE);
+      const abandoned = db.iterator();
       await abandoned.next();
       const lastWrite = db.put(bytes(7), bytes(8), {sync: true});
       const closing = db.close();
       expect(db.close()).toBe(closing);
       await expect(db.put(bytes(9), bytes(10))).rejects.toThrow("DatabaseClosed");
-      await expect(db.get(bytes(1), READ)).rejects.toThrow("DatabaseClosed");
-      expect(() => db.iterator(PAGE)).toThrow("DatabaseClosed");
+      await expect(db.get(bytes(1))).rejects.toThrow("DatabaseClosed");
+      expect(() => db.iterator()).toThrow("DatabaseClosed");
       await Promise.all([lastWrite, closing]);
       await expect(abandoned.next()).rejects.toThrow("DatabaseClosed");
       await abandoned.close();
       const reopened = await LevelDb.open(path, {createIfMissing: false});
       try {
-        expect(await reopened.get(bytes(7), READ)).toEqual(bytes(8));
-        expect(await reopened.get(bytes(9), READ)).toBeNull();
+        expect(await reopened.get(bytes(7))).toEqual(bytes(8));
+        expect(await reopened.get(bytes(9))).toBeNull();
       } finally {
         await reopened.close();
       }
@@ -318,15 +292,15 @@ it("enforces the live cursor cap and reuses capacity after explicit close", asyn
     const cursors: LevelDbIterator[] = [];
     try {
       for (let index = 0; index < 64; index++) {
-        const cursor = db.iterator(PAGE);
+        const cursor = db.iterator();
         cursors.push(cursor);
         expect((await cursor.next()).value).toEqual({key: bytes(1), value: bytes(2)});
       }
-      const excess = db.iterator(PAGE);
+      const excess = db.iterator();
       await expect(excess.next()).rejects.toThrow("CursorCapacity");
       await excess.close();
       await cursors[0].close();
-      const replacement = db.iterator(PAGE);
+      const replacement = db.iterator();
       cursors[0] = replacement;
       expect((await replacement.next()).value).toEqual({key: bytes(1), value: bytes(2)});
     } finally {
@@ -341,49 +315,45 @@ it("rejects shared and detached buffers before changing stored data", async () =
     await db.put(key, bytes(2));
     const shared = new Uint8Array(new SharedArrayBuffer(1));
     await expect(db.put(key, shared)).rejects.toThrow("InvalidBytes");
-    await expect(db.get(shared, READ)).rejects.toThrow("InvalidBytes");
+    await expect(db.get(shared)).rejects.toThrow("InvalidBytes");
     const backing = new ArrayBuffer(1);
     const detached = new Uint8Array(backing);
     structuredClone(backing, {transfer: [backing]});
     await expect(db.put(key, detached)).rejects.toThrow("InvalidBytes");
-    await expect(db.get(detached, READ)).rejects.toThrow("InvalidBytes");
-    expect(await db.get(key, READ)).toEqual(bytes(2));
+    await expect(db.get(detached)).rejects.toThrow("InvalidBytes");
+    expect(await db.get(key)).toEqual(bytes(2));
   });
 });
 
-for (const terminalError of [false, true]) {
-  it(`reserves cursor cleanup for new snapshots after 64 ${terminalError ? "terminal errors" : "explicit closes"}`, async () => {
-    await withDatabase(
-      async (db) => {
-        await db.batch([
-          {key: bytes(1), type: "put", value: bytes(1)},
-          {key: bytes(2), type: "put", value: bytes(2, 2)},
-        ]);
-        const old: LevelDbIterator[] = [];
-        const fresh: LevelDbIterator[] = [];
-        try {
-          for (let index = 0; index < 64; index++) {
-            const cursor = db.iterator({...PAGE, maxValueBytes: terminalError ? 1 : 2});
-            old.push(cursor);
-            await cursor.next();
-          }
-          const terminal = old.map((cursor) =>
-            terminalError ? expect(cursor.next()).rejects.toThrow("ValueTooLarge") : cursor.close()
-          );
-          await Promise.resolve();
-          for (let index = 0; index < 64; index++) fresh.push(db.iterator(PAGE));
-          await Promise.all(terminal);
-          await Promise.all(fresh.map((cursor) => cursor.next()));
-          await Promise.all(fresh.map((cursor) => cursor.close()));
-          expect((await collect(db.iterator(PAGE))).length).toBe(2);
-        } finally {
-          await Promise.all([...old, ...fresh].map((cursor) => cursor.close()));
+it("reserves cursor cleanup for new snapshots after 64 explicit closes", async () => {
+  await withDatabase(
+    async (db) => {
+      await db.batch([
+        {key: bytes(1), type: "put", value: bytes(1)},
+        {key: bytes(2), type: "put", value: bytes(2, 2)},
+      ]);
+      const old: LevelDbIterator[] = [];
+      const fresh: LevelDbIterator[] = [];
+      try {
+        for (let index = 0; index < 64; index++) {
+          const cursor = db.iterator();
+          old.push(cursor);
+          await cursor.next();
         }
-      },
-      {maxPendingOperations: 128}
-    );
-  });
-}
+        const terminal = old.map((cursor) => cursor.close());
+        await Promise.resolve();
+        for (let index = 0; index < 64; index++) fresh.push(db.iterator());
+        await Promise.all(terminal);
+        await Promise.all(fresh.map((cursor) => cursor.next()));
+        await Promise.all(fresh.map((cursor) => cursor.close()));
+        expect((await collect(db.iterator())).length).toBe(2);
+      } finally {
+        await Promise.all([...old, ...fresh].map((cursor) => cursor.close()));
+      }
+    },
+    {maxPendingOperations: 128}
+  );
+});
 
 it("validates byte views after all array getters have run", async () => {
   await withDatabase(async (db) => {
@@ -396,8 +366,8 @@ it("validates byte views after all array getters have run", async () => {
         return bytes(2);
       },
     });
-    await expect(db.getMany(keys, READ_MANY)).rejects.toThrow("InvalidBytes");
+    await expect(db.getMany(keys)).rejects.toThrow("InvalidBytes");
     await db.put(bytes(3), bytes(4));
-    expect(await db.get(bytes(3), READ)).toEqual(bytes(4));
+    expect(await db.get(bytes(3))).toEqual(bytes(4));
   });
 });
