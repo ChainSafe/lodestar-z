@@ -1,7 +1,6 @@
 const std = @import("std");
 const a = @import("admission.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
-const ForkSeq = @import("config").ForkSeq;
 const Protocol = @import("protocol.zig").Protocol;
 
 const quotas = @import("admission_fixture.zig").quotas;
@@ -140,11 +139,11 @@ test "reqresp request admission aggregate refusal is atomic and impossible cost 
 }
 
 test "reqresp request admission fork quota changes retain nanosecond debt" {
-    var peer = quotas(2, 1000);
-    peer[@intFromEnum(ForkSeq.fulu)] = @splat(.{ .tokens = 4, .period_ms = 1000 });
+    var peer = quotas(4, 1000);
+    peer.blocks_pre_deneb.tokens = 2;
     var owner = try a.Limiter.init(std.testing.allocator, .all, .{ .identities = 1, .peer = peer, .global = quotas(100, 1000) });
     defer owner.deinit(std.testing.allocator);
-    try std.testing.expectEqual(a.Decision.allowed, owner.take(&first, method, 2, .deneb, 0));
+    try std.testing.expectEqual(a.Decision.allowed, owner.take(&first, method, 2, .capella, 0));
     try std.testing.expectEqual(a.Decision.peer_quota, owner.take(&first, method, 1, .fulu, 0));
     try std.testing.expectEqual(a.Decision.allowed, owner.take(&first, method, 1, .fulu, 250));
     try std.testing.expectEqual(a.Decision.allowed, owner.take(&first, method, 4, .fulu, std.math.maxInt(u64)));

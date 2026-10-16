@@ -114,8 +114,8 @@ test "configuration control admission quotas permit the full two hundred peer wo
     defer starts.deinit(std.testing.allocator);
     for (std.enums.values(protocol.Protocol)) |which| {
         if (!which.isControl()) continue;
-        const quota = quotas.peer[@intFromEnum(config.ForkSeq.fulu)][@intFromEnum(which)];
-        try std.testing.expectEqual(quota.tokens * 200, quotas.global[@intFromEnum(config.ForkSeq.fulu)][@intFromEnum(which)].tokens);
+        const quota = quotas.peer.get(which, .fulu);
+        try std.testing.expectEqual(quota.tokens * 200, quotas.global.get(which, .fulu).tokens);
         for (0..200) |index| {
             var identity: PeerId = .{ .bytes = @splat(0) };
             std.mem.writeInt(u16, identity.bytes[0..2], @intCast(index), .little);
@@ -232,11 +232,9 @@ test "configuration request admission derives retained capacity quotas and contr
     const admission = resolved.core.protocols.reqresp.admission.limits;
     const control_admission = resolved.core.protocols.control_reqresp.admission.limits;
     try std.testing.expectEqual(resolved.core.peers.capacity, admission.identities);
-    const ForkSeq = @import("config").ForkSeq;
-    const Protocol = @import("reqresp/protocol.zig").Protocol;
-    try std.testing.expectEqual(@as(u32, 128), admission.peer[@intFromEnum(ForkSeq.fulu)][@intFromEnum(Protocol.blocks_by_root_v2)].tokens);
-    try std.testing.expectEqual(@as(u32, 1024), admission.peer[@intFromEnum(ForkSeq.phase0)][@intFromEnum(Protocol.blocks_by_root_v2)].tokens);
-    try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * control_admission.peer[@intFromEnum(ForkSeq.fulu)][@intFromEnum(Protocol.ping_v1)].tokens, control_admission.global[@intFromEnum(ForkSeq.fulu)][@intFromEnum(Protocol.ping_v1)].tokens);
+    try std.testing.expectEqual(@as(u32, 128), admission.peer.get(.blocks_by_root_v2, .fulu).tokens);
+    try std.testing.expectEqual(@as(u32, 1024), admission.peer.get(.blocks_by_root_v2, .phase0).tokens);
+    try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * control_admission.peer.get(.ping_v1, .fulu).tokens, control_admission.global.get(.ping_v1, .fulu).tokens);
 }
 
 test "configuration request admission memory plan measures retained capacity" {
@@ -294,7 +292,7 @@ test "resolved admission and Identify overrides use final capacities" {
     const quotas = requests.admission.limits;
     const control_quotas = resolved.core.protocols.control_reqresp.admission.limits;
     try std.testing.expectEqual(resolved.core.peers.capacity, quotas.identities);
-    try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * control_quotas.peer[@intFromEnum(config.ForkSeq.fulu)][@intFromEnum(protocol.Protocol.ping_v1)].tokens, control_quotas.global[@intFromEnum(config.ForkSeq.fulu)][@intFromEnum(protocol.Protocol.ping_v1)].tokens);
+    try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * control_quotas.peer.get(.ping_v1, .fulu).tokens, control_quotas.global.get(.ping_v1, .fulu).tokens);
     const identify = resolved.core.protocols.identify;
     try std.testing.expectEqual(@as(u16, 4), identify.inbound_max);
     try std.testing.expectEqualStrings("resolved-agent", identify.agent);
@@ -316,8 +314,8 @@ test "application request limits preserve control capacity and size admission fr
         try std.testing.expectEqual(application_max, requests.serving_max);
         try std.testing.expectEqual(application_max, requests.outbound_max);
         try std.testing.expectEqual(resolved.core.peers.max_peers, resolved.core.protocols.control_reqresp.outbound_max);
-        const ping = resolved.core.protocols.control_reqresp.admission.limits.global[@intFromEnum(config.ForkSeq.fulu)][@intFromEnum(protocol.Protocol.ping_v1)];
-        try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * resolved.core.protocols.control_reqresp.admission.limits.peer[@intFromEnum(config.ForkSeq.fulu)][@intFromEnum(protocol.Protocol.ping_v1)].tokens, ping.tokens);
+        const ping = resolved.core.protocols.control_reqresp.admission.limits.global.get(.ping_v1, .fulu);
+        try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * resolved.core.protocols.control_reqresp.admission.limits.peer.get(.ping_v1, .fulu).tokens, ping.tokens);
     }
     try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 0, .admission_policy = policy_fixture.config() }));
     _ = try resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 32, .reqresp = .{ .serving_max = 1 }, .admission_policy = policy_fixture.config() });

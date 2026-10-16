@@ -612,7 +612,8 @@ test "reqresp request admission distinct identity peer aggregate and retained ca
     for ([_]u16{ 1, 2 }) |identities| {
         var setup: harness.Pair = .{};
         var global = admission_quotas(100, 86_400_000);
-        for (&global) |*table| table[@intFromEnum(protocol.Protocol.blob_sidecars_by_root_v1)].tokens = 1;
+        global.protocols[@intFromEnum(protocol.Protocol.blob_sidecars_by_root_v1)].tokens = 1;
+        global.blobs_pre_electra.tokens = 1;
         try setup.init(.{}, .{
             .admission = .{ .policy = policy_fixture(), .limits = .{ .identities = identities, .peer = admission_quotas(1, 86_400_000), .global = global } },
         });

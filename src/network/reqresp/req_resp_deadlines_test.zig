@@ -87,7 +87,7 @@ test "reqresp negotiated handoff starts a fresh progress interval" {
 
 test "reqresp admission wait expires as local policy and not peer timeout" {
     var admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 128, 2);
-    for (&admission.limits.peer) |*quotas| quotas[@intFromEnum(Protocol.ping_v1)] = .{ .tokens = 1, .period_ms = 5000 };
+    admission.limits.peer.protocols[@intFromEnum(Protocol.ping_v1)] = .{ .tokens = 1, .period_ms = 5000 };
     var setup: Pair = .{};
     try setup.init(.{}, .{ .quota_timeout_ms = 1000, .admission = admission });
     defer setup.deinit();

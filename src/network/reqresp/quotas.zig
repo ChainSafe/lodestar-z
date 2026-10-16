@@ -10,13 +10,24 @@ pub const Quota = struct {
     period_ms: u64,
 };
 
-pub const Quotas = [Protocol.count]Quota;
-pub const ByFork = [ForkSeq.count]Quotas;
+pub const Rates = struct {
+    protocols: [Protocol.count]Quota,
+    blocks_pre_deneb: Quota,
+    blobs_pre_electra: Quota,
+
+    pub fn get(self: *const Rates, which: Protocol, fork: ForkSeq) Quota {
+        return switch (which) {
+            .blocks_by_range_v2, .blocks_by_root_v2 => if (fork.gte(.deneb)) self.protocols[@intFromEnum(which)] else self.blocks_pre_deneb,
+            .blob_sidecars_by_range_v1, .blob_sidecars_by_root_v1 => if (fork.gte(.electra)) self.protocols[@intFromEnum(which)] else self.blobs_pre_electra,
+            else => self.protocols[@intFromEnum(which)],
+        };
+    }
+};
 
 pub const Options = struct {
     identities: u16,
-    peer: ByFork,
-    global: ByFork,
+    peer: Rates,
+    global: Rates,
     /// Limits fixed per-request overhead independently of the requested blocks or columns.
     starts: Quota = .{ .tokens = Protocol.count * constants.MAX_CONCURRENT_REQUESTS, .period_ms = ten_seconds_ms },
 
@@ -24,20 +35,21 @@ pub const Options = struct {
         if (global_scale == 0) return error.InvalidPolicy;
         const policy = try request_policy.Policy.init(configuration);
         var result: Options = .{ .identities = identities, .peer = undefined, .global = undefined };
-        for (0..ForkSeq.count) |i| {
-            for (0..Protocol.count) |j| {
-                const which: Protocol = @enumFromInt(j);
-                const quota = peerQuota(&policy, which, @enumFromInt(i));
-                result.peer[i][j] = quota;
-                result.global[i][j] = .{
-                    .tokens = quota.tokens * @as(u32, global_scale),
-                    .period_ms = quota.period_ms,
-                };
-            }
+        for (&result.peer.protocols, &result.global.protocols, 0..) |*peer, *global, index| {
+            peer.* = peerQuota(&policy, @enumFromInt(index), .fulu);
+            global.* = scaled(peer.*, global_scale);
         }
+        result.peer.blocks_pre_deneb = peerQuota(&policy, .blocks_by_root_v2, .phase0);
+        result.peer.blobs_pre_electra = peerQuota(&policy, .blob_sidecars_by_root_v1, .deneb);
+        result.global.blocks_pre_deneb = scaled(result.peer.blocks_pre_deneb, global_scale);
+        result.global.blobs_pre_electra = scaled(result.peer.blobs_pre_electra, global_scale);
         return result;
     }
 };
+
+fn scaled(quota: Quota, scale: u16) Quota {
+    return .{ .tokens = quota.tokens * @as(u32, scale), .period_ms = quota.period_ms };
+}
 
 fn peerQuota(policy: *const request_policy.Policy, which: Protocol, fork: ForkSeq) Quota {
     return switch (which) {

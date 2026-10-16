@@ -39,8 +39,8 @@ test "reqresp quotas preserve every protocol rate across chain configurations an
             const era: usize = if (fork.gte(.electra)) 2 else if (fork.gte(.deneb)) 1 else 0;
             for (cases, 0..) |case, index| {
                 try std.testing.expectEqual(index, @intFromEnum(case.protocol));
-                const peer = limits.peer[@intFromEnum(fork)][index];
-                const global = limits.global[@intFromEnum(fork)][index];
+                const peer = limits.peer.get(case.protocol, fork);
+                const global = limits.global.get(case.protocol, fork);
                 try std.testing.expectEqual(case.tokens[era], peer.tokens);
                 try std.testing.expectEqual(case.period_ms, peer.period_ms);
                 try std.testing.expectEqual(case.tokens[era] * @as(u32, 8), global.tokens);
@@ -60,13 +60,11 @@ test "reqresp quotas follow configured request bounds and scale the instance glo
     for ([_]u16{ 1, 2, 3, 8, 210 }) |scale| {
         const limits = try Options.defaults(&policy, 8, scale);
         for (std.enums.values(config.ForkSeq)) |fork| {
-            const peer = limits.peer[@intFromEnum(fork)];
-            const global = limits.global[@intFromEnum(fork)];
-            try std.testing.expectEqual(@as(u32, if (fork.gte(.deneb)) 8 else 16), peer[@intFromEnum(Protocol.blocks_by_root_v2)].tokens);
-            try std.testing.expectEqual(@as(u32, 8), peer[@intFromEnum(Protocol.blocks_by_head_v1)].tokens);
-            try std.testing.expectEqual(@as(u32, if (fork.gte(.electra)) 48 else 24), peer[@intFromEnum(Protocol.blob_sidecars_by_root_v1)].tokens);
-            try std.testing.expectEqual(@as(u32, 96 * scale), global[@intFromEnum(Protocol.data_column_sidecars_by_range_v1)].tokens);
-            try std.testing.expectEqual(@as(u32, 2) * scale, global[@intFromEnum(Protocol.ping_v1)].tokens);
+            try std.testing.expectEqual(@as(u32, if (fork.gte(.deneb)) 8 else 16), limits.peer.get(.blocks_by_root_v2, fork).tokens);
+            try std.testing.expectEqual(@as(u32, 8), limits.peer.get(.blocks_by_head_v1, fork).tokens);
+            try std.testing.expectEqual(@as(u32, if (fork.gte(.electra)) 48 else 24), limits.peer.get(.blob_sidecars_by_root_v1, fork).tokens);
+            try std.testing.expectEqual(@as(u32, 96 * scale), limits.global.get(.data_column_sidecars_by_range_v1, fork).tokens);
+            try std.testing.expectEqual(@as(u32, 2) * scale, limits.global.get(.ping_v1, fork).tokens);
         }
     }
     try std.testing.expectError(error.InvalidPolicy, Options.defaults(&policy, 8, 0));
