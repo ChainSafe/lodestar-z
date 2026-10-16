@@ -24,7 +24,7 @@ const Fixture = struct {
         }, .{
             .peers = .{ .capacity = 4, .outbound_reserve = 0, .target_peers = 1, .max_peers = 4, .min_outbound = 0 },
             .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 1 },
-        }, .initEmpty(), .{ .connections = 4, .control_responses = 4 });
+        }, .initEmpty(), 4);
         errdefer manager.deinit();
         const gossip = try test_support.init(std.testing.allocator, .{
             .random_seed = 1,

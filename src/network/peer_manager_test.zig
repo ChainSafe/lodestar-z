@@ -22,7 +22,7 @@ const Fixture = struct {
         self.manager = try PeerManager.init(std.testing.allocator, &.{ .bytes = @splat(0) }, &.{}, .{
             .peers = .{ .capacity = 4, .outbound_reserve = 0, .target_peers = 3, .max_peers = 4, .min_outbound = 0 },
             .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 1 },
-        }, .initEmpty(), .{ .connections = 4, .control_responses = 4 });
+        }, .initEmpty(), 4);
         errdefer self.manager.deinit();
         try self.io.init();
     }

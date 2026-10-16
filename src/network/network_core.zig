@@ -187,7 +187,7 @@ pub const NetworkCore = struct {
         const identify_local = try prepareIdentifyLocal(&identify_base, self.advertisementEndpoints(), router.Router.initialCapabilities(protocols_options.router));
         self.protocols = try Protocols.init(allocator, protocols_options, &identify_local);
         errdefer self.protocols.deinit();
-        self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, resolved.core.peerManager(), self.protocols.router.capabilities().receive, .{ .connections = self.transport.engine.limits.connections_max, .control_responses = protocols_options.control_reqresp.serving_max });
+        self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, resolved.core.peerManager(), self.protocols.router.capabilities().receive, self.transport.engine.limits.connections_max);
         errdefer self.peer_manager.deinit();
         self.peer_manager.loadRemembered(startup.remembered, self.last_now);
         self.protocols.gossipsub.clock = io;

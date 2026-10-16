@@ -82,14 +82,14 @@ pub const PeerManager = struct {
         local: *const t.LocalState,
         options: Options,
         receive: capabilities.Set,
-        capacities: struct { connections: u16, control_responses: u16 },
+        connections: u16,
     ) !PeerManager {
         var copied: t.LocalState = undefined;
         try local_state.copyServingLocal(&copied, local, receive);
         try validateOptions(options);
-        var catalog = try peers.Catalog.initWithIntents(a, options.peers, options.dial.capacity, capacities.connections, options.dial.seed);
+        var catalog = try peers.Catalog.initWithIntents(a, options.peers, options.dial.capacity, connections, options.dial.seed);
         errdefer catalog.deinit(a);
-        var control = try peers.Control.init(a, options.control, @intCast(catalog.rows.len), capacities.control_responses);
+        var control = try peers.Control.init(a, options.control, @intCast(catalog.rows.len));
         errdefer control.deinit(a);
         const dialing = try peers.Dialing.init(options.dial);
         const scratch = try a.alloc(t.Snapshot, options.peers.capacity);

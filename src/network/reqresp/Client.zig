@@ -180,7 +180,7 @@ fn completeChunk(
     const payload = request.io.decoder.payload();
     if (request.io.decoder.isError()) {
         const message_len: u16 = @intCast(@min(payload.len, codec.error_message_max));
-        @memcpy(request.error_message[0..message_len], payload[0..message_len]);
+        @memcpy(request.inline_bytes[0..message_len], payload[0..message_len]);
         request.error_len = message_len;
         const code = request.io.decoder.result();
         const reason = Failure{ .peer_error = .{ .code = code, .message_len = message_len } };

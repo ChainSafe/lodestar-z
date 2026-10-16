@@ -692,12 +692,12 @@ test "core control native Fulu serves older schemas but old Status cannot establ
             var transport: [32]Engine.Event = undefined;
             _ = try setup.turn(&setup.server, .{});
             if (protocol == .goodbye_v1) {
-                for (setup.server.peer_manager.control.responses) |response| if (response.request) |inbound| {
-                    const owner = &setup.server.protocols.control_reqresp.inbound[inbound.index];
+                for (setup.server.protocols.control_reqresp.inbound) |*owner| {
+                    if (!owner.request.occupied()) continue;
                     if (owner.request.protocol != .goodbye_v1 or !owner.request.io.writing) continue;
-                    try std.testing.expectEqualSlices(u8, &goodbye_reply, response.bytes[0..8]);
+                    try std.testing.expectEqualSlices(u8, &goodbye_reply, owner.request.inline_bytes[0..8]);
                     goodbye_writer = true;
-                };
+                }
             }
             var output: [1]rr.ReqResp.Event = undefined;
             const counts = setup.client.protocols.process(setup.pair.client, setup.pair.events(
@@ -867,14 +867,14 @@ test "core native immutable Status writer survives local update" {
     var pending = false;
     for (0..40) |_| {
         try setup.step(0);
-        for (setup.server.peer_manager.control.responses) |response| if (response.request) |request| {
-            const slot = &setup.server.protocols.control_reqresp.inbound[request.index];
+        for (setup.server.protocols.control_reqresp.inbound) |*slot| {
+            if (!slot.request.occupied() or !slot.request.io.writing) continue;
             if (slot.request.protocol != .status_v1) continue;
             try std.testing.expect(slot.request.io.writing);
             try setup.server.updateStatus(&localState(.{ .status = .{ .head_slot = 80 } }).status);
             pending = true;
             break;
-        };
+        }
         if (pending) break;
     }
     try std.testing.expect(pending);

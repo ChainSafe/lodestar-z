@@ -11,7 +11,7 @@ test "control disconnect returns the original closing state and refuses stale co
     const a = std.testing.allocator;
     var catalog = try Catalog.init(a, .{ .capacity = 1, .outbound_reserve = 0, .target_peers = 1, .max_peers = 1, .min_outbound = 0 }, 1, 0);
     defer catalog.deinit(a);
-    var control = try Control.init(a, .{}, 1, 1);
+    var control = try Control.init(a, .{}, 1);
     defer control.deinit(a);
     const now = Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 });
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
@@ -32,7 +32,7 @@ test "control disconnect returns the original closing state and refuses stale co
 }
 
 test "control repeated Status intent preserves the first due time" {
-    var control = try Control.init(std.testing.allocator, .{}, 2, 2);
+    var control = try Control.init(std.testing.allocator, .{}, 2);
     defer control.deinit(std.testing.allocator);
     var catalog = try Catalog.init(std.testing.allocator, .{ .capacity = 2, .outbound_reserve = 0, .target_peers = 2, .max_peers = 2, .min_outbound = 0 }, 2, 0);
     defer catalog.deinit(std.testing.allocator);
@@ -54,7 +54,7 @@ test "control start quota and cursor preserve order across Identify and RPC star
     const a = std.testing.allocator;
     var catalog = try Catalog.init(a, .{ .capacity = 4, .outbound_reserve = 0, .target_peers = 4, .max_peers = 4, .min_outbound = 0 }, 4, 0);
     defer catalog.deinit(a);
-    var control = try Control.init(a, .{ .starts_per_turn_max = 3 }, 4, 4);
+    var control = try Control.init(a, .{ .starts_per_turn_max = 3 }, 4);
     defer control.deinit(a);
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 });
     const local: t.LocalState = .{};
@@ -123,7 +123,7 @@ fn statusVerdict(io: *support.Io, local: *const t.LocalState, remote: *const t.S
     const a = std.testing.allocator;
     var catalog = try Catalog.init(a, .{ .capacity = 1, .outbound_reserve = 0, .target_peers = 1, .max_peers = 1, .min_outbound = 0 }, 1, 0);
     defer catalog.deinit(a);
-    var control = try Control.init(a, .{}, 1, 1);
+    var control = try Control.init(a, .{}, 1);
     defer control.deinit(a);
     const now: Now = Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 });
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
@@ -142,8 +142,4 @@ fn statusVerdict(io: *support.Io, local: *const t.LocalState, remote: *const t.S
     }
     try std.testing.expectEqualDeep(remote.*, snapshot.status.?);
     return null;
-}
-
-test "control rejects an empty inbound response pool" {
-    try std.testing.expectError(error.InvalidOptions, Control.init(std.testing.allocator, .{}, 1, 0));
 }

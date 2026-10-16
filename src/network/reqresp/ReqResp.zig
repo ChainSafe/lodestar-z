@@ -449,7 +449,8 @@ pub fn accept(
     return slot.request.handle(index);
 }
 
-/// Response bytes stay immutable through chunk_sent or terminal delivery.
+/// Copies responses up to codec.error_message_max bytes. Larger responses stay immutable
+/// through chunk_sent or terminal delivery.
 pub fn respond(
     self: *ReqResp,
     handle: RequestHandle,
@@ -732,7 +733,7 @@ pub fn complete(owner: *ReqResp, engine: *Engine, router: *Router, record: *Requ
             if (failed.reason == .peer_error) {
                 const len = failed.reason.peer_error.message_len;
                 assert(len == record.error_len);
-                @memcpy(failed.message[0..len], record.error_message[0..len]);
+                @memcpy(failed.message[0..len], record.inline_bytes[0..len]);
             }
         },
         .served => |*served| served.peer_fault = fault,

@@ -48,12 +48,6 @@ const ConnectionState = struct {
     /// completed. None counts once a local close began.
     rejection: ?t.Rejection = null,
 };
-const Response = struct {
-    request: ?rr.ReqResp.RequestHandle = null,
-    conn: t.Handle = undefined,
-    bytes: [wire.status_size_max]u8 = undefined,
-};
-
 /// Owns peer qualification, health probes and their request buffers. Obsolete requests are
 /// abandoned before a connection row is reused. All calls run on the network owner thread.
 pub const Control = struct {
@@ -76,7 +70,6 @@ pub const Control = struct {
     pub const HealthProbe = enum { status, metadata, ping };
 
     connections: []ConnectionState,
-    responses: []Response,
     /// Live connections keyed on the earliest time `decide` acts on them, in ms.
     deadlines: DeadlineHeap,
     /// The rows one maintain turn takes from the heap.
@@ -110,28 +103,23 @@ pub const Control = struct {
         for (timers) |timer| if (timer == 0 or timer > 86_400_000) return error.InvalidOptions;
     }
 
-    pub fn init(a: std.mem.Allocator, options: Options, peer_capacity: u16, inbound_capacity: u16) !Control {
+    pub fn init(a: std.mem.Allocator, options: Options, peer_capacity: u16) !Control {
         try validateOptions(options);
-        if (inbound_capacity == 0) return error.InvalidOptions;
         const connections = try a.alloc(ConnectionState, peer_capacity);
         errdefer a.free(connections);
         var deadlines = try DeadlineHeap.init(a, peer_capacity);
         errdefer deadlines.deinit(a);
         const due = try a.alloc(u32, peer_capacity);
         errdefer a.free(due);
-        const responses = try a.alloc(Response, inbound_capacity);
-        @memset(responses, .{});
         @memset(connections, .{});
         return .{
             .connections = connections,
-            .responses = responses,
             .deadlines = deadlines,
             .due = due,
             .options = options,
         };
     }
     pub fn deinit(self: *Control, a: std.mem.Allocator) void {
-        a.free(self.responses);
         a.free(self.due);
         self.deadlines.deinit(a);
         a.free(self.connections);
@@ -335,12 +323,6 @@ pub const Control = struct {
     pub fn releaseConnection(self: *Control, io: *const Io, peer: t.PeerRef, conn: t.Handle, now: Now) ?rr.ReqResp.PeerFault {
         const fault = self.abandon(io, peer, conn, now);
         self.retire(peer, conn);
-        for (self.responses) |*response| if (response.request) |request| {
-            if (std.meta.eql(response.conn, conn)) {
-                // Keep terminal delivery so any inbound protocol fault retains its normal path.
-                _ = io.reqresp.cancel(io.engine, io.router, request, now);
-            }
-        };
         return fault;
     }
 
@@ -356,22 +338,18 @@ pub const Control = struct {
                         continue;
                     };
                     self.requested(catalog, peer, incoming, local, now, slot);
-                    self.respond(io, incoming, local, now);
+                    respond(io, incoming, local, now);
                     continue;
                 },
                 inline else => |value| value.request,
             };
             if (request.direction == .inbound) {
-                for (self.responses) |*response| {
-                    if (!std.meta.eql(response.request, request)) continue;
-                    switch (event) {
-                        .chunk_sent => {
-                            _ = io.reqresp.finish(request, now);
-                        },
-                        .served, .failed => response.request = null,
-                        else => unreachable,
-                    }
-                    break;
+                switch (event) {
+                    .chunk_sent => {
+                        _ = io.reqresp.finish(request, now);
+                    },
+                    .served, .failed => {},
+                    else => unreachable,
                 }
             } else {
                 for (self.connections) |*row| {
@@ -432,21 +410,17 @@ pub const Control = struct {
     }
 
     /// Answers a peer's control request from the local state, or cancels a request it cannot
-    /// answer. The response bytes stay immutable until reqresp reports them served or failed.
+    /// answer. Reqresp copies these small responses before returning.
     fn respond(
-        self: *Control,
         io: *const Io,
         event: *const @FieldType(rr.ReqResp.Event, "request"),
         local: *const t.LocalState,
         now: Now,
     ) void {
-        const response = available: {
-            for (self.responses) |*candidate| if (candidate.request == null) break :available candidate;
-            unreachable;
-        };
-        response.conn = event.conn;
+        comptime assert(wire.status_size_max <= rr.codec.error_message_max);
+        var bytes: [wire.status_size_max]u8 = undefined;
         const len: usize = switch (event.protocol) {
-            .status_v1, .status_v2 => wire.encodeStatus(event.protocol, &local.status, &response.bytes) catch {
+            .status_v1, .status_v2 => wire.encodeStatus(event.protocol, &local.status, &bytes) catch {
                 _ = io.reqresp.cancel(io.engine, io.router, event.request, now);
                 return;
             },
@@ -455,25 +429,24 @@ pub const Control = struct {
                     _ = io.reqresp.cancel(io.engine, io.router, event.request, now);
                     return;
                 };
-                break :blk wire.encodeScalar(local.metadata.seq_number, &response.bytes) catch unreachable;
+                break :blk wire.encodeScalar(local.metadata.seq_number, &bytes) catch unreachable;
             },
             .metadata_v1, .metadata_v2, .metadata_v3 => wire.encodeMetadata(
                 event.protocol,
                 &local.metadata,
                 local.fork,
-                &response.bytes,
+                &bytes,
             ) catch {
                 _ = io.reqresp.cancel(io.engine, io.router, event.request, now);
                 return;
             },
-            .goodbye_v1 => wire.encodeScalar(1, &response.bytes) catch unreachable,
+            .goodbye_v1 => wire.encodeScalar(1, &bytes) catch unreachable,
             else => unreachable,
         };
-        io.reqresp.respond(event.request, response.bytes[0..len], null, now) catch {
+        io.reqresp.respond(event.request, bytes[0..len], null, now) catch {
             _ = io.reqresp.cancel(io.engine, io.router, event.request, now);
             return;
         };
-        response.request = event.request;
     }
 
     pub fn identifyResults(self: *Control, catalog: *Catalog, results: []const identify_mod.Handler.Result) void {

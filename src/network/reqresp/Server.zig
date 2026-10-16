@@ -241,8 +241,8 @@ fn rejectRequest(owner: *ReqResp, slot: *Server, index: u16, reason: Rejection, 
 
 fn reject(slot: *Server, code: u8, message: []const u8, now: Now) void {
     const request = &slot.request;
-    assert(message.len <= request.error_message.len);
-    @memcpy(request.error_message[0..message.len], message);
+    assert(message.len <= request.inline_bytes.len);
+    @memcpy(request.inline_bytes[0..message.len], message);
     request.error_len = @intCast(message.len);
     request.io.decoding = false;
     slot.admission.rejected();
@@ -251,7 +251,7 @@ fn reject(slot: *Server, code: u8, message: []const u8, now: Now) void {
         slot,
         code,
         null,
-        request.error_message[0..message.len],
+        request.inline_bytes[0..message.len],
         true,
         now,
     );
@@ -387,7 +387,11 @@ pub fn acceptPrepared(
 
 pub fn respond(slot: *Server, ssz: []const u8, digest: ?[constants.context_bytes_length]u8, now: Now) void {
     assert(slot.responseReadiness() == .ready);
-    queueChunk(slot, constants.result_success, digest, ssz, false, now);
+    const bytes = if (ssz.len <= slot.request.inline_bytes.len) copied: {
+        @memcpy(slot.request.inline_bytes[0..ssz.len], ssz);
+        break :copied slot.request.inline_bytes[0..ssz.len];
+    } else ssz;
+    queueChunk(slot, constants.result_success, digest, bytes, false, now);
 }
 
 pub fn responseReadiness(self: *const Server) ReqResp.ResponseReadiness {
@@ -402,9 +406,9 @@ pub fn respondError(slot: *Server, code: u8, message: []const u8, now: Now) void
     assert(slot.responseReadiness() == .ready);
     assert(constants.isErrorResult(code) and message.len <= codec.error_message_max);
     const request = &slot.request;
-    @memcpy(request.error_message[0..message.len], message);
+    @memcpy(request.inline_bytes[0..message.len], message);
     request.error_len = @intCast(message.len);
-    queueChunk(slot, code, null, request.error_message[0..message.len], true, now);
+    queueChunk(slot, code, null, request.inline_bytes[0..message.len], true, now);
 }
 
 pub fn finish(slot: *Server, now: Now) bool {

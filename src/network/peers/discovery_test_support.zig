@@ -65,7 +65,7 @@ pub fn handoff(candidate: *const adapter.Candidate) !void {
     var protocols = try protocols_test_support.initProtocols(std.testing.allocator, opts.protocols, &pair.client);
     defer protocols.deinit();
     const gossipsub = protocols.gossipsub;
-    var core = try PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, opts.peerManager(), protocols.router.capabilities().receive, .{ .connections = pair.client.limits.connections_max, .control_responses = @intCast(protocols.control_reqresp.serving.entries.len) });
+    var core = try PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, opts.peerManager(), protocols.router.capabilities().receive, pair.client.limits.connections_max);
     defer core.deinit();
     try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &.{candidate.*}, pair.now).accepted);
     try std.testing.expectEqual(candidate.hints.sequence, core.catalog.rows[0].dial.hints.?.sequence);
@@ -101,7 +101,7 @@ pub fn admitBatch(candidates: []const adapter.Candidate) !void {
     var options = opts.peerManager();
     options.peers.capacity = discovery.Discovery.candidates_per_step;
     options.dial.capacity = discovery.Discovery.candidates_per_step;
-    var manager = try PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, options, protocols.router.capabilities().receive, .{ .connections = pair.client.limits.connections_max, .control_responses = @intCast(protocols.control_reqresp.serving.entries.len) });
+    var manager = try PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, options, protocols.router.capabilities().receive, pair.client.limits.connections_max);
     defer manager.deinit();
     const result = manager.discoveredBatch(protocols.gossipsub, candidates, pair.now);
     try std.testing.expectEqual(candidates.len, result.accepted);

@@ -109,15 +109,15 @@ test "core native immutable metadata response survives local update during pendi
     var pending = false;
     for (0..40) |_| {
         try setup.step(0);
-        for (setup.server.peer_manager.control.responses) |response| if (response.request) |request| {
-            const slot = &setup.server.protocols.control_reqresp.inbound[request.index];
+        for (setup.server.protocols.control_reqresp.inbound) |*slot| {
+            if (!slot.request.occupied() or !slot.request.io.writing) continue;
             if (slot.request.protocol != .metadata_v1) continue;
             try std.testing.expect(slot.request.io.writing);
             const changed: t.Metadata = .{ .seq_number = 5, .attnets = @splat(9) };
             try network_core_test_support.updateLocal(&setup.server, &metadataUpdate(&setup.server, &localState(.{ .metadata = changed }).metadata), setup.pair.now);
             pending = true;
             break;
-        };
+        }
         if (pending) break;
     }
     try std.testing.expect(pending);
@@ -243,7 +243,7 @@ fn allocationCheck(a: std.mem.Allocator) !void {
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     const opts = resolvedOptions().core;
     const receive = router.Router.initialCapabilities(opts.protocols.router).receive;
-    var core = try PeerManager.init(a, &identity, &localState(.{}), opts.peerManager(), receive, .{ .connections = 4, .control_responses = opts.protocols.control_reqresp.serving_max });
+    var core = try PeerManager.init(a, &identity, &localState(.{}), opts.peerManager(), receive, 4);
     defer core.deinit();
 }
 
