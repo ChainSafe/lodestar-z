@@ -1157,8 +1157,8 @@ pub const Id = enum(u32) {
 
         const path_len = base_gindex.pathLen();
 
-        // Zero-filled so that if a later iteration errors, the errdefer's free skips the
-        // not-yet-filled slots (freeing a zero id is a no-op) instead of unref-ing garbage.
+        // Zero-filled: the walk can record a slot above this pass's allocation as an unfinalized
+        // parent, and the error cleanup must then see a zero id (a no-op) instead of garbage.
         var path_parents_buf: [max_depth]Id = @splat(@as(Id, @enumFromInt(0)));
         // at each level, there is at most 1 unfinalized parent per traversal
         // "unfinalized" means it may or may not be part of the new tree.
@@ -1175,13 +1175,9 @@ pub const Id = enum(u32) {
         const path_rights = path_rights_buf[0..path_len];
 
         var node_id = root_node;
-        errdefer {
-            // at any points, node_id is the root of the in-progress new tree
-            if (node_id != root_node) pool.unref(node_id);
-            // orphaned nodes were unrefed along the way through unfinalized_parents_buf
-            // path_parents may or maynot be part of the in-progress new tree, there is no issue to double unref()
-            pool.free(path_parents);
-        }
+        // Parents allocated for the current index until its rebind succeeds.
+        var unbound_parents: []Id = &.{};
+        errdefer releaseUnattachedParents(pool, unbound_parents, &unfinalized_parents_buf);
 
         // The shared depth between the previous and current index
         // This is initialized as 0 since the first index has no previous index
@@ -1204,6 +1200,7 @@ pub const Id = enum(u32) {
             else
                 path_len - @as(Depth, @intCast(@bitSizeOf(usize) - @clz(index ^ indices[i + 1])));
             try pool.alloc(path_parents[next_d_offset..path_len]);
+            unbound_parents = path_parents[next_d_offset..path_len];
 
             var path = gindex.toPath();
 
@@ -1284,6 +1281,7 @@ pub const Id = enum(u32) {
                 path_lefts[next_d_offset..path_len],
                 path_rights[next_d_offset..path_len],
             );
+            unbound_parents = &.{};
 
             // unref prev parents if it's not part of the new tree
             // can only unref after the rebind
@@ -1410,8 +1408,8 @@ pub const Id = enum(u32) {
 
         const path_len = base_gindex.pathLen();
 
-        // Zero-filled so that if a later iteration errors, the errdefer's free skips the
-        // not-yet-filled slots (freeing a zero id is a no-op) instead of unref-ing garbage.
+        // Zero-filled: the walk can record a slot above this pass's allocation as an unfinalized
+        // parent, and the error cleanup must then see a zero id (a no-op) instead of garbage.
         var path_parents_buf: [max_depth]Id = @splat(@as(Id, @enumFromInt(0)));
         // at each level, there is at most 1 unfinalized parent per traversal
         // "unfinalized" means it may or may not be part of the new tree.
@@ -1424,13 +1422,9 @@ pub const Id = enum(u32) {
         var right_move: [max_depth]bool = undefined;
 
         var node_id = root_node;
-        errdefer {
-            // at any points, node_id is the root of the in-progress new tree
-            if (node_id != root_node) pool.unref(node_id);
-            // orphaned nodes were unrefed along the way through unfinalized_parents_buf
-            // path_parents_buf may or maynot be part of the in-progress new tree, there is no issue to double unref()
-            pool.free(&path_parents_buf);
-        }
+        // Parents allocated for the current gindex until its rebind succeeds.
+        var unbound_parents: []Id = &.{};
+        errdefer releaseUnattachedParents(pool, unbound_parents, &unfinalized_parents_buf);
 
         // The shared depth between the previous and current index
         // This is initialized as 0 since the first index has no previous index
@@ -1453,6 +1447,7 @@ pub const Id = enum(u32) {
                 path_len - @as(Depth, @intCast(@bitSizeOf(usize) - @clz(@intFromEnum(gindex) ^ @intFromEnum(gindices[i + 1]))));
 
             try pool.alloc(path_parents_buf[next_d_offset..path_len]);
+            unbound_parents = path_parents_buf[next_d_offset..path_len];
 
             var path = gindex.toPath();
 
@@ -1533,6 +1528,7 @@ pub const Id = enum(u32) {
                 path_lefts_buf[next_d_offset..path_len],
                 path_rights_buf[next_d_offset..path_len],
             );
+            unbound_parents = &.{};
             // unref prev parents if it's not part of the new tree
             // can only unref after the rebind
             for (next_d_offset..path_len) |bit_i| {
@@ -1580,6 +1576,22 @@ pub const Id = enum(u32) {
         return node_id;
     }
 };
+
+/// Error cleanup for `setNodes` and `setNodesAtDepth`. Each subtree a failed batch has built hangs
+/// either from a parent allocated for the current index or from an unfinalized parent: a finished
+/// pass leaves its top there until a later pass attaches it, while `path_parents` may already hold
+/// newer allocations. The walk cursor is not released because it can point into the original tree.
+/// A node reached twice was freed by its first unref, and `unref` skips freed slots.
+fn releaseUnattachedParents(
+    pool: *Pool,
+    unbound_parents: []Id,
+    unfinalized: *const [max_depth]?Id,
+) void {
+    pool.free(unbound_parents);
+    for (unfinalized) |parent| {
+        if (parent) |id| pool.unref(id);
+    }
+}
 
 fn fillCountAtLevel(contents_count: usize, level: Depth) usize {
     var count = contents_count;
