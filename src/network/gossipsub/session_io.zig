@@ -11,7 +11,6 @@ const peer_io_mod = @import("peer_io.zig");
 const PeerIo = peer_io_mod.PeerIo;
 const Session = @import("peer_session.zig").Session;
 const PeerId = @import("../wire/peer_id.zig").PeerId;
-const Options = @import("options.zig").Options;
 const Version = sessions_mod.Version;
 const assert = std.debug.assert;
 const logging = @import("../logging.zig");
@@ -390,7 +389,7 @@ pub fn serviceSession(self: *Gossipsub, router: *Router, engine: *Engine, index:
     session.receive_endpoint = engine.receiveEndpoint(session.conn);
     switch (session.outbound) {
         .closing => {
-            logSendPressure(session, &self.peers.rows[session.logical.index].identity, &self.options, now.millis());
+            logSendPressure(session, &self.peers.rows[session.logical.index].identity, now.millis());
             retirePeer(self, router, engine, index);
             return;
         },
@@ -407,7 +406,7 @@ pub fn serviceSession(self: *Gossipsub, router: *Router, engine: *Engine, index:
     if (write_first and io.tx.ready) flush(self, engine, index, io, turn, &peer);
     if (session.in_stream != null and io.rx_ready) readPeer(self, engine, index, io, turn, &peer);
     if (!write_first and io.tx.ready) flush(self, engine, index, io, turn, &peer);
-    logSendPressure(session, &self.peers.rows[session.logical.index].identity, &self.options, now.millis());
+    logSendPressure(session, &self.peers.rows[session.logical.index].identity, now.millis());
     if (session.active and session.outbound == .closing) retirePeer(self, router, engine, index);
 }
 
@@ -524,12 +523,12 @@ pub fn expireSession(self: *Gossipsub, router: *Router, engine: *Engine, index: 
     }
 }
 
-fn logSendPressure(row: *Session, identity: *const PeerId, options: *const Options, now_ms: u64) void {
+fn logSendPressure(row: *Session, identity: *const PeerId, now_ms: u64) void {
     const io = &row.io;
     if (!io.tx.pressure_pending or now_ms < io.tx.pressure_log_due_ms) return;
     io.tx.pressure_pending = false;
     io.tx.pressure_log_due_ms = now_ms +| 1_000;
-    std.log.scoped(.network_gossip_errors).debug("gossip_send_pressure peer={f} connection={d}:{d} reason={s} kind={s} total={d} data_queued={d}/{d} data_bytes={d}/{d} control_frames={d} control_bytes={d} oldest_ms={d} write_blocked_ms={d} write_zero={d} budget_deferred={d}", .{ logging.peer(identity), row.conn.index, row.conn.generation, @tagName(io.tx.last_drop), if (io.tx.last_drop_kind) |kind| @tagName(kind) else "control", io.tx.drops[@intFromEnum(io.tx.last_drop)], io.tx.data.count, outbox.data_capacity, io.tx.data.bytes, options.tx_peer_bytes, io.tx.control.count, io.tx.control.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0, if (io.tx.blocked_since) |since| now_ms -| since else 0, io.write_zero, io.write_budget_deferred });
+    std.log.scoped(.network_gossip_errors).debug("gossip_send_pressure peer={f} connection={d}:{d} reason={s} kind={s} total={d} data_queued={d}/{d} data_bytes={d}/{d} control_frames={d} control_bytes={d} oldest_ms={d} write_blocked_ms={d} write_zero={d} budget_deferred={d}", .{ logging.peer(identity), row.conn.index, row.conn.generation, @tagName(io.tx.last_drop), if (io.tx.last_drop_kind) |kind| @tagName(kind) else "control", io.tx.drops[@intFromEnum(io.tx.last_drop)], io.tx.data.count, outbox.data_capacity, io.tx.data.bytes, constants.tx_peer_bytes, io.tx.control.count, io.tx.control.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0, if (io.tx.blocked_since) |since| now_ms -| since else 0, io.write_zero, io.write_budget_deferred });
 }
 
 fn logIoTimeout(row: *const Session, identity: *const PeerId, reason: []const u8, now_ms: u64) void {

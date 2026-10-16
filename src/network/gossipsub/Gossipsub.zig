@@ -380,7 +380,7 @@ fn deliver(self: *Gossipsub, peers: *const sessions_mod.PeerSet, h: storage.Hand
             self.delivery_metrics.recipient(origin, .unavailable);
             continue;
         }
-        if (self.sessions.rows[index].io.tx.queueData(&self.messages.store, h, origin, self.deliveryLimits(), now_ms) == .queued) {
+        if (self.sessions.rows[index].io.tx.queueData(&self.messages.store, h, origin, delivery_limits, now_ms) == .queued) {
             result.queued += 1;
             self.delivery_metrics.recipient(origin, .queued);
             self.settle(index);
@@ -545,9 +545,7 @@ pub fn writeCompleted(self: *Gossipsub, session: sessions_mod.SessionRef, comple
     }
 }
 
-pub fn deliveryLimits(self: *const Gossipsub) delivery.Limits {
-    return .{ .bytes = self.options.tx_peer_bytes, .local_bytes = self.options.tx_local_bytes };
-}
+pub const delivery_limits: delivery.Limits = .{ .bytes = constants.tx_peer_bytes, .local_bytes = constants.tx_local_bytes };
 
 fn controlSent(self: *Gossipsub, peer: u16, token: u64, now_ms: u64) void {
     self.recovery.controlSent(self.sessions.rows[peer].conn, token, self.options.iwant_followup_ms, now_ms);

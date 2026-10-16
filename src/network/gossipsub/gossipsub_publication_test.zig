@@ -75,7 +75,7 @@ test "publication queues despite a full ordinary block allowance" {
     const queue = &g.sessions.rows[recipient.index].io.tx.data;
     try std.testing.expectEqual(@as(usize, 2), queue.count);
     try std.testing.expectEqual(@as(usize, 0), queue.local_bytes);
-    try std.testing.expect(queue.bytes < g.options.tx_peer_bytes - g.options.tx_local_bytes);
+    try std.testing.expect(queue.bytes < constants.tx_peer_bytes - constants.tx_local_bytes);
     const outcome = try g.publishWithOptions(test_topic, "local", .{ .allow_zero_peers = false }, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }));
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, outcome);
     try std.testing.expect(g.messages.wasSeen(topic_mod.validMessageId(test_topic, "local", .{}), 3));
@@ -158,7 +158,7 @@ test "publication recipient policy tops up without graft and accounts unique sha
     const full = &g.sessions.rows[3].io.tx;
     for (0..outbox.data_capacity) |_| {
         const origin: delivery.Origin = if (full.data.full()) .publication else .forward;
-        try std.testing.expectEqual(.queued, full.queueData(&g.messages.store, h, origin, .{ .bytes = g.options.tx_peer_bytes }, 2));
+        try std.testing.expectEqual(.queued, full.queueData(&g.messages.store, h, origin, .{ .bytes = constants.tx_peer_bytes }, 2));
     }
     const full_messages = full.rpc_sent.message;
     const flood = try g.publishWithOptions(test_topic, "flood", .{ .flood = true }, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
@@ -187,7 +187,7 @@ test "publication failed history admission retains payloads and recovery attribu
         _ = try g.publish(test_topic, &payload, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
         h.* = g.messages.history.message(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(test_topic, &payload, .{})).?);
     }
-    try std.testing.expectEqual(.queued, g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, retained[0], .forward, g.deliveryLimits(), 1));
+    try std.testing.expectEqual(.queued, g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, retained[0], .forward, Gossipsub.delivery_limits, 1));
     const retry = try std.testing.allocator.alloc(u8, 64 * message_store.page_bytes);
     defer std.testing.allocator.free(retry);
     random.random().bytes(retry);
@@ -308,7 +308,7 @@ test "delivery recipients count refused frames and completions by origin" {
     // Forwards fill the ordinary allowance and publications the local reserve.
     for (1..outbox.data_capacity) |_| {
         const origin: Origin = if (io.tx.data.full()) .publication else .forward;
-        try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, filler, origin, .{ .bytes = g.options.tx_peer_bytes }, 1));
+        try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, filler, origin, .{ .bytes = constants.tx_peer_bytes }, 1));
     }
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .pressured = 1 }, try g.publish(test_topic, "refused", Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
     var body: [32]u8 = undefined;

@@ -2,7 +2,6 @@ const topic_fixture = @import("topic_fixture.zig");
 const Options = @import("options.zig").Options;
 const constants = @import("constants.zig");
 const preset = @import("preset");
-const delivery = @import("delivery.zig");
 
 test "gossip policy default epoch timers follow the selected preset and require entropy" {
     const std = @import("std");
@@ -32,18 +31,5 @@ test "gossip policy wire limits validate inclusive boundaries" {
     try std.testing.expectError(error.InvalidLimits, o.validate());
     o.iwant_followup_ms = 1;
     o.idontwant_min_data_size = constants.GOSSIP_MAX_SIZE + 1;
-    try std.testing.expectError(error.InvalidLimits, o.validate());
-}
-
-test "gossip local publication reserve fits the protected share and leaves a maximal ordinary message" {
-    const std = @import("std");
-    const compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
-    var o: Options = .{ .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })}, .random_seed = 1, .tx_local_descriptors = delivery.per_peer_reserve };
-    o.tx_local_bytes = o.tx_peer_bytes - compressed;
-    try o.validate();
-    o.tx_local_bytes += 1;
-    try std.testing.expectError(error.InvalidLimits, o.validate());
-    o.tx_local_bytes = 0;
-    o.tx_local_descriptors += 1;
     try std.testing.expectError(error.InvalidLimits, o.validate());
 }

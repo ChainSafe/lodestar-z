@@ -104,7 +104,7 @@ pub const Sessions = struct {
         const deliveries = try a.create(DeliveryPool);
         errdefer a.destroy(deliveries);
         deliveries.* = try DeliveryPool.init(a, rows.len, layout.deliveries);
-        deliveries.local_descriptors = options.tx_local_descriptors;
+        deliveries.local_descriptors = constants.tx_local_descriptors;
         deliveries.kind_limits = options.deliveryKindLimits();
         for (rows, 0..) |*row, i| {
             row.* = .{ .io = PeerIo.init(arena[i * per_peer ..][0..per_peer], options, deliveries) };

@@ -73,7 +73,6 @@ test "gossipsub rejects incompatible memory plans and cleans partial startup all
     const a = std.testing.allocator;
     try std.testing.expectError(error.InvalidLimits, support.init(a, .{ .random_seed = 1, .receive_arena_bytes = 65536 }));
     try std.testing.expectError(error.InvalidLimits, support.init(a, .{ .random_seed = 1, .receive_arena_bytes = 1024 * 1024 * 1024 + 4096 }));
-    try std.testing.expectError(error.InvalidLimits, support.init(a, .{ .random_seed = 1, .fields_per_pump = 1 }));
     try std.testing.checkAllAllocationFailures(a, testStartup, .{});
 }
 
@@ -246,8 +245,8 @@ test "gossip validation finishes without allocation while shared deliveries are 
         const count: usize = if (i == 0) delivery.per_peer_limit else delivery.per_peer_reserve;
         const tx = &g.sessions.rows[i].io.tx;
         for (0..count) |item| {
-            const origin: delivery.Origin = if (item >= count - g.options.tx_local_descriptors) .publication else .forward;
-            try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, message, origin, .{ .bytes = g.options.tx_peer_bytes }, 0));
+            const origin: delivery.Origin = if (item >= count - constants.tx_local_descriptors) .publication else .forward;
+            try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, message, origin, .{ .bytes = constants.tx_peer_bytes }, 0));
         }
     }
     const occupied = g.resourceSnapshot();

@@ -115,7 +115,7 @@ test "gossip retention makes room from its own kind's oldest copy despite queued
     // One stalled recipient cannot consume every retained entry of a kind.
     var slot = g.messages.history.head;
     for (0..g.messages.history.count) |i| {
-        try std.testing.expectEqual(@as(QueueResult, if (i == 0) .queued else .full), g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, g.messages.history.message(slot), .forward, .{ .bytes = g.options.tx_peer_bytes }, 2));
+        try std.testing.expectEqual(@as(QueueResult, if (i == 0) .queued else .full), g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, g.messages.history.message(slot), .forward, .{ .bytes = constants.tx_peer_bytes }, 2));
         slot = g.messages.history.entries[slot].next;
     }
     _ = try g.publish(name, "sixth", Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }));
@@ -153,7 +153,7 @@ test "gossip retention reclaims queued pages for larger and inline mixed histori
             handles[kept] = history.message(history.get(&g.messages.store, topic_mod.validMessageId(case.name, payload, .{})).?);
             kept += 1;
         }
-        try std.testing.expectEqual(.queued, g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, handles[case.queued], .forward, .{ .bytes = g.options.tx_peer_bytes }, 1));
+        try std.testing.expectEqual(.queued, g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, handles[case.queued], .forward, .{ .bytes = constants.tx_peer_bytes }, 1));
         _ = try g.publish(case.name, case.replacement, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
         try std.testing.expect(g.messages.store.get(handles[case.queued]) == null);
         try std.testing.expect(history.get(&g.messages.store, topic_mod.validMessageId(case.name, case.replacement, .{})) != null);
@@ -171,7 +171,7 @@ test "gossip history expiry frees payloads and cancels unstarted sends without a
     _ = try g.publish(name, "held", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     const handle = g.messages.history.message(g.messages.history.head);
     const tx = &g.sessions.rows[peer.index].io.tx;
-    try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, handle, .forward, g.deliveryLimits(), 1));
+    try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, handle, .forward, Gossipsub.delivery_limits, 1));
     for (1..constants.mcache_len + 2) |epoch| {
         const now = Now.fromMilliseconds(.{ .mono_ms = epoch * g.options.heartbeat_interval_ms, .unix_s = 0 });
         support.heartbeat(&g, now);

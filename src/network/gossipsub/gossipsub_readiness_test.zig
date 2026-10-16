@@ -1,3 +1,4 @@
+const constants = @import("constants.zig");
 const std = @import("std");
 const schedule_test_support = @import("../schedule_test_support.zig");
 const gossip_test = @import("test_support.zig");
@@ -279,7 +280,7 @@ test "gossip local publications lead each turn for a bounded run and cannot star
     try std.testing.expect(!io.tx.pending());
     const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(topic, "retained", g.options.message_id_policy)).?);
     const ordinary = [_]Origin{ .forward, .forward, .forward, .iwant, .forward, .forward };
-    for (ordinary) |origin| try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, retained, origin, .{ .bytes = g.options.tx_peer_bytes }, setup.shared.pair.now.millis()));
+    for (ordinary) |origin| try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, retained, origin, .{ .bytes = constants.tx_peer_bytes }, setup.shared.pair.now.millis()));
     for (0..8) |i| {
         var payload: [8]u8 = undefined;
         std.mem.writeInt(u64, &payload, i, .little);

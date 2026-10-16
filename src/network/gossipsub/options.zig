@@ -10,7 +10,6 @@ const gossip_limits = @import("../gossip_limits.zig");
 const outbox = @import("outbox.zig");
 const preset = @import("preset");
 const mcache = @import("mcache.zig");
-const delivery = @import("delivery.zig");
 const active_send = @import("active_send.zig");
 
 pub const mcache_arena_bytes_min = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + storage.page_bytes;
@@ -46,12 +45,6 @@ pub const Options = struct {
     active_send_items: [gossip_limits.kind_count]u16 = @splat(8),
     control_bytes: usize = 28 * 1024,
     critical_bytes: usize = outbox.critical_bytes,
-    tx_peer_bytes: usize = 2 * constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE),
-    /// Per-peer data descriptors and bytes that only local publications may use: forwards and
-    /// IWANT responses leave them free, so our own messages still queue behind a forward burst.
-    /// The delivery pool holds the descriptor count.
-    tx_local_descriptors: usize = 32,
-    tx_local_bytes: usize = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE),
     peers_per_pump: usize = 32,
     topics_per_pump: usize = 4,
     items_per_peer: usize = 32,
@@ -60,8 +53,6 @@ pub const Options = struct {
     input_per_pump: usize = 1024 * 1024,
     output_per_peer: usize = 128 * 1024,
     output_per_pump: usize = 1024 * 1024,
-    fields_per_peer: usize = 32_768,
-    fields_per_pump: usize = 131_072,
     work_per_pump: usize = 8 * 1024 * 1024,
     calls_per_peer: usize = 64,
     calls_per_pump: usize = 256,
@@ -126,7 +117,6 @@ pub const Options = struct {
         try range(o.connection_slots, 1, quic_limits.connections_max_ceiling);
         try range(o.retained_capacity, o.connected_capacity, peer_book.capacity);
         try range(o.retained_outbound_reserve, 1, o.retained_capacity - 1);
-        const compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
         try range(o.validation_capacity, 1, 65535);
         if (o.payload_limits) |limits| {
             gossip_limits.validate(&limits) catch return error.InvalidLimits;
@@ -145,16 +135,10 @@ pub const Options = struct {
         try range(o.body_buffer_bytes, 1, constants.GOSSIP_MAX_SIZE);
         try range(o.control_bytes, 1, 65536);
         try range(o.critical_bytes, 32 + topic_mod.topic_max_len, outbox.critical_bytes);
-        try range(o.tx_peer_bytes, compressed, 1024 * 1024 * 1024);
-        try range(o.tx_local_descriptors, 0, delivery.per_peer_reserve);
-        try range(o.tx_local_bytes, 0, o.tx_peer_bytes - compressed);
         try range(o.topics_per_pump, 1, constants.topics_cap);
         try range(o.peers_per_pump, 1, constants.peers_cap);
         try range(o.items_per_peer, 1, 4096);
         try range(o.items_per_pump, 1, 16384);
-        const field_min = @import("protobuf.zig").fields_per_item_max;
-        try range(o.fields_per_peer, field_min, 1_048_576);
-        try range(o.fields_per_pump, field_min, 4_194_304);
         try range(o.calls_per_peer, 1, 4096);
         try range(o.calls_per_pump, 1, 65536);
         const byte_credits = [_]usize{ o.input_per_peer, o.input_per_pump, o.output_per_peer, o.output_per_pump, o.work_per_pump, o.decompress_per_peer_bytes };

@@ -78,7 +78,7 @@ test "local intent history survives topic expiry and real retransmission descrip
     try std.testing.expectEqualStrings("history payload", payload[0..read]);
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const io = &g.sessions.rows[peer.index].io;
-    const served = g.messages.serve(&io.tx, g.sessions.rows[peer.index].logical, id, .{ .bytes = g.options.tx_peer_bytes }, now.millis());
+    const served = g.messages.serve(&io.tx, g.sessions.rows[peer.index].logical, id, .{ .bytes = constants.tx_peer_bytes }, now.millis());
     try std.testing.expect(served == .known);
     try std.testing.expectEqual(.queued, served.known);
     try std.testing.expectEqual(retained, (io.tx.data.next(&g.messages.store, g.last_now_ms, g.options.tx_timeout_ms)).?.message);

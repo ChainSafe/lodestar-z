@@ -90,3 +90,10 @@ comptime {
     std.debug.assert(GOSSIP_MAX_SIZE >= 1024 * 1024);
     std.debug.assert(message_id_length == 20);
 }
+
+/// Per-peer data allowance includes room for one maximum local publication after forward saturation.
+pub const tx_peer_bytes = 2 * maxCompressedLen(MAX_PAYLOAD_SIZE);
+pub const tx_local_bytes = maxCompressedLen(MAX_PAYLOAD_SIZE);
+pub const tx_local_descriptors = 32;
+pub const fields_per_peer = 32_768;
+pub const fields_per_pump = 131_072;

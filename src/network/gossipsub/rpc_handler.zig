@@ -199,7 +199,7 @@ fn onIwant(self: *Gossipsub, index: u16, iwant: protobuf.IdList, now: Now) void 
         examined += 1;
         if (id_bytes.len != constants.message_id_length) continue;
         const id: MessageId = id_bytes[0..constants.message_id_length].*;
-        const outcome: IwantOutcome = switch (self.messages.serve(&self.sessions.rows[index].io.tx, self.logical(index), id, self.deliveryLimits(), now.millis())) {
+        const outcome: IwantOutcome = switch (self.messages.serve(&self.sessions.rows[index].io.tx, self.logical(index), id, Gossipsub.delivery_limits, now.millis())) {
             .unknown => .miss,
             .known => |known| blk: {
                 switch (known) {

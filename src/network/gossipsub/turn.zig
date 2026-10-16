@@ -1,3 +1,4 @@
+const constants = @import("constants.zig");
 const Options = @import("options.zig").Options;
 const std = @import("std");
 const Now = @import("../types.zig").Now;
@@ -25,7 +26,7 @@ pub const Credits = struct {
             .calls = options.calls_per_peer,
             .work = options.decompress_per_peer_bytes,
             .copy = options.decompress_per_peer_bytes,
-            .fields = options.fields_per_peer,
+            .fields = constants.fields_per_peer,
         };
     }
 };
@@ -57,7 +58,7 @@ pub const Turn = struct {
                 .calls = options.calls_per_pump,
                 .work = options.work_per_pump,
                 .copy = options.work_per_pump,
-                .fields = options.fields_per_pump,
+                .fields = constants.fields_per_pump,
             },
             .scratch = scratch,
         };

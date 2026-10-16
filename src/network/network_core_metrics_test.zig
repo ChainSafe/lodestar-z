@@ -1,3 +1,4 @@
+const Gossipsub = @import("gossipsub/Gossipsub.zig");
 const Now = @import("types.zig").Now;
 const core_test = @import("network_core_test_support.zig");
 const gossip_test = @import("gossipsub/test_support.zig");
@@ -415,7 +416,7 @@ test "metrics distinguish gossip kind allowances from recipient queue capacity" 
     _ = try g.publish("/eth2/00000000/beacon_block/ssz_snappy", "payload", now);
     const message = g.messages.history.message(g.messages.history.head);
     const tx = &g.sessions.rows[peer.index].io.tx;
-    const limits = g.deliveryLimits();
+    const limits = Gossipsub.delivery_limits;
     g.sessions.deliveries.kind_limits = @splat(.{ .items = 1, .bytes = 8192 });
     try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, message, .forward, limits, 1));
     try std.testing.expectEqual(.full, tx.queueData(&g.messages.store, message, .iwant, limits, 1));

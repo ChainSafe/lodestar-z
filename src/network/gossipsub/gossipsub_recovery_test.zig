@@ -307,7 +307,7 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
     const tx = &g.sessions.rows[first.index].io.tx;
     for (0..outbox.data_capacity) |_| {
         const origin: delivery.Origin = if (tx.data.full()) .publication else .forward;
-        try std.testing.expectEqual(outbox.QueueResult.queued, tx.queueData(&g.messages.store, message, origin, .{ .bytes = g.options.tx_peer_bytes }, 1));
+        try std.testing.expectEqual(outbox.QueueResult.queued, tx.queueData(&g.messages.store, message, origin, .{ .bytes = constants.tx_peer_bytes }, 1));
     }
     support.control(&g, first.index, .{ .iwant = iwant }, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }));
     try std.testing.expect(g.messages.history.iwantAllowed(g.messages.history.get(&g.messages.store, id).?, logical_peer, 1));

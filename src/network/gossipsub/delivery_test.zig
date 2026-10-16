@@ -7,7 +7,6 @@ const Origin = @import("delivery.zig").Origin;
 const per_peer_reserve = @import("delivery.zig").per_peer_reserve;
 const std = @import("std");
 const storage = @import("message_store.zig");
-const Options = @import("options.zig").Options;
 const constants = @import("constants.zig");
 
 test "gossip global descriptor pressure preserves every peer local reservation" {
@@ -35,8 +34,7 @@ test "gossip global descriptor pressure preserves every peer local reservation" 
 test "gossip default byte reserve admits a maximal local frame after ordinary saturation" {
     const a = std.testing.allocator;
     const maximum = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
-    const options: Options = .{};
-    const limits: Limits = .{ .bytes = options.tx_peer_bytes, .local_bytes = options.tx_local_bytes };
+    const limits: Limits = .{ .bytes = constants.tx_peer_bytes, .local_bytes = constants.tx_local_bytes };
     var pool = try Pool.init(a, 1, Pool.capacity(1, 1));
     defer pool.deinit(a);
     var store = try storage.Store.init(a, 1, std.mem.alignForward(usize, maximum, storage.page_bytes));

@@ -1,3 +1,4 @@
+const constants = @import("constants.zig");
 const support = @import("test_support.zig");
 const std = @import("std");
 const Gossipsub = @import("Gossipsub.zig");
@@ -49,7 +50,7 @@ test "IWANT ignores IDONTWANT while preserving retransmission and queue limits" 
     const h = g.messages.history.message(g.messages.history.get(&g.messages.store, known[0]).?);
     for (0..delivery.per_peer_limit) |_| {
         if (tx.data.full()) break;
-        _ = tx.queueData(&g.messages.store, h, .forward, .{ .bytes = g.options.tx_peer_bytes }, 2);
+        _ = tx.queueData(&g.messages.store, h, .forward, .{ .bytes = constants.tx_peer_bytes }, 2);
     }
     support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{known[1]}) } }, now);
     for ([_]IwantOutcome{ .miss, .limited, .queued, .refused }, [_]u64{ 1, 1, 4, 1 }) |outcome, count| {
