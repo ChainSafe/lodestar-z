@@ -109,6 +109,7 @@ pub const AcceptError = error{
     SlotsExhausted,
     ConnectionSlotsExhausted,
     UnknownProtocol,
+    ProtocolDisabled,
 };
 
 pub const ResponseReadiness = enum { ready, backpressured, terminal, stale };
@@ -229,27 +230,29 @@ pub fn inspectRequest(self: *const ReqResp, which: Protocol, bytes: []const u8, 
 pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
     try options.validate();
     const policy = try request_policy.Policy.init(&options.admission.policy);
-    var admission = try InboundAdmission.init(allocator, options.admission.limits, options.connections);
+    const receive = ReceiveLayout.init(&policy, options.protocols);
+    var admission = try InboundAdmission.init(allocator, options.admission.limits, options.connections, receive.slots_per_connection);
     errdefer admission.deinit(allocator);
 
     const outbound = try allocator.alloc(Client, options.outbound_max);
     errdefer allocator.free(outbound);
     @memset(outbound, .{});
-    const receive = ReceiveLayout.init(&policy);
-    const inbound = try allocator.alloc(Server, @as(usize, options.connections) * ReceiveLayout.slots_per_connection);
+    const inbound = try allocator.alloc(Server, @as(usize, options.connections) * receive.slots_per_connection);
     errdefer allocator.free(inbound);
     @memset(inbound, .{});
 
     const request_sinks = try allocator.alloc(u8, @as(usize, options.connections) * receive.sink_bytes);
     errdefer allocator.free(request_sinks);
 
-    const outbound_bytes = @as(usize, options.outbound_max - options.outbound_control_reserved) * RequestIO.bufferBytes(false) +
-        @as(usize, options.outbound_control_reserved) * RequestIO.bufferBytes(true);
+    const outbound_sizes = RequestIO.BufferSizes.init(options.protocols);
+    const control_buffers = RequestIO.BufferSizes.init(.control);
+    const outbound_bytes = @as(usize, options.outbound_max - options.outbound_control_reserved) * outbound_sizes.bytes() +
+        @as(usize, options.outbound_control_reserved) * control_buffers.bytes();
     const inbound_bytes = @as(usize, options.connections) * receive.io_bytes;
     const arena = try allocator.alloc(u8, outbound_bytes + inbound_bytes);
     errdefer allocator.free(arena);
     var cursor: usize = 0;
-    for (outbound, 0..) |*slot, index| cursor = slot.request.io.assignBuffers(arena, cursor, index < options.outbound_control_reserved);
+    for (outbound, 0..) |*slot, index| cursor = slot.request.io.assignBuffers(arena, cursor, if (index < options.outbound_control_reserved) control_buffers else outbound_sizes);
     for (inbound, 0..) |*slot, index| {
         const buffers = receive.buffers(index, request_sinks, arena[outbound_bytes..]);
         slot.receive = buffers;
@@ -346,6 +349,7 @@ pub fn request(
     request_options: RequestOptions,
     now: Now,
 ) RequestError!RequestHandle {
+    if (!self.receive_layout.protocols.contains(which)) return error.ProtocolDisabled;
     if (!router.capabilities().request.contains(.{ .reqresp = which })) return error.ProtocolDisabled;
     const bounds = self.requestBounds(which);
     const identity = engine.peerId(conn) orelse return error.StaleHandle;
@@ -547,8 +551,8 @@ pub fn consume(self: *ReqResp, engine: *Engine, router: *Router, handle: Request
 
 /// Recovers one complete Goodbye before the caller cancels the connection's requests.
 pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *Router, conn: Handle, now: Now) ?u64 {
-    if (conn.index >= self.options.connections) return null;
-    const first = ReceiveLayout.first(conn.index, .goodbye_v1);
+    if (conn.index >= self.options.connections or !self.receive_layout.protocols.contains(.goodbye_v1)) return null;
+    const first = self.receive_layout.first(conn.index, .goodbye_v1);
     for (first..first + constants.MAX_CONCURRENT_REQUESTS) |position| {
         const index: u16 = @intCast(position);
         const slot = &self.inbound[index];
@@ -580,8 +584,8 @@ pub fn connectionClosed(self: *ReqResp, engine: *Engine, router: *Router, conn: 
         if (!slot.request.occupied() or !std.meta.eql(slot.request.conn, conn)) continue;
         slot.fail(self, engine, router, index, .connection_closed, now);
     }
-    const first = ReceiveLayout.first(conn.index, @enumFromInt(0));
-    for (first..first + ReceiveLayout.slots_per_connection) |position| {
+    const first = @as(usize, conn.index) * self.receive_layout.slots_per_connection;
+    for (first..first + self.receive_layout.slots_per_connection) |position| {
         const index: u16 = @intCast(position);
         const slot = &self.inbound[index];
         if (!slot.request.occupied() or !std.meta.eql(slot.request.conn, conn)) continue;
@@ -1072,7 +1076,7 @@ pub fn outboundApplicationOccupiedCount(self: *const ReqResp, conn: Handle) u16 
 /// The connection's block of the receive layout.
 fn inboundOf(self: *const ReqResp, conn: Handle) []const Server {
     if (conn.index >= self.options.connections) return &.{};
-    return self.inbound[ReceiveLayout.first(conn.index, @enumFromInt(0))..][0..ReceiveLayout.slots_per_connection];
+    return self.inbound[@as(usize, conn.index) * self.receive_layout.slots_per_connection ..][0..self.receive_layout.slots_per_connection];
 }
 
 pub fn inboundApplicationOccupiedCount(self: *const ReqResp, conn: Handle) u16 {

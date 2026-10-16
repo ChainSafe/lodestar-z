@@ -5,6 +5,7 @@ const request_policy = @import("request_policy.zig");
 const admission_mod = @import("admission.zig");
 const quotas = @import("quotas.zig");
 const limits = @import("../quic/limits.zig");
+const Protocol = @import("protocol.zig").Protocol;
 const types = @import("../types.zig");
 const ForkEntry = types.ForkEntry;
 
@@ -24,6 +25,7 @@ pub fn validateForkTable(table: []const ForkEntry) error{InvalidOptions}!void {
 
 pub const Options = struct {
     routes: Routes = .application,
+    protocols: Protocol.Set = .all,
 
     connections: u16 = limits.connections_max_default,
     outbound_max: u16 = constants.outbound_max_default,
@@ -73,6 +75,7 @@ pub const Options = struct {
     };
 
     pub fn validate(options: Options) Error!void {
+        if (options.protocols.len() == 0) return error.InvalidOptions;
         if (!std.meta.eql(options.routes, Routes.application) and !std.meta.eql(options.routes, Routes.control)) return error.InvalidOptions;
         _ = try request_policy.Policy.init(&options.admission.policy);
         try admission_mod.Limiter.validate(&options.admission.limits);

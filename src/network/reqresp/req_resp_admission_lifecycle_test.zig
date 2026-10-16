@@ -1,4 +1,3 @@
-const ReceiveLayout = @import("ReceiveLayout.zig");
 const std = @import("std");
 const ct = @import("consensus_types");
 const rr = @import("ReqResp.zig");
@@ -131,7 +130,7 @@ fn allocation(allocator: std.mem.Allocator) !void {
     });
     defer owner.deinit();
     for (0..2) |peer| for (std.enums.values(Protocol)) |which| {
-        const first = ReceiveLayout.first(@intCast(peer), which);
+        const first = owner.receive_layout.first(@intCast(peer), which);
         const bounds = owner.policy.requestMaxFor(which);
         try std.testing.expectEqual(bounds, owner.inbound[first].receive.sink.len);
         try std.testing.expectEqual(bounds, owner.inbound[first + 1].receive.sink.len);
@@ -149,7 +148,7 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
     defer setup.deinit();
     const owner = &setup.shared.server.reqresp;
     for ([_]Protocol{ .blocks_by_root_v2, .blocks_by_root_v2, .ping_v1 }, 0..) |which, peer| {
-        const index = ReceiveLayout.first(@intCast(peer), which);
+        const index = owner.receive_layout.first(@intCast(peer), which);
         const slot = &owner.inbound[index];
         defer owner.settleSlot(.inbound, @intCast(index));
         slot.identity = .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) };
@@ -166,7 +165,7 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
             .stream = .{ .conn = conn, .slot = 0, .id = 0 },
         };
     }
-    const heavy = &owner.inbound[ReceiveLayout.first(0, .blocks_by_root_v2)];
+    const heavy = &owner.inbound[owner.receive_layout.first(0, .blocks_by_root_v2)];
     try std.testing.expectEqual(.allowed, owner.admission.limiter.take(&heavy.identity, .blocks_by_root_v2, 4, .fulu, setup.shared.pair.now.millis()));
     var application_events: [4]rr.Event = undefined;
     var control_events: [4]rr.Event = undefined;
@@ -200,7 +199,7 @@ test "reqresp admission lifecycle a fresh burst starts full requests before spli
     defer setup.deinit();
     const owner = &setup.shared.server.reqresp;
     for (0..4) |peer| {
-        const index = ReceiveLayout.first(@intCast(peer), .blocks_by_root_v2);
+        const index = owner.receive_layout.first(@intCast(peer), .blocks_by_root_v2);
         const slot = &owner.inbound[index];
         defer owner.settleSlot(.inbound, @intCast(index));
         slot.identity = .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) };

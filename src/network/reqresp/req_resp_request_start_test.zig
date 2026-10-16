@@ -2,7 +2,6 @@ const std = @import("std");
 const rr = @import("ReqResp.zig");
 const codec = @import("codec.zig");
 const Protocol = @import("protocol.zig").Protocol;
-const ReceiveLayout = @import("ReceiveLayout.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const Handle = @import("../types.zig").Handle;
 const harness = @import("test_pair.zig");
@@ -397,7 +396,7 @@ test "reqresp request start a slow waiter retains identity accounting after debt
 
 /// A `.ready` request on connection index `connection` whose start accept deferred.
 fn deferredSlot(owner: *rr, connection: u16, which: Protocol, identity: *const PeerId, now_ms: u64) u16 {
-    const index: u16 = @intCast(ReceiveLayout.first(connection, which));
+    const index: u16 = @intCast(owner.receive_layout.first(connection, which));
     const slot = &owner.inbound[index];
     const conn: Handle = .{ .index = connection, .generation = std.math.maxInt(u32) };
     slot.identity = identity.*;
@@ -539,7 +538,7 @@ test "reqresp request start hard capacity refusal preserves an available start w
         const now_ms = setup.shared.pair.now.millis();
         const held_stream = try setup.openRaw(.blocks_by_root_v2);
         try setup.awaitRawSelection(held_stream, .blocks_by_root_v2);
-        const held_index: u16 = @intCast(ReceiveLayout.first(setup.shared.handles.server.index, .blocks_by_root_v2));
+        const held_index: u16 = @intCast(owner.receive_layout.first(setup.shared.handles.server.index, .blocks_by_root_v2));
         const held = owner.inbound[held_index].request.handle(held_index);
         try std.testing.expectEqual(@as(usize, 0), waitingStarts(owner));
         var exchange: Exchange = .{ .setup = &setup };

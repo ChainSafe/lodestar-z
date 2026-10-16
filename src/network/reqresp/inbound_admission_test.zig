@@ -3,7 +3,6 @@ const Now = @import("../types.zig").Now;
 const RequestIO = @import("RequestIO.zig");
 const rr = @import("ReqResp.zig");
 const Protocol = @import("protocol.zig").Protocol;
-const ReceiveLayout = @import("ReceiveLayout.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const types = @import("../types.zig");
 const support = @import("../quic/test_support.zig");
@@ -77,7 +76,7 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
             .leftover = &.{},
             .fin = false,
         }, pair.now);
-        const first = ReceiveLayout.first(handles.server.index, .metadata_v1);
+        const first = owner.receive_layout.first(handles.server.index, .metadata_v1);
         owner.inbound[first].request.generation = std.math.maxInt(u32);
         if (!handoff) owner.inbound[first + 1].request.generation = std.math.maxInt(u32);
         var bytes: [RequestIO.read_buffer_length]u8 = @splat(0);
@@ -103,7 +102,7 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
 fn readySlot(owner: *rr, peer: u16, which: Protocol, ordinal: u16, identity: PeerId, accepted_ms: u64) u16 {
     std.debug.assert(peer < owner.options.connections);
     std.debug.assert(ordinal < constants.MAX_CONCURRENT_REQUESTS);
-    const index: u16 = @intCast(ReceiveLayout.first(peer, which) + ordinal);
+    const index: u16 = @intCast(owner.receive_layout.first(peer, which) + ordinal);
     const slot = &owner.inbound[index];
     std.debug.assert(slot.request.available());
     const conn: types.Handle = .{ .index = peer, .generation = 1 };

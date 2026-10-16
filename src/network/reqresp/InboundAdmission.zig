@@ -6,7 +6,6 @@ const ReqResp = @import("ReqResp.zig");
 const Server = @import("Server.zig");
 const admission = @import("admission.zig");
 const quotas = @import("quotas.zig");
-const ReceiveLayout = @import("ReceiveLayout.zig");
 const constants = @import("constants.zig");
 const index_list = @import("../index_list.zig");
 const types = @import("../types.zig");
@@ -62,16 +61,17 @@ pub const Progress = enum { waiting, charged, admitted };
 const InboundAdmission = @This();
 
 limiter: admission.Limiter,
+slots_per_connection: u8,
 connection_cursors: []ConnectionCursor,
 ready: [2]index_list.List = .{ .{}, .{} },
 pending: bool = false,
 
-pub fn init(allocator: std.mem.Allocator, options: quotas.Options, connections: u16) admission.InitError!InboundAdmission {
+pub fn init(allocator: std.mem.Allocator, options: quotas.Options, connections: u16, slots_per_connection: u8) admission.InitError!InboundAdmission {
     var limiter = try admission.Limiter.init(allocator, options);
     errdefer limiter.deinit(allocator);
     const cursors = try allocator.alloc(ConnectionCursor, connections);
     @memset(cursors, .{});
-    return .{ .limiter = limiter, .connection_cursors = cursors };
+    return .{ .limiter = limiter, .connection_cursors = cursors, .slots_per_connection = slots_per_connection };
 }
 
 pub fn deinit(self: *InboundAdmission, allocator: std.mem.Allocator) void {
@@ -131,6 +131,7 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
         .reqresp => |which| which,
         else => return error.UnknownProtocol,
     };
+    if (!owner.receive_layout.protocols.contains(which)) return error.ProtocolDisabled;
     const bounds = owner.requestBounds(which);
     if (owner.inboundProtocolRunningCount(stream.conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
         owner.recordAdmissionRefusal(stream, which, .protocol_concurrency, 0);
@@ -145,7 +146,7 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
         owner.recordAdmissionRefusal(stream, which, .connection_capacity, 0);
         return error.ConnectionSlotsExhausted;
     }
-    const available = availableInbound(owner.inbound, stream.conn, which);
+    const available = availableInbound(owner, stream.conn, which);
     if (!which.isControl() and owner.options.inbound_application_per_connection_max > 0 and
         owner.inboundApplicationOccupiedCount(stream.conn) >= owner.options.inbound_application_per_connection_max)
     {
@@ -165,7 +166,7 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
     // request past the starts limiter waits in `.ready` for its start. One arriving behind a
     // request still owed its start waits too, uncharged, so it cannot take the refill that one
     // awaits; it still needs a limiter row for its identity.
-    const start_due: ?u64 = if (startsPending(owner.inbound, stream.conn, control))
+    const start_due: ?u64 = if (self.startsPending(owner.inbound, stream.conn, control))
         limiter.startAt(&identity, control, now.millis())
     else switch (limiter.start(&identity, control, now.millis())) {
         .allowed => null,
@@ -181,9 +182,9 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
     };
 }
 
-fn availableInbound(slots: []Server, conn: Handle, which: Protocol) ?u16 {
-    const first = ReceiveLayout.first(conn.index, which);
-    for (slots[first..][0..constants.MAX_CONCURRENT_REQUESTS], first..) |*slot, index| {
+fn availableInbound(owner: *ReqResp, conn: Handle, which: Protocol) ?u16 {
+    const first = owner.receive_layout.first(conn.index, which);
+    for (owner.inbound[first..][0..constants.MAX_CONCURRENT_REQUESTS], first..) |*slot, index| {
         if (slot.request.available()) return @intCast(index);
     }
     return null;
@@ -191,8 +192,8 @@ fn availableInbound(slots: []Server, conn: Handle, which: Protocol) ?u16 {
 
 pub fn settle(self: *InboundAdmission, slots: []Server, index: u16) void {
     const slot = &slots[index];
-    const conn = index / ReceiveLayout.slots_per_connection;
-    const bit = @as(u64, 1) << @intCast(index % ReceiveLayout.slots_per_connection);
+    const conn = index / self.slots_per_connection;
+    const bit = @as(u64, 1) << @intCast(index % self.slots_per_connection);
     const class: u1 = @intFromBool(slot.request.protocol.isControl());
     const cursor = &self.connection_cursors[conn];
     const waiting = slot.request.running() and slot.state == .ready;
@@ -246,17 +247,17 @@ pub fn promoteReady(self: *InboundAdmission, owner: *ReqResp, now: Now) void {
 /// charged its start or pays toward its cost.
 fn promoteConnection(self: *InboundAdmission, owner: *ReqResp, conn: u16, comptime class: u1, now: Now) bool {
     const cursor = &self.connection_cursors[conn];
-    const first = @as(usize, conn) * ReceiveLayout.slots_per_connection;
+    const first = @as(usize, conn) * self.slots_per_connection;
     const start = cursor.admission[class];
-    for (0..ReceiveLayout.slots_per_connection) |offset| {
-        const local: u8 = @intCast((start + offset) % ReceiveLayout.slots_per_connection);
+    for (0..self.slots_per_connection) |offset| {
+        const local: u8 = @intCast((start + offset) % self.slots_per_connection);
         if (cursor.ready_mask[class] & (@as(u64, 1) << @intCast(local)) == 0) continue;
         const index: u16 = @intCast(first + local);
         owner.visits +|= 1;
         const result = self.promote(owner, index, now);
         owner.settleSlot(.inbound, index);
         if (result != .waiting) {
-            cursor.admission[class] = @intCast((local + 1) % ReceiveLayout.slots_per_connection);
+            cursor.admission[class] = @intCast((local + 1) % self.slots_per_connection);
             return true;
         }
     }
@@ -313,8 +314,8 @@ fn chargeStart(self: *InboundAdmission, slots: []Server, index: u16, now: Now) b
 }
 
 /// Whether a running request of the class on the connection is still owed its start.
-fn startsPending(slots: []const Server, conn: Handle, control: bool) bool {
-    for (slots[ReceiveLayout.first(conn.index, @enumFromInt(0))..][0..ReceiveLayout.slots_per_connection]) |*slot| {
+fn startsPending(self: *const InboundAdmission, slots: []const Server, conn: Handle, control: bool) bool {
+    for (slots[@as(usize, conn.index) * self.slots_per_connection ..][0..self.slots_per_connection]) |*slot| {
         if (!slot.admission.start_pending or !slot.request.running() or slot.request.protocol.isControl() != control) continue;
         if (std.meta.eql(slot.request.conn, conn)) return true;
     }
@@ -327,10 +328,10 @@ fn startsPending(slots: []const Server, conn: Handle, control: bool) bool {
 /// waiter is charged its start within one refill per request ahead of it.
 fn startQueued(self: *const InboundAdmission, slots: []const Server, index: u16) bool {
     const slot = &slots[index];
-    const conn = index / ReceiveLayout.slots_per_connection;
-    const first = @as(usize, conn) * ReceiveLayout.slots_per_connection;
+    const conn = index / self.slots_per_connection;
+    const first = @as(usize, conn) * self.slots_per_connection;
     var mask = self.connection_cursors[conn].ready_mask[@intFromBool(slot.request.protocol.isControl())];
-    for (0..ReceiveLayout.slots_per_connection) |_| {
+    for (0..self.slots_per_connection) |_| {
         if (mask == 0) break;
         const other = first + @ctz(mask);
         mask &= mask - 1;
@@ -356,12 +357,12 @@ pub fn chargeRejected(self: *InboundAdmission, owner: *ReqResp, engine: *Engine,
 }
 
 pub fn checkSlot(self: *const InboundAdmission, slot: *const Server, index: u16) void {
-    const bit = @as(u64, 1) << @intCast(index % ReceiveLayout.slots_per_connection);
+    const bit = @as(u64, 1) << @intCast(index % self.slots_per_connection);
     const class: u1 = @intFromBool(slot.request.protocol.isControl());
     const waiting = slot.request.running() and slot.state == .ready;
-    const cursor = &self.connection_cursors[index / ReceiveLayout.slots_per_connection];
+    const cursor = &self.connection_cursors[index / self.slots_per_connection];
     assert((cursor.ready_mask[class] & bit != 0) == waiting);
-    if (waiting) assert(ConnectionCursor.linked(self.connection_cursors, class, index / ReceiveLayout.slots_per_connection));
+    if (waiting) assert(ConnectionCursor.linked(self.connection_cursors, class, index / self.slots_per_connection));
     if (waiting and slot.admission.wait == .none) assert(self.pending);
 }
 
@@ -379,10 +380,6 @@ const ConnectionCursor = struct {
         return if (class == 0) rows[conn].application_link.linked else rows[conn].control_link.linked;
     }
 };
-
-comptime {
-    assert(ReceiveLayout.slots_per_connection <= 64);
-}
 
 test {
     _ = @import("inbound_admission_test.zig");

@@ -2,6 +2,7 @@ const std = @import("std");
 const Engine = @import("../quic/Engine.zig");
 const codec = @import("codec.zig");
 const stream_io = @import("../stream_io.zig");
+const constants = @import("constants.zig");
 const protocol = @import("protocol.zig");
 const Negotiator = @import("../negotiate.zig").Negotiator;
 
@@ -90,16 +91,33 @@ pub fn clear(self: *RequestIO) void {
     self.outbox = .{};
 }
 
-pub fn bufferBytes(control: bool) usize {
-    return if (control) protocol.control_scratch_length + control_read_buffer_length else scratch_length + read_buffer_length;
-}
+pub const BufferSizes = struct {
+    scratch: usize,
+    read: usize,
 
-pub fn assignBuffers(io: *RequestIO, arena: []u8, cursor: usize, control: bool) usize {
-    const scratch = if (control) protocol.control_scratch_length else scratch_length;
-    const read_buffer = if (control) control_read_buffer_length else read_buffer_length;
-    io.scratch = arena[cursor..][0..scratch];
-    io.read_buffer = arena[cursor + scratch ..][0..read_buffer];
-    return cursor + scratch + read_buffer;
+    pub fn init(protocols: protocol.Protocol.Set) BufferSizes {
+        var payload_max: usize = 0;
+        for (std.enums.values(protocol.Protocol)) |which| {
+            if (!protocols.contains(which)) continue;
+            const bounds = which.info();
+            payload_max = @max(payload_max, bounds.request_max, bounds.response_max);
+        }
+        const frame_max = @min(payload_max, constants.frame_uncompressed_max);
+        return .{
+            .scratch = codec.frameLengthMax(@min(@max(payload_max, codec.error_message_max), constants.frame_uncompressed_max)),
+            .read = @max(Negotiator.inbox_capacity, @min(read_buffer_length, codec.header_max + codec.frameLengthMax(frame_max))),
+        };
+    }
+
+    pub fn bytes(self: BufferSizes) usize {
+        return self.scratch + self.read;
+    }
+};
+
+pub fn assignBuffers(io: *RequestIO, arena: []u8, cursor: usize, sizes: BufferSizes) usize {
+    io.scratch = arena[cursor..][0..sizes.scratch];
+    io.read_buffer = arena[cursor + sizes.scratch ..][0..sizes.read];
+    return cursor + sizes.bytes();
 }
 
 comptime {

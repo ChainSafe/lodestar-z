@@ -36,6 +36,38 @@ pub const Protocol = enum(u8) {
 
     pub const count: u8 = @intCast(@typeInfo(Protocol).@"enum".fields.len);
 
+    pub const Set = struct {
+        bits: std.meta.Int(.unsigned, count) = 0,
+
+        pub const all: Set = .{ .bits = std.math.maxInt(std.meta.Int(.unsigned, count)) };
+        pub const control: Set = blk: {
+            var result: Set = .{};
+            for (std.enums.values(Protocol)) |which| {
+                if (which.isControl()) result.bits |= bit(which);
+            }
+            break :blk result;
+        };
+        pub const application: Set = .{ .bits = all.bits & ~control.bits };
+
+        pub fn contains(self: Set, which: Protocol) bool {
+            return self.bits & bit(which) != 0;
+        }
+
+        pub fn len(self: Set) u8 {
+            return @popCount(self.bits);
+        }
+
+        pub fn index(self: Set, which: Protocol) ?u8 {
+            const mask = bit(which);
+            if (self.bits & mask == 0) return null;
+            return @popCount(self.bits & (mask - 1));
+        }
+
+        fn bit(which: Protocol) std.meta.Int(.unsigned, count) {
+            return @as(std.meta.Int(.unsigned, count), 1) << @intCast(@intFromEnum(which));
+        }
+    };
+
     pub fn id(self: Protocol) []const u8 {
         return ids[@intFromEnum(self)];
     }

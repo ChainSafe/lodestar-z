@@ -393,7 +393,7 @@ test "protocol stack reqresp slots stay indexed by connection across a reconnect
     var sinks: [2][8]u8 = undefined;
     _ = try setup.shared.client.request(&setup.shared.pair.client, old.client, .ping_v1, &bytes, &sinks[0], .{}, setup.shared.pair.now);
     const stale = try awaitRequest(&setup);
-    const slots_per_connection = @import("reqresp/ReceiveLayout.zig").slots_per_connection;
+    const slots_per_connection = server.receive_layout.slots_per_connection;
     try std.testing.expectEqual(@as(usize, old.server.index), stale.index / slots_per_connection);
 
     // The server holds its host events while the connection closes and a new one takes its index.
