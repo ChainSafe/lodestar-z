@@ -13,7 +13,7 @@ const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const ForkTypes = @import("fork_types").ForkTypes;
 const c = @import("constants");
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
-const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
+const computeStartSlotAtEpoch = @import("../epoch.zig").computeStartSlotAtEpoch;
 const AggregatedSignatureSet = @import("../utils/signature_sets.zig").AggregatedSignatureSet;
 const createAggregateSignatureSetFromComponents = @import("../utils/signature_sets.zig").createAggregateSignatureSetFromComponents;
 

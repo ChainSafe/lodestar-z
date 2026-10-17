@@ -8,7 +8,7 @@ const AnyBeaconBlock = @import("fork_types").AnyBeaconBlock;
 const ForkTypes = @import("fork_types").ForkTypes;
 const c = @import("constants");
 const ZERO_HASH = c.ZERO_HASH;
-const computeCheckpointEpochAtStateSlot = @import("utils/epoch.zig").computeCheckpointEpochAtStateSlot;
+const computeCheckpointEpochAtStateSlot = @import("epoch.zig").computeCheckpointEpochAtStateSlot;
 
 checkpoint: types.phase0.Checkpoint.Type,
 block_header: types.phase0.BeaconBlockHeader.Type,

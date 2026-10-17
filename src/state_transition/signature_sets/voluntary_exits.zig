@@ -7,7 +7,7 @@ const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const types = @import("consensus_types");
 const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
-const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
+const computeStartSlotAtEpoch = @import("../epoch.zig").computeStartSlotAtEpoch;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const verifySingleSignatureSet = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
 

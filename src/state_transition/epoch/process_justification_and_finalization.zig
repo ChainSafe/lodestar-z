@@ -7,7 +7,7 @@ const JustificationBits = types.phase0.JustificationBits.Type;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const SLOTS_PER_EPOCH = @import("preset").preset.SLOTS_PER_EPOCH;
-const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
+const computeEpochAtSlot = @import("../epoch.zig").computeEpochAtSlot;
 const getBlockRoot = @import("../utils/block_root.zig").getBlockRoot;
 
 /// Update justified and finalized checkpoints depending on network participation.

@@ -4,7 +4,7 @@ const BeaconState = @import("fork_types").BeaconState;
 
 pub fn getBeaconProposer(comptime fork: ForkSeq, epoch_cache: *const EpochCache, state: *BeaconState(fork), slot: u64) !u64 {
     const preset_import = @import("preset").preset;
-    const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
+    const computeEpochAtSlot = @import("../epoch.zig").computeEpochAtSlot;
 
     // For Fulu, use proposer_lookahead from state
     if (comptime fork.gte(.fulu)) {

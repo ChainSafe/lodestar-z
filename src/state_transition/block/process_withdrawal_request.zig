@@ -13,7 +13,7 @@ const hasExecutionWithdrawalCredential = @import("../utils/electra.zig").hasExec
 const isActiveValidatorView = @import("../utils/validator.zig").isActiveValidatorView;
 const getPendingBalanceToWithdraw = @import("../utils/validator.zig").getPendingBalanceToWithdraw;
 const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateValidatorExit;
-const computeExitEpochAndUpdateChurn = @import("../utils/epoch.zig").computeExitEpochAndUpdateChurn;
+const computeExitEpochAndUpdateChurn = @import("../epoch.zig").computeExitEpochAndUpdateChurn;
 
 pub fn processWithdrawalRequest(
     comptime fork: ForkSeq,
