@@ -297,6 +297,9 @@ fn applyReports(self: *Runtime, tick: n.Now) bool {
     for (0..32) |_| {
         self.lock();
         const report = self.bridge.reports.next();
+        if (report) |item| if (item.action == .fatal) {
+            if (self.bridge.gossip) |*table| table.dropPeer(&item.identity);
+        };
         self.unlock();
         const item = report orelse return false;
         if (self.owner.?.core.reportPeer(&item, tick) == null) {

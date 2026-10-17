@@ -4,6 +4,7 @@ const p = @import("root.zig");
 const t = std.testing;
 const index_list = @import("../index_list.zig");
 const Gossipsub = @import("../gossipsub/root.zig").Gossipsub;
+const PeerId = @import("../wire/peer_id.zig").PeerId;
 
 test "gossip processor validates explicit execution overrides before allocating" {
     const limits: p.limits.Limits = @splat(.{ .items = 4096, .bytes = 4096 });
@@ -432,4 +433,104 @@ fn blockOptions(block: p.limits.Limit) p.GossipProcessor.Options {
     var limits: p.limits.Limits = @splat(.{ .items = 2, .bytes = 4096 });
     limits[@intFromEnum(p.limits.Kind.beacon_block)] = block;
     return .{ .limits = limits, .execution = limits };
+}
+
+test "gossip processor fatal peer cleanup is bounded and preserves other peers and host work" {
+    const limits: p.limits.Limits = @splat(.{ .items = 128, .bytes = 16384 });
+    var allocator = t.FailingAllocator.init(t.allocator, .{});
+    var table = try p.GossipProcessor.init(allocator.allocator(), .{ .limits = limits });
+    defer table.deinit();
+    defer table.close();
+    const identity = tableIdentity(1);
+    const delivered = try add(&table, .beacon_block, null);
+    const executing = table.claimDemand(1, .{ .ordinary = false });
+    table.finish(&executing);
+    const copying = try add(&table, .beacon_block, null);
+    const borrowed = table.claimDemand(1, .{ .ordinary = false });
+    defer table.finish(&borrowed);
+    const waiting = try add(&table, .beacon_attestation, @splat(3));
+    const checking = try add(&table, .beacon_attestation, @splat(4));
+    const checks = table.claimChecks(1, 2);
+    try t.expectEqual(@as(usize, 2), checks.len);
+    try t.expect(table.classify(waiting, false));
+    const needs_check = try add(&table, .beacon_attestation, @splat(5));
+    var queued: [128]p.GossipProcessor.Token = undefined;
+    for (&queued, 0..) |*token, i| {
+        token.* = try add(&table, .sync_committee, null);
+        table.get(token.*).?.identity = tableIdentity(@intCast(1 + i % 2));
+    }
+    const allocations = allocator.allocations;
+    table.dropPeer(&identity);
+    for (0..std.math.divCeil(usize, table.cells.len, p.GossipProcessor.batch_max) catch unreachable) |_| {
+        const before = table.diag.pendingVerdicts;
+        table.maintain(1, 0);
+        try t.expect(table.diag.pendingVerdicts - before <= p.GossipProcessor.batch_max);
+    }
+    try t.expectEqual(@as(usize, 0), table.prune_remaining);
+    try t.expectEqual(@as(usize, 66), table.diag.pendingVerdicts);
+    for (queued, 0..) |token, i| {
+        const cell = table.get(token).?;
+        try t.expectEqual(if (i % 2 == 0) p.GossipProcessor.State.verdict_pending else .queued, cell.state);
+        if (i % 2 == 0) try t.expectEqual(Gossipsub.Verdict.ignore, cell.verdict);
+    }
+    for ([_]p.GossipProcessor.Token{ waiting, needs_check }) |token| {
+        try t.expectEqual(p.GossipProcessor.State.verdict_pending, table.get(token).?.state);
+        try t.expectEqual(Gossipsub.Verdict.ignore, table.get(token).?.verdict);
+    }
+    try t.expectEqual(p.GossipProcessor.State.checking, table.get(checking).?.state);
+    try t.expectEqual(p.GossipProcessor.State.delivered, table.get(delivered).?.state);
+    try t.expectEqual(p.GossipProcessor.State.copying, table.get(copying).?.state);
+    try t.expectEqual(allocations, allocator.allocations);
+}
+
+fn tableIdentity(byte: u8) PeerId {
+    return .{ .bytes = @splat(byte) };
+}
+
+test "gossip processor claims skip fatal peers before their prune pass reaches the cells" {
+    const limits: p.limits.Limits = @splat(.{ .items = 8, .bytes = 4096 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
+    defer table.deinit();
+    defer table.close();
+    const bad = try add(&table, .voluntary_exit, null);
+    const good = try add(&table, .voluntary_exit, null);
+    table.get(good).?.identity = tableIdentity(2);
+    const bad_check = try add(&table, .beacon_attestation, @splat(3));
+    const grouped_bad = try capture(&table, .beacon_attestation, "x", .{ .slot = 1, .group = @splat(7) }, 0, 100);
+    const grouped_good = try capture(&table, .beacon_attestation, "x", .{ .slot = 1, .group = @splat(7) }, 0, 100);
+    table.get(grouped_good).?.identity = tableIdentity(2);
+    table.maintain(51, 0);
+    table.dropPeer(&tableIdentity(1));
+    try t.expectEqual(@as(usize, 0), table.claimChecks(51, p.GossipProcessor.batch_max).len);
+    const batch = table.claim(51);
+    try t.expectEqual(@as(usize, 2), batch.len);
+    try t.expectEqual(good, batch.tokens[0]);
+    try t.expectEqual(grouped_good, batch.tokens[1]);
+    table.finish(&batch);
+    for ([_]p.GossipProcessor.Token{ bad, bad_check, grouped_bad }) |token| {
+        try t.expectEqual(p.GossipProcessor.State.verdict_pending, table.get(token).?.state);
+    }
+}
+
+test "gossip processor fatal identity overflow prunes old queued work without restarting the cursor" {
+    const limits: p.limits.Limits = @splat(.{ .items = 8, .bytes = 4096 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
+    defer table.deinit();
+    defer table.close();
+    const old = try add(&table, .data_column_sidecar, null);
+    table.get(old).?.identity = tableIdentity(99);
+    const checking = try add(&table, .beacon_attestation, @splat(3));
+    _ = table.claimChecks(1, 1);
+    for (0..table.drop_peers.len) |i| table.dropPeer(&tableIdentity(@intCast(i + 1)));
+    table.maintain(1, 0);
+    const cursor = table.prune_cursor;
+    table.dropPeer(&tableIdentity(17));
+    try t.expectEqual(cursor, table.prune_cursor);
+    const fresh = try add(&table, .data_column_sidecar, null);
+    table.get(fresh).?.identity = tableIdentity(99);
+    for (0..std.math.divCeil(usize, table.cells.len, p.GossipProcessor.batch_max) catch unreachable) |_| table.maintain(1, 0);
+    try t.expectEqual(p.GossipProcessor.State.verdict_pending, table.get(old).?.state);
+    try t.expectEqual(p.GossipProcessor.State.queued, table.get(fresh).?.state);
+    try t.expectEqual(p.GossipProcessor.State.checking, table.get(checking).?.state);
+    try t.expectEqual(@as(usize, 0), table.prune_remaining);
 }

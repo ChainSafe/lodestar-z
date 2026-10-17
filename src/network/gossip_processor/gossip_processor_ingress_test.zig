@@ -926,3 +926,47 @@ test "gossip protocol expiry frees compressed storage while host work retains pr
     try t.expectEqual(@as(usize, 1), next.len);
     table.finish(&next);
 }
+
+test "gossip processor ignores unsearchable unknown roots after checking while retaining known old roots" {
+    var g = try support.init(t.allocator, options);
+    defer g.deinit();
+    const limits: processor.limits.Limits = @splat(.{ .items = 8, .bytes = 16384 });
+    var table = try processor.GossipProcessor.init(t.allocator, .{ .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
+    defer table.deinit();
+    defer table.close();
+    var consumer: Consumer = .{ .table = &table, .slot = 32 };
+    const sink = consumer.sink();
+    g.message_sink = &sink;
+    _ = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    try support.subscribe(&g, attestation);
+    table.maintain(1, consumer.slot);
+    const k = @intFromEnum(processor.limits.Kind.beacon_attestation);
+    const refusal = @intFromEnum(processor.GossipProcessor.Refusal.dependency_unsearchable);
+    const cases = [_]struct { slot: u64, available: bool, state: processor.GossipProcessor.State }{
+        .{ .slot = 29, .available = false, .state = .verdict_pending },
+        .{ .slot = 30, .available = false, .state = .waiting },
+        .{ .slot = 29, .available = true, .state = .queued },
+        .{ .slot = 33, .available = false, .state = .waiting },
+    };
+    for (cases, 0..) |case, i| {
+        var bytes: [240]u8 = undefined;
+        vote(&bytes, @intCast(i + 1), case.slot);
+        try receive(&g, 0, attestation, &bytes);
+        const checks = table.claimChecks(1, processor.GossipProcessor.batch_max);
+        try t.expectEqual(@as(usize, 1), checks.len);
+        try t.expectEqual(@as(u64, @intFromBool(i > 0)), table.refusals[k][refusal]);
+        const token = checks.tokens[0];
+        const cell = table.get(token).?;
+        try t.expect(table.classify(token, case.available));
+        try t.expectEqual(case.state, cell.state);
+        try t.expectEqual(@as(u64, 1), table.refusals[k][refusal]);
+        if (case.state == .verdict_pending) {
+            try t.expectEqual(Gossipsub.Verdict.ignore, cell.verdict);
+            const now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
+            try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(cell.handle, cell.verdict, now));
+            table.retire(token);
+        }
+    }
+    try t.expectEqual(@as(usize, 2), table.waiting_items[k]);
+    try t.expectEqual(@as(u64, 0), table.refusals[k][@intFromEnum(processor.GossipProcessor.Refusal.dependency_full)]);
+}

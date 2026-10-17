@@ -18,6 +18,7 @@ const metadata_mod = @import("metadata.zig");
 const Kind = limits_mod.Kind;
 const assert = std.debug.assert;
 pub const batch_max = 64;
+pub const dependency_search_slots = .{ .past = 2, .future = 1 };
 pub const batch_bytes = 16 * 1024 * 1024;
 pub const payload_max = @import("../constants.zig").MAX_PAYLOAD_SIZE;
 comptime {
@@ -40,6 +41,9 @@ slot: u64 = 0,
 last_now: u64 = 0,
 prune_cursor: usize = 0,
 prune_remaining: usize = 0,
+drop_peers: [16]PeerId = undefined,
+drop_peer_count: usize = 0,
+peer_drop_before: u64 = 0,
 drop_before: u64 = 0,
 closed: bool = false,
 refusals: [limits_mod.kind_count][refusal_count]u64 = @splat(@splat(0)),
@@ -140,7 +144,7 @@ pub const Occupancy = enum { queued, waiting, checking, executing };
 pub const occupancy_count = @typeInfo(Occupancy).@"enum".fields.len;
 /// Why the processor refused a message: its kind's items, bytes or cells, the shared payload
 /// store, its source's share, slot or fork eligibility, or dependency waiting room.
-pub const Refusal = enum { kind_full, store_full, source_full, ineligible, dependency_full };
+pub const Refusal = enum { kind_full, store_full, source_full, ineligible, dependency_full, dependency_unsearchable };
 pub const refusal_count = @typeInfo(Refusal).@"enum".fields.len;
 pub const Job = struct { kind: Kind, start: usize, len: usize, grouped: bool };
 pub const Batch = struct {
@@ -494,7 +498,6 @@ pub fn maintain(self: *GossipProcessor, now: u64, slot: u64) void {
     self.groups.advance(now, batch_max);
     if (self.slot != slot) {
         self.slot = slot;
-        self.prune_cursor = 0;
         self.prune_remaining = self.cells.len;
     }
     for (0..batch_max) |_| {
@@ -503,13 +506,18 @@ pub fn maintain(self: *GossipProcessor, now: u64, slot: u64) void {
     }
     for (0..@min(batch_max, self.prune_remaining)) |_| {
         const index = self.prune_cursor;
-        self.prune_cursor += 1;
+        self.prune_cursor = (self.prune_cursor + 1) % self.cells.len;
         self.prune_remaining -= 1;
         const cell = &self.cells[index];
         switch (cell.state) {
-            .needs_check, .checking, .waiting, .queued => if (!self.eligible(cell)) self.ignore(cell),
+            .needs_check, .waiting, .queued => if (!self.eligible(cell) or self.peerDropped(cell)) self.ignore(cell),
+            .checking => if (!self.eligible(cell)) self.ignore(cell),
             else => {},
         }
+    }
+    if (self.prune_remaining == 0) {
+        self.drop_peer_count = 0;
+        self.peer_drop_before = 0;
     }
 }
 fn eligible(self: *const GossipProcessor, cell: *const Cell) bool {
@@ -553,7 +561,7 @@ pub fn claimDemand(self: *GossipProcessor, now: u64, demand: Claim) Batch {
             const index = self.nextKind(kind);
             if (index == none) break;
             const cell = &self.cells[index];
-            if (now >= cell.deadline or !self.eligible(cell)) {
+            if (now >= cell.deadline or !self.eligible(cell) or self.peerDropped(cell)) {
                 work += 1;
                 self.ignore(cell);
                 continue;
@@ -565,7 +573,7 @@ pub fn claimDemand(self: *GossipProcessor, now: u64, demand: Claim) Batch {
             for (0..@min(batch_max - work, group_count)) |_| {
                 if (batch.len >= @min(batch_max, demand.items)) break;
                 const member = if (group == none) index else self.groups.rows[group].members.tail;
-                if (now >= self.cells[member].deadline or !self.eligible(&self.cells[member])) {
+                if (now >= self.cells[member].deadline or !self.eligible(&self.cells[member]) or self.peerDropped(&self.cells[member])) {
                     self.ignore(&self.cells[member]);
                     work += 1;
                     continue;
@@ -609,7 +617,7 @@ pub fn claimChecks(self: *GossipProcessor, now: u64, limit: usize) Batch {
             if (index == none) break;
             work += 1;
             const cell = &self.cells[index];
-            if (now >= cell.deadline or !self.eligible(cell)) {
+            if (now >= cell.deadline or !self.eligible(cell) or self.peerDropped(cell)) {
                 self.ignore(cell);
                 continue;
             }
@@ -624,12 +632,19 @@ pub fn claimChecks(self: *GossipProcessor, now: u64, limit: usize) Batch {
 pub fn classify(self: *GossipProcessor, handle: Token, available: bool) bool {
     const cell = self.get(handle) orelse return false;
     if (cell.state != .checking or cell.retired) return false;
+    const searchable = if (cell.metadata.slot) |slot|
+        slot >= self.slot -| dependency_search_slots.past and slot <= self.slot +| dependency_search_slots.future
+    else
+        true;
     if (self.last_now >= cell.deadline or !self.eligible(cell)) {
         self.ignore(cell);
     } else if (available) {
         self.transition(handle.index, .queued);
     } else if (cell.check_notification != self.dependencies.notification or self.dependencies.notification == std.math.maxInt(u64)) {
         self.transition(handle.index, .needs_check);
+    } else if (!searchable) {
+        self.ignore(cell);
+        self.refuse(cell.kind, .dependency_unsearchable);
     } else {
         const k = @intFromEnum(cell.kind);
         const peer_full = if (cell.source) |source|
@@ -654,8 +669,25 @@ pub fn ignore(self: *GossipProcessor, cell: *Cell) void {
 }
 pub fn dropQueued(self: *GossipProcessor) void {
     self.drop_before = self.order;
-    self.prune_cursor = 0;
     self.prune_remaining = self.cells.len;
+}
+pub fn dropPeer(self: *GossipProcessor, identity: *const PeerId) void {
+    if (self.closed) return;
+    for (self.drop_peers[0..self.drop_peer_count]) |*peer| if (peer.eql(identity)) return;
+    if (self.drop_peer_count == self.drop_peers.len) {
+        self.peer_drop_before = self.order;
+        self.drop_peer_count = 0;
+    } else {
+        self.drop_peers[self.drop_peer_count] = identity.*;
+        self.drop_peer_count += 1;
+    }
+    // Keep the cursor moving even under a continuous stream of fatal reports.
+    self.prune_remaining = self.cells.len;
+}
+fn peerDropped(self: *const GossipProcessor, cell: *const Cell) bool {
+    if (cell.order <= self.peer_drop_before) return true;
+    for (self.drop_peers[0..self.drop_peer_count]) |*peer| if (peer.eql(&cell.identity)) return true;
+    return false;
 }
 pub fn nextVerdict(self: *const GossipProcessor) ?Token {
     for (limits_mod.priority) |kind| {

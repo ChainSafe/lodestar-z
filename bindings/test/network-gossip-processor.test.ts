@@ -204,6 +204,17 @@ test("native processor retains dependencies, protects blocks, batches ready work
       )
       .toBe(1);
     expect(exchange(pair.right, {...gossipUrgent}).checks).toEqual([]);
+
+    view.setBigUint64(4, 100n, true);
+    data[132] = 9;
+    await pair.left.publishGossip(ATTESTATION, data);
+    const [pending] = await checks(pair.right, 1);
+    exchange(pair.right, settleOnly, [classify(pending.handle, false)]);
+    const waitingMetric = 'lodestar_gossip_validation_waiting_block_count{topic="beacon_attestation"}';
+    expect(metricValue(await pair.right.getMetrics(), waitingMetric)).toBe(1);
+    exchange(pair.right, settleOnly, [{action: "fatal", count: 1, peerId: pair.identity.peerId, type: "reportPeer"}]);
+    await expect.poll(async () => metricValue(await pair.right.getMetrics(), waitingMetric), {timeout: 5000}).toBe(0);
+    expect(exchange(pair.right, gossipAll)).toMatchObject({checks: [], gossip: null});
   } finally {
     await Promise.allSettled([pair.left.stop(), pair.right.close()]);
   }

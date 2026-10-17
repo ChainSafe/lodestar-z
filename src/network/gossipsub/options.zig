@@ -13,6 +13,7 @@ const mcache = @import("mcache.zig");
 const active_send = @import("active_send.zig");
 
 pub const mcache_arena_bytes_min = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + storage.page_bytes;
+pub const seen_capacity_max = 1_048_576;
 
 pub const Options = struct {
     /// Required startup namespace. The owner copies it during initialization.
@@ -75,8 +76,12 @@ pub const Options = struct {
 
     pub fn setPayloadLimits(o: *Options, limits: *const gossip_limits.Limits) error{InvalidLimits}!void {
         gossip_limits.validate(limits) catch return error.InvalidLimits;
+        if (o.heartbeat_interval_ms == 0 or o.heartbeat_interval_ms > 86_400_000 or o.seen_ttl_ms == 0 or o.seen_ttl_ms > 86_400_000) return error.InvalidLimits;
         o.payload_limits = limits.*;
         o.validation_capacity = gossip_limits.items(limits);
+        const history_ms = o.heartbeat_interval_ms * constants.mcache_len;
+        const windows = std.math.divCeil(u64, o.seen_ttl_ms, history_ms) catch unreachable;
+        o.seen_capacity = @intCast(@min(seen_capacity_max, @max(o.seen_capacity, o.validation_capacity * windows)));
         // Pending validation and retained history each receive the configured byte allowance.
         o.mcache_arena_bytes = @max(2 * gossip_limits.bytes(limits), mcache_arena_bytes_min);
     }
@@ -125,7 +130,7 @@ pub const Options = struct {
             }
             if (o.validation_capacity != gossip_limits.items(&limits) or o.mcache_arena_bytes < 2 * gossip_limits.bytes(&limits)) return error.InvalidLimits;
         }
-        try range(o.seen_capacity, 1, 1_048_576);
+        try range(o.seen_capacity, 1, seen_capacity_max);
         try range(o.mcache_capacity, 1, mcache.History.capacity_max);
         try range(o.mcache_arena_bytes, mcache_arena_bytes_min, 1024 * 1024 * 1024);
         const page = @import("receive_pool.zig").page_bytes;
