@@ -16,6 +16,7 @@ const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
 const ComputeIndexUtils = @import("./committee_indices.zig");
 const computeProposerIndex = ComputeIndexUtils.computeProposerIndex;
 const computeSyncCommitteeIndices = ComputeIndexUtils.computeSyncCommitteeIndices;
+const computeSyncCommitteeIndicesElectra = ComputeIndexUtils.computeSyncCommitteeIndicesElectra;
 const computeEpochAtSlot = @import("./epoch.zig").computeEpochAtSlot;
 const ByteCount = @import("./committee_indices.zig").ByteCount;
 
@@ -69,12 +70,33 @@ test "computeProposers - sanity" {
 }
 
 pub fn getNextSyncCommitteeIndices(comptime fork: ForkSeq, allocator: Allocator, state: *BeaconState(fork), active_indices: []const ValidatorIndex, effective_balance_increments: EffectiveBalanceIncrements, out: []ValidatorIndex) !void {
-    const rand_byte_count: ByteCount = if (comptime fork.gte(.electra)) ByteCount.Two else ByteCount.One;
-    const max_effective_balance: u64 = if (comptime fork.gte(.electra)) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
     const epoch = computeEpochAtSlot(try state.slot()) + 1;
     var seed: [32]u8 = undefined;
     try getSeed(fork, state, epoch, c.DOMAIN_SYNC_COMMITTEE, &seed);
-    try computeSyncCommitteeIndices(allocator, &seed, active_indices, effective_balance_increments.items, rand_byte_count, max_effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT, preset.SHUFFLE_ROUND_COUNT, out);
+    if (comptime fork.gte(.electra)) {
+        try computeSyncCommitteeIndicesElectra(
+            allocator,
+            &seed,
+            active_indices,
+            effective_balance_increments.items,
+            preset.MAX_EFFECTIVE_BALANCE_ELECTRA,
+            preset.EFFECTIVE_BALANCE_INCREMENT,
+            preset.SHUFFLE_ROUND_COUNT,
+            out,
+        );
+    } else {
+        try computeSyncCommitteeIndices(
+            allocator,
+            &seed,
+            active_indices,
+            effective_balance_increments.items,
+            ByteCount.One,
+            preset.MAX_EFFECTIVE_BALANCE,
+            preset.EFFECTIVE_BALANCE_INCREMENT,
+            preset.SHUFFLE_ROUND_COUNT,
+            out,
+        );
+    }
 }
 
 pub fn getRandaoMix(comptime fork: ForkSeq, state: *BeaconState(fork), epoch: Epoch) !*const [32]u8 {
