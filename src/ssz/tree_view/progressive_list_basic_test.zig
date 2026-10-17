@@ -25,6 +25,8 @@ test "progressive chunked basic view matches plain at subtree and blob boundarie
             defer value.deinit(allocator);
             const view = try ST.TreeView.fromValue(allocator, &pool, &value);
             defer view.deinit();
+            var empty_iterator = view.iteratorReadonly(0);
+            try std.testing.expectEqual(null, try empty_iterator.next());
             for (0..len) |i| {
                 const item: Element.Type = if (Element.Type == bool) i % 3 != 0 else @intCast(i % 251);
                 try view.push(item);
@@ -36,10 +38,11 @@ test "progressive chunked basic view matches plain at subtree and blob boundarie
             _ = try view.getAllInto(output);
             try std.testing.expectEqualSlices(Element.Type, value.items, output);
             try expectRoot(ST, view, &value);
-            for ([_]usize{ 0, 1, 20 * per_chunk, 21 * per_chunk + 1, 84 * per_chunk, 85 * per_chunk + 1, 148 * per_chunk, 149 * per_chunk, len - 1 }) |start| {
+            for ([_]usize{ 0, 1, 20 * per_chunk, 21 * per_chunk + 1, 84 * per_chunk, 85 * per_chunk + 1, 148 * per_chunk, 149 * per_chunk, len - 1, len }) |start| {
                 var iterator = view.iteratorReadonly(start);
-                for (value.items[start..]) |item| try std.testing.expectEqual(item, try iterator.next());
-                try std.testing.expectError(error.InvalidLength, iterator.next());
+                for (value.items[start..]) |item| try std.testing.expectEqual(@as(?Element.Type, item), try iterator.next());
+                try std.testing.expectEqual(null, try iterator.next());
+                try std.testing.expectEqual(null, try iterator.next());
             }
             for ([_]usize{ 20 * per_chunk, 21 * per_chunk, 84 * per_chunk + 1, 85 * per_chunk, 148 * per_chunk + 1, 149 * per_chunk, 340 * per_chunk, 341 * per_chunk }) |index| {
                 try view.set(index, Element.default_value);
@@ -260,7 +263,7 @@ test "progressive chunked basic bulk and warmed writes allocate no scratch" {
         var bytes: [4096]u8 = undefined;
         _ = try view.serializeIntoBytes(&bytes);
         var iterator = view.iteratorReadonly(400);
-        for (400..420) |i| try std.testing.expectEqual(@as(u64, i), try iterator.next());
+        for (400..420) |i| try std.testing.expectEqual(@as(?u64, i), try iterator.next());
         try std.testing.expect(!failing.has_induced_failure);
     }
     try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
@@ -291,8 +294,8 @@ test "progressive basic view packed types and subtree boundaries" {
             try std.testing.expectEqualSlices(Element.Type, value.items, output);
             try expectRoot(ST, view, &value);
             var iterator = view.iteratorReadonly(3);
-            for (value.items[3..]) |item| try std.testing.expectEqual(item, try iterator.next());
-            try std.testing.expectError(error.InvalidLength, iterator.next());
+            for (value.items[3..]) |item| try std.testing.expectEqual(@as(?Element.Type, item), try iterator.next());
+            try std.testing.expectEqual(null, try iterator.next());
             try std.testing.expectError(error.IndexOutOfBounds, view.get(count));
             try std.testing.expectError(error.IndexOutOfBounds, view.set(count, Element.default_value));
             try std.testing.expectError(error.InvalidLength, view.growTo(count - 1));
