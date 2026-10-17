@@ -56,6 +56,33 @@ pub fn subtreeGindex(subtree_i: usize) Gindex {
     return @enumFromInt(@intFromEnum(spineGindex(subtree_i)) * 2);
 }
 
+/// Builds progressive contents from borrowed element roots; the caller keeps its references.
+/// `nodes` is scratch and holds unspecified ids afterwards. The result is fresh.
+pub fn contentsFromNodes(pool: *Node.Pool, nodes: []Node.Id) !Node.Id {
+    if (nodes.len > max_node_chunks) return error.InputTooLong;
+    var contents: Node.Id = @enumFromInt(0);
+    errdefer pool.unref(contents);
+
+    var subtree_i = subtreeCount(nodes.len);
+    while (subtree_i > 0) {
+        subtree_i -= 1;
+        const start = subtreeStartChunk(subtree_i);
+        const end = @min(start + subtreeLength(subtree_i), nodes.len);
+        const depth = subtreeDepth(subtree_i);
+        // Subtree 0 is a borrowed root itself. Deeper subtrees get fresh parents, and
+        // `Node.fillWithContents` restores the borrowed slice if it fails.
+        const subtree = if (depth == 0)
+            nodes[start]
+        else
+            try Node.fillWithContents(pool, nodes[start..end], depth);
+        contents = pool.createBranch(subtree, contents) catch |err| {
+            if (depth != 0) pool.unref(subtree);
+            return err;
+        };
+    }
+    return contents;
+}
+
 /// Returns a list root whose spine grows from `old_count` to `new_count` subtrees, with zero
 /// subtrees appended. The caller owns one reference to the result; `root` is unchanged.
 pub fn growSpine(pool: *Node.Pool, root: Node.Id, old_count: usize, new_count: usize) !Node.Id {

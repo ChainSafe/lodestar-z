@@ -373,34 +373,8 @@ pub fn ProgressiveListCompositeTreeView(comptime ST: type) type {
             var iterator = self.iteratorReadonly(@min(index, list_length));
             for (nodes) |*node| node.* = try iterator.nextNode();
 
-            var contents: ?Node.Id = @enumFromInt(0);
-            defer if (contents) |id| pool.unref(id);
-
-            var subtree_i = progressive.subtreeCount(target_length);
-            while (subtree_i > 0) {
-                subtree_i -= 1;
-                const start = progressive.subtreeStartChunk(subtree_i);
-                const end = @min(start + progressive.subtreeLength(subtree_i), target_length);
-                const depth = progressive.subtreeDepth(subtree_i);
-                // Subtree 0 is a borrowed element root. Deeper subtrees get fresh parents, and
-                // `fillWithContents` restores the borrowed slice if it fails.
-                const subtree = if (depth == 0)
-                    nodes[start]
-                else
-                    try Node.fillWithContents(pool, nodes[start..end], depth);
-                contents = pool.createBranch(subtree, contents.?) catch |err| {
-                    if (depth != 0) pool.unref(subtree);
-                    return err;
-                };
-            }
-
-            var length_node: ?Node.Id = try pool.createLeafFromUint(target_length);
-            defer if (length_node) |id| pool.unref(id);
-
-            const root = try pool.createBranch(contents.?, length_node.?);
+            const root = try ST.tree.fromNodes(pool, nodes);
             errdefer pool.unref(root);
-            contents = null;
-            length_node = null;
 
             return Self.init(self.allocator, pool, root);
         }

@@ -918,3 +918,76 @@ test "memory_safety: variable progressive list clone should preserve out on OOM"
         }
     }.run, .{&value});
 }
+
+test "FixedProgressiveListType zeros should build a canonical sparse spine without element allocation" {
+    const allocator = std.testing.allocator;
+    inline for (.{ false, true }) |chunked| {
+        const List = FixedProgressiveListType(UintType(8), .{ .chunked_leaf = chunked });
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        var pool = try Node.Pool.init(.{ .allocator = failing.allocator(), .page_allocator = allocator, .pool_size = 64 });
+        defer pool.deinit();
+        const baseline = pool.getNodesInUse();
+        for ([_]usize{ 0, 1, 32, 33, 160, 161, 672, 673, 2721 }) |len| {
+            const root = try List.tree.zeros(&pool, len);
+            var expected: List.Type = .empty;
+            defer expected.deinit(allocator);
+            try expected.resize(allocator, len);
+            @memset(expected.items, 0);
+            var hash: [32]u8 = undefined;
+            try List.hashTreeRoot(allocator, &expected, &hash);
+            try std.testing.expectEqualSlices(u8, &hash, root.getRoot(&pool));
+            try std.testing.expectEqual(len, try List.tree.length(root, &pool));
+            pool.unref(root);
+            try std.testing.expectEqual(baseline, pool.getNodesInUse());
+        }
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+}
+
+test "memory_safety: FixedProgressiveListType fromNodes should borrow element roots and keep the source on pool exhaustion" {
+    const allocator = std.testing.allocator;
+    const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
+    const Entry = StructContainerType(struct { epoch: UintType(64), root: ByteVectorType(32) });
+    const Before = @import("list.zig").FixedListType(Entry, 128, .{});
+    const After = FixedProgressiveListType(Entry, .{});
+    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+    {
+        var value = Before.default_value;
+        defer value.deinit(allocator);
+        for (0..86) |i| try value.append(allocator, .{ .epoch = i, .root = @splat(@truncate(i)) });
+        const source = try Before.TreeView.fromValue(allocator, &pool, &value);
+        defer source.deinit();
+        const source_root = (try source.hashTreeRoot()).*;
+        var expected_root: [32]u8 = undefined;
+        try After.hashTreeRoot(allocator, &value, &expected_root);
+        const source_count = pool.getNodesInUse();
+        var saw_failure = false;
+        for (0..130) |available| {
+            var nodes: [86]Node.Id = undefined;
+            try source.getRoot().getNodesAtDepth(&pool, Before.chunk_depth + 1, 0, &nodes);
+            const first = nodes[0];
+            var held: std.ArrayList(Node.Id) = .empty;
+            defer held.deinit(allocator);
+            while (pool.nodes.len - pool.getNodesInUse() > available) try held.append(allocator, try pool.createLeafFromUint(0));
+            const root = After.tree.fromNodes(&pool, &nodes) catch |err| {
+                try std.testing.expectEqual(error.PoolExhausted, err);
+                pool.free(held.items);
+                try std.testing.expectEqual(source_count, pool.getNodesInUse());
+                try std.testing.expectEqualSlices(u8, &source_root, try source.hashTreeRoot());
+                saw_failure = true;
+                continue;
+            };
+            pool.free(held.items);
+            const migrated = try After.TreeView.init(allocator, &pool, root);
+            try std.testing.expectEqualSlices(u8, &expected_root, try migrated.hashTreeRoot());
+            try std.testing.expectEqual(first, try root.getNode(&pool, @enumFromInt(4)));
+            migrated.deinit();
+            try std.testing.expectEqual(source_count, pool.getNodesInUse());
+            try std.testing.expect(saw_failure);
+            break;
+        } else return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}

@@ -19,6 +19,8 @@ pub const isBitVectorType = types.isBitVectorType;
 
 pub const ByteListType = types.ByteListType;
 pub const isByteListType = types.isByteListType;
+pub const ProgressiveByteListType = types.ProgressiveByteListType;
+pub const isProgressiveByteListType = types.isProgressiveByteListType;
 
 pub const ByteVectorType = types.ByteVectorType;
 pub const isByteVectorType = types.isByteVectorType;

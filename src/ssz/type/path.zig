@@ -162,6 +162,17 @@ fn getFieldGindex(comptime item: PathItem) Gindex {
                 .container => {
                     return Gindex.fromDepth(ST.chunk_depth, child.index);
                 },
+                .progressive_container => return comptime ST.getFieldGindex(ST.fields[child.index].name),
+                .progressive_list, .progressive_bit_list => {
+                    const chunk_index = if (comptime ST.kind == .progressive_bit_list)
+                        child.index / 256
+                    else if (comptime isBasicType(ST.Element))
+                        child.index / (BYTES_PER_CHUNK / ST.Element.fixed_size)
+                    else
+                        child.index;
+                    // The contents root is the left child of the length mix-in.
+                    return Gindex.concat(&.{ @enumFromInt(2), @import("progressive.zig").chunkGindex(chunk_index) });
+                },
                 .vector, .list => {
                     // Lists have an extra depth level for the length mixin
                     const depth = ST.chunk_depth + @as(u8, if (ST.kind == .list) 1 else 0);

@@ -563,3 +563,33 @@ test "ProgressiveListBasicTreeView should reuse one pending leaf for repeated wr
     }
     try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
 }
+
+test "ProgressiveListBasicTreeView should read, write and grow a zeros tree" {
+    inline for (.{ List, ChunkedList }) |ST| {
+        var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
+        defer pool.deinit();
+        {
+            const root = try ST.tree.zeros(&pool, 1400);
+            const view = ST.TreeView.init(allocator, &pool, root) catch |err| {
+                pool.unref(root);
+                return err;
+            };
+            defer view.deinit();
+
+            try std.testing.expectEqual(@as(u64, 0), try view.get(1399));
+            try view.set(600, 6);
+            try view.push(7);
+
+            var expected: ST.Type = .empty;
+            defer expected.deinit(allocator);
+            try expected.resize(allocator, 1401);
+            @memset(expected.items, 0);
+            expected.items[600] = 6;
+            expected.items[1400] = 7;
+            try expectRoot(ST, view, &expected);
+            var it = view.iteratorReadonly(1398);
+            for (expected.items[1398..]) |item| try std.testing.expectEqual(@as(?u64, item), try it.next());
+        }
+        try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
+    }
+}
