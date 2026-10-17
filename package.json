@@ -55,6 +55,7 @@
     "prepare": "pnpm run prepare-${LODESTAR_PRESET:-mainnet}",
     "prepare-mainnet": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=mainnet",
     "prepare-minimal": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=minimal",
+    "prepare-gnosis": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=gnosis",
     "lint": "biome check",
     "test:network-interop": "zig build build-exe:network_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/run.mjs zig-out/bin/network_interop_peer",
     "test:network-core-interop": "zig build build-exe:core_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/core_run.mjs",
