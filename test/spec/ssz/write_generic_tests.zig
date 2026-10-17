@@ -67,9 +67,12 @@ pub fn main(init: std.process.Init) !void {
         \\const options = @import("spec_test_options");
         \\const types = @import("json_types.zig");
         \\const test_case = @import("json_test_case.zig");
+        \\const yaml_types = @import("generic_types.zig");
+        \\const yaml_test_case = @import("test_case.zig");
         \\
         \\
     );
+    const yaml_total = try writeYamlTests(allocator, io, writer);
 
     var total: usize = 0;
     var skipped: usize = 0;
@@ -141,5 +144,139 @@ pub fn main(init: std.process.Init) !void {
     const out = try std.Io.Dir.cwd().createFile(io, "test/spec/ssz/generic_tests.zig", .{});
     defer out.close(io);
     try out.writeStreamingAll(io, buffer.written());
-    std.log.info("generated {d} SSZ cases ({d} skipped), pin {s}", .{ total, skipped, options.ssz_spec_test_version });
+    std.log.info("generated {d} YAML cases from {s}, {d} JSON cases ({d} skipped) from {s}", .{
+        yaml_total,
+        options.ssz_generic_spec_test_version,
+        total,
+        skipped,
+        options.ssz_spec_test_version,
+    });
+}
+
+/// The YAML `ssz_generic` cases of the last consensus release that ships them. They cover far more
+/// invalid encodings than the JSON fixtures. Listing the categories, and requiring cases in each of
+/// their directories, makes missing or empty fixtures fail.
+const yaml_cases_path = "general/tests/general/phase0/ssz_generic";
+const yaml_categories = [_][]const u8{
+    "basic_progressive_list",
+    "basic_vector",
+    "bitlist",
+    "bitvector",
+    "boolean",
+    "compatible_unions",
+    "containers",
+    "progressive_bitlist",
+    "progressive_containers",
+    "uints",
+};
+
+fn writeYamlTests(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer) !usize {
+    const cases_path = try std.fs.path.join(allocator, &.{
+        options.spec_test_out_dir,
+        options.ssz_generic_spec_test_version,
+        yaml_cases_path,
+    });
+    var cases_dir = try std.Io.Dir.cwd().openDir(io, cases_path, .{});
+    defer cases_dir.close(io);
+
+    var count: usize = 0;
+    for (yaml_categories) |category| {
+        for ([_]bool{ true, false }) |valid| {
+            const sub_path = try std.fs.path.join(allocator, &.{ category, if (valid) "valid" else "invalid" });
+            var dir = try cases_dir.openDir(io, sub_path, .{ .iterate = true });
+            defer dir.close(io);
+
+            const before = count;
+            var it = dir.iterate();
+            while (try it.next(io)) |entry| {
+                if (entry.kind != .directory) continue;
+                const type_name = getTypeName(category, entry.name);
+                // Zero-length vectors are rejected at compile time.
+                if (!valid and std.mem.find(u8, type_name, "vec_") != null and std.mem.find(u8, type_name, "_0") != null) {
+                    continue;
+                }
+                try writeYamlTest(writer, valid, category, entry.name, type_name);
+                count += 1;
+            }
+            if (count == before) {
+                std.log.err("no SSZ generic cases in {s}", .{sub_path});
+                return error.EmptyFixtures;
+            }
+        }
+    }
+    return count;
+}
+
+fn getTypeName(test_dir_name: []const u8, test_name: []const u8) []const u8 {
+    if (std.mem.eql(u8, test_dir_name, "boolean")) {
+        return "boolean";
+    }
+    if (std.mem.eql(u8, test_dir_name, "progressive_bitlist")) {
+        return "progbitlist";
+    }
+    if (std.mem.eql(u8, test_dir_name, "containers")) {
+        var split_it = std.mem.splitScalar(u8, test_name, '_');
+        return split_it.first();
+    }
+    if (std.mem.eql(u8, test_dir_name, "basic_progressive_list")) {
+        var split_it = std.mem.splitScalar(u8, test_name, '_');
+        _ = split_it.next();
+        _ = split_it.next();
+        return test_name[0 .. (split_it.index orelse (split_it.buffer.len + 1)) - 1];
+    }
+    if (std.mem.eql(u8, test_dir_name, "progressive_containers")) {
+        if (std.mem.find(u8, test_name, "TestStruct")) |idx| {
+            return test_name[0 .. idx + "TestStruct".len];
+        }
+        if (std.mem.find(u8, test_name, "Struct")) |idx| {
+            return test_name[0 .. idx + "Struct".len];
+        }
+        return test_name;
+    }
+    if (std.mem.eql(u8, test_dir_name, "compatible_unions")) {
+        if (std.mem.startsWith(u8, test_name, "CompatibleUnionABCA_")) return "CompatibleUnionABCA";
+        if (std.mem.startsWith(u8, test_name, "CompatibleUnionBC_")) return "CompatibleUnionBC";
+        if (std.mem.startsWith(u8, test_name, "CompatibleUnionA_")) return "CompatibleUnionA";
+        return test_name;
+    }
+    if (std.mem.eql(u8, test_dir_name, "basic_vector")) {
+        var split_it = std.mem.splitScalar(u8, test_name, '_');
+        _ = split_it.next();
+        _ = split_it.next();
+        _ = split_it.next();
+        return test_name[0 .. (split_it.index orelse (split_it.buffer.len + 1)) - 1];
+    }
+    var split_it = std.mem.splitScalar(u8, test_name, '_');
+    _ = split_it.next();
+    _ = split_it.next();
+    return test_name[0 .. (split_it.index orelse (split_it.buffer.len + 1)) - 1];
+}
+
+fn writeYamlTest(writer: *std.Io.Writer, valid: bool, category: []const u8, test_name: []const u8, type_name: []const u8) !void {
+    try writer.print(
+        \\test "{s} - {s}" {{
+        \\    const test_dir_name = try std.fs.path.join(std.testing.allocator, &.{{
+        \\        options.spec_test_out_dir,
+        \\        options.ssz_generic_spec_test_version,
+        \\        "{s}/{s}/{s}/{s}",
+        \\    }});
+        \\    defer std.testing.allocator.free(test_dir_name);
+        \\
+        \\    var test_dir = try std.Io.Dir.openDir(.cwd(), std.testing.io, test_dir_name, .{{}});
+        \\    defer test_dir.close(std.testing.io);
+        \\    try yaml_test_case.{s}(yaml_types.{s}, std.testing.allocator, test_dir{s});
+        \\}}
+        \\
+        \\
+    , .{
+        if (valid) "Valid" else "Invalid",
+        test_name,
+        yaml_cases_path,
+        category,
+        if (valid) "valid" else "invalid",
+        test_name,
+        if (valid) "validTestCase" else "invalidTestCase",
+        type_name,
+        if (valid) ", \"meta.yaml\"" else "",
+    });
 }

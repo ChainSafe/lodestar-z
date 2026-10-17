@@ -129,6 +129,11 @@
                 .default = "v1.7.0-beta.4",
                 .description = "Consensus spec tests version tag.",
             },
+            .ssz_generic_spec_test_version = .{
+                .type = .string,
+                .default = "v1.7.0-alpha.11",
+                .description = "Last consensus spec tests tag that ships the YAML ssz_generic cases.",
+            },
             .ssz_spec_test_url = .{
                 .type = .string,
                 .default = "https://github.com/ethereum/ssz-specs",
@@ -509,7 +514,7 @@
         .ssz_generic_spec_tests = .{
             .root_module = .{
                 .root_source_file = "test/spec/ssz/generic_tests.zig",
-                .imports = .{ .hex, .persistent_merkle_tree, .ssz, .spec_test_options },
+                .imports = .{ .hex, .snappy, .persistent_merkle_tree, .ssz, .spec_test_options, .yaml },
             },
         },
         .ssz_static_spec_tests = .{

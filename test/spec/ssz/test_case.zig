@@ -358,3 +358,89 @@ fn ChunkedLayout(comptime ST: type) ?type {
     if (ST.kind != .progressive_list or !ssz.isBasicType(ST.Element)) return null;
     return ssz.FixedProgressiveListType(ST.Element, .{ .chunked_leaf = true });
 }
+
+pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+
+    // read expected serialized
+
+    const serialized_snappy_bytes = try path.readFileAlloc(io, "serialized.ssz_snappy", allocator, .unlimited);
+
+    const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(serialized_snappy_bytes));
+    const serialized_len = try snappy.uncompress(serialized_snappy_bytes, serialized_buf);
+    const serialized_expected = serialized_buf[0..serialized_len];
+
+    // test deserialization
+
+    try std.testing.expectError(error.InvalidSSZ, validate(ST, serialized_expected));
+
+    var value_actual: ST.Type = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
+
+    try std.testing.expectError(error.InvalidSSZ, deserialize(ST, allocator, serialized_expected, &value_actual));
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = gpa,
+        .allocator = gpa,
+        .pool_size = 1_000_000,
+    });
+    defer pool.deinit();
+
+    try std.testing.expectError(error.InvalidSSZ, deserializeTree(ST, &pool, serialized_expected));
+    if (comptime ChunkedLayout(ST)) |Chunked| {
+        try std.testing.expectError(
+            error.InvalidSSZ,
+            deserializeTree(Chunked, &pool, serialized_expected),
+        );
+    }
+}
+
+fn deserializeTree(comptime ST: type, pool: *Node.Pool, serialized: []const u8) !void {
+    const node = ST.tree.deserializeFromBytes(pool, serialized) catch |err| switch (@as(anyerror, err)) {
+        error.OutOfMemory, error.PoolExhausted, error.RefCountOverflow => return err,
+        else => return error.InvalidSSZ,
+    };
+    defer pool.unref(node);
+}
+
+test "tree invalid-case normalization preserves resource errors" {
+    var pool = try Node.Pool.init(.{
+        .page_allocator = std.testing.allocator,
+        .allocator = std.testing.failing_allocator,
+        .pool_size = 0,
+    });
+    defer pool.deinit();
+
+    try std.testing.expectError(error.PoolExhausted, deserializeTree(ssz.BoolType(), &pool, &.{1}));
+    try std.testing.expectError(error.InvalidSSZ, deserializeTree(ssz.BoolType(), &pool, &.{2}));
+    try std.testing.expectError(
+        error.PoolExhausted,
+        deserializeTree(ssz.FixedProgressiveListType(ssz.BoolType(), .{}), &pool, &.{1}),
+    );
+
+    var payload_pool = try Node.Pool.init(.{
+        .page_allocator = std.testing.allocator,
+        .allocator = std.testing.failing_allocator,
+        .pool_size = 1,
+    });
+    defer payload_pool.deinit();
+
+    const Container = ssz.StructContainerType(struct { value: ssz.BoolType() });
+    try std.testing.expectError(error.OutOfMemory, deserializeTree(Container, &payload_pool, &.{1}));
+}
+
+// Wrap validate with a single error type
+fn validate(comptime ST: type, serialized: []const u8) !void {
+    return ST.serialized.validate(serialized) catch error.InvalidSSZ;
+}
+
+// Wrap deserializeFromBytes with a single error type
+fn deserialize(comptime ST: type, allocator: Allocator, serialized_expected: []const u8, value_actual: anytype) !void {
+    if (comptime ssz.isFixedType(ST)) {
+        return ST.deserializeFromBytes(serialized_expected, value_actual) catch error.InvalidSSZ;
+    } else {
+        return ST.deserializeFromBytes(allocator, serialized_expected, value_actual) catch error.InvalidSSZ;
+    }
+}
