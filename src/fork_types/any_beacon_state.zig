@@ -1,5 +1,5 @@
 const std = @import("std");
-const ListView = @import("list_view.zig").ListView;
+const AnyStateList = @import("any_state_list.zig").AnyStateList;
 const Allocator = std.mem.Allocator;
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
@@ -393,19 +393,19 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    fn getListField(self: *AnyBeaconState, comptime field: []const u8, comptime View: type) !View {
+    fn getListField(self: *AnyBeaconState, comptime field: []const u8) !AnyStateList(field) {
         return switch (self.*) {
-            inline else => |state| {
+            inline else => |state, fork_seq| {
                 const State = @TypeOf(state.*).SszType;
                 if (comptime @hasField(State.Type, field)) {
-                    return View.fromView(State.getFieldType(field), try state.get(field));
+                    return AnyStateList(field).fromView(fork_seq, try state.get(field));
                 }
                 return error.InvalidAtFork;
             },
         };
     }
 
-    fn setListField(self: *AnyBeaconState, comptime field: []const u8, comptime View: type, value: View) !void {
+    fn setListField(self: *AnyBeaconState, comptime field: []const u8, value: AnyStateList(field)) !void {
         return switch (self.*) {
             inline else => |state| {
                 const State = @TypeOf(state.*).SszType;
@@ -418,8 +418,8 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn validators(self: *AnyBeaconState) !ListView(ct.phase0.Validators, ct.gloas.Validators) {
-        return self.getListField("validators", ListView(ct.phase0.Validators, ct.gloas.Validators));
+    pub fn validators(self: *AnyBeaconState) !AnyStateList("validators") {
+        return self.getListField("validators");
     }
 
     pub fn validatorsCount(self: *AnyBeaconState) !usize {
@@ -465,8 +465,8 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn balances(self: *AnyBeaconState) !ListView(ct.phase0.Balances, ct.gloas.Balances) {
-        return self.getListField("balances", ListView(ct.phase0.Balances, ct.gloas.Balances));
+    pub fn balances(self: *AnyBeaconState) !AnyStateList("balances") {
+        return self.getListField("balances");
     }
 
     /// Returns a read-only slice of balances.
@@ -530,8 +530,8 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn previousEpochParticipation(self: *AnyBeaconState) !ListView(ct.altair.EpochParticipation, ct.gloas.EpochParticipation) {
-        return self.getListField("previous_epoch_participation", ListView(ct.altair.EpochParticipation, ct.gloas.EpochParticipation));
+    pub fn previousEpochParticipation(self: *AnyBeaconState) !AnyStateList("previous_epoch_participation") {
+        return self.getListField("previous_epoch_participation");
     }
 
     pub fn setPreviousEpochParticipation(self: *AnyBeaconState, participations: *const ct.altair.EpochParticipation.Type) !void {
@@ -541,8 +541,8 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn currentEpochParticipation(self: *AnyBeaconState) !ListView(ct.altair.EpochParticipation, ct.gloas.EpochParticipation) {
-        return self.getListField("current_epoch_participation", ListView(ct.altair.EpochParticipation, ct.gloas.EpochParticipation));
+    pub fn currentEpochParticipation(self: *AnyBeaconState) !AnyStateList("current_epoch_participation") {
+        return self.getListField("current_epoch_participation");
     }
 
     pub fn setCurrentEpochParticipation(self: *AnyBeaconState, participations: *const ct.altair.EpochParticipation.Type) !void {
@@ -635,8 +635,8 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn inactivityScores(self: *AnyBeaconState) !ListView(ct.altair.InactivityScores, ct.gloas.InactivityScores) {
-        return self.getListField("inactivity_scores", ListView(ct.altair.InactivityScores, ct.gloas.InactivityScores));
+    pub fn inactivityScores(self: *AnyBeaconState) !AnyStateList("inactivity_scores") {
+        return self.getListField("inactivity_scores");
     }
 
     pub fn currentSyncCommittee(self: *AnyBeaconState) !*ct.altair.SyncCommittee.TreeView {
@@ -854,28 +854,28 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn pendingDeposits(self: *AnyBeaconState) !ListView(ct.electra.PendingDeposits, ct.gloas.PendingDeposits) {
-        return self.getListField("pending_deposits", ListView(ct.electra.PendingDeposits, ct.gloas.PendingDeposits));
+    pub fn pendingDeposits(self: *AnyBeaconState) !AnyStateList("pending_deposits") {
+        return self.getListField("pending_deposits");
     }
 
-    pub fn setPendingDeposits(self: *AnyBeaconState, deposits: ListView(ct.electra.PendingDeposits, ct.gloas.PendingDeposits)) !void {
-        return self.setListField("pending_deposits", ListView(ct.electra.PendingDeposits, ct.gloas.PendingDeposits), deposits);
+    pub fn setPendingDeposits(self: *AnyBeaconState, deposits: AnyStateList("pending_deposits")) !void {
+        return self.setListField("pending_deposits", deposits);
     }
 
-    pub fn pendingPartialWithdrawals(self: *AnyBeaconState) !ListView(ct.electra.PendingPartialWithdrawals, ct.gloas.PendingPartialWithdrawals) {
-        return self.getListField("pending_partial_withdrawals", ListView(ct.electra.PendingPartialWithdrawals, ct.gloas.PendingPartialWithdrawals));
+    pub fn pendingPartialWithdrawals(self: *AnyBeaconState) !AnyStateList("pending_partial_withdrawals") {
+        return self.getListField("pending_partial_withdrawals");
     }
 
-    pub fn setPendingPartialWithdrawals(self: *AnyBeaconState, pending_partial_withdrawals: ListView(ct.electra.PendingPartialWithdrawals, ct.gloas.PendingPartialWithdrawals)) !void {
-        return self.setListField("pending_partial_withdrawals", ListView(ct.electra.PendingPartialWithdrawals, ct.gloas.PendingPartialWithdrawals), pending_partial_withdrawals);
+    pub fn setPendingPartialWithdrawals(self: *AnyBeaconState, pending_partial_withdrawals: AnyStateList("pending_partial_withdrawals")) !void {
+        return self.setListField("pending_partial_withdrawals", pending_partial_withdrawals);
     }
 
-    pub fn pendingConsolidations(self: *AnyBeaconState) !ListView(ct.electra.PendingConsolidations, ct.gloas.PendingConsolidations) {
-        return self.getListField("pending_consolidations", ListView(ct.electra.PendingConsolidations, ct.gloas.PendingConsolidations));
+    pub fn pendingConsolidations(self: *AnyBeaconState) !AnyStateList("pending_consolidations") {
+        return self.getListField("pending_consolidations");
     }
 
-    pub fn setPendingConsolidations(self: *AnyBeaconState, consolidations: ListView(ct.electra.PendingConsolidations, ct.gloas.PendingConsolidations)) !void {
-        return self.setListField("pending_consolidations", ListView(ct.electra.PendingConsolidations, ct.gloas.PendingConsolidations), consolidations);
+    pub fn setPendingConsolidations(self: *AnyBeaconState, consolidations: AnyStateList("pending_consolidations")) !void {
+        return self.setListField("pending_consolidations", consolidations);
     }
 
     /// Get proposer_lookahead
