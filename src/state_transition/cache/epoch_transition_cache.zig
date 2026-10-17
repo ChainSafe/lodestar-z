@@ -324,7 +324,7 @@ pub const EpochTransitionCache = struct {
             validator_count,
         );
         const validator_flat_cache = &reused_cache.validator_flat_cache;
-        switch (validators_view) {
+        switch (validators_view.inner) {
             inline else => |view| try validator_flat_cache.sync(@TypeOf(view.*).SszType, view.getRoot(), validator_count),
         }
 
