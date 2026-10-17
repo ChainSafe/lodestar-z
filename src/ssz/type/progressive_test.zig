@@ -113,6 +113,44 @@ test "progressive streaming builder rejects excess input and invalid finish" {
     try std.testing.expectError(error.InputTooLong, progressive.TreeBuilder.init(&pool, std.math.maxInt(usize)));
 }
 
+test "chunked progressive tree builder should size nodes by subtree and reject other sizes" {
+    const allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const baseline = pool.getNodesInUse();
+    const bytes: [64 * 32]u8 = @splat(7);
+
+    var builder = try progressive.TreeBuilder.initChunkedLeaf(&pool, 86);
+    defer builder.deinit();
+
+    // Subtrees 0 to 2 hold 21 single-chunk leaves. Subtree 3 is one 64-chunk leaf. The last chunk
+    // starts subtree 4.
+    for (0..21) |_| {
+        try std.testing.expectEqual(1, builder.nextNodeChunks());
+        try builder.appendPacked(bytes[0..32]);
+    }
+    try std.testing.expectEqual(64, builder.nextNodeChunks());
+    try std.testing.expectError(error.InvalidLength, builder.appendPacked(bytes[0..32]));
+    const partial = bytes[0 .. bytes.len - 1];
+    try std.testing.expectError(error.InvalidLength, builder.appendPacked(partial));
+    try builder.appendPacked(&bytes);
+    try std.testing.expectEqual(1, builder.nextNodeChunks());
+    try builder.appendPacked(bytes[0..1]);
+    try std.testing.expectEqual(0, builder.nextNodeChunks());
+    try std.testing.expectError(error.InvalidLength, builder.appendPacked(&.{}));
+    try std.testing.expectError(error.InvalidLength, builder.appendPacked(bytes[0..32]));
+
+    const root = try builder.finish();
+    pool.unref(root);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
 test "memory_safety: progressive appendOwned consumes its input on pool exhaustion" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 3 });

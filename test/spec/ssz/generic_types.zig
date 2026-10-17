@@ -156,9 +156,9 @@ pub const BitsStruct = ssz.VariableContainerType(struct {
 
 // Progressive container types
 pub const ProgressiveTestStruct = ssz.VariableContainerType(struct {
-    A: ssz.FixedProgressiveListType(ssz.UintType(8)),
-    B: ssz.FixedProgressiveListType(ssz.UintType(64)),
-    C: ssz.FixedProgressiveListType(SmallTestStruct),
+    A: ssz.FixedProgressiveListType(ssz.UintType(8), .{}),
+    B: ssz.FixedProgressiveListType(ssz.UintType(64), .{}),
+    C: ssz.FixedProgressiveListType(SmallTestStruct, .{}),
     D: ssz.VariableProgressiveListType(ssz.VariableProgressiveListType(VarTestStruct)),
 });
 
@@ -195,8 +195,8 @@ pub const ProgressiveComplexTestStruct = ssz.VariableProgressiveContainerType(st
     A: ssz.UintType(8),
     B: ssz.FixedListType(ssz.UintType(16), 123, .{}),
     C: ssz.ProgressiveBitListType(),
-    D: ssz.FixedProgressiveListType(ssz.UintType(64)),
-    E: ssz.FixedProgressiveListType(SmallTestStruct),
+    D: ssz.FixedProgressiveListType(ssz.UintType(64), .{}),
+    E: ssz.FixedProgressiveListType(SmallTestStruct, .{}),
     F: ssz.VariableProgressiveListType(ssz.VariableProgressiveListType(VarTestStruct)),
     G: ssz.FixedListType(ProgressiveSingleFieldContainerTestStruct, 10, .{}),
     H: ssz.VariableProgressiveListType(ProgressiveVarTestStruct),
@@ -211,13 +211,13 @@ pub const uint_128 = ssz.UintType(128);
 pub const uint_256 = ssz.UintType(256);
 
 // basic_progressive_list
-pub const proglist_bool = ssz.FixedProgressiveListType(ssz.BoolType());
-pub const proglist_uint8 = ssz.FixedProgressiveListType(ssz.UintType(8));
-pub const proglist_uint16 = ssz.FixedProgressiveListType(ssz.UintType(16));
-pub const proglist_uint32 = ssz.FixedProgressiveListType(ssz.UintType(32));
-pub const proglist_uint64 = ssz.FixedProgressiveListType(ssz.UintType(64));
-pub const proglist_uint128 = ssz.FixedProgressiveListType(ssz.UintType(128));
-pub const proglist_uint256 = ssz.FixedProgressiveListType(ssz.UintType(256));
+pub const proglist_bool = ssz.FixedProgressiveListType(ssz.BoolType(), .{});
+pub const proglist_uint8 = ssz.FixedProgressiveListType(ssz.UintType(8), .{});
+pub const proglist_uint16 = ssz.FixedProgressiveListType(ssz.UintType(16), .{});
+pub const proglist_uint32 = ssz.FixedProgressiveListType(ssz.UintType(32), .{});
+pub const proglist_uint64 = ssz.FixedProgressiveListType(ssz.UintType(64), .{});
+pub const proglist_uint128 = ssz.FixedProgressiveListType(ssz.UintType(128), .{});
+pub const proglist_uint256 = ssz.FixedProgressiveListType(ssz.UintType(256), .{});
 
 // progressive_bitlist
 pub const progbitlist = ssz.ProgressiveBitListType();
