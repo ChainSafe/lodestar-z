@@ -46,6 +46,20 @@ fn validateActiveFields(comptime active_fields: []const u1, comptime field_count
     }
 }
 
+fn defaultRoot(
+    comptime fields: []const std.builtin.Type.StructField,
+    comptime field_indices: []const usize,
+    comptime active_fields: []const u1,
+) [32]u8 {
+    var chunks: [active_fields.len][32]u8 = @splat(@as([32]u8, @splat(0)));
+    for (fields, field_indices) |field, index| chunks[index] = field.type.default_root;
+    var contents: [32]u8 = undefined;
+    progressive.merkleizeChunksComptime(active_fields.len, &chunks, &contents) catch unreachable;
+    var root: [32]u8 = undefined;
+    hashOne(&root, &contents, &packActiveFields(active_fields));
+    return root;
+}
+
 /// Returns the merkle tree index (position in active_fields) for the nth field
 fn getActiveFieldIndex(comptime active_fields: []const u1, comptime n: usize) usize {
     var count: usize = 0;
@@ -119,6 +133,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
 
     return struct {
         const Self = @This();
+        pub const TreeView = @import("../tree_view/container.zig").ContainerTreeView(Self);
         pub const kind = TypeKind.progressive_container;
         pub const Fields: type = ST;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
@@ -141,6 +156,8 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             }
             break :blk out;
         };
+
+        pub const default_root: [32]u8 = defaultRoot(fields, &field_indices, active_fields);
 
         pub fn equals(a: *const Type, b: *const Type) bool {
             inline for (fields) |field| {
@@ -248,6 +265,10 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                return fromValue(pool, &Self.default_value);
+            }
+
             /// Initializes `out` only on success, without reading or freeing its previous contents.
             pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
@@ -555,6 +576,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
 
     return struct {
         const Self = @This();
+        pub const TreeView = @import("../tree_view/container.zig").ContainerTreeView(Self);
         pub const kind = TypeKind.progressive_container;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
         pub const field_indices: [fields.len]usize = blk: {
@@ -580,6 +602,8 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             }
             break :blk out;
         };
+
+        pub const default_root: [32]u8 = defaultRoot(fields, &field_indices, active_fields);
 
         pub fn equals(a: *const Type, b: *const Type) bool {
             inline for (fields) |field| {
@@ -842,6 +866,10 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                return fromValue(pool, &Self.default_value);
+            }
+
             /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);

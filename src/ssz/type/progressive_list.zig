@@ -27,13 +27,24 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
         const Self = @This();
         pub const kind = TypeKind.progressive_list;
         pub const Element: type = ST;
+        pub const opts: TypeOpts = _opts;
         const use_chunked_leaf = _opts.chunked_leaf;
         const items_per_chunk = 32 / Element.fixed_size;
+        /// The longest list a node-backed tree can address whose serialized size fits a `usize`.
+        pub const limit: usize = @intCast(@min(
+            @as(u128, progressive.max_node_chunks) * (if (isBasicType(Element)) items_per_chunk else 1),
+            std.math.maxInt(usize) / Element.fixed_size,
+        ));
         pub const Type: type = std.ArrayList(Element.Type);
+        pub const TreeView = if (isBasicType(Element))
+            @import("../tree_view/progressive_list_basic.zig").ProgressiveListBasicTreeView(@This())
+        else
+            @import("../tree_view/progressive_list_composite.zig").ProgressiveListCompositeTreeView(@This());
         pub const min_size: usize = 0;
         pub const max_size: usize = std.math.maxInt(usize);
 
         pub const default_value: Type = Type.empty;
+        pub const default_root: [32]u8 = @import("hashing").getZeroHash(1).*;
 
         pub fn equals(a: *const Type, b: *const Type) bool {
             if (a.items.len != b.items.len) return false;
@@ -210,6 +221,10 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                return try pool.createBranch(@enumFromInt(0), @enumFromInt(0));
+            }
+
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
                 const right = try node.getRight(pool);
                 const hash = right.getRoot(pool);
@@ -221,7 +236,7 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
             }
 
             /// Decodes `values.len` packed elements from `bytes`, which start on a chunk boundary.
-            fn toValuesPackedFromBytes(bytes: []const u8, values: []Element.Type) void {
+            pub fn toValuesPackedFromBytes(bytes: []const u8, values: []Element.Type) void {
                 comptime std.debug.assert(isBasicType(Element));
                 std.debug.assert(bytes.len % 32 == 0);
                 std.debug.assert(bytes.len >= values.len * Element.fixed_size);
@@ -426,11 +441,16 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
         const Self = @This();
         pub const kind = TypeKind.progressive_list;
         pub const Element: type = ST;
+        /// The longest list a node-backed tree can address whose serialized offset table fits a
+        /// `usize`.
+        pub const limit: usize = @min(progressive.max_node_chunks, std.math.maxInt(usize) / 4);
         pub const Type: type = std.ArrayList(Element.Type);
+        pub const TreeView = @import("../tree_view/progressive_list_composite.zig").ProgressiveListCompositeTreeView(@This());
         pub const min_size: usize = 0;
         pub const max_size: usize = std.math.maxInt(usize);
 
         pub const default_value: Type = Type.empty;
+        pub const default_root: [32]u8 = @import("hashing").getZeroHash(1).*;
 
         pub fn equals(a: *const Type, b: *const Type) bool {
             if (a.items.len != b.items.len) return false;
@@ -559,6 +579,10 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                return try pool.createBranch(@enumFromInt(0), @enumFromInt(0));
+            }
+
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
                 const right = try node.getRight(pool);
                 const hash = right.getRoot(pool);

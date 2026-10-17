@@ -167,3 +167,51 @@ test "memory_safety: progressive appendOwned consumes its input on pool exhausti
     }
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
+
+test "progressive chunkGindex and subtreeIndex should follow subtree boundaries at runtime" {
+    for (0..31) |index| {
+        const expected: u64 = if (index == 0) 2 else if (index < 5) 24 + index - 1 else if (index < 21) 224 + index - 5 else 1920 + index - 21;
+        try std.testing.expectEqual(expected, @intFromEnum(progressive.chunkGindex(index)));
+    }
+    try std.testing.expectEqual(0, progressive.subtreeCount(0));
+    try std.testing.expectEqual(1, progressive.subtreeCount(1));
+    try std.testing.expectEqual(1, progressive.subtreeIndex(2));
+    try std.testing.expectEqual(2, progressive.subtreeCount(2));
+    try std.testing.expectEqual(2, progressive.subtreeIndex(20));
+    try std.testing.expectEqual(3, progressive.subtreeCount(21));
+    const Gindex = @import("persistent_merkle_tree").Gindex;
+    // Gloas `finalized_checkpoint.root`: contents root, active field 20, then the `root` chunk.
+    try std.testing.expectEqual(735, @intFromEnum(Gindex.concat(&.{ @enumFromInt(2), progressive.chunkGindex(20), @enumFromInt(3) })));
+}
+
+test "progressive types should derive default roots and trees from their default values" {
+    const allocator = std.testing.allocator;
+    const UintType = @import("uint.zig").UintType;
+    const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
+    const Bits = @import("progressive_bit_list.zig").ProgressiveBitListType();
+    const Numbers = @import("progressive_list.zig").FixedProgressiveListType(UintType(64), .{});
+    const Fixed = @import("progressive_container.zig").FixedProgressiveContainerType(struct {
+        a: UintType(64),
+        b: ByteVectorType(32),
+    }, &.{ 1, 0, 1 });
+    const Variable = @import("progressive_container.zig").VariableProgressiveContainerType(struct {
+        a: UintType(64),
+        numbers: Numbers,
+        bits: Bits,
+    }, &.{ 1, 0, 0, 0, 0, 1, 1 });
+    const Nested = @import("progressive_list.zig").VariableProgressiveListType(Variable);
+
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+    inline for (.{ Bits, Numbers, Fixed, Variable, Nested }) |ST| {
+        const expected = try ST.tree.fromValue(&pool, &ST.default_value);
+        defer pool.unref(expected);
+        try std.testing.expectEqualSlices(u8, expected.getRoot(&pool), &ST.default_root);
+
+        const node = try ST.tree.default(&pool);
+        defer pool.unref(node);
+        try std.testing.expectEqualSlices(u8, expected.getRoot(&pool), node.getRoot(&pool));
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}

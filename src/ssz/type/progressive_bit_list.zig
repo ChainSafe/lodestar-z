@@ -24,10 +24,12 @@ pub fn ProgressiveBitListType() type {
         pub const kind = TypeKind.progressive_bit_list;
         pub const Element: type = BoolType();
         pub const Type: type = BitList(.{ .limit = unlimited });
+        pub const TreeView = @import("../tree_view/progressive_bit_list.zig").ProgressiveBitListTreeView(Self);
         pub const min_size: usize = 1;
         pub const max_size: usize = std.math.maxInt(usize);
 
         pub const default_value: Type = Type.empty;
+        pub const default_root: [32]u8 = @import("hashing").getZeroHash(1).*;
 
         pub fn equals(a: *const Type, b: *const Type) bool {
             return a.equals(b);
@@ -194,6 +196,10 @@ pub fn ProgressiveBitListType() type {
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                return try pool.createBranch(@enumFromInt(0), @enumFromInt(0));
+            }
+
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
                 const right = try node.getRight(pool);
                 const hash = right.getRoot(pool);

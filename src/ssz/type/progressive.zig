@@ -5,7 +5,6 @@ const Node = @import("persistent_merkle_tree").Node;
 const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 
-const base_count = 1;
 const scaling_factor = 4;
 
 /// Limits of a progressive tree stored as nodes. Subtree `i` holds `4^i` chunks at depth `2i`
@@ -21,37 +20,59 @@ pub const max_node_chunks = blk: {
     for (0..max_node_subtrees) |i| total += @as(usize, 1) << @intCast(2 * i);
     break :blk total;
 };
-const zero_leaf_bytes: [ChunkedLeaf.K * 32]u8 = @splat(0);
+pub const zero_leaf_bytes: [ChunkedLeaf.K * 32]u8 = @splat(0);
 
+/// Returns the gindex of a chunk relative to the contents root, where the spine node above
+/// subtree `i` is `2^(i + 1) - 1`.
 pub fn chunkGindex(chunk_i: usize) Gindex {
     const subtree_i = subtreeIndex(chunk_i);
-    var gindex: Gindex.Uint = 1;
-    var subtree_starting_index = 0;
-    for (0..subtree_i) |i| {
-        gindex = gindex * 2 + 1;
-        subtree_starting_index += subtreeLength(i);
-    }
-
-    gindex *= 2;
-    gindex *= try std.math.powi(usize, 2, subtreeDepth(subtree_i));
-    gindex += chunk_i - subtree_starting_index;
-    return @enumFromInt(gindex);
+    const subtree_root = ((@as(Gindex.Uint, 1) << @intCast(subtree_i + 1)) - 1) * 2;
+    const offset = chunk_i - subtreeStartChunk(subtree_i);
+    return @enumFromInt((subtree_root << subtreeDepth(subtree_i)) + offset);
 }
 
+/// Returns the subtree holding a zero-based chunk index. Subtree `i` starts at chunk
+/// `(4^i - 1) / 3`, so `i = floor(log4(3 * chunk_i + 1))`.
 pub fn subtreeIndex(chunk_i: usize) usize {
-    return subtreeCount(chunk_i + 1) - 1;
+    std.debug.assert(chunk_i < max_node_chunks);
+    return std.math.log2_int(usize, 3 * chunk_i + 1) / 2;
 }
 
 pub fn subtreeCount(chunk_count: usize) usize {
-    var left: usize = chunk_count;
-    var subtree_length: usize = base_count;
-    var subtree_i: usize = 0;
-    while (left > 0) {
-        left -|= subtree_length;
-        subtree_length *= scaling_factor;
-        subtree_i += 1;
+    return if (chunk_count == 0) 0 else subtreeIndex(chunk_count - 1) + 1;
+}
+
+pub fn subtreeStartChunk(subtree_i: usize) usize {
+    return ((@as(usize, 1) << @intCast(2 * subtree_i)) - 1) / 3;
+}
+
+/// Gindex of the spine node whose left child is subtree `i`, relative to the root of a
+/// length-mixed progressive list or bitlist.
+pub fn spineGindex(subtree_i: usize) Gindex {
+    return @enumFromInt((@as(Gindex.Uint, 3) << @intCast(subtree_i)) - 1);
+}
+
+pub fn subtreeGindex(subtree_i: usize) Gindex {
+    return @enumFromInt(@intFromEnum(spineGindex(subtree_i)) * 2);
+}
+
+/// Returns a list root whose spine grows from `old_count` to `new_count` subtrees, with zero
+/// subtrees appended. The caller owns one reference to the result; `root` is unchanged.
+pub fn growSpine(pool: *Node.Pool, root: Node.Id, old_count: usize, new_count: usize) !Node.Id {
+    std.debug.assert(new_count > old_count);
+    var tail: Node.Id = @enumFromInt(0);
+    defer pool.unref(tail);
+
+    var i = new_count;
+    while (i > old_count) {
+        i -= 1;
+        tail = try pool.createBranch(@enumFromInt(subtreeDepth(i)), tail);
     }
-    return subtree_i;
+    // Retain the scaffold while setNode may partially build and reclaim ancestors.
+    try pool.ref(tail);
+    const expanded = try root.setNode(pool, spineGindex(old_count), tail);
+    try pool.ref(expanded);
+    return expanded;
 }
 
 pub fn subtreeLength(subtree_i: usize) usize {
