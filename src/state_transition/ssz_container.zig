@@ -16,7 +16,7 @@ pub fn deserializeContainerOverrideFieldsWithRanges(
     ranges: *const [ContainerST.fields.len][2]usize,
     overrides: anytype,
 ) !*ContainerST.TreeView {
-    var nodes: [ContainerST.chunk_count]Node.Id = undefined;
+    var nodes: [ContainerST.chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
     var owned_nodes: [ContainerST.chunk_count]Node.Id = undefined;
     var owned_len: usize = 0;
 
@@ -30,8 +30,9 @@ pub fn deserializeContainerOverrideFieldsWithRanges(
     }
 
     inline for (ContainerST.fields, 0..) |field, i| {
+        const position = if (comptime ContainerST.kind == .progressive_container) ContainerST.field_indices[i] else i;
         if (comptime @hasField(@TypeOf(overrides), field.name)) {
-            nodes[i] = @field(overrides, field.name);
+            nodes[position] = @field(overrides, field.name);
             continue;
         }
 
@@ -39,12 +40,15 @@ pub fn deserializeContainerOverrideFieldsWithRanges(
         const end = ranges[i][1];
         const field_bytes = bytes[start..end];
 
-        nodes[i] = try field.type.tree.deserializeFromBytes(pool, field_bytes);
-        owned_nodes[owned_len] = nodes[i];
+        nodes[position] = try field.type.tree.deserializeFromBytes(pool, field_bytes);
+        owned_nodes[owned_len] = nodes[position];
         owned_len += 1;
     }
 
-    const root = try Node.fillWithContents(pool, &nodes, ContainerST.chunk_depth);
+    const root = if (comptime ContainerST.kind == .progressive_container)
+        try ContainerST.tree.fromFieldNodes(pool, &nodes)
+    else
+        try Node.fillWithContents(pool, &nodes, ContainerST.chunk_depth);
     errdefer pool.unref(root);
     owned_len = 0;
 
