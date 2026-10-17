@@ -9,18 +9,22 @@ LOGS_DIR="${FUZZ_DIR}/logs"
 
 SSZ_TARGETS=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists ssz_chunked_leaf_set)
 BLS_TARGETS=(bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig)
-ALL_TARGETS=("${SSZ_TARGETS[@]}" "${BLS_TARGETS[@]}")
+DISCV5_TARGETS=(discv5_wire)
+source "${FUZZ_DIR}/network-targets.sh"
+ALL_TARGETS=("${SSZ_TARGETS[@]}" "${BLS_TARGETS[@]}" "${DISCV5_TARGETS[@]}" "${NETWORK_TARGETS[@]}")
 
 usage() {
     echo "Usage: $0 [targets...]"
     echo ""
-    echo "Groups:  all, ssz, bls"
+    echo "Groups:  all, ssz, bls, discv5, network"
     echo "Targets: ${ALL_TARGETS[*]}"
     echo ""
     echo "Examples:"
     echo "  $0                    # fuzz all targets"
     echo "  $0 ssz                # fuzz all SSZ targets"
     echo "  $0 bls                # fuzz all BLS targets"
+    echo "  $0 discv5             # fuzz all DiscV5 targets"
+    echo "  $0 network            # fuzz all network targets"
     echo "  $0 ssz bls_signature  # mix groups and individual targets"
     echo ""
     echo "Environment:"
@@ -37,6 +41,8 @@ resolve_targets() {
             all)       resolved+=("${ALL_TARGETS[@]}") ;;
             ssz)       resolved+=("${SSZ_TARGETS[@]}") ;;
             bls)       resolved+=("${BLS_TARGETS[@]}") ;;
+            discv5)    resolved+=("${DISCV5_TARGETS[@]}") ;;
+            network)   resolved+=("${NETWORK_TARGETS[@]}") ;;
             *)
                 # Validate that the target actually exists
                 local valid=false
@@ -49,7 +55,7 @@ resolve_targets() {
                 if ! $valid; then
                     echo "Error: unknown target '${arg}'" >&2
                     echo "Valid targets: ${ALL_TARGETS[*]}" >&2
-                    echo "Valid groups: all, ssz, bls" >&2
+                    echo "Valid groups: all, ssz, bls, discv5, network" >&2
                     exit 1
                 fi
                 resolved+=("$arg")
@@ -95,13 +101,17 @@ run_round() {
     for target in "${TARGETS[@]}"; do
         local input_dir="${CORPUS_DIR}/${target}-cmin"
         if [ ! -d "$input_dir" ] || [ -z "$(ls -A "$input_dir" 2>/dev/null)" ]; then
-            input_dir="${CORPUS_DIR}/${target}-initial"
+            input_dir="${CORPUS_DIR}/${target}-${NETWORK_CORPUS[$target]:-initial}"
         fi
 
         local output_dir="${AFL_OUT}/${target}/round-${round}"
         mkdir -p "$output_dir"
 
-        afl-fuzz \
+        local extra_args=()
+        if [[ -n "${NETWORK_INPUT_MAX[$target]:-}" ]]; then extra_args=(-G "${NETWORK_INPUT_MAX[$target]}"); fi
+        local dictionary="${FUZZ_DIR}/dictionaries/${target}.dict"
+        if test -f "$dictionary"; then extra_args+=(-x "$dictionary"); fi
+        afl-fuzz "${extra_args[@]}" \
             -i "$input_dir" \
             -o "$output_dir" \
             -V "$ROUND_DURATION" \

@@ -25,6 +25,36 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const quiche_module = lodestar_z.module("network").import_table.get("quiche_zig:quiche").?;
+    std.debug.assert(quiche_module.link_objects.items.len == 1);
+    // A harness links its bitcode, so it takes the network module's own objects (the accelerated
+    // gossip SHA-256 object where the target has one) explicitly, as it takes quiche's.
+    const network_objects = lodestar_z.module("network").link_objects.items;
+    std.debug.assert(network_objects.len <= 1);
+    const gossip_objects: []const std.Build.LazyPath = if (network_objects.len == 1)
+        b.allocator.dupe(std.Build.LazyPath, &.{network_objects[0].other_step.getEmittedBin()}) catch @panic("out of memory")
+    else
+        &.{};
+    const quiche_objects = std.mem.concat(b.allocator, std.Build.LazyPath, &.{ &.{quiche_module.link_objects.items[0].static_path}, gossip_objects }) catch @panic("out of memory");
+    const network_fixture = b.createModule(.{
+        .root_source_file = b.path("tools/network_fixture.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    network_fixture.addImport("network", lodestar_z.module("network"));
+    const seeds_module = b.createModule(.{
+        .root_source_file = b.path("tools/network_corpus.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    seeds_module.addImport("network_fixture", network_fixture);
+    seeds_module.addImport("network", lodestar_z.module("network"));
+    seeds_module.addImport("discv5", lodestar_z.module("discv5"));
+    const seeds = b.addRunArtifact(b.addExecutable(.{ .name = "network_corpus", .root_module = seeds_module }));
+    seeds.setCwd(b.path("."));
+    if (b.args) |args| seeds.addArgs(args);
+    b.step("network-corpus", "Generate valid QUIC TLS and DiscV5 fuzz seeds").dependOn(&seeds.step);
+
     // Tool: extract corpus seeds from spec test vectors
     {
         const extract_mod = b.createModule(.{
@@ -53,12 +83,16 @@ pub fn build(b: *std.Build) void {
 
     const Fuzzer = struct {
         name: []const u8,
+        corpus_suffix: []const u8 = "cmin",
         extra_libs: []const *std.Build.Step.Compile = &.{},
+        extra_objects: []const std.Build.LazyPath = &.{},
+        extra_args: []const []const u8 = &.{},
+        input_max: ?u32 = null,
 
         /// Returns the corpus directory path for this fuzzer.
         /// Change the suffix to switch between -cmin and -initial.
         fn corpus(self: @This(), bb: *std.Build) []const u8 {
-            return bb.fmt("corpus/{s}-cmin", .{self.name});
+            return bb.fmt("corpus/{s}-{s}", .{ self.name, self.corpus_suffix });
         }
 
         fn source(self: @This(), bb: *std.Build) []const u8 {
@@ -66,7 +100,7 @@ pub fn build(b: *std.Build) void {
         }
     };
 
-    const fuzzers = &[_]Fuzzer{
+    const base_fuzzers = &[_]Fuzzer{
         .{ .name = "ssz_basic" },
         .{ .name = "ssz_bitlist" },
         .{ .name = "ssz_bitvector" },
@@ -82,7 +116,32 @@ pub fn build(b: *std.Build) void {
         .{ .name = "bls_aggregate_sig", .extra_libs = &.{dep_blst.artifact("blst")} },
     };
 
-    inline for (fuzzers) |fuzzer| {
+    var fuzzers: std.ArrayList(Fuzzer) = .empty;
+    fuzzers.appendSlice(b.allocator, base_fuzzers) catch @panic("out of memory");
+    const snappy_libs = [_]*std.Build.Step.Compile{dep_snappy.artifact("snappy")};
+    var rows = std.mem.tokenizeScalar(u8, @embedFile("network-targets.tsv"), '\n');
+    while (rows.next()) |row| {
+        var fields = std.mem.tokenizeAny(u8, row, " \t");
+        const name = fields.next().?;
+        const corpus = fields.next().?;
+        const input_max = std.fmt.parseInt(u32, fields.next().?, 10) catch @panic("invalid network fuzz input bound");
+        const link = fields.next().?;
+        std.debug.assert(fields.next() == null);
+        const snappy = std.mem.eql(u8, link, "snappy");
+        const quiche = std.mem.eql(u8, link, "quiche");
+        std.debug.assert(snappy or quiche or std.mem.eql(u8, link, "none"));
+        fuzzers.append(b.allocator, .{
+            .name = name,
+            .corpus_suffix = corpus,
+            .input_max = input_max,
+            .extra_libs = if (snappy) &snappy_libs else &.{},
+            .extra_objects = if (quiche) quiche_objects else gossip_objects,
+            .extra_args = if (snappy or quiche) &.{ "-lc++", "-lc++abi", "-lunwind" } else &.{},
+        }) catch @panic("out of memory");
+    }
+    const build_network = b.step("build-network", "Build every network harness from network-targets.tsv");
+
+    for (fuzzers.items) |fuzzer| {
         const run_step = b.step(
             b.fmt("run-{s}", .{fuzzer.name}),
             b.fmt("Run {s} with afl-fuzz", .{fuzzer.name}),
@@ -101,10 +160,13 @@ pub fn build(b: *std.Build) void {
         );
         lib_mod.addImport("preset", lodestar_z.module("preset"));
         lib_mod.addImport("constants", lodestar_z.module("constants"));
+        lib_mod.addImport("discv5", lodestar_z.module("discv5"));
         lib_mod.addImport(
             "persistent_merkle_tree",
             lodestar_z.module("persistent_merkle_tree"),
         );
+        lib_mod.addImport("network", lodestar_z.module("network"));
+        lib_mod.addImport("network_fixture", network_fixture);
 
         const lib = b.addLibrary(.{
             .name = fuzzer.name,
@@ -113,19 +175,33 @@ pub fn build(b: *std.Build) void {
         lib.root_module.stack_check = false;
         lib.root_module.fuzz = true;
 
-        const exe = afl.addInstrumentedExe(b, lib, fuzzer.extra_libs);
+        const exe = afl.addInstrumentedExe(b, lib, fuzzer.extra_libs, fuzzer.extra_objects, fuzzer.extra_args);
         const mkdir = b.addSystemCommand(&.{
             "mkdir", "-p",
         });
         mkdir.addDirectoryArg(
             b.path(b.fmt("afl-out/{s}", .{fuzzer.name})),
         );
-        const run = afl.addFuzzerRun(
-            b,
-            exe,
-            b.path(fuzzer.corpus(b)),
-            b.path(b.fmt("afl-out/{s}", .{fuzzer.name})),
-        );
+        const run = b.addSystemCommand(&.{b.findProgram(&.{"afl-fuzz"}, &.{}) catch @panic("afl-fuzz is required")});
+        run.addArg("-i");
+        run.addDirectoryArg(b.path(fuzzer.corpus(b)));
+        run.addArg("-o");
+        run.addDirectoryArg(b.path(b.fmt("afl-out/{s}", .{fuzzer.name})));
+        if (fuzzer.input_max) |maximum| run.addArgs(&.{ "-G", b.fmt("{d}", .{maximum}) });
+        const dictionary = b.fmt("dictionaries/{s}.dict", .{fuzzer.name});
+        const has_dictionary = found: {
+            b.build_root.handle.access(b.graph.io, dictionary, .{}) catch |err| switch (err) {
+                error.FileNotFound => break :found false,
+                else => @panic("cannot read fuzz dictionary"),
+            };
+            break :found true;
+        };
+        if (has_dictionary) {
+            run.addArg("-x");
+            run.addFileArg(b.path(dictionary));
+        }
+        run.addArg("--");
+        run.addFileArg(exe);
         run.step.dependOn(&mkdir.step);
         run_step.dependOn(&run.step);
 
@@ -134,5 +210,11 @@ pub fn build(b: *std.Build) void {
             b.fmt("fuzz-{s}", .{fuzzer.name}),
         );
         b.getInstallStep().dependOn(&install.step);
+        const build_step = b.step(
+            b.fmt("build-{s}", .{fuzzer.name}),
+            b.fmt("Build {s} AFL harness", .{fuzzer.name}),
+        );
+        build_step.dependOn(&install.step);
+        if (std.mem.startsWith(u8, fuzzer.name, "network_") or std.mem.eql(u8, fuzzer.name, "discv5_wire")) build_network.dependOn(&install.step);
     }
 }
