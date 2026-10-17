@@ -211,17 +211,14 @@ pub fn ProgressiveBitListType() type {
                 const bit_len = try length(node, pool);
                 const chunk_count = bit_len / 256 + @intFromBool(bit_len % 256 != 0);
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
-                var value = Self.default_value;
-                errdefer Self.deinit(allocator, &value);
-                try value.resize(allocator, bit_len);
+                try out.resize(allocator, bit_len);
                 var offset: usize = 0;
                 while (try it.next()) |chunk| {
-                    const count = @min(32, value.data.items.len - offset);
-                    @memcpy(value.data.items[offset..][0..count], chunk.getRoot(pool)[0..count]);
+                    const count = @min(32, out.data.items.len - offset);
+                    @memcpy(out.data.items[offset..][0..count], chunk.getRoot(pool)[0..count]);
                     offset += count;
                 }
-                std.debug.assert(offset == value.data.items.len);
-                out.* = value;
+                std.debug.assert(offset == out.data.items.len);
             }
 
             pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {

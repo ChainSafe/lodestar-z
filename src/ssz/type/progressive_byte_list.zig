@@ -58,12 +58,8 @@ pub fn ProgressiveByteListType(comptime _opts: TypeOpts) type {
             const len = hexByteLen(hex_bytes);
             if (len > limit) return error.InvalidJson;
 
-            var replacement: Type = .empty;
-            errdefer replacement.deinit(allocator);
-
-            try replacement.resize(allocator, len);
-            _ = try hexToBytes(replacement.items, hex_bytes);
-            out.* = replacement;
+            try out.resize(allocator, len);
+            _ = try hexToBytes(out.items, hex_bytes);
         }
     };
 }

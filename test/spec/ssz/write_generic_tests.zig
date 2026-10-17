@@ -10,9 +10,9 @@ const suites = [_][]const u8{
     "test_progressive_types",
 };
 
-/// A compatible union has no default value, so types that decode or clone through a temporary
-/// built from their fields' or elements' defaults cannot hold one yet (#788). These cases are
-/// generated as skipped tests rather than dropped; remove them here once unions can nest.
+/// A compatible union has no default value, so a container's `default_value` and new list slots,
+/// which are built from their fields' or elements' defaults, cannot hold one yet (#788). These
+/// cases are generated as skipped tests rather than dropped; remove them once unions can nest.
 const unsupported = [_]struct { suite: []const u8, type_name: []const u8 }{
     .{ .suite = "test_compatible_unions", .type_name = "SampleNestedShape" },
     .{ .suite = "test_compatible_unions", .type_name = "SampleShapeContainer" },

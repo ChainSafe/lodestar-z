@@ -251,7 +251,7 @@ test "progressive container should compose chunked leaf and struct container lis
     try std.testing.expectEqualSlices(u8, bytes, encoded);
 }
 
-test "memory_safety: variable progressive container clone preserves out on OOM" {
+test "memory_safety: variable progressive container clone should leave a failed clone for the caller to free on OOM" {
     const Items = FixedListType(UintType(8), 8, .{});
     const Container = VariableProgressiveContainerType(struct {
         a: Items,
@@ -267,11 +267,7 @@ test "memory_safety: variable progressive container clone preserves out on OOM" 
         fn run(allocator: std.mem.Allocator, input: *const Container.Type) !void {
             var out: Container.Type = Container.default_value;
             defer Container.deinit(allocator, &out);
-            Container.clone(allocator, input, &out) catch |err| {
-                try std.testing.expectEqual(@as(usize, 0), out.a.items.len);
-                try std.testing.expectEqual(@as(usize, 0), out.b.items.len);
-                return err;
-            };
+            try Container.clone(allocator, input, &out);
             try std.testing.expect(Container.equals(input, &out));
         }
     }.run, .{&value});
@@ -350,7 +346,7 @@ test "progressive containers should report their fields" {
     try std.testing.expect(!Variable.hasField("b"));
 }
 
-test "memory_safety: fixed progressive container byte deserialization preserves out on malformed input" {
+test "fixed progressive container byte deserialization should reject a malformed field" {
     const Container = FixedProgressiveContainerType(struct {
         a: BoolType(),
         b: BoolType(),
@@ -361,11 +357,9 @@ test "memory_safety: fixed progressive container byte deserialization preserves 
         error.invalidBoolean,
         Container.deserializeFromBytes(&.{ 1, 2 }, &out),
     );
-    try std.testing.expect(!out.a);
-    try std.testing.expect(!out.b);
 }
 
-test "memory_safety: variable progressive container byte deserialization leaves default out on error" {
+test "memory_safety: variable progressive container byte deserialization should leave a failed decode for the caller to free" {
     const Items = FixedProgressiveListType(BoolType(), .{});
     const Container = VariableProgressiveContainerType(struct {
         a: UintType(8),
@@ -382,9 +376,6 @@ test "memory_safety: variable progressive container byte deserialization leaves 
             &out,
         ),
     );
-    try std.testing.expectEqual(@as(u8, 0), out.a);
-    try std.testing.expectEqual(@as(usize, 0), out.items.items.len);
-    try std.testing.expectEqual(@as(usize, 0), out.items.capacity);
 }
 
 test "progressive container hashing streams sparse fields without allocation" {
@@ -705,7 +696,7 @@ test "progressive container tree reads stream sparse fields" {
     }
 }
 
-test "memory_safety: progressive container tree.toValue cleans partial values on OOM" {
+test "memory_safety: progressive container tree.toValue should leave partial values for the caller to free on OOM" {
     const allocator = std.testing.allocator;
     const Container = VariableProgressiveContainerType(struct {
         a: FixedProgressiveListType(UintType(8), .{}),
@@ -726,22 +717,22 @@ test "memory_safety: progressive container tree.toValue cleans partial values on
     for (0..8) |fail_after| {
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_after });
         var out = Container.default_value;
-        defer Container.deinit(failing.allocator(), &out);
-        Container.tree.toValue(failing.allocator(), root, &pool, &out) catch |err| {
+        if (Container.tree.toValue(failing.allocator(), root, &pool, &out)) |_| {
+            try std.testing.expect(Container.equals(&source, &out));
+            saw_success = true;
+        } else |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
-            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
             saw_failure = true;
-            continue;
-        };
-        try std.testing.expect(Container.equals(&source, &out));
-        saw_success = true;
-        break;
+        }
+        Container.deinit(failing.allocator(), &out);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (saw_success) break;
     }
     try std.testing.expect(saw_failure);
     try std.testing.expect(saw_success);
 }
 
-test "memory_safety: progressive container tree reads validate terminators before publishing values" {
+test "memory_safety: progressive container tree reads should reject a nonzero terminator" {
     const allocator = std.testing.allocator;
     const Fixed = FixedProgressiveContainerType(struct { a: UintType(64), b: UintType(8) }, &.{ 1, 0, 1 });
     const Variable = VariableProgressiveContainerType(struct {
@@ -761,17 +752,102 @@ test "memory_safety: progressive container tree reads validate terminators befor
         const bad = try good.setNode(&pool, @enumFromInt(11), bad_leaf);
         defer pool.unref(bad);
 
-        var failing = std.testing.FailingAllocator.init(allocator, .{});
         var out = ST.default_value;
-        defer if (ST == Variable) ST.deinit(failing.allocator(), &out);
+        defer if (ST == Variable) ST.deinit(allocator, &out);
         if (ST == Fixed) {
             try std.testing.expectError(error.InvalidTerminatorNode, ST.tree.toValue(bad, &pool, &out));
         } else {
-            try std.testing.expectError(error.InvalidTerminatorNode, ST.tree.toValue(failing.allocator(), bad, &pool, &out));
-            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            try std.testing.expectError(error.InvalidTerminatorNode, ST.tree.toValue(allocator, bad, &pool, &out));
         }
-        try std.testing.expect(ST.equals(&ST.default_value, &out));
         var bytes: [16]u8 = undefined;
         try std.testing.expectError(error.InvalidTerminatorNode, ST.tree.serializeIntoBytes(bad, &pool, &bytes));
     }
+}
+
+test "memory_safety: VariableProgressiveContainerType tree.toValue should not leak a large value on allocation failure" {
+    const allocator = std.testing.allocator;
+    const Items = FixedProgressiveListType(UintType(8), .{});
+    const ST = VariableProgressiveContainerType(struct {
+        large: ByteVectorType(64 * 1024),
+        first: Items,
+        second: Items,
+    }, &.{ 1, 0, 1, 0, 1 });
+    const source = try allocator.create(ST.Type);
+    defer allocator.destroy(source);
+    source.* = ST.default_value;
+    defer ST.deinit(allocator, source);
+    source.large[0] = 77;
+    source.large[source.large.len - 1] = 88;
+    try source.first.appendSlice(allocator, &.{ 1, 2, 3 });
+    try source.second.appendSlice(allocator, &.{ 4, 5, 6 });
+
+    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 8192 });
+    defer pool.deinit();
+    const initial_nodes = pool.getNodesInUse();
+    {
+        const root = try ST.tree.fromValue(&pool, source);
+        defer pool.unref(root);
+        try std.testing.checkAllAllocationFailures(allocator, struct {
+            fn run(checked: std.mem.Allocator, node_pool: *Node.Pool, node: Node.Id, expected: *const ST.Type) !void {
+                const out = try checked.create(ST.Type);
+                defer checked.destroy(out);
+                out.* = ST.default_value;
+                defer ST.deinit(checked, out);
+                const before_nodes = node_pool.getNodesInUse();
+                try ST.tree.toValue(checked, node, node_pool, out);
+                try std.testing.expect(ST.equals(expected, out));
+                try std.testing.expectEqual(before_nodes, node_pool.getNodesInUse());
+            }
+        }.run, .{ &pool, root, source });
+    }
+    try std.testing.expectEqual(initial_nodes, pool.getNodesInUse());
+}
+
+test "memory_safety: VariableProgressiveContainerType JSON decoding should leave failed decodes for the caller to free" {
+    const allocator = std.testing.allocator;
+    const Inner = FixedProgressiveListType(UintType(16), .{});
+    const Point = FixedProgressiveContainerType(struct { x: UintType(8), y: BoolType() }, &.{ 1, 1 });
+    const ST = VariableProgressiveContainerType(struct {
+        a: UintType(8),
+        nested: @import("progressive_list.zig").VariableProgressiveListType(Inner),
+        bytes: @import("progressive_byte_list.zig").ProgressiveByteListType(.{}),
+        bits: ProgressiveBitListType(),
+        points: FixedProgressiveListType(Point, .{}),
+    }, &.{ 1, 0, 1, 1, 1, 1 });
+
+    var source = ST.default_value;
+    defer ST.deinit(allocator, &source);
+    source.a = 7;
+    try source.nested.appendNTimes(allocator, Inner.default_value, 3);
+    try source.nested.items[0].appendSlice(allocator, &.{ 1, 2, 3 });
+    try source.nested.items[2].appendSlice(allocator, &.{ 9, 8 });
+    try source.bytes.appendSlice(allocator, &.{ 0xaa, 0xbb });
+    try source.bits.resize(allocator, 13);
+    try source.bits.set(allocator, 3, true);
+    try source.points.appendSlice(allocator, &.{ .{ .x = 1, .y = true }, .{ .x = 2, .y = false } });
+
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    var writer: std.json.Stringify = .{ .writer = &output.writer };
+    try ST.serializeIntoJson(allocator, &writer, &source);
+    const json = output.written();
+
+    for (0..json.len) |len| {
+        var out = ST.default_value;
+        defer ST.deinit(allocator, &out);
+        var scanner = std.json.Scanner.initCompleteInput(allocator, json[0..len]);
+        defer scanner.deinit();
+        if (ST.deserializeFromJson(allocator, &scanner, &out)) |_| return error.TestUnexpectedResult else |_| {}
+    }
+
+    try std.testing.checkAllAllocationFailures(allocator, struct {
+        fn run(checked: std.mem.Allocator, input: []const u8, expected: *const ST.Type) !void {
+            var out = ST.default_value;
+            defer ST.deinit(checked, &out);
+            var scanner = std.json.Scanner.initCompleteInput(checked, input);
+            defer scanner.deinit();
+            try ST.deserializeFromJson(checked, &scanner, &out);
+            try std.testing.expect(ST.equals(expected, &out));
+        }
+    }.run, .{ json, &source });
 }
