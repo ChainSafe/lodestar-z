@@ -57,12 +57,12 @@ fn configureEreVerifier(b: *std.Build, result: zbuild.BuildResult) !void {
     const bindings = result.library("bindings").?;
     const target = bindings.root_module.resolved_target.?.result;
     if (target.os.tag == .linux and target.abi == .gnu) {
-        // ere 0.19.2 retains two unused strong imports that override quiche's weak libc references.
+        // ere 0.19.2 retains unused strong imports for newer glibc, including quiche's weak libc references.
         // Remove only those symbols, preserving the local symbols used for profiling.
         for (package.module("ere").link_objects.items) |*object| switch (object.*) {
             .static_path => |archive| {
                 const objcopy = try b.findProgram(&.{"llvm-objcopy"}, &.{});
-                const clean = b.addSystemCommand(&.{ objcopy, "--strip-symbol=posix_spawn_file_actions_addchdir", "--strip-symbol=pidfd_spawnp" });
+                const clean = b.addSystemCommand(&.{ objcopy, "--strip-symbol=posix_spawn_file_actions_addchdir", "--strip-symbol=pidfd_spawnp", "--strip-symbol=pidfd_getpid" });
                 clean.addFileArg(archive);
                 object.* = .{ .static_path = clean.addOutputFileArg("libere_verifier_c.a") };
             },
