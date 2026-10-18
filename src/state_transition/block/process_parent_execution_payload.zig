@@ -26,14 +26,21 @@ pub fn processParentExecutionPayload(
 ) !void {
     const bid = &block.body().inner.signed_execution_payload_bid.message;
     var parent_bid = ForkTypes(fork).ExecutionPayloadBid.default_value;
-    try state.inner.getValue(allocator, "latest_execution_payload_bid", &parent_bid);
     defer ForkTypes(fork).ExecutionPayloadBid.deinit(allocator, &parent_bid);
+    try state.inner.getValue(allocator, "latest_execution_payload_bid", &parent_bid);
 
     const requests = &block.body().inner.parent_execution_requests;
     try validateExecutionRequests(fork, requests);
     const is_parent_block_full = std.mem.eql(u8, &bid.parent_block_hash, &parent_bid.block_hash);
     if (!is_parent_block_full) {
-        try assertEmptyExecutionRequests(fork, requests);
+        if (requests.deposits.items.len != 0 or
+            requests.withdrawals.items.len != 0 or
+            requests.consolidations.items.len != 0 or
+            requests.builder_deposits.items.len != 0 or
+            requests.builder_exits.items.len != 0)
+        {
+            return error.ParentExecutionRequestsNotEmpty;
+        }
         return;
     }
 
@@ -57,8 +64,8 @@ pub fn applyParentExecutionPayload(
 ) !void {
     try validateExecutionRequests(fork, requests);
     var parent_bid = ForkTypes(fork).ExecutionPayloadBid.default_value;
-    try state.inner.getValue(allocator, "latest_execution_payload_bid", &parent_bid);
     defer ForkTypes(fork).ExecutionPayloadBid.deinit(allocator, &parent_bid);
+    try state.inner.getValue(allocator, "latest_execution_payload_bid", &parent_bid);
     const parent_slot = try state.latestBlockHeaderSlot();
     const parent_epoch = computeEpochAtSlot(parent_slot);
     const current_epoch = computeEpochAtSlot(try state.slot());
@@ -117,17 +124,6 @@ fn settleBuilderPayment(comptime fork: ForkSeq, allocator: Allocator, state: *Be
 
     const default_payment = ForkTypes(fork).BuilderPendingPayment.default_value;
     try builder_pending_payments.setValue(payment_index, &default_payment);
-}
-
-fn assertEmptyExecutionRequests(comptime fork: ForkSeq, requests: *const ForkTypes(fork).ExecutionRequests.Type) !void {
-    if (requests.deposits.items.len != 0 or
-        requests.withdrawals.items.len != 0 or
-        requests.consolidations.items.len != 0 or
-        requests.builder_deposits.items.len != 0 or
-        requests.builder_exits.items.len != 0)
-    {
-        return error.ParentExecutionRequestsNotEmpty;
-    }
 }
 
 pub fn validateExecutionRequests(comptime fork: ForkSeq, requests: *const ForkTypes(fork).ExecutionRequests.Type) !void {
