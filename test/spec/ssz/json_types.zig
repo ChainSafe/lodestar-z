@@ -1,8 +1,9 @@
+//! Schemas for the ethereum/ssz-specs JSON fixtures, mirroring `tests/fillers/ssz/` at the pinned
+//! fixture version. Suites get separate namespaces because `SampleShapeContainer` differs between
+//! suites.
+
 const ssz = @import("ssz");
 
-// Schema names and field positions from ethereum/ssz-specs v0.0.1.dev2,
-// commit 2f7cbc4f82c143e10f3a3cacab52645a8816ef21, tests/fillers/ssz/.
-// Suites use separate namespaces because SampleShapeContainer differs by suite.
 const Uint8 = ssz.UintType(8);
 const Uint16 = ssz.UintType(16);
 const Uint32 = ssz.UintType(32);
@@ -12,7 +13,6 @@ const Uint16List4 = ssz.FixedListType(Uint16, 4, .{});
 const Uint64ProgressiveList = ssz.FixedProgressiveListType(Uint64, .{});
 const Square = ssz.FixedProgressiveContainerType(struct { side: Uint16, color: Uint8 }, &.{ 1, 0, 1 });
 const Circle = ssz.FixedProgressiveContainerType(struct { radius: Uint16, color: Uint8 }, &.{ 0, 1, 1 });
-const Shape = ssz.CompatibleUnionType(.{ .{ 1, Square }, .{ 2, Circle }, .{ 127, Square } });
 const SquareList = ssz.FixedProgressiveListType(Square, .{});
 const CircleList = ssz.FixedProgressiveListType(Circle, .{});
 
@@ -39,13 +39,9 @@ pub const test_basic_types = struct {
 };
 
 pub const test_compatible_unions = struct {
-    pub const SampleShape = Shape;
+    pub const SampleShape = ssz.CompatibleUnionType(.{ .{ 1, Square }, .{ 2, Circle }, .{ 127, Square } });
     pub const SampleNumbers = ssz.CompatibleUnionType(.{ .{ 1, Uint16List4 }, .{ 2, Uint16List4 } });
     pub const SampleEmptyProne = ssz.CompatibleUnionType(.{ .{ 1, SquareList }, .{ 2, CircleList } });
-    pub const SampleNestedShape = ssz.CompatibleUnionType(.{ .{ 1, Shape }, .{ 2, ssz.CompatibleUnionType(.{.{ 5, Square }}) } });
-    pub const SampleShapeContainer = ssz.VariableContainerType(struct { tag: Uint64, body: Shape });
-    pub const SampleShapeProgressiveContainer = ssz.VariableProgressiveContainerType(struct { tag: Uint64, body: Shape }, &.{ 1, 0, 1 });
-    pub const SampleShapeProgressiveList = ssz.VariableProgressiveListType(Shape, .{});
 };
 
 pub const test_decode_failure_smoke = struct {

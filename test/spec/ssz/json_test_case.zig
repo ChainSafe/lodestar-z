@@ -15,16 +15,12 @@ fn numberString(json: std.json.Value) ![]const u8 {
     };
 }
 
-fn containsUnion(comptime ST: type) bool {
-    switch (ST.kind) {
-        .compatible_union => return true,
-        .container, .progressive_container => {
-            inline for (ST.fields) |field| if (containsUnion(field.type)) return true;
-        },
-        .list, .progressive_list, .vector => return containsUnion(ST.Element),
-        else => {},
-    }
-    return false;
+/// Decoders take a deinitializable `out`. A compatible union has no default value, so start from its
+/// first option; decoding replaces it.
+fn initialValue(comptime ST: type) ST.Type {
+    if (comptime ST.kind != .compatible_union) return ST.default_value;
+    const option = ST._union_options[0];
+    return @unionInit(ST.Type, std.fmt.comptimePrint("option_{d}", .{option.@"0"}), option.@"1".default_value);
 }
 
 /// Read the fixture's independent value representation without decoding its SSZ
@@ -40,7 +36,7 @@ fn parseValue(comptime ST: type, fixture_allocator: Allocator, json: std.json.Va
             try out.resize(fixture_allocator, values.len);
             for (values, 0..) |value, i| try out.set(fixture_allocator, i, value.bool);
         }
-    } else if (comptime ssz.isByteVectorType(ST) or ssz.isByteListType(ST)) {
+    } else if (comptime ssz.isByteVectorType(ST) or ssz.isByteListType(ST) or ssz.isProgressiveByteListType(ST)) {
         const encoded = unwrapData(json).string;
         const bytes = try decodeHex(fixture_allocator, encoded);
         if (comptime ssz.isByteVectorType(ST)) {
@@ -156,7 +152,7 @@ fn expectInvalid(result: anyerror!void) !void {
 /// and tree decoding. Any success is a failure.
 fn expectFixtureRejected(comptime ST: type, fixture_allocator: Allocator, pool: *Node.Pool, bytes: []const u8) !void {
     try expectInvalid(ST.serialized.validate(bytes));
-    var value = ssz.initValue(ST);
+    var value = initialValue(ST);
     try expectInvalid(deserializeFromBytes(ST, fixture_allocator, bytes, &value));
     if (ST.tree.deserializeFromBytes(pool, bytes)) |node| {
         pool.unref(node);
@@ -175,7 +171,7 @@ fn expectValueSerializesTo(comptime ST: type, fixture_allocator: Allocator, valu
 /// The fixture's SSZ bytes pass validation and decode to the fixture's value.
 fn expectBytesDeserializeTo(comptime ST: type, fixture_allocator: Allocator, bytes: []const u8, expected: *const ST.Type) !void {
     try ST.serialized.validate(bytes);
-    var actual = ssz.initValue(ST);
+    var actual = initialValue(ST);
     try deserializeFromBytes(ST, fixture_allocator, bytes, &actual);
     try std.testing.expect(ST.equals(expected, &actual));
 }
@@ -215,14 +211,12 @@ fn expectTreeRoundTrip(
     try std.testing.expectEqual(bytes.len, try ST.tree.serializeIntoBytes(node, pool, out));
     try std.testing.expectEqualSlices(u8, bytes, out);
 
-    var tree_value = ssz.initValue(ST);
+    var tree_value = initialValue(ST);
     try treeToValue(ST, fixture_allocator, pool, node, &tree_value);
     try std.testing.expect(ST.equals(value, &tree_value));
     return node;
 }
 
-/// Compatible unions currently expose value/tree APIs only. Their containing
-/// types exercise every other property; supported mutable views add this check.
 fn expectViewRoundTrip(
     comptime ST: type,
     backing_allocator: Allocator,
@@ -251,6 +245,16 @@ fn expectViewRoundTrip(
 /// - `backing_allocator`: manages the arena, pool and tree view
 /// - `fixture_allocator`: the arena allocator which does smaller and more frequent allocations for fixtures
 pub fn run(comptime ST: type, backing_allocator: Allocator, file: []const u8, test_id: []const u8) !void {
+    try runLayout(ST, backing_allocator, file, test_id);
+    // Basic progressive lists can also store their chunks in chunked leaves. That layout has the
+    // same root and bytes, so it must pass the same fixtures.
+    if (comptime ST.kind == .progressive_list and ssz.isBasicType(ST.Element) and !ST.opts.chunked_leaf) {
+        const Chunked = ssz.FixedProgressiveListType(ST.Element, .{ .chunked_leaf = true, .limit = ST.opts.limit });
+        try runLayout(Chunked, backing_allocator, file, test_id);
+    }
+}
+
+fn runLayout(comptime ST: type, backing_allocator: Allocator, file: []const u8, test_id: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(backing_allocator);
     defer arena.deinit();
     const fixture_allocator = arena.allocator();
@@ -275,12 +279,13 @@ pub fn run(comptime ST: type, backing_allocator: Allocator, file: []const u8, te
     const node = try expectTreeRoundTrip(ST, fixture_allocator, &pool, &expected, fixture.bytes, &root);
     defer pool.unref(node);
 
-    if (comptime !containsUnion(ST) and @hasDecl(ST, "TreeView")) {
+    // Compatible unions have no tree view.
+    if (comptime @hasDecl(ST, "TreeView")) {
         try expectViewRoundTrip(ST, backing_allocator, fixture_allocator, &pool, node, fixture.bytes, &root);
     }
 }
 
-test "invalid JSON fixture runner preserves resource errors" {
+test "expectInvalid should preserve resource errors" {
     try expectInvalid(error.InvalidLength);
     try std.testing.expectError(error.OutOfMemory, expectInvalid(error.OutOfMemory));
     try std.testing.expectError(error.PoolExhausted, expectInvalid(error.PoolExhausted));

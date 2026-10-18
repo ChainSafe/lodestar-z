@@ -7,7 +7,6 @@ pub const BYTES_PER_CHUNK = types.BYTES_PER_CHUNK;
 pub const TypeKind = types.TypeKind;
 pub const isBasicType = types.isBasicType;
 pub const isFixedType = types.isFixedType;
-pub const initValue = types.initValue;
 
 pub const BoolType = types.BoolType;
 pub const UintType = types.UintType;
@@ -38,6 +37,7 @@ pub const VariableContainerType = types.VariableContainerType;
 
 // Progressive container types
 pub const FixedProgressiveContainerType = types.FixedProgressiveContainerType;
+pub const StructProgressiveContainerType = types.StructProgressiveContainerType;
 pub const VariableProgressiveContainerType = types.VariableProgressiveContainerType;
 
 // Progressive list types

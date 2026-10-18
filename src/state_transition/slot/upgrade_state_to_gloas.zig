@@ -66,7 +66,7 @@ fn migrateComposite(comptime Before: type, comptime After: type, allocator: Allo
     const nodes = try allocator.alloc(Node.Id, len);
     defer allocator.free(nodes);
     if (len > 0) try before.getRoot().getNodesAtDepth(pool, Before.chunk_depth + 1, 0, nodes);
-    const root = try After.tree.fromNodes(allocator, pool, nodes, len);
+    const root = try After.tree.fromNodes(pool, nodes);
     errdefer pool.unref(root);
     return After.TreeView.init(view_allocator, pool, root);
 }

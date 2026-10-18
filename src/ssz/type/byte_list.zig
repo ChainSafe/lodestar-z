@@ -13,7 +13,6 @@ const Node = @import("persistent_merkle_tree").Node;
 const ListBasicTreeView = @import("../tree_view/root.zig").ListBasicTreeView;
 
 pub fn isByteListType(ST: type) bool {
-    if (@import("progressive_byte_list.zig").isProgressiveByteListType(ST)) return true;
     return ST.kind == .list and ST.Element.kind == .uint and ST.Element.fixed_size == 1 and ST == ByteListType(ST.limit);
 }
 
@@ -135,7 +134,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
                     );
                 }
 
-                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                var it = Node.SubtreeBuilder.init(pool, chunk_depth);
                 errdefer it.deinit();
 
                 for (0..chunk_count - 1) |i| {
@@ -177,7 +176,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
                     );
                 }
 
-                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                var it = Node.SubtreeBuilder.init(pool, chunk_depth);
                 errdefer it.deinit();
 
                 for (0..chunk_count) |i| {

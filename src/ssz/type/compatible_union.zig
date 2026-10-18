@@ -3,7 +3,6 @@ const TypeKind = @import("type_kind.zig").TypeKind;
 const isFixedType = @import("type_kind.zig").isFixedType;
 const hashOne = @import("hashing").hashOne;
 const Node = @import("persistent_merkle_tree").Node;
-const initValue = @import("value_init.zig").initValue;
 
 /// Validates that a selector is within the valid range (1-127)
 fn isValidSelector(selector: u8) bool {
@@ -252,7 +251,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
                     const value_data_ptr = &@field(value.*, field_name);
-                    var replacement = @unionInit(Type, field_name, initValue(option_type));
+                    var replacement = @unionInit(Type, field_name, option_type.default_value);
                     errdefer deinit(allocator, &replacement);
                     const replacement_data_ptr = &@field(replacement, field_name);
                     if (comptime isFixedType(option_type)) {
@@ -348,7 +347,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                    var replacement = @unionInit(Type, field_name, initValue(option_type));
+                    var replacement = @unionInit(Type, field_name, option_type.default_value);
                     errdefer deinit(allocator, &replacement);
                     const replacement_data_ptr = &@field(replacement, field_name);
 
@@ -454,7 +453,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                         const option_type = option.@"1";
                         const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                        var replacement = @unionInit(Type, field_name, initValue(option_type));
+                        var replacement = @unionInit(Type, field_name, option_type.default_value);
                         errdefer deinit(allocator, &replacement);
                         const replacement_data_ptr = &@field(replacement, field_name);
 
@@ -567,7 +566,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                    var replacement = @unionInit(Type, field_name, initValue(option_type));
+                    var replacement = @unionInit(Type, field_name, option_type.default_value);
                     errdefer deinit(allocator, &replacement);
                     const replacement_data_ptr = &@field(replacement, field_name);
 

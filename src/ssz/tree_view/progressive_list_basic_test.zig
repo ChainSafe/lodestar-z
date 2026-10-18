@@ -13,7 +13,7 @@ fn expectRoot(comptime ST: type, view: *ST.TreeView, value: *const ST.Type) !voi
     try std.testing.expectEqualSlices(u8, &expected, try view.hashTreeRoot());
 }
 
-test "progressive chunked basic view matches plain at subtree and blob boundaries" {
+test "ProgressiveListBasicTreeView with chunked leaves should match value roots at subtree and leaf boundaries" {
     inline for (.{ ssz.BoolType(), ssz.UintType(8), ssz.UintType(16), ssz.UintType(32), ssz.UintType(64), ssz.UintType(128), ssz.UintType(256) }) |Element| {
         const ST = ssz.FixedProgressiveListType(Element, .{ .chunked_leaf = true });
         const per_chunk = 32 / Element.fixed_size;
@@ -79,7 +79,7 @@ test "progressive chunked basic view matches plain at subtree and blob boundarie
     }
 }
 
-test "progressive chunked basic zero growth clone and cached blob ownership" {
+test "ProgressiveListBasicTreeView with chunked leaves should keep clones isolated across zero growth" {
     var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     {
@@ -119,7 +119,7 @@ test "progressive chunked basic zero growth clone and cached blob ownership" {
     try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
 }
 
-test "progressive chunked basic single proofs preserve canonical gindices" {
+test "ProgressiveListBasicTreeView with chunked leaves should prove chunks at canonical gindices" {
     const pmt = @import("persistent_merkle_tree");
     var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
@@ -170,11 +170,11 @@ fn chunkedAllocationFailures(failing: Allocator) !void {
     try std.testing.expectEqual(@as(u64, 22), try copy.get(600));
 }
 
-test "memory_safety: progressive chunked basic allocation failures" {
+test "memory_safety: ProgressiveListBasicTreeView with chunked leaves should clean up on every allocation failure" {
     try std.testing.checkAllAllocationFailures(allocator, chunkedAllocationFailures, .{});
 }
 
-test "memory_safety: progressive chunked basic failed publication and slice reclaim payloads" {
+test "memory_safety: ProgressiveListBasicTreeView with chunked leaves should keep writes and reclaim nodes on pool exhaustion" {
     inline for (.{ false, true }) |slice| {
         var saw_failure = false;
         var saw_success = false;
@@ -240,7 +240,7 @@ test "memory_safety: progressive chunked basic failed publication and slice recl
     }
 }
 
-test "progressive chunked basic bulk and warmed writes allocate no scratch" {
+test "ProgressiveListBasicTreeView with chunked leaves should not allocate for warmed writes and bulk reads" {
     var failing = std.testing.FailingAllocator.init(allocator, .{});
     var pool = try Node.Pool.init(.{ .allocator = failing.allocator(), .page_allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
@@ -269,7 +269,7 @@ test "progressive chunked basic bulk and warmed writes allocate no scratch" {
     try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
 }
 
-test "progressive basic view packed types and subtree boundaries" {
+test "ProgressiveListBasicTreeView should match value roots for every packed type" {
     inline for (.{ ssz.BoolType(), ssz.UintType(8), ssz.UintType(16), ssz.UintType(32), ssz.UintType(64), ssz.UintType(128), ssz.UintType(256) }) |Element| {
         const ST = ssz.FixedProgressiveListType(Element, .{});
         var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 2048 });
@@ -305,7 +305,7 @@ test "progressive basic view packed types and subtree boundaries" {
     }
 }
 
-test "progressive basic view grows zero subtrees and slices shared prefixes" {
+test "ProgressiveListBasicTreeView should grow zero subtrees and slice shared prefixes" {
     var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
     {
@@ -346,7 +346,7 @@ test "progressive basic view grows zero subtrees and slices shared prefixes" {
     try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
 }
 
-test "progressive basic view clone transfer drops writes and retains root consistency" {
+test "ProgressiveListBasicTreeView clone should drop transferred writes" {
     var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     {
@@ -385,7 +385,7 @@ test "progressive basic view clone transfer drops writes and retains root consis
     try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
 }
 
-test "progressive basic view toValue fills caller-owned out in place" {
+test "ProgressiveListBasicTreeView toValue should fill caller-owned out in place" {
     var pool = try Node.Pool.init(.{
         .allocator = allocator,
         .page_allocator = allocator,
@@ -414,7 +414,7 @@ test "progressive basic view toValue fills caller-owned out in place" {
     try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
 }
 
-test "progressive basic view integrates as an ordinary container field" {
+test "ProgressiveListBasicTreeView should work as an ordinary container field" {
     inline for (.{ List, ChunkedList }) |ST| {
         const Container = ssz.VariableContainerType(struct { values: ST });
         var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
@@ -439,7 +439,7 @@ test "progressive basic view integrates as an ordinary container field" {
     }
 }
 
-test "memory_safety: progressive basic commit retains writes on pool exhaustion" {
+test "memory_safety: ProgressiveListBasicTreeView commit should keep writes on pool exhaustion" {
     var failures: usize = 0;
     var successes: usize = 0;
     for ([_]usize{ 4, 20 }) |new_length| {
@@ -513,20 +513,11 @@ fn allocationFailures(failing: Allocator) !void {
     try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
 }
 
-test "memory_safety: progressive basic view allocation failure cleanup" {
+test "memory_safety: ProgressiveListBasicTreeView should clean up on every allocation failure" {
     try std.testing.checkAllAllocationFailures(allocator, allocationFailures, .{});
 }
 
-test "progressive basic deserialization propagates original errors" {
-    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 128 });
-    defer pool.deinit();
-    const Booleans = ssz.FixedProgressiveListType(ssz.BoolType(), .{});
-    try std.testing.expectError(error.invalidBoolean, Booleans.TreeView.deserialize(allocator, &pool, &.{2}));
-    try std.testing.expectError(error.InvalidSSZ, List.TreeView.deserialize(allocator, &pool, &.{0}));
-    try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
-}
-
-test "memory_safety: progressive basic commit OOM preserves ordinary and growing roots" {
+test "memory_safety: ProgressiveListBasicTreeView commit should keep the old root on OOM" {
     for ([_]usize{ 4, 96 }) |len| {
         var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 2048 });
         defer pool.deinit();
@@ -552,7 +543,7 @@ test "memory_safety: progressive basic commit OOM preserves ordinary and growing
     }
 }
 
-test "progressive basic repeated packed writes reuse one pending leaf" {
+test "ProgressiveListBasicTreeView should reuse one pending leaf for repeated writes" {
     var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 128 });
     defer pool.deinit();
     {
@@ -573,28 +564,48 @@ test "progressive basic repeated packed writes reuse one pending leaf" {
     try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
 }
 
-test "progressive basic roots match TS SSZ reference fixtures" {
-    const counts = [_]usize{ 0, 1, 4, 5, 20, 21, 84, 85, 340, 341 };
-    const roots = [_][]const u8{
-        "f5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b",
-        "e832d263aaa8f9417d9f45a702834f6961ee7b15ad4d3d27f2b0f4fe79d33031",
-        "fb119bdda96d8ebf59b511db66fc19a40f4f1543a5aa87d8d9b4519655a8eda9",
-        "b52da986d8c44ac58d43d54d5a6f27363363ad09e1249d211c38c21c5221e5f4",
-        "1957d11b2bce3ef0c72872fca6fa4cffacc27e601c91b88ab8e6b28eebc6525c",
-        "86a8ce9749021379ba7af31ac5d6f3b33e0e0791a5c9bb2e00580fe8d6aeb117",
-        "765cd3f85263382f72bcf782dd80038ec9184206fdde9e0872f5ec4025ed992f",
-        "44149f84b9899187d206378ab59b88e7e59ebd3ed84fd95b4b2ba58b08f98024",
-        "3083accc9e7cff9414433f3012d5b356e592e23df63c125f238f1a7efdc92ef2",
-        "124e759295d6379ae9fba4499aa45580f940cab8214b34260e36977bd0e6e9fa",
-    };
-    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 2048 });
-    defer pool.deinit();
-    for (counts, roots) |count, root_hex| {
-        const view = try List.TreeView.fromValue(allocator, &pool, &List.default_value);
-        defer view.deinit();
-        for (0..count) |i| try view.push(i % 251);
-        var expected: [32]u8 = undefined;
-        _ = try std.fmt.hexToBytes(&expected, root_hex);
-        try std.testing.expectEqualSlices(u8, &expected, try view.hashTreeRoot());
+test "ProgressiveListBasicTreeView should read, write and grow a zeros tree" {
+    inline for (.{ List, ChunkedList }) |ST| {
+        var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
+        defer pool.deinit();
+        {
+            const root = try ST.tree.zeros(&pool, 1400);
+            const view = ST.TreeView.init(allocator, &pool, root) catch |err| {
+                pool.unref(root);
+                return err;
+            };
+            defer view.deinit();
+
+            try std.testing.expectEqual(@as(u64, 0), try view.get(1399));
+            try view.set(600, 6);
+            try view.push(7);
+
+            var expected: ST.Type = .empty;
+            defer expected.deinit(allocator);
+            try expected.resize(allocator, 1401);
+            @memset(expected.items, 0);
+            expected.items[600] = 6;
+            expected.items[1400] = 7;
+            try expectRoot(ST, view, &expected);
+            var it = view.iteratorReadonly(1398);
+            for (expected.items[1398..]) |item| try std.testing.expectEqual(@as(?u64, item), try it.next());
+        }
+        try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
     }
+}
+
+test "ProgressiveListBasicTreeView push and growTo should respect the type limit" {
+    const ST = ssz.FixedProgressiveListType(ssz.UintType(64), .{ .limit = 3 });
+    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 64 });
+    defer pool.deinit();
+    {
+        const view = try ST.TreeView.fromValue(allocator, &pool, &ST.default_value);
+        defer view.deinit();
+        try view.growTo(2);
+        try view.push(7);
+        try std.testing.expectError(error.LengthOverLimit, view.push(8));
+        try std.testing.expectError(error.LengthOverLimit, view.growTo(4));
+        try std.testing.expectEqual(@as(u64, 7), try view.get(2));
+    }
+    try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
 }

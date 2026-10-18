@@ -1,5 +1,6 @@
 const std = @import("std");
 const BitList = @import("bit_array").BitList;
+const unlimited = @import("bit_array").unlimited;
 const expectEqualRootsAlloc = @import("test_utils.zig").expectEqualRootsAlloc;
 const expectEqualSerializedAlloc = @import("test_utils.zig").expectEqualSerializedAlloc;
 const TypeKind = @import("type_kind.zig").TypeKind;
@@ -11,23 +12,38 @@ const hexLenFromBytes = @import("hex").hexLenFromBytes;
 const mixInLength = @import("hashing").mixInLength;
 const Node = @import("persistent_merkle_tree").Node;
 const progressive = @import("progressive.zig");
+const chunk_utils = @import("chunk.zig");
 
 pub fn isProgressiveBitListType(ST: type) bool {
     return ST.kind == .progressive_bit_list;
 }
 
+/// Progressive merkleization has no length bound. `limit` carries the bound the consensus rules
+/// give each progressive bitlist, so decoding can reject longer inputs; it defaults to unbounded.
 pub const TypeOpts = struct { limit: usize = std.math.maxInt(usize) };
 
 pub fn ProgressiveBitListType(comptime opts: TypeOpts) type {
+    comptime {
+        if (opts.limit == 0) @compileError("limit must be greater than 0");
+    }
     return struct {
         const Self = @This();
         pub const kind = TypeKind.progressive_bit_list;
         pub const Element: type = BoolType();
-        pub const limit: usize = @intCast(@min(opts.limit, @as(u128, progressive.max_tree_chunks) * 256, std.math.maxInt(usize) - 255));
-        pub const Type: type = BitList(.{ .limit = if (opts.limit == std.math.maxInt(usize)) @import("bit_array").unlimited else opts.limit });
+        /// `opts.limit`, capped so the chunk count and the padded byte length cannot overflow. It
+        /// bounds decoding but not merkleization.
+        pub const limit: usize = @intCast(@min(
+            opts.limit,
+            @as(u128, progressive.max_node_chunks) * 256,
+            std.math.maxInt(usize) - 255,
+        ));
+        pub const Type: type = BitList(.{ .limit = if (opts.limit == std.math.maxInt(usize)) unlimited else opts.limit });
         pub const TreeView = @import("../tree_view/progressive_bit_list.zig").ProgressiveBitListTreeView(Self);
         pub const min_size: usize = 1;
-        pub const max_size: usize = std.math.maxInt(usize);
+        pub const max_size: usize = if (opts.limit == std.math.maxInt(usize))
+            std.math.maxInt(usize)
+        else
+            limit / 8 + 1;
 
         pub const default_value: Type = Type.empty;
         pub const default_root: [32]u8 = @import("hashing").getZeroHash(1).*;
@@ -41,28 +57,38 @@ pub fn ProgressiveBitListType(comptime opts: TypeOpts) type {
         }
 
         pub fn chunkCount(value: *const Type) usize {
-            return (value.bit_len + 255) / 256;
+            return chunkCountForLength(value.bit_len);
+        }
+
+        fn chunkCountForLength(bit_len: usize) usize {
+            return bit_len / 256 + @intFromBool(bit_len % 256 != 0);
         }
 
         pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            if (value.bit_len > limit) return error.LengthOverLimit;
             var accumulator = try progressive.MerkleAccumulator.init(chunkCount(value));
-            var offset: usize = 0;
-            while (offset < value.data.items.len) {
-                var chunk: [32]u8 = @splat(0);
-                const count = @min(32, value.data.items.len - offset);
-                @memcpy(chunk[0..count], value.data.items[offset..][0..count]);
+            var chunks = std.mem.window(u8, value.data.items, 32, 32);
+            while (chunks.next()) |bytes| {
+                const chunk = chunk_utils.fromBytes(bytes);
                 try accumulator.append(&chunk);
-                offset += count;
             }
             try accumulator.finish(out);
             mixInLength(value.bit_len, out);
         }
 
-        /// Clones the underlying `ArrayList` in `data`.
-        ///
-        /// Caller owns the memory.
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or
+        /// error.
         pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
+            return cloneInto(@This(), allocator, value, out);
+        }
+
+        /// Initialize `out` with `DestinationST.default_value`; the caller deinitializes it after
+        /// success or error.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
             out.data = try value.data.clone(allocator);
             out.bit_len = value.bit_len;
         }
@@ -119,6 +145,29 @@ pub fn ProgressiveBitListType(comptime opts: TypeOpts) type {
             }
         }
 
+        const SerializedChunkIterator = struct {
+            bytes: std.mem.WindowIterator(u8),
+            bit_len: usize,
+
+            fn init(data: []const u8) !SerializedChunkIterator {
+                const bit_len = try serialized.length(data);
+                const byte_len = bit_len / 8 + @intFromBool(bit_len % 8 != 0);
+                return .{ .bytes = std.mem.window(u8, data[0..byte_len], 32, 32), .bit_len = bit_len };
+            }
+
+            /// Borrows full chunks from the input; uses `out` only for padding or delimiter removal.
+            fn next(self: *SerializedChunkIterator, out: *[32]u8) ?*const [32]u8 {
+                const bytes = self.bytes.next() orelse return null;
+                const has_delimiter = self.bytes.index == null and self.bit_len % 8 != 0;
+                if (bytes.len == 32 and !has_delimiter) return bytes[0..32];
+                out.* = chunk_utils.fromBytes(bytes);
+                if (has_delimiter) {
+                    out[bytes.len - 1] &= ~(@as(u8, 1) << @intCast(self.bit_len % 8));
+                }
+                return out;
+            }
+        };
+
         pub const serialized = struct {
             pub fn validate(data: []const u8) !void {
                 if (data.len == 0) {
@@ -156,65 +205,41 @@ pub fn ProgressiveBitListType(comptime opts: TypeOpts) type {
             }
 
             pub fn hashTreeRoot(_: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
-                const bit_len = try length(data);
-                const byte_len = bit_len / 8 + @intFromBool(bit_len % 8 != 0);
-                var accumulator = try progressive.MerkleAccumulator.init(bit_len / 256 + @intFromBool(bit_len % 256 != 0));
-                var offset: usize = 0;
-                while (offset < byte_len) {
-                    var chunk: [32]u8 = @splat(0);
-                    const count = @min(32, byte_len - offset);
-                    @memcpy(chunk[0..count], data[offset..][0..count]);
-                    if (offset + count == byte_len and bit_len % 8 != 0) {
-                        chunk[count - 1] ^= @as(u8, 1) << @intCast(bit_len % 8);
-                    }
-                    try accumulator.append(&chunk);
-                    offset += count;
-                }
+                var chunks = try SerializedChunkIterator.init(data);
+                var accumulator = try progressive.MerkleAccumulator.init(chunkCountForLength(chunks.bit_len));
+                var scratch: [32]u8 = undefined;
+                while (chunks.next(&scratch)) |chunk| try accumulator.append(chunk);
                 try accumulator.finish(out);
-                mixInLength(bit_len, out);
+                mixInLength(chunks.bit_len, out);
             }
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                return try pool.createBranch(@enumFromInt(0), @enumFromInt(0));
+            }
+
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
                 const right = try node.getRight(pool);
                 const hash = right.getRoot(pool);
                 const len = std.mem.readInt(u256, hash, .little);
                 if (len > limit) return error.LengthOverLimit;
-                const bit_len: usize = @intCast(len);
-                try progressive.validateContents(pool, try node.getLeft(pool), (bit_len + 255) / 256);
-                return bit_len;
+                return @intCast(len);
             }
 
+            /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const bit_len = try length(node, pool);
-                const chunk_count = (bit_len + 255) / 256;
-                if (chunk_count == 0) {
-                    try out.resize(allocator, 0);
-                    return;
-                }
-
-                const byte_length = (bit_len + 7) / 8;
-
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-
-                const contents_node = try node.getLeft(pool);
-                try progressive.getNodes(pool, contents_node, nodes);
-
+                const chunk_count = bit_len / 256 + @intFromBool(bit_len % 256 != 0);
+                var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
                 try out.resize(allocator, bit_len);
-                for (0..chunk_count) |i| {
-                    const start_idx = i * 32;
-                    const remaining_bytes = byte_length - start_idx;
-
-                    // Determine how many bytes to copy for this chunk
-                    const bytes_to_copy = @min(remaining_bytes, 32);
-
-                    // Copy data if there are bytes to copy
-                    if (bytes_to_copy > 0) {
-                        @memcpy(out.data.items[start_idx..][0..bytes_to_copy], nodes[i].getRoot(pool)[0..bytes_to_copy]);
-                    }
+                var offset: usize = 0;
+                while (try it.next()) |chunk| {
+                    const count = @min(32, out.data.items.len - offset);
+                    @memcpy(out.data.items[offset..][0..count], chunk.getRoot(pool)[0..count]);
+                    offset += count;
                 }
+                std.debug.assert(offset == out.data.items.len);
             }
 
             pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
@@ -225,76 +250,50 @@ pub fn ProgressiveBitListType(comptime opts: TypeOpts) type {
                 const bit_len = try length(node, pool);
                 const size = bit_len / 8 + 1;
                 if (out.len < size) return error.InvalidSize;
-                const byte_len = (bit_len + 7) / 8;
-                var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), (bit_len + 255) / 256);
+                const byte_len = bit_len / 8 + @intFromBool(bit_len % 8 != 0);
+                const chunk_count = bit_len / 256 + @intFromBool(bit_len % 256 != 0);
+                var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
                 var offset: usize = 0;
                 while (try it.next()) |chunk| {
                     const count = @min(32, byte_len - offset);
                     @memcpy(out[offset..][0..count], chunk.getRoot(pool)[0..count]);
                     offset += count;
                 }
-                const padding: u8 = @as(u8, 1) << @intCast(bit_len % 8);
-                out[size - 1] = if (bit_len % 8 == 0) padding else (out[size - 1] & (padding - 1)) | padding;
+                std.debug.assert(offset == byte_len);
+                if (bit_len % 8 == 0) {
+                    out[size - 1] = 1;
+                } else {
+                    out[size - 1] |= @as(u8, 1) << @intCast(bit_len % 8);
+                }
                 return size;
             }
 
-            pub fn default(pool: *Node.Pool) !Node.Id {
-                return fromValue(pool, &Self.default_value);
-            }
-
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
-                const allocator = pool.allocator;
-                var value = Self.default_value;
-                defer Self.deinit(allocator, &value);
-
-                try Self.deserializeFromBytes(allocator, data, &value);
-                return fromValue(pool, &value);
+                var chunks = try SerializedChunkIterator.init(data);
+                var builder = try progressive.TreeBuilder.init(pool, chunkCountForLength(chunks.bit_len));
+                defer builder.deinit();
+                var scratch: [32]u8 = undefined;
+                while (chunks.next(&scratch)) |chunk| try builder.appendOwned(try pool.createLeaf(chunk));
+                const contents = try builder.finish();
+                errdefer pool.unref(contents);
+                const length_leaf = try pool.createLeafFromUint(chunks.bit_len);
+                errdefer pool.unref(length_leaf);
+                return try pool.createBranch(contents, length_leaf);
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                if (value.bit_len > limit) return error.LengthOverLimit;
-                const allocator = pool.allocator;
-                const chunk_count = chunkCount(value);
-                if (chunk_count == 0) {
-                    const length_leaf = try pool.createLeafFromUint(0);
-                    errdefer pool.unref(length_leaf);
-
-                    return try pool.createBranch(@enumFromInt(0), length_leaf);
+                var builder = try progressive.TreeBuilder.init(pool, chunkCount(value));
+                defer builder.deinit();
+                var chunks = std.mem.window(u8, value.data.items, 32, 32);
+                while (chunks.next()) |bytes| {
+                    const chunk = chunk_utils.fromBytes(bytes);
+                    try builder.appendOwned(try pool.createLeaf(&chunk));
                 }
-                const byte_length = (value.bit_len + 7) / 8;
-
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-                @memset(nodes, @as(Node.Id, @enumFromInt(0)));
-                var content_owns_nodes = false;
-                errdefer if (!content_owns_nodes) pool.free(nodes);
-                for (0..chunk_count) |i| {
-                    var leaf_buf = [_]u8{0} ** 32;
-                    const start_idx = i * 32;
-                    const remaining_bytes = byte_length - start_idx;
-
-                    // Determine how many bytes to copy for this chunk
-                    const bytes_to_copy = @min(remaining_bytes, 32);
-
-                    // Copy data if there are bytes to copy
-                    if (bytes_to_copy > 0) {
-                        @memcpy(leaf_buf[0..bytes_to_copy], value.data.items[start_idx..][0..bytes_to_copy]);
-                    }
-
-                    nodes[i] = try pool.createLeaf(&leaf_buf);
-                }
-
-                const contents_tree = try progressive.fillWithContents(allocator, pool, nodes);
-                content_owns_nodes = true;
-                errdefer pool.unref(contents_tree);
-
+                const contents = try builder.finish();
+                errdefer pool.unref(contents);
                 const length_leaf = try pool.createLeafFromUint(value.bit_len);
                 errdefer pool.unref(length_leaf);
-
-                return try pool.createBranch(
-                    contents_tree,
-                    length_leaf,
-                );
+                return try pool.createBranch(contents, length_leaf);
             }
         };
 

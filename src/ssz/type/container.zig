@@ -678,8 +678,6 @@ pub fn VariableContainerType(comptime ST: type) type {
         // Returns the bytes ranges of all fields, both variable and fixed size.
         // Fields may not be contiguous in the serialized bytes, so the returned ranges are [start, end].
         pub fn readFieldRanges(data: []const u8) ![fields.len][2]usize {
-            // Serialized hashing calls this directly, without a preceding
-            // validation pass. Check every offset read and the terminal cast.
             if (data.len < min_size or data.len > max_size or data.len > std.math.maxInt(u32)) return error.InvalidSize;
             var ranges: [fields.len][2]usize = undefined;
             var offsets: [var_count + 1]u32 = undefined;

@@ -1,60 +1,65 @@
 const std = @import("std");
-const progressive_list = @import("progressive_list.zig");
+const hexToBytes = @import("hex").hexToBytes;
+const hexByteLen = @import("hex").hexByteLen;
+const hexLenFromBytes = @import("hex").hexLenFromBytes;
+const bytesToHex = @import("hex").bytesToHex;
 const UintType = @import("uint.zig").UintType;
-const TypeKind = @import("type_kind.zig").TypeKind;
+const progressive_list = @import("progressive_list.zig");
+const TypeOpts = progressive_list.TypeOpts;
 
 pub fn isProgressiveByteListType(comptime ST: type) bool {
-    return ST.kind == .progressive_list and @hasDecl(ST, "is_progressive_byte_list") and ST.is_progressive_byte_list;
+    return ST.kind == .progressive_list and @hasDecl(ST, "is_progressive_byte_list");
 }
 
-/// The byte-list JSON representation is hexadecimal; its SSZ encoding and roots
-/// are exactly those of a progressive uint8 list with the same storage options.
-pub fn ProgressiveByteListType(comptime options: progressive_list.TypeOpts) type {
-    const ProgressiveListFixed = progressive_list.FixedProgressiveListType(UintType(8), options);
+/// `ProgressiveList[byte]` with hexadecimal JSON. SSZ bytes, roots and trees are those of the
+/// progressive `uint8` list, whose declarations this type re-exports.
+pub fn ProgressiveByteListType(comptime _opts: TypeOpts) type {
+    const Bytes = progressive_list.FixedProgressiveListType(UintType(8), _opts);
+
     return struct {
         pub const is_progressive_byte_list = true;
-        pub const kind = TypeKind.progressive_list;
-        pub const Element = ProgressiveListFixed.Element;
-        pub const opts = ProgressiveListFixed.opts;
-        pub const limit = ProgressiveListFixed.limit;
-        pub const Type = ProgressiveListFixed.Type;
+        pub const kind = Bytes.kind;
+        pub const Element = Bytes.Element;
+        pub const opts = Bytes.opts;
+        pub const limit = Bytes.limit;
+        pub const Type = Bytes.Type;
         pub const TreeView = @import("../tree_view/progressive_list_basic.zig").ProgressiveListBasicTreeView(@This());
-        pub const min_size = ProgressiveListFixed.min_size;
-        pub const max_size = ProgressiveListFixed.max_size;
-        pub const default_value = ProgressiveListFixed.default_value;
-        pub const default_root = ProgressiveListFixed.default_root;
-        pub const equals = ProgressiveListFixed.equals;
-        pub const deinit = ProgressiveListFixed.deinit;
-        pub const chunkCount = ProgressiveListFixed.chunkCount;
-        pub const hashTreeRoot = ProgressiveListFixed.hashTreeRoot;
-        pub const serializedSize = ProgressiveListFixed.serializedSize;
-        pub const serializeIntoBytes = ProgressiveListFixed.serializeIntoBytes;
-        pub const deserializeFromBytes = ProgressiveListFixed.deserializeFromBytes;
-        pub const serialized = ProgressiveListFixed.serialized;
-        pub const tree = ProgressiveListFixed.tree;
+        pub const min_size = Bytes.min_size;
+        pub const max_size = Bytes.max_size;
+        pub const default_value = Bytes.default_value;
+        pub const default_root = Bytes.default_root;
 
-        pub fn serializeIntoJson(_: std.mem.Allocator, writer: anytype, value: *const Type) !void {
-            if (value.items.len > limit) return error.LengthOverLimit;
-            try writer.print("\"0x{x}\"", .{value.items});
+        pub const equals = Bytes.equals;
+        pub const deinit = Bytes.deinit;
+        pub const clone = Bytes.clone;
+        pub const cloneInto = Bytes.cloneInto;
+        pub const chunkCount = Bytes.chunkCount;
+        pub const hashTreeRoot = Bytes.hashTreeRoot;
+        pub const serializedSize = Bytes.serializedSize;
+        pub const serializeIntoBytes = Bytes.serializeIntoBytes;
+        pub const deserializeFromBytes = Bytes.deserializeFromBytes;
+        pub const serialized = Bytes.serialized;
+        pub const tree = Bytes.tree;
+
+        pub fn serializeIntoJson(allocator: std.mem.Allocator, writer: anytype, in: *const Type) !void {
+            const byte_str = try allocator.alloc(u8, hexLenFromBytes(in.items));
+            defer allocator.free(byte_str);
+
+            _ = try bytesToHex(byte_str, in.items);
+            try writer.print("\"{s}\"", .{byte_str});
         }
 
         /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromJson(allocator: std.mem.Allocator, source: *std.json.Scanner, out: *Type) !void {
-            const text = switch (try source.next()) {
-                .string => |value| value,
+            const hex_bytes = switch (try source.next()) {
+                .string => |v| v,
                 else => return error.InvalidJson,
             };
-            if (!std.mem.startsWith(u8, text, "0x")) return error.InvalidJson;
-            const digits = text[2..];
-            if (digits.len % 2 != 0) return error.InvalidJson;
-            const length = digits.len / 2;
-            if (length > limit) return error.LengthOverLimit;
+            const len = hexByteLen(hex_bytes);
+            if (len > limit) return error.LengthOverLimit;
 
-            var replacement: Type = .empty;
-            errdefer replacement.deinit(allocator);
-            try replacement.resize(allocator, length);
-            _ = std.fmt.hexToBytes(replacement.items, digits) catch return error.InvalidJson;
-            out.* = replacement;
+            try out.resize(allocator, len);
+            _ = try hexToBytes(out.items, hex_bytes);
         }
     };
 }

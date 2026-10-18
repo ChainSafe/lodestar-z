@@ -2,11 +2,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Node = @import("persistent_merkle_tree").Node;
 const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
+const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
 
-/// Mutable progressive bitlist with a lazy packed-byte cache. Aggregation bitlists are
-/// bounded by the consensus type; merely borrowing a view allocates no bit storage.
+/// Mutable progressive bitlist with a lazy packed-byte cache. Borrowing a view allocates no bit
+/// storage until the first read or write.
 pub fn ProgressiveBitListTreeView(comptime ST: type) type {
-    return struct {
+    const TreeView = struct {
         allocator: Allocator,
         pool: *Node.Pool,
         root: Node.Id,
@@ -63,7 +64,9 @@ pub fn ProgressiveBitListTreeView(comptime ST: type) type {
         }
 
         pub fn get(self: *Self, index: usize) !bool {
-            return (try self.getValue()).get(index);
+            const value = try self.getValue();
+            if (index >= value.bit_len) return error.IndexOutOfBounds;
+            return value.get(index);
         }
 
         pub fn set(self: *Self, index: usize, bit: bool) !void {
@@ -132,6 +135,9 @@ pub fn ProgressiveBitListTreeView(comptime ST: type) type {
             return ST.tree.serializedSize(self.root, self.pool);
         }
     };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
 }
 
 test {

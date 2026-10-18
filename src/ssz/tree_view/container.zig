@@ -114,9 +114,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
         }
 
         pub fn commit(self: *Self) !void {
-            comptime {
-                @setEvalBranchQuota(100000);
-            }
             if (self.changed.count() == 0) {
                 return;
             }
@@ -132,7 +129,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             var changed_idx: usize = 0;
             inline for (ST.fields, 0..) |field, i| {
                 if (self.changed.isSet(i)) {
-                    const ChildST = field.type;
+                    const ChildST = ST.getFieldType(field.name);
                     if (comptime isBasicType(ChildST)) {
                         const child_value = self.child_data[i] orelse return error.MissingChildValue;
                         const child_node = try ChildST.tree.fromValue(
@@ -164,15 +161,18 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 self.changed = std.StaticBitSet(ST.fields.len).empty;
                 return;
             }
-            // Different-depth progressive updates can reclaim intermediate parents on failure.
-            // Retain inputs until the rebuilt root owns them; basic-node cleanup below remains
-            // armed on failure, while composite roots continue to belong to child views.
-            var retained: usize = 0;
-            defer for (nodes[0..retained]) |node| self.pool.unrefUnsafe(node);
             const new_root = if (comptime ST.kind == .progressive_container) blk: {
+                // Different-depth updates can reclaim intermediate parents on failure. Retain the
+                // inputs until the rebuilt root owns them; basic-node cleanup stays armed.
+                var retained: usize = 0;
+                defer for (nodes[0..retained]) |node| self.pool.unrefUnsafe(node);
+
+                const field_gindices = comptime gindices_blk: {
+                    var out: [ST.fields.len]Gindex = undefined;
+                    for (ST.fields, 0..) |field, i| out[i] = ST.getFieldGindex(field.name);
+                    break :gindices_blk out;
+                };
                 var gindices: [ST.fields.len]Gindex = undefined;
-                var field_gindices: [ST.fields.len]Gindex = undefined;
-                inline for (ST.fields, 0..) |field, i| field_gindices[i] = comptime ST.getFieldGindex(field.name);
                 for (indices[0..changed_idx], nodes[0..changed_idx], 0..) |index, node, i| {
                     gindices[i] = field_gindices[index];
                     try self.pool.ref(node);
@@ -236,7 +236,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
             }
 
             const field_data = try ChildST.TreeView.init(self.allocator, self.pool, root);
-            errdefer field_data.deinit();
             try self.set(field_name, field_data);
         }
 

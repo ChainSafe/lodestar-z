@@ -23,8 +23,9 @@ pub const TypeOpts = struct {
     ///
     /// `ListBasicTreeView`'s `iteratorReadonly` and `sliceTo` handle
     /// chunked_leaf types with two-level (chunked_leaf_idx, intra_chunk)
-    /// navigation. Requires `limit >= K * items_per_chunk` so that
-    /// `chunk_depth >= k_log2`.
+    /// navigation. Bounded lists and vectors require
+    /// `limit >= K * items_per_chunk` so that `chunk_depth >= k_log2`.
+    /// Progressive lists apply it per subtree, to those of at least K chunks.
     chunked_leaf: bool = false,
 };
 
@@ -292,7 +293,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                     const content_root: Node.Id = @enumFromInt(chunk_depth);
                     return try pool.createBranch(content_root, len_mixin);
                 } else {
-                    var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                    var it = Node.SubtreeBuilder.init(pool, chunk_depth);
                     errdefer it.deinit();
 
                     const element_zero = try Element.tree.default(pool);
@@ -338,7 +339,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
 
             /// `deserializeFromBytes` for chunked_leaf layouts.
             fn deserializeFromBytesChunkedLeaf(pool: *Node.Pool, data: []const u8, len: usize) !Node.Id {
-                var it = Node.FillWithContentsIterator.initWithOffset(pool, chunked_leaf_depth, ChunkedLeaf.k_log2);
+                var it = Node.SubtreeBuilder.initWithOffset(pool, chunked_leaf_depth, ChunkedLeaf.k_log2);
                 errdefer it.deinit();
 
                 const bytes_per_chunked_leaf: usize = ChunkedLeaf.K * 32;
@@ -369,7 +370,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
 
             /// `deserializeFromBytes` for non-chunked_leaf layouts.
             fn deserializeFromBytesPlain(pool: *Node.Pool, data: []const u8, len: usize, chunk_count: usize) !Node.Id {
-                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                var it = Node.SubtreeBuilder.init(pool, chunk_depth);
                 errdefer it.deinit();
 
                 if (comptime isBasicType(Element)) {
@@ -510,7 +511,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
 
             /// `fromValue` for chunked_leaf layouts.
             fn fromValueChunkedLeaf(pool: *Node.Pool, value: *const Type, len: usize) !Node.Id {
-                var it = Node.FillWithContentsIterator.initWithOffset(pool, chunked_leaf_depth, ChunkedLeaf.k_log2);
+                var it = Node.SubtreeBuilder.initWithOffset(pool, chunked_leaf_depth, ChunkedLeaf.k_log2);
                 errdefer it.deinit();
 
                 const items_per_chunk = 32 / Element.fixed_size;
@@ -551,7 +552,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
 
             /// `fromValue` for non-chunked_leaf layouts.
             fn fromValuePlain(pool: *Node.Pool, value: *const Type, len: usize, chunk_count: usize) !Node.Id {
-                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                var it = Node.SubtreeBuilder.init(pool, chunk_depth);
                 errdefer it.deinit();
 
                 if (comptime isBasicType(Element)) {
@@ -852,7 +853,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                 const len_mixin = try pool.createLeafFromUint(len);
                 errdefer pool.unref(len_mixin);
 
-                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                var it = Node.SubtreeBuilder.init(pool, chunk_depth);
                 errdefer it.deinit();
 
                 const element_zero = try Element.tree.default(pool);
@@ -879,7 +880,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                     );
                 }
 
-                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                var it = Node.SubtreeBuilder.init(pool, chunk_depth);
                 errdefer it.deinit();
 
                 while (try elements.next()) |elem_bytes| {
@@ -928,7 +929,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                     );
                 }
 
-                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                var it = Node.SubtreeBuilder.init(pool, chunk_depth);
                 errdefer it.deinit();
 
                 for (0..chunk_count) |i| {

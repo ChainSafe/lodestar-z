@@ -9,6 +9,7 @@ const Node = pmt.Node;
 const Gindex = pmt.Gindex;
 
 const isFixedType = @import("../type/type_kind.zig").isFixedType;
+const progressive = @import("../type/progressive.zig");
 
 const tree_view_root = @import("root.zig");
 const TreeViewState = @import("utils/tree_view_state.zig").TreeViewState;
@@ -285,7 +286,7 @@ pub fn CompositeChunks(
 
         pub fn elementGindex(index: usize) Gindex {
             return if (comptime ST.kind == .progressive_list)
-                Gindex.concat(&.{ @enumFromInt(2), @import("../type/progressive.zig").chunkGindex(index) })
+                Gindex.concat(&.{ @enumFromInt(2), progressive.chunkGindex(index) })
             else
                 Gindex.fromDepth(chunk_depth, index);
         }
@@ -465,7 +466,9 @@ pub fn CompositeChunks(
             defer allocator.free(nodes);
 
             if (comptime ST.kind == .progressive_list) {
-                try @import("../type/progressive.zig").getNodes(self.state.pool, try self.state.root.getLeft(self.state.pool), nodes);
+                const contents = try self.state.root.getLeft(self.state.pool);
+                var it = try progressive.NodeIterator.init(self.state.pool, contents, len);
+                for (nodes) |*node| node.* = (try it.next()).?;
             } else {
                 try self.state.root.getNodesAtDepth(self.state.pool, chunk_depth, 0, nodes);
             }

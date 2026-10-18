@@ -60,7 +60,7 @@ src/
   fork_types/              # Type-erased, fork-aware wrappers
   hashing/                 # SHA-256 and Merkleization
   persistent_merkle_tree/  # Structural sharing and lazy hashing
-  preset/                  # Mainnet and minimal presets
+  preset/                  # Mainnet, minimal, and gnosis presets
   ssz/                     # SSZ types, serialization, and views
   state_transition/        # Block, epoch, and slot processing
 
@@ -167,6 +167,7 @@ zig build build-lib:bindings -Doptimize=ReleaseSafe
 # Build for a specific preset through package scripts
 pnpm prepare-mainnet
 pnpm prepare-minimal
+pnpm prepare-gnosis
 
 # Run binding tests
 pnpm test
@@ -187,14 +188,14 @@ zig build run:download_era_files
 zig build test:int
 
 # Representative benchmarks
-zig build run:bench_ssz_attestation -Doptimize=ReleaseSafe
-zig build run:bench_ssz_block -Doptimize=ReleaseSafe
-zig build run:bench_ssz_state -Doptimize=ReleaseSafe
-zig build run:bench_hashing -Doptimize=ReleaseSafe
-zig build run:bench_merkle_node -Doptimize=ReleaseSafe
-zig build run:bench_merkle_gindex -Doptimize=ReleaseSafe
-zig build run:bench_process_block -Doptimize=ReleaseSafe
-zig build run:bench_process_epoch -Doptimize=ReleaseSafe
+zig build run:bench_ssz_attestation -Doptimize=ReleaseSafe -Dcpu=baseline
+zig build run:bench_ssz_block -Doptimize=ReleaseSafe -Dcpu=baseline
+zig build run:bench_ssz_state -Doptimize=ReleaseSafe -Dcpu=baseline
+zig build run:bench_hashing -Doptimize=ReleaseSafe -Dcpu=baseline
+zig build run:bench_merkle_node -Doptimize=ReleaseSafe -Dcpu=baseline
+zig build run:bench_merkle_gindex -Doptimize=ReleaseSafe -Dcpu=baseline
+zig build run:bench_process_block -Doptimize=ReleaseSafe -Dcpu=baseline
+zig build run:bench_process_epoch -Doptimize=ReleaseSafe -Dcpu=baseline
 ```
 
 ## Code style

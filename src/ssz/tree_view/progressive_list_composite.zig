@@ -1,14 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const hashing = @import("hashing");
-const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
-const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
 const isFixedType = @import("../type/type_kind.zig").isFixedType;
-
-const type_root = @import("../type/root.zig");
-const chunkDepth = type_root.chunkDepth;
 
 const progressive = @import("../type/progressive.zig");
 const CompositeChunks = @import("chunks.zig").CompositeChunks;
@@ -43,18 +37,6 @@ pub fn ProgressiveListCompositeTreeView(comptime ST: type) type {
 
         const Chunks = CompositeChunks(ST, 0);
 
-        fn spineGindex(index: usize) Gindex {
-            return @enumFromInt((@as(Gindex.Uint, 3) << @intCast(index)) - 1);
-        }
-
-        fn subtreeStart(index: usize) usize {
-            return ((@as(usize, 1) << @intCast(2 * index)) - 1) / 3;
-        }
-
-        fn subtreeCount(count: usize) usize {
-            return if (count == 0) 0 else progressive.subtreeIndex(count - 1) + 1;
-        }
-
         // A newly grown composite position must contain the element's default root, which
         // need not be the zero chunk (notably packed validators and variable containers).
         fn ensureDefault(self: *Self, index: usize) !void {
@@ -65,12 +47,15 @@ pub fn ProgressiveListCompositeTreeView(comptime ST: type) type {
         }
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
+            const len = try ST.tree.length(root, pool);
+            if (len > ST.limit) return error.LengthOverLimit;
+
             const ptr = try allocator.create(Self);
             errdefer allocator.destroy(ptr);
 
             ptr.allocator = allocator;
-            ptr._orig_len = try ST.tree.length(root, pool);
-            ptr._len = ptr._orig_len;
+            ptr._orig_len = len;
+            ptr._len = len;
             try Chunks.init(&ptr.chunks, allocator, pool, root);
             return ptr;
         }
@@ -102,21 +87,12 @@ pub fn ProgressiveListCompositeTreeView(comptime ST: type) type {
             for (self._orig_len..self._len) |index| try self.ensureDefault(index);
             try self.updateListLength();
             const pool = self.chunks.state.pool;
-            const old_count = subtreeCount(self._orig_len);
-            const new_count = subtreeCount(self._len);
+            const old_count = progressive.subtreeCount(self._orig_len);
+            const new_count = progressive.subtreeCount(self._len);
             if (old_count == new_count) {
                 try self.chunks.commit();
             } else {
-                var tail: Node.Id = @enumFromInt(0);
-                defer pool.unref(tail);
-                var i = new_count;
-                while (i > old_count) {
-                    i -= 1;
-                    tail = try pool.createBranch(@enumFromInt(2 * i), tail);
-                }
-                try pool.ref(tail);
-                const expanded = try self.chunks.state.root.setNode(pool, spineGindex(old_count), tail);
-                try pool.ref(expanded);
+                const expanded = try progressive.growSpine(pool, self.chunks.state.root, old_count, new_count);
                 const original = self.chunks.state.root;
                 self.chunks.state.root = expanded;
                 errdefer {
@@ -256,8 +232,8 @@ pub fn ProgressiveListCompositeTreeView(comptime ST: type) type {
             try self.push(child_view);
         }
 
-        /// Read-only iterator over committed elements. Pending `set`/`push`
-        /// writes are not visible — call `commit()` first if they matter.
+        /// Read-only iterator over committed elements. Commit first; pending writes are not
+        /// visible.
         pub fn iteratorReadonly(self: *const Self, start_index: usize) ReadonlyIterator {
             std.debug.assert(self.chunks.state.changed.count() == 0);
             return ReadonlyIterator.init(self, start_index);
@@ -280,8 +256,8 @@ pub fn ProgressiveListCompositeTreeView(comptime ST: type) type {
                 if (self.elem_index >= self.tree_view._orig_len) return error.IndexOutOfBounds;
                 if (self.depth_iterator == null or self.elem_index == self.subtree_end) {
                     const subtree = progressive.subtreeIndex(self.elem_index);
-                    const start = subtreeStart(subtree);
-                    const gindex: Gindex = @enumFromInt(@intFromEnum(spineGindex(subtree)) * 2);
+                    const start = progressive.subtreeStartChunk(subtree);
+                    const gindex = progressive.subtreeGindex(subtree);
                     const root = try self.tree_view.getRoot().getNode(self.tree_view.chunks.state.pool, gindex);
                     self.depth_iterator = Node.DepthIterator.init(self.tree_view.chunks.state.pool, root, progressive.subtreeDepth(subtree), self.elem_index - start);
                     self.subtree_end = start + progressive.subtreeLength(subtree);
@@ -297,15 +273,12 @@ pub fn ProgressiveListCompositeTreeView(comptime ST: type) type {
                 return node.getRoot(self.tree_view.chunks.state.pool);
             }
 
-            /// Get the next element as an SSZ value type.
-            /// Picks between the non-allocating version for fixed types or
-            /// the allocating version for variable-length types.
+            /// Variable-size elements take an allocator for `toValue`.
             pub const nextValue = if (isFixedType(ST.Element))
                 nextValueFixed
             else
                 nextValueAlloc;
 
-            /// Inner function to get the next element as an SSZ value type.
             fn nextValueFixed(self: *ReadonlyIterator) !ST.Element.Type {
                 const node = try self.nextNode();
                 var value: ST.Element.Type = undefined;
@@ -313,9 +286,6 @@ pub fn ProgressiveListCompositeTreeView(comptime ST: type) type {
                 return value;
             }
 
-            /// Inner function to get the next element as an SSZ value type.
-            ///
-            /// Requires an allocator for `toValue`.
             fn nextValueAlloc(self: *ReadonlyIterator, allocator: Allocator) !ST.Element.Type {
                 const node = try self.nextNode();
                 // Variable-size elements: toValue reads `out` (it resizes embedded ArrayLists),
@@ -332,14 +302,8 @@ pub fn ProgressiveListCompositeTreeView(comptime ST: type) type {
                 return value;
             }
 
-            /// Read-only pointer to the next element's value without copying.
-            /// Only available when `ST.Element` is a `StructContainerType` —
-            /// the underlying `container_struct` node already holds the value
-            /// inline, so we can hand back a `*const T` directly.
-            ///
-            /// The pointer is valid as long as the iterator's pool retains
-            /// the node (CoW mutation invalidates it). Use only for
-            /// transient read passes that don't mutate the list.
+            /// Borrows the value stored inline in a `StructContainerType` element node. Mutating
+            /// the list or freeing the node invalidates the pointer.
             pub fn nextValuePtr(self: *ReadonlyIterator) !*const ST.Element.Type {
                 if (comptime !@hasDecl(ST.Element.tree, "getValuePtr")) {
                     @compileError("nextValuePtr requires ST.Element to be a StructContainerType");
@@ -360,15 +324,11 @@ pub fn ProgressiveListCompositeTreeView(comptime ST: type) type {
             }
 
             const new_length = index + 1;
-            if (new_length > ST.limit) {
-                return error.LengthOverLimit;
-            }
-
             const pool = self.chunks.state.pool;
             const last_subtree = progressive.subtreeIndex(index);
-            const last_gindex: Gindex = @enumFromInt(@intFromEnum(spineGindex(last_subtree)) * 2);
+            const last_gindex = progressive.subtreeGindex(last_subtree);
             const last_root = try self.getRoot().getNode(pool, last_gindex);
-            const truncated = try last_root.truncateAfterIndex(pool, progressive.subtreeDepth(last_subtree), index - subtreeStart(last_subtree));
+            const truncated = try last_root.truncateAfterIndex(pool, progressive.subtreeDepth(last_subtree), index - progressive.subtreeStartChunk(last_subtree));
             try pool.ref(truncated);
             defer pool.unref(truncated);
 
@@ -378,7 +338,7 @@ pub fn ProgressiveListCompositeTreeView(comptime ST: type) type {
             var i = last_subtree;
             while (i > 0) {
                 i -= 1;
-                const gindex: Gindex = @enumFromInt(@intFromEnum(spineGindex(i)) * 2);
+                const gindex = progressive.subtreeGindex(i);
                 const subtree = try self.getRoot().getNode(pool, gindex);
                 const next = try pool.createBranch(subtree, contents);
                 try pool.ref(next);
@@ -405,13 +365,17 @@ pub fn ProgressiveListCompositeTreeView(comptime ST: type) type {
 
             const target_length = if (index >= list_length) 0 else list_length - index;
 
+            const pool = self.chunks.state.pool;
+
             const nodes = try self.allocator.alloc(Node.Id, target_length);
             defer self.allocator.free(nodes);
+
             var iterator = self.iteratorReadonly(@min(index, list_length));
             for (nodes) |*node| node.* = try iterator.nextNode();
-            const pool = self.chunks.state.pool;
-            const root = try ST.tree.fromNodes(self.allocator, pool, nodes, target_length);
+
+            const root = try ST.tree.fromNodes(pool, nodes);
             errdefer pool.unref(root);
+
             return Self.init(self.allocator, pool, root);
         }
 

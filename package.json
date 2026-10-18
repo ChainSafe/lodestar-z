@@ -45,13 +45,14 @@
     "prepare": "pnpm run prepare-${LODESTAR_PRESET:-mainnet}",
     "prepare-mainnet": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=mainnet",
     "prepare-minimal": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=minimal",
+    "prepare-gnosis": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=gnosis",
     "lint": "biome check",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts",
     "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --isolate --config .benchrc.yaml --defaultBranch main"
   },
   "keywords": [],
   "author": "ChainSafe Systems",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ChainSafe/lodestar-z.git"

@@ -77,7 +77,7 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
         .list, .progressive_list => {
             if (comptime ssz.isBitListType(ST)) {
                 return try bitArrayToNapiValue(env, value.data.items, value.bit_len);
-            } else if (comptime ssz.isByteListType(ST)) {
+            } else if (comptime ssz.isByteListType(ST) or ssz.isProgressiveByteListType(ST)) {
                 var bytes: [*]u8 = undefined;
                 const buf = try env.createArrayBuffer(value.items.len, &bytes);
                 @memcpy(bytes[0..value.items.len], value.items);

@@ -1,7 +1,6 @@
 pub const TypeKind = @import("type_kind.zig").TypeKind;
 pub const isBasicType = @import("type_kind.zig").isBasicType;
 pub const isFixedType = @import("type_kind.zig").isFixedType;
-pub const initValue = @import("value_init.zig").initValue;
 
 pub const BoolType = @import("bool.zig").BoolType;
 pub const UintType = @import("uint.zig").UintType;
@@ -38,6 +37,7 @@ pub const chunkDepth = chunk.chunkDepth;
 pub const getPathGindex = @import("path.zig").getPathGindex;
 
 pub const FixedProgressiveContainerType = @import("progressive_container.zig").FixedProgressiveContainerType;
+pub const StructProgressiveContainerType = @import("progressive_container.zig").StructProgressiveContainerType;
 pub const VariableProgressiveContainerType = @import("progressive_container.zig").VariableProgressiveContainerType;
 
 pub const FixedProgressiveListType = @import("progressive_list.zig").FixedProgressiveListType;

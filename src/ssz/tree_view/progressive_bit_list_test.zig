@@ -3,8 +3,8 @@ const Node = @import("persistent_merkle_tree").Node;
 const ssz = @import("../type/root.zig");
 const allocator = std.testing.allocator;
 
-test "progressive bitlist mutation clone and serialization at subtree boundaries" {
-    const ST = ssz.ProgressiveBitListType(.{ .limit = 6000 });
+test "ProgressiveBitListTreeView should match value roots across subtree boundaries" {
+    const ST = ssz.ProgressiveBitListType(.{});
     var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const baseline = pool.getNodesInUse();
@@ -36,14 +36,15 @@ test "progressive bitlist mutation clone and serialization at subtree boundaries
         defer decoded.deinit();
         try std.testing.expectEqualSlices(u8, &root, try decoded.hashTreeRoot());
         try std.testing.expectError(error.IndexOutOfBounds, view.set(5500, true));
+        try std.testing.expectError(error.IndexOutOfBounds, view.get(5500));
     }
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
-test "progressive bitlist allocation failures release cached values and preserve old root" {
+test "memory_safety: ProgressiveBitListTreeView should release cached values and keep the old root on OOM" {
     try std.testing.checkAllAllocationFailures(allocator, struct {
         fn run(alloc: std.mem.Allocator) !void {
-            const ST = ssz.ProgressiveBitListType(.{ .limit = 512 });
+            const ST = ssz.ProgressiveBitListType(.{});
             var pool = try Node.Pool.init(.{ .allocator = alloc, .page_allocator = allocator, .pool_size = 128 });
             defer pool.deinit();
             const baseline = pool.getNodesInUse();
