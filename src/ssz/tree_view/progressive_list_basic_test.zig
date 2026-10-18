@@ -593,3 +593,19 @@ test "ProgressiveListBasicTreeView should read, write and grow a zeros tree" {
         try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
     }
 }
+
+test "ProgressiveListBasicTreeView push and growTo should respect the type limit" {
+    const ST = ssz.FixedProgressiveListType(ssz.UintType(64), .{ .limit = 3 });
+    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 64 });
+    defer pool.deinit();
+    {
+        const view = try ST.TreeView.fromValue(allocator, &pool, &ST.default_value);
+        defer view.deinit();
+        try view.growTo(2);
+        try view.push(7);
+        try std.testing.expectError(error.LengthOverLimit, view.push(8));
+        try std.testing.expectError(error.LengthOverLimit, view.growTo(4));
+        try std.testing.expectEqual(@as(u64, 7), try view.get(2));
+    }
+    try std.testing.expectEqual(@as(usize, zero_nodes), pool.getNodesInUse());
+}

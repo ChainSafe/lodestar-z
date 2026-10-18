@@ -212,8 +212,8 @@ test "ProgressiveListCompositeTreeView should commit nested list length updates"
         id: UintType(32),
         numbers: Numbers,
     });
-    const Inner = VariableProgressiveListType(Element);
-    const Outer = VariableProgressiveListType(Inner);
+    const Inner = VariableProgressiveListType(Element, .{});
+    const Outer = VariableProgressiveListType(Inner, .{});
 
     const outer = try Outer.TreeView.fromValue(allocator, &pool, &Outer.default_value);
     defer outer.deinit();
@@ -326,7 +326,7 @@ test "memory_safety: ProgressiveListCompositeTreeView getAllReadonlyValues shoul
         first: Bytes,
         second: Bytes,
     });
-    const ListType = VariableProgressiveListType(Element);
+    const ListType = VariableProgressiveListType(Element, .{});
 
     var pool = try Node.Pool.init(.{
         .page_allocator = allocator,
@@ -370,7 +370,7 @@ test "memory_safety: ProgressiveListCompositeTreeView iterator nextValue should 
         first: Bytes,
         second: Bytes,
     });
-    const ListType = VariableProgressiveListType(Element);
+    const ListType = VariableProgressiveListType(Element, .{});
 
     var pool = try Node.Pool.init(.{
         .page_allocator = allocator,

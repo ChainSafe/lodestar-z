@@ -61,7 +61,7 @@ test "getPathGindex should address progressive containers, lists and bitlists" {
     try std.testing.expectEqual(@as(Gindex.Uint, 735), @intFromEnum(getPathGindex(State, "finalized_checkpoint.root")));
 
     const Numbers = types.FixedProgressiveListType(types.UintType(64), .{});
-    const Bits = types.ProgressiveBitListType();
+    const Bits = types.ProgressiveBitListType(.{});
     // Element 5 and bit 300 both sit in chunk 1, contents gindex 24, so 40 from the list root.
     try std.testing.expectEqual(@as(Gindex.Uint, 40), @intFromEnum(getPathGindex(Numbers, "5")));
     try std.testing.expectEqual(@as(Gindex.Uint, 40), @intFromEnum(getPathGindex(Bits, "300")));

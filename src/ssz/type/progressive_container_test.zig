@@ -275,7 +275,7 @@ test "memory_safety: variable progressive container clone should leave a failed 
 
 test "variable progressive container cloneInto should fill a container with more fields" {
     const allocator = std.testing.allocator;
-    const Bits = ProgressiveBitListType();
+    const Bits = ProgressiveBitListType(.{});
     const Balances = FixedProgressiveListType(UintType(64), .{});
     const Checkpoint = FixedProgressiveContainerType(struct {
         epoch: UintType(64),
@@ -809,9 +809,9 @@ test "memory_safety: VariableProgressiveContainerType JSON decoding should leave
     const Point = FixedProgressiveContainerType(struct { x: UintType(8), y: BoolType() }, &.{ 1, 1 });
     const ST = VariableProgressiveContainerType(struct {
         a: UintType(8),
-        nested: @import("progressive_list.zig").VariableProgressiveListType(Inner),
+        nested: @import("progressive_list.zig").VariableProgressiveListType(Inner, .{}),
         bytes: @import("progressive_byte_list.zig").ProgressiveByteListType(.{}),
-        bits: ProgressiveBitListType(),
+        bits: ProgressiveBitListType(.{}),
         points: FixedProgressiveListType(Point, .{}),
     }, &.{ 1, 0, 1, 1, 1, 1 });
 

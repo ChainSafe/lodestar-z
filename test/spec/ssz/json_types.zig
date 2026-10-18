@@ -68,7 +68,7 @@ pub const test_progressive_containers = struct {
     pub const SampleWidestLayout = ssz.FixedProgressiveContainerType(struct { tail: Uint8 }, &([_]u1{0} ** 255 ++ [_]u1{1}));
     pub const SampleLevelBoundary = ssz.FixedProgressiveContainerType(struct { first: Uint16, last: Uint8 }, &([_]u1{1} ++ [_]u1{0} ** 20 ++ [_]u1{1}));
     pub const SampleBoundedListField = ssz.VariableProgressiveContainerType(struct { head: Uint64, body: Uint16List4 }, &.{ 1, 0, 1 });
-    pub const SampleProgressiveFields = ssz.VariableProgressiveContainerType(struct { head: Uint64, numbers: Uint64ProgressiveList, flags: ssz.ProgressiveBitListType() }, &.{ 1, 1, 1 });
+    pub const SampleProgressiveFields = ssz.VariableProgressiveContainerType(struct { head: Uint64, numbers: Uint64ProgressiveList, flags: ssz.ProgressiveBitListType(.{}) }, &.{ 1, 1, 1 });
     pub const SampleOuterShape = ssz.FixedProgressiveContainerType(struct {
         head: Uint8,
         inner: ssz.FixedProgressiveContainerType(struct { x: Uint16, y: Uint8 }, &.{ 1, 0, 1 }),
@@ -80,7 +80,7 @@ pub const test_progressive_containers = struct {
 pub const test_progressive_types = struct {
     pub const SampleUint64ProgressiveList = Uint64ProgressiveList;
     pub const SampleBytes32ProgressiveList = ssz.FixedProgressiveListType(Bytes32, .{});
-    pub const SampleNestedProgressiveList = ssz.VariableProgressiveListType(ssz.FixedProgressiveListType(Uint16, .{}));
-    pub const ProgressiveBitList = ssz.ProgressiveBitListType();
+    pub const SampleNestedProgressiveList = ssz.VariableProgressiveListType(ssz.FixedProgressiveListType(Uint16, .{}), .{});
+    pub const ProgressiveBitList = ssz.ProgressiveBitListType(.{});
     pub const SampleContainerWithProgressiveList = ssz.VariableContainerType(struct { a: Uint16, b: Uint64ProgressiveList, c: Uint8 });
 };

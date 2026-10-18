@@ -188,7 +188,7 @@ test "progressive types should derive default roots and trees from their default
     const allocator = std.testing.allocator;
     const UintType = @import("uint.zig").UintType;
     const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
-    const Bits = @import("progressive_bit_list.zig").ProgressiveBitListType();
+    const Bits = @import("progressive_bit_list.zig").ProgressiveBitListType(.{});
     const Numbers = @import("progressive_list.zig").FixedProgressiveListType(UintType(64), .{});
     const Fixed = @import("progressive_container.zig").FixedProgressiveContainerType(struct {
         a: UintType(64),
@@ -199,7 +199,7 @@ test "progressive types should derive default roots and trees from their default
         numbers: Numbers,
         bits: Bits,
     }, &.{ 1, 0, 0, 0, 0, 1, 1 });
-    const Nested = @import("progressive_list.zig").VariableProgressiveListType(Variable);
+    const Nested = @import("progressive_list.zig").VariableProgressiveListType(Variable, .{});
 
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();

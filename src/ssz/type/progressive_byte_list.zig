@@ -5,7 +5,7 @@ const hexLenFromBytes = @import("hex").hexLenFromBytes;
 const bytesToHex = @import("hex").bytesToHex;
 const UintType = @import("uint.zig").UintType;
 const progressive_list = @import("progressive_list.zig");
-const TypeOpts = @import("list.zig").TypeOpts;
+const TypeOpts = progressive_list.TypeOpts;
 
 pub fn isProgressiveByteListType(comptime ST: type) bool {
     return ST.kind == .progressive_list and @hasDecl(ST, "is_progressive_byte_list");
@@ -56,7 +56,7 @@ pub fn ProgressiveByteListType(comptime _opts: TypeOpts) type {
                 else => return error.InvalidJson,
             };
             const len = hexByteLen(hex_bytes);
-            if (len > limit) return error.InvalidJson;
+            if (len > limit) return error.LengthOverLimit;
 
             try out.resize(allocator, len);
             _ = try hexToBytes(out.items, hex_bytes);

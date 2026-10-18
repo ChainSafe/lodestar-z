@@ -4,7 +4,7 @@ const ssz = @import("../type/root.zig");
 const allocator = std.testing.allocator;
 
 test "ProgressiveBitListTreeView should match value roots across subtree boundaries" {
-    const ST = ssz.ProgressiveBitListType();
+    const ST = ssz.ProgressiveBitListType(.{});
     var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const baseline = pool.getNodesInUse();
@@ -44,7 +44,7 @@ test "ProgressiveBitListTreeView should match value roots across subtree boundar
 test "memory_safety: ProgressiveBitListTreeView should release cached values and keep the old root on OOM" {
     try std.testing.checkAllAllocationFailures(allocator, struct {
         fn run(alloc: std.mem.Allocator) !void {
-            const ST = ssz.ProgressiveBitListType();
+            const ST = ssz.ProgressiveBitListType(.{});
             var pool = try Node.Pool.init(.{ .allocator = alloc, .page_allocator = allocator, .pool_size = 128 });
             defer pool.deinit();
             const baseline = pool.getNodesInUse();

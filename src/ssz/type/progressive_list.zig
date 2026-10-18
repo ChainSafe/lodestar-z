@@ -11,7 +11,13 @@ const Node = @import("persistent_merkle_tree").Node;
 const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
 const progressive = @import("progressive.zig");
 const chunk_utils = @import("chunk.zig");
-const TypeOpts = @import("list.zig").TypeOpts;
+/// Progressive merkleization has no length bound. `limit` carries the bound the consensus rules
+/// give each progressive list, so decoding and growth can reject longer inputs; it defaults to
+/// unbounded.
+pub const TypeOpts = struct {
+    chunked_leaf: bool = false,
+    limit: usize = std.math.maxInt(usize),
+};
 
 pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) type {
     comptime {
@@ -20,6 +26,9 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
         }
         if (_opts.chunked_leaf and !isBasicType(ST)) {
             @compileError("chunked_leaf requires basic elements");
+        }
+        if (_opts.limit == 0) {
+            @compileError("limit must be greater than 0");
         }
     }
 
@@ -30,8 +39,10 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
         pub const opts: TypeOpts = _opts;
         const use_chunked_leaf = _opts.chunked_leaf;
         const items_per_chunk = 32 / Element.fixed_size;
-        /// The longest list a node-backed tree can address whose serialized size fits a `usize`.
+        /// `opts.limit`, capped by the longest list a node-backed tree can address. It bounds decoding
+        /// and growth but not merkleization.
         pub const limit: usize = @intCast(@min(
+            opts.limit,
             @as(u128, progressive.max_node_chunks) * (if (isBasicType(Element)) items_per_chunk else 1),
             std.math.maxInt(usize) / Element.fixed_size,
         ));
@@ -41,7 +52,10 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
         else
             @import("../tree_view/progressive_list_composite.zig").ProgressiveListCompositeTreeView(@This());
         pub const min_size: usize = 0;
-        pub const max_size: usize = std.math.maxInt(usize);
+        pub const max_size: usize = if (opts.limit == std.math.maxInt(usize))
+            std.math.maxInt(usize)
+        else
+            limit * Element.fixed_size;
 
         pub const default_value: Type = Type.empty;
         pub const default_root: [32]u8 = @import("hashing").getZeroHash(1).*;
@@ -136,6 +150,7 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
             }
 
             const len = data.len / Element.fixed_size;
+            if (len > limit) return error.LengthOverLimit;
 
             try out.resize(allocator, len);
             @memset(out.items, Element.default_value);
@@ -163,6 +178,7 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
             }
 
             while ((try source.peekNextTokenType()) != .array_end) {
+                if (out.items.len == limit) return error.LengthOverLimit;
                 try out.append(allocator, Element.default_value);
                 try Element.deserializeFromJson(source, &out.items[out.items.len - 1]);
             }
@@ -171,10 +187,7 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
 
         pub const serialized = struct {
             pub fn validate(data: []const u8) !void {
-                const len = std.math.divExact(usize, data.len, Element.fixed_size) catch {
-                    return error.InvalidSSZ;
-                };
-
+                const len = try length(data);
                 for (0..len) |i| {
                     try Element.serialized.validate(data[i * Element.fixed_size .. (i + 1) * Element.fixed_size]);
                 }
@@ -184,6 +197,7 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
                 const len = std.math.divExact(usize, data.len, Element.fixed_size) catch {
                     return error.InvalidSSZ;
                 };
+                if (len > limit) return error.LengthOverLimit;
                 return len;
             }
 
@@ -250,7 +264,8 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
                 const hash = right.getRoot(pool);
 
                 const len_u256 = std.mem.readInt(u256, hash[0..32], .little);
-                const len = @as(usize, @intCast(@min(len_u256, std.math.maxInt(usize))));
+                if (len_u256 > limit) return error.LengthOverLimit;
+                const len: usize = @intCast(len_u256);
 
                 return len;
             }
@@ -444,23 +459,33 @@ pub fn FixedProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) typ
     };
 }
 
-pub fn VariableProgressiveListType(comptime ST: type) type {
+pub fn VariableProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) type {
     comptime {
         if (isFixedType(ST)) {
             @compileError("ST must not be fixed type");
+        }
+        if (_opts.chunked_leaf) {
+            @compileError("chunked_leaf requires basic elements");
+        }
+        if (_opts.limit == 0) {
+            @compileError("limit must be greater than 0");
         }
     }
     return struct {
         const Self = @This();
         pub const kind = TypeKind.progressive_list;
         pub const Element: type = ST;
-        /// The longest list a node-backed tree can address whose serialized offset table fits a
-        /// `usize`.
-        pub const limit: usize = @min(progressive.max_node_chunks, std.math.maxInt(usize) / 4);
+        pub const opts: TypeOpts = _opts;
+        /// `opts.limit`, capped by the longest list a node-backed tree can address. It bounds decoding
+        /// and growth but not merkleization.
+        pub const limit: usize = @min(opts.limit, progressive.max_node_chunks, std.math.maxInt(usize) / 4);
         pub const Type: type = std.ArrayList(Element.Type);
         pub const TreeView = @import("../tree_view/progressive_list_composite.zig").ProgressiveListCompositeTreeView(@This());
         pub const min_size: usize = 0;
-        pub const max_size: usize = std.math.maxInt(usize);
+        pub const max_size: usize = if (opts.limit == std.math.maxInt(usize))
+            std.math.maxInt(usize)
+        else
+            limit *| 4 +| limit *| Element.max_size;
 
         pub const default_value: Type = Type.empty;
         pub const default_root: [32]u8 = @import("hashing").getZeroHash(1).*;
@@ -606,7 +631,8 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
                 const hash = right.getRoot(pool);
 
                 const len_u256 = std.mem.readInt(u256, hash[0..32], .little);
-                const len = @as(usize, @intCast(@min(len_u256, std.math.maxInt(usize))));
+                if (len_u256 > limit) return error.LengthOverLimit;
+                const len: usize = @intCast(len_u256);
 
                 return len;
             }
@@ -699,6 +725,7 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
             }
 
             while ((try source.peekNextTokenType()) != .array_end) {
+                if (out.items.len == limit) return error.LengthOverLimit;
                 try out.append(allocator, Element.default_value);
                 try Element.deserializeFromJson(
                     allocator,

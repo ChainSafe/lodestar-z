@@ -209,7 +209,7 @@ test "memory_safety: chunked progressive tree.toValue should reject malformed tr
     var huge_out: List.Type = .empty;
     defer huge_out.deinit(allocator);
     try std.testing.expectError(
-        error.InvalidSubtreeLength,
+        error.LengthOverLimit,
         List.tree.toValue(allocator, huge_root, &pool, &huge_out),
     );
 }
@@ -331,7 +331,7 @@ test "ListType - sanity" {
     try Bytes.deserializeFromBytes(allocator, b_buf, &b_decoded);
     try std.testing.expect(Bytes.equals(&b, &b_decoded));
 
-    const BytesBytes = VariableProgressiveListType(Bytes);
+    const BytesBytes = VariableProgressiveListType(Bytes, .{});
     var b2: BytesBytes.Type = BytesBytes.default_value;
     defer b2.deinit(allocator);
     const b_elem: Bytes.Type = Bytes.default_value;
@@ -378,7 +378,7 @@ test "fixed progressive list tree size needs no allocation" {
     }
 }
 
-test "fixed progressive list tree size rejects overflow" {
+test "fixed progressive list tree size should reject a length over the limit" {
     const allocator = std.testing.allocator;
     const List = FixedProgressiveListType(UintType(64), .{});
     var pool = try Node.Pool.init(.{
@@ -392,7 +392,7 @@ test "fixed progressive list tree size rejects overflow" {
     const root = try pool.createBranch(@enumFromInt(0), length_leaf);
     defer pool.unref(root);
 
-    try std.testing.expectError(error.Overflow, List.tree.serializedSize(root, &pool));
+    try std.testing.expectError(error.LengthOverLimit, List.tree.serializedSize(root, &pool));
 }
 
 fn expectProgressiveFromValuePoolExhaustionReclaimsNodes(
@@ -473,8 +473,8 @@ test "memory_safety: progressive list tree.toValue should reject a leaf contents
 }
 
 test "memory_safety: variable progressive list byte deserialization should leave a failed decode for the caller to free on OOM" {
-    const Bits = ProgressiveBitListType();
-    const List = VariableProgressiveListType(Bits);
+    const Bits = ProgressiveBitListType(.{});
+    const List = VariableProgressiveListType(Bits, .{});
     var source: List.Type = .empty;
     defer List.deinit(std.testing.allocator, &source);
     for (0..2) |i| {
@@ -504,8 +504,8 @@ test "memory_safety: variable progressive list byte deserialization should leave
 }
 
 test "memory_safety: variable progressive list tree.toValue should leave a failed read for the caller to free on OOM" {
-    const Bits = ProgressiveBitListType();
-    const List = VariableProgressiveListType(Bits);
+    const Bits = ProgressiveBitListType(.{});
+    const List = VariableProgressiveListType(Bits, .{});
     var source: List.Type = .empty;
     defer List.deinit(std.testing.allocator, &source);
     for (0..2) |i| {
@@ -614,7 +614,7 @@ test "progressive list hashing streams packed and composite values without alloc
         }
     }
     const Inner = FixedProgressiveListType(UintType(8), .{});
-    const Outer = VariableProgressiveListType(Inner);
+    const Outer = VariableProgressiveListType(Inner, .{});
     var value = Outer.default_value;
     defer Outer.deinit(allocator, &value);
     for (0..86) |i| {
@@ -662,7 +662,7 @@ test "progressive tree construction streams packed and nested values" {
         }
     }
     const Inner = FixedProgressiveListType(UintType(8), .{});
-    const Outer = VariableProgressiveListType(Inner);
+    const Outer = VariableProgressiveListType(Inner, .{});
     var value = Outer.default_value;
     defer Outer.deinit(allocator, &value);
     for (0..22) |i| {
@@ -698,7 +698,7 @@ fn expectStreamingProgressiveConstruction(comptime ST: type, value: *const ST.Ty
 test "memory_safety: progressive streaming decoder cleans up malformed elements and offsets" {
     const allocator = std.testing.allocator;
     const Inner = FixedProgressiveListType(BoolType(), .{});
-    const Outer = VariableProgressiveListType(Inner);
+    const Outer = VariableProgressiveListType(Inner, .{});
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
     const baseline = pool.getNodesInUse();
@@ -753,7 +753,7 @@ test "progressive tree reads allocate only output values" {
     const Bytes = FixedProgressiveListType(UintType(8), .{});
     inline for (.{ UintType(8), UintType(64), BoolType(), Pair, Bytes }) |Element| {
         const variable = Element == Bytes;
-        const List = if (variable) VariableProgressiveListType(Element) else FixedProgressiveListType(Element, .{});
+        const List = if (variable) VariableProgressiveListType(Element, .{}) else FixedProgressiveListType(Element, .{});
         for ([_]usize{ 0, 1, 2, 5, 6, 21, 22, 85, 86, 341, 342 }) |len| {
             var value = List.default_value;
             defer List.deinit(allocator, &value);
@@ -794,7 +794,7 @@ test "progressive tree reads allocate only output values" {
 test "progressive tree reads should reject a nonzero terminator" {
     const allocator = std.testing.allocator;
     const Inner = FixedProgressiveListType(UintType(8), .{});
-    inline for (.{ FixedProgressiveListType(UintType(64), .{}), VariableProgressiveListType(Inner) }) |List| {
+    inline for (.{ FixedProgressiveListType(UintType(64), .{}), VariableProgressiveListType(Inner, .{}) }) |List| {
         var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 128 });
         defer pool.deinit();
         var value = List.default_value;
@@ -858,8 +858,8 @@ test "variable progressive list cloneInto should widen nested elements" {
         c: UintType(16),
     });
     const Inner = FixedProgressiveListType(Pair, .{});
-    const List = VariableProgressiveListType(Inner);
-    const WideList = VariableProgressiveListType(FixedProgressiveListType(WidePair, .{}));
+    const List = VariableProgressiveListType(Inner, .{});
+    const WideList = VariableProgressiveListType(FixedProgressiveListType(WidePair, .{}), .{});
 
     var list = List.default_value;
     defer List.deinit(allocator, &list);
@@ -879,7 +879,7 @@ test "variable progressive list cloneInto should widen nested elements" {
 
 test "memory_safety: variable progressive list clone should leave a failed clone for the caller to free on OOM" {
     const Inner = FixedProgressiveListType(UintType(16), .{});
-    const List = VariableProgressiveListType(Inner);
+    const List = VariableProgressiveListType(Inner, .{});
 
     var value = List.default_value;
     defer List.deinit(std.testing.allocator, &value);
@@ -969,4 +969,68 @@ test "memory_safety: FixedProgressiveListType fromNodes should borrow element ro
         } else return error.TestUnexpectedResult;
     }
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "progressive limits should reject longer inputs before allocating" {
+    const Fixed = FixedProgressiveListType(UintType(64), .{ .limit = 1 });
+    const Variable = VariableProgressiveListType(Fixed, .{ .limit = 1 });
+    const Bits = ProgressiveBitListType(.{ .limit = 8 });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var fixed = Fixed.default_value;
+    var variable = Variable.default_value;
+    var bits = Bits.default_value;
+    try std.testing.expectError(error.LengthOverLimit, Fixed.deserializeFromBytes(failing.allocator(), &@as([16]u8, @splat(0)), &fixed));
+    try std.testing.expectError(error.invalidOffsetCount, Variable.deserializeFromBytes(failing.allocator(), &.{ 8, 0, 0, 0, 8, 0, 0, 0 }, &variable));
+    try std.testing.expectError(error.LengthOverLimit, Bits.deserializeFromBytes(failing.allocator(), &.{ 0xff, 3 }, &bits));
+    try std.testing.expect(!failing.has_induced_failure);
+
+    const Bytes = @import("progressive_byte_list.zig").ProgressiveByteListType(.{ .limit = 1 });
+    // The unbounded field keeps the parent's `max_size` open, so validation reaches `fixed`.
+    const Parent = @import("container.zig").VariableContainerType(struct {
+        fixed: Fixed,
+        rest: FixedProgressiveListType(UintType(8), .{}),
+    });
+    try std.testing.expectError(error.LengthOverLimit, Fixed.serialized.validate(&@as([16]u8, @splat(0))));
+    try std.testing.expectError(error.LengthOverLimit, Bytes.serialized.validate(&.{ 1, 2 }));
+    // Two 8-byte elements in `fixed` exceed its limit of 1; `rest` is empty.
+    const parent_bytes = [_]u8{ 8, 0, 0, 0, 24, 0, 0, 0 } ++ @as([16]u8, @splat(0));
+    try std.testing.expectError(error.LengthOverLimit, Parent.serialized.validate(&parent_bytes));
+
+    var pool = try Node.Pool.init(.{ .allocator = std.testing.allocator, .page_allocator = std.testing.allocator, .pool_size = 16 });
+    defer pool.deinit();
+    const leaf = try pool.createLeafFromUint(2);
+    const root = try pool.createBranch(@enumFromInt(0), leaf);
+    defer pool.unref(root);
+    inline for (.{ Fixed, Variable }) |ST| try std.testing.expectError(error.LengthOverLimit, ST.tree.length(root, &pool));
+
+    var scanner = std.json.Scanner.initCompleteInput(std.testing.allocator, "[\"1\", \"2\"]");
+    defer scanner.deinit();
+    var json_out = Fixed.default_value;
+    defer json_out.deinit(std.testing.allocator);
+    try std.testing.expectError(error.LengthOverLimit, Fixed.deserializeFromJson(std.testing.allocator, &scanner, &json_out));
+}
+
+test "progressive limits should not change merkleization or serialization" {
+    const allocator = std.testing.allocator;
+    const Limited = FixedProgressiveListType(UintType(8), .{ .limit = 2 });
+    const Unlimited = FixedProgressiveListType(UintType(8), .{});
+    try std.testing.expectEqual(@as(usize, 2), Limited.limit);
+    try std.testing.expectEqual(@as(usize, 2), Limited.max_size);
+    try std.testing.expectEqual(std.math.maxInt(usize), Unlimited.max_size);
+
+    var value: Limited.Type = .empty;
+    defer value.deinit(allocator);
+    try value.appendSlice(allocator, &.{ 1, 2, 3 });
+    var limited_root: [32]u8 = undefined;
+    var unlimited_root: [32]u8 = undefined;
+    try Limited.hashTreeRoot(allocator, &value, &limited_root);
+    try Unlimited.hashTreeRoot(allocator, &value, &unlimited_root);
+    try std.testing.expectEqualSlices(u8, &unlimited_root, &limited_root);
+
+    var bytes: [3]u8 = undefined;
+    _ = Limited.serializeIntoBytes(&value, &bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, &bytes);
+    var decoded = Limited.default_value;
+    defer decoded.deinit(allocator);
+    try std.testing.expectError(error.LengthOverLimit, Limited.deserializeFromBytes(allocator, &bytes, &decoded));
 }

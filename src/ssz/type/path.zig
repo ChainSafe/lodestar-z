@@ -67,6 +67,7 @@ pub fn getPathItem(comptime ST: type, comptime path_str_item: []const u8) PathIt
             }
 
             const element_index = std.fmt.parseInt(usize, path_str_item, 10) catch @compileError("Invalid index");
+            if (element_index >= ST.limit) @compileError("Index past limit");
 
             return .{
                 .ST = ST,
