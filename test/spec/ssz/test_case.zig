@@ -356,7 +356,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
 /// root and the same bytes, so it must pass the same vectors.
 fn ChunkedLayout(comptime ST: type) ?type {
     if (ST.kind != .progressive_list or !ssz.isBasicType(ST.Element)) return null;
-    return ssz.FixedProgressiveListType(ST.Element, .{ .chunked_leaf = true });
+    return ssz.FixedProgressiveListType(ST.Element, .{ .chunked_leaf = true, .limit = ST.opts.limit });
 }
 
 pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir) !void {

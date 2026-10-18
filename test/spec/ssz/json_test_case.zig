@@ -249,7 +249,7 @@ pub fn run(comptime ST: type, backing_allocator: Allocator, file: []const u8, te
     // Basic progressive lists can also store their chunks in chunked leaves. That layout has the
     // same root and bytes, so it must pass the same fixtures.
     if (comptime ST.kind == .progressive_list and ssz.isBasicType(ST.Element) and !ST.opts.chunked_leaf) {
-        const Chunked = ssz.FixedProgressiveListType(ST.Element, .{ .chunked_leaf = true });
+        const Chunked = ssz.FixedProgressiveListType(ST.Element, .{ .chunked_leaf = true, .limit = ST.opts.limit });
         try runLayout(Chunked, backing_allocator, file, test_id);
     }
 }
