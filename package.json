@@ -4,8 +4,6 @@
   "description": "Lodestar-z NAPI bindings",
   "files": [
     "bindings/src/",
-    "docs/leveldb.md",
-    "src/leveldb/LICENSE",
     "zig-out/lib/"
   ],
   "type": "module",
@@ -42,10 +40,6 @@
       "import": "./bindings/src/shuffle.js",
       "types": "./bindings/src/shuffle.d.ts"
     },
-    "./leveldb": {
-      "types": "./bindings/src/leveldb.d.ts",
-      "import": "./bindings/src/leveldb.js"
-    },
     "./execution-proof-verifier": {
       "import": "./bindings/src/execution-proof-verifier.js",
       "types": "./bindings/src/execution-proof-verifier.d.ts"
@@ -62,8 +56,7 @@
     "test:network-identify-interop": "zig build build-exe:network_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/identify_run.mjs zig-out/bin/network_interop_peer installed",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts",
     "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --isolate --config .benchrc.yaml --defaultBranch main",
-    "typecheck:network": "tsc -p tsconfig.network.json",
-    "typecheck:leveldb": "tsc -p tsconfig.leveldb.json"
+    "typecheck:network": "tsc -p tsconfig.network.json"
   },
   "keywords": [],
   "author": "ChainSafe Systems",
