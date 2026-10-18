@@ -208,6 +208,7 @@ fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key:
     const update = try network_config.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
     const resolved = try network.configuration.resolve(.{
         .seed = 7,
+        .byte_limit = 4 * 1024 * 1024 * 1024,
         .forks = network_config.forks[0..network_config.boundary_count],
         .admission_policy = network_config.requestPolicy(),
         .router = .{ .capabilities = update.capabilities },
