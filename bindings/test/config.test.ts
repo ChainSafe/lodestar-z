@@ -7,6 +7,7 @@ import bindings from "../src/index.js";
 describe("BeaconConfig", () => {
   describe.each([
     {field: "FULU_FORK_EPOCH", override: (value: number) => ({FULU_FORK_EPOCH: value})},
+    {field: "HEZE_FORK_EPOCH", override: (value: number) => ({HEZE_FORK_EPOCH: value})},
     {
       field: "BLOB_SCHEDULE.EPOCH",
       override: (value: number) => ({BLOB_SCHEDULE: [{EPOCH: value, MAX_BLOBS_PER_BLOCK: 9}]}),
@@ -23,6 +24,23 @@ describe("BeaconConfig", () => {
 
     it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1, 2 ** 64, -Infinity, NaN])("rejects %s", (value) => {
       const config = {...mainnetChainConfig, ...override(value)};
+      expect(() => new bindings.BeaconConfig(config, new Uint8Array(32))).toThrow("InvalidChainConfigFieldValue");
+    });
+  });
+
+  describe.each(["SLOT_DURATION_MS", "SLOT_DURATION_MS_HEZE"])("%s", (field) => {
+    it.each([1000, 5000, 10000, 24000])("accepts %s ms", (value) => {
+      const config = {...mainnetChainConfig, [field]: value};
+      expect(() => new bindings.BeaconConfig(config, new Uint8Array(32))).not.toThrow();
+    });
+
+    it.each([0, 1, 1500, Infinity])("rejects %s ms", (value) => {
+      const config = {...mainnetChainConfig, [field]: value};
+      expect(() => new bindings.BeaconConfig(config, new Uint8Array(32))).toThrow("InvalidSlotDuration");
+    });
+
+    it.each([-1000, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN])("rejects invalid integer %s", (value) => {
+      const config = {...mainnetChainConfig, [field]: value};
       expect(() => new bindings.BeaconConfig(config, new Uint8Array(32))).toThrow("InvalidChainConfigFieldValue");
     });
   });
