@@ -4,7 +4,9 @@
   "description": "Lodestar-z NAPI bindings",
   "files": [
     "bindings/src/",
-    "zig-out/lib/"
+    "zig-out/lib/",
+    "docs/leveldb.md",
+    "src/leveldb/LICENSE"
   ],
   "type": "module",
   "exports": {
@@ -39,6 +41,10 @@
     "./execution-proof-verifier": {
       "import": "./bindings/src/execution-proof-verifier.js",
       "types": "./bindings/src/execution-proof-verifier.d.ts"
+    },
+    "./leveldb": {
+      "types": "./bindings/src/leveldb.d.ts",
+      "import": "./bindings/src/leveldb.js"
     }
   },
   "scripts": {
@@ -48,7 +54,8 @@
     "prepare-gnosis": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=gnosis",
     "lint": "biome check",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts",
-    "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --isolate --config .benchrc.yaml --defaultBranch main"
+    "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --isolate --config .benchrc.yaml --defaultBranch main",
+    "typecheck:leveldb": "tsc -p tsconfig.leveldb.json"
   },
   "keywords": [],
   "author": "ChainSafe Systems",
