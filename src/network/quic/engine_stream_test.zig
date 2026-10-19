@@ -657,3 +657,36 @@ test "engine normalizes missing native streams on read write and capacity" {
         try std.testing.expectError(error.UnknownStream, pair.client.read(stream, &buffer));
     }
 }
+
+test "engine capacity on a reported closed connection leaves it retirable" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+    const stream = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(stream, "x", false);
+    try pair.pump();
+    var storage: [16]Event = undefined;
+    const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    // The peer's STOP reaches the client before the client closes the connection.
+    pair.server.shutdown(inbound, .read, 9);
+    try pair.pump();
+    _ = pair.client.close(handles.client, 7);
+    try pair.pump();
+    var reported = false;
+    for (0..8) |_| {
+        for (pair.events(&pair.client, &storage)) |event| if (event == .closed) {
+            reported = true;
+        };
+        if (reported) break;
+        pair.advance(100);
+        try pair.pump();
+    }
+    try std.testing.expect(reported);
+    const slot = &pair.client.registry.slots[handles.client.index];
+    try std.testing.expect(slot.state == .closed and slot.close_event == .reported and !slot.hasEvents());
+    try std.testing.expectError(error.StreamStopped, pair.client.streamCapacity(stream));
+    try std.testing.expect(!slot.hasEvents());
+    pair.client.releaseReported();
+    try std.testing.expect(slot.state == .free);
+}

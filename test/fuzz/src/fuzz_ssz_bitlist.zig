@@ -8,6 +8,14 @@
 // Tests: padding bit parsing, sentinel validation, length limits.
 
 const std = @import("std");
+
+/// Exit 99 lets AFL detect panics without waiting for symbolization or a core dump handler.
+pub const panic = std.debug.FullPanic(fuzzPanic);
+
+fn fuzzPanic(text: []const u8, _: ?usize) noreturn {
+    std.debug.print("panic: {s}\n", .{text});
+    std.process.exit(99);
+}
 const assert = std.debug.assert;
 const ssz = @import("ssz");
 

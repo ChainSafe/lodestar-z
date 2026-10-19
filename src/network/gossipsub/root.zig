@@ -1,3 +1,5 @@
+pub const testing = @import("test_support.zig");
+pub const topic_fixture = @import("topic_fixture.zig");
 pub const delivery = @import("delivery.zig");
 pub const diagnostics = @import("diagnostics.zig");
 pub const local_intent = @import("local_intent.zig");

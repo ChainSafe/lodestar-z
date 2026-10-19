@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_allocator = if (@import("builtin").is_test) std.testing.allocator else std.heap.c_allocator;
 const constants = @import("../constants.zig");
 const Engine = @import("Engine.zig");
 const keys = @import("../wire/keys.zig");
@@ -41,7 +42,7 @@ pub const Pair = struct {
             self.client_ctx.deinit();
             return err;
         };
-        self.client = Engine.init(std.testing.allocator, .{
+        self.client = Engine.init(test_allocator, .{
             .tls = self.client_ctx,
             .limits = client_limits,
             .local = .{ client_address, null },
@@ -51,7 +52,7 @@ pub const Pair = struct {
             self.client_ctx.deinit();
             return err;
         };
-        self.server = Engine.init(std.testing.allocator, .{
+        self.server = Engine.init(test_allocator, .{
             .tls = self.server_ctx,
             .limits = server_limits,
             .local = .{ server_address, null },

@@ -35,6 +35,21 @@ pub const Address = union(enum) {
         };
     }
 
+    /// std reads any "::ffff:" prefix as an IPv4-mapped address and rejects hex groups after it,
+    /// while its formatter spells such addresses that way. Naming the leading zero group routes
+    /// them through the general parser.
+    pub fn parseIpText(text: []const u8, port_number: u16) error{InvalidAddress}!std.Io.net.IpAddress {
+        const mapped_prefix = "::ffff:";
+        if (std.ascii.startsWithIgnoreCase(text, mapped_prefix) and std.mem.findScalar(u8, text, '.') == null) {
+            var spelled: [64]u8 = undefined;
+            if (text.len + 1 > spelled.len) return error.InvalidAddress;
+            spelled[0] = '0';
+            @memcpy(spelled[1..][0..text.len], text);
+            return std.Io.net.IpAddress.parse(spelled[0 .. text.len + 1], port_number) catch error.InvalidAddress;
+        }
+        return std.Io.net.IpAddress.parse(text, port_number) catch error.InvalidAddress;
+    }
+
     pub fn isIp4Mapped(ip: [16]u8) bool {
         return std.mem.allEqual(u8, ip[0..10], 0) and ip[10] == 0xff and ip[11] == 0xff;
     }
@@ -62,3 +77,13 @@ pub const Address = union(enum) {
         return std.meta.eql(self, other);
     }
 };
+
+test "parseIpText accepts hex groups after a mapped-looking prefix" {
+    const spelled = try Address.parseIpText("::ffff:ffee", 1);
+    try std.testing.expect(spelled == .ip6);
+    try std.testing.expectEqual([16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xee }, spelled.ip6.bytes);
+    const mapped = try Address.parseIpText("::ffff:127.0.0.1", 1);
+    try std.testing.expect(mapped == .ip6 and Address.isIp4Mapped(mapped.ip6.bytes));
+    try std.testing.expectError(error.InvalidAddress, Address.parseIpText("::ffff:zz", 1));
+    try std.testing.expect((try Address.parseIpText("10.0.0.1", 1)) == .ip4);
+}

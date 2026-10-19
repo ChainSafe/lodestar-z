@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+export AFL_CRASH_EXITCODE=99
 
 FUZZ_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="${FUZZ_DIR}/zig-out/bin"

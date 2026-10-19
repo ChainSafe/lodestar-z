@@ -1,4 +1,12 @@
 const std = @import("std");
+
+/// Exit 99 lets AFL detect panics without waiting for symbolization or a core dump handler.
+pub const panic = std.debug.FullPanic(fuzzPanic);
+
+fn fuzzPanic(text: []const u8, _: ?usize) noreturn {
+    std.debug.print("panic: {s}\n", .{text});
+    std.process.exit(99);
+}
 const wire = @import("network").wire;
 
 pub export fn zig_fuzz_init() callconv(.c) void {}

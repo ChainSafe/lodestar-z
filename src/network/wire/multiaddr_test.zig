@@ -78,3 +78,21 @@ test "multiaddr rejects IPv6 interface scope without losing endpoint identity" {
     try std.testing.expectEqual(@as(u32, 7), endpoint.address.ip6.interface);
     try std.testing.expectError(error.InvalidMultiaddr, multiaddr.Multiaddr.parse("/ip6/fe80::1%7/udp/9000/quic-v1"));
 }
+
+test "multiaddr round trips ip6 text that starts with the mapped prefix" {
+    const inputs = [_][]const u8{
+        &.{ 0x29, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x80, 0xda, 0xda, 0xa5, 0x04, 0x00, 0x00, 0x10, 0x00, 0x91, 0x02, 0x0f, 0xa1, 0xcd, 0x03 },
+        &.{ 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xee, 0x91, 0x02, 0x0f, 0xa1, 0xcd, 0x03 },
+        &.{ 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x24, 0x00, 0x00, 0x04, 0x2e, 0x2f, 0x2e, 0x00, 0x91, 0x02, 0x0f, 0xa1, 0xcd, 0x03 },
+    };
+    for (inputs) |bytes| {
+        const first = try multiaddr.Multiaddr.decode(bytes);
+        var text: [multiaddr.text_length_max]u8 = undefined;
+        const rendered = try first.toText(&text);
+        try std.testing.expect(std.mem.startsWith(u8, rendered, "/ip6/::ffff:"));
+        const parsed = try multiaddr.Multiaddr.parse(rendered);
+        try std.testing.expect(parsed.address.eql(first.address));
+    }
+    try std.testing.expectError(error.InvalidMultiaddr, multiaddr.Multiaddr.parse("/ip6/::ffff:127.0.0.1/udp/4001/quic-v1"));
+    try std.testing.expectError(error.InvalidMultiaddr, multiaddr.Multiaddr.parse("/ip6/::ffff:zz/udp/4001/quic-v1"));
+}

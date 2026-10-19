@@ -8,3 +8,6 @@ zig-pkg/
 
 # Spec-extracted seeds (regenerate with: zig build extract-corpus)
 corpus/*-initial/spec-*
+
+# Archived campaign outputs from overnight restarts
+afl-out-run*/

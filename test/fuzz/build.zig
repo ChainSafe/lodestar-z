@@ -42,6 +42,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     network_fixture.addImport("network", lodestar_z.module("network"));
+    const gossip_fixture = b.createModule(.{
+        .root_source_file = b.path("tools/gossip_fixture.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gossip_fixture.addImport("network", lodestar_z.module("network"));
+    gossip_fixture.addImport("snappy", dep_snappy.module("snappy"));
     const seeds_module = b.createModule(.{
         .root_source_file = b.path("tools/network_corpus.zig"),
         .target = target,
@@ -127,8 +134,9 @@ pub fn build(b: *std.Build) void {
         const input_max = std.fmt.parseInt(u32, fields.next().?, 10) catch @panic("invalid network fuzz input bound");
         const link = fields.next().?;
         std.debug.assert(fields.next() == null);
-        const snappy = std.mem.eql(u8, link, "snappy");
-        const quiche = std.mem.eql(u8, link, "quiche");
+        const both = std.mem.eql(u8, link, "all");
+        const snappy = both or std.mem.eql(u8, link, "snappy");
+        const quiche = both or std.mem.eql(u8, link, "quiche");
         std.debug.assert(snappy or quiche or std.mem.eql(u8, link, "none"));
         fuzzers.append(b.allocator, .{
             .name = name,
@@ -140,6 +148,7 @@ pub fn build(b: *std.Build) void {
         }) catch @panic("out of memory");
     }
     const build_network = b.step("build-network", "Build every network harness from network-targets.tsv");
+    const test_harnesses = b.step("test-harnesses", "Test stateful harness ownership and reset");
 
     for (fuzzers.items) |fuzzer| {
         const run_step = b.step(
@@ -167,6 +176,20 @@ pub fn build(b: *std.Build) void {
         );
         lib_mod.addImport("network", lodestar_z.module("network"));
         lib_mod.addImport("network_fixture", network_fixture);
+        lib_mod.addImport("snappy", dep_snappy.module("snappy"));
+        lib_mod.addImport("gossip_fixture", gossip_fixture);
+
+        if (std.mem.eql(u8, fuzzer.name, "network_reqresp_session") or std.mem.eql(u8, fuzzer.name, "network_gossip_sessions")) {
+            const test_mod = b.createModule(.{
+                .root_source_file = b.path(fuzzer.source(b)),
+                .target = target,
+                .optimize = optimize,
+            });
+            test_mod.addImport("network", lodestar_z.module("network"));
+            test_mod.addImport("gossip_fixture", gossip_fixture);
+            const tests = b.addTest(.{ .root_module = test_mod, .filters = &.{"fuzz harness"} });
+            test_harnesses.dependOn(&b.addRunArtifact(tests).step);
+        }
 
         const lib = b.addLibrary(.{
             .name = fuzzer.name,
@@ -183,6 +206,7 @@ pub fn build(b: *std.Build) void {
             b.path(b.fmt("afl-out/{s}", .{fuzzer.name})),
         );
         const run = b.addSystemCommand(&.{b.findProgram(&.{"afl-fuzz"}, &.{}) catch @panic("afl-fuzz is required")});
+        run.setEnvironmentVariable("AFL_CRASH_EXITCODE", "99");
         run.addArg("-i");
         run.addDirectoryArg(b.path(fuzzer.corpus(b)));
         run.addArg("-o");

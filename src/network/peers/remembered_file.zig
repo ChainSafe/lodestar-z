@@ -56,7 +56,7 @@ fn parse(line: []const u8) error{InvalidRecord}!remembered.Record {
     const port = std.fmt.parseInt(u16, fields.next() orelse return error.InvalidRecord, 10) catch return error.InvalidRecord;
     const timestamp = std.fmt.parseInt(u64, fields.next() orelse return error.InvalidRecord, 10) catch return error.InvalidRecord;
     if (fields.next() != null) return error.InvalidRecord;
-    const parsed = std.Io.net.IpAddress.parse(ip, port) catch return error.InvalidRecord;
+    const parsed = t.Address.parseIpText(ip, port) catch return error.InvalidRecord;
     if (parsed == .ip6 and t.Address.isIp4Mapped(parsed.ip6.bytes)) return error.InvalidRecord;
     const address = t.Address.fromNetwork(parsed);
     if (!address.isUsable()) return error.InvalidRecord;

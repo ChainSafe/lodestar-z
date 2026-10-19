@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+export AFL_CRASH_EXITCODE=99
 FUZZ_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${FUZZ_DIR}/network-targets.sh"
 TARGETS=("${NETWORK_TARGETS[@]}")

@@ -805,7 +805,7 @@ pub fn cancelAll(self: *ReqResp, engine: *Engine, router: *Router, now: Now) voi
 pub fn pump(self: *ReqResp, engine: *Engine, router: *Router, now: Now, events: []Event) usize {
     const exhausted = self.advance(engine, router, now);
     const count = self.drain(now, events);
-    if (@import("builtin").is_test) self.checkInvariants(engine, now, exhausted);
+    if (@import("builtin").is_test or @import("builtin").fuzz) self.checkInvariants(engine, now, exhausted);
     return count;
 }
 
@@ -901,7 +901,7 @@ fn retire(self: *ReqResp, id: u32) void {
 /// match the slot states, that no slot with stream work is off `ready`, that a pump with
 /// budget to spare left no due key, and that each live stream a slot holds routes to it and
 /// back.
-fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhausted: bool) void {
+pub fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhausted: bool) void {
     var lengths: struct { ready: usize = 0, events: usize = 0 } = .{};
     for (self.links, 0..) |*links, position| {
         const id: u32 = @intCast(position);

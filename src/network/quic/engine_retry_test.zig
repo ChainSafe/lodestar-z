@@ -94,3 +94,24 @@ fn initialWithToken(packet: []u8, token: []const u8) []u8 {
     @memcpy(packet[header.len + 2 ..][0..token.len], token);
     return packet[0..limits.client_initial_min];
 }
+
+test "QUIC Retry keys an admitted handshake before its first advance" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handle = try pair.dial();
+    var packet: [constants.datagram_size_max]u8 = undefined;
+    var out: [packet.len]u8 = undefined;
+    const unvalidated = pair.sendOne(&pair.client, handle.index, &packet).?;
+    const answer = pair.server.receive(unvalidated, &support.client_address, pair.now, &out);
+    try std.testing.expect(answer == .retry);
+    var token_reply: [packet.len]u8 = undefined;
+    @memcpy(token_reply[0..answer.retry.len], answer.retry);
+    _ = pair.client.receive(token_reply[0..answer.retry.len], &support.server_address, pair.now, &out);
+    const validated = pair.sendOne(&pair.client, handle.index, &packet).?;
+    const outcome = pair.server.receive(validated, &support.client_address, pair.now, &out);
+    try std.testing.expect(outcome == .accepted);
+    try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
+    try std.testing.expect(pair.server.nextDeadlineNs() != null);
+    pair.server.checkInvariants(pair.now);
+}

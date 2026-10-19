@@ -1,4 +1,12 @@
 const std = @import("std");
+
+/// Exit 99 lets AFL detect panics without waiting for symbolization or a core dump handler.
+pub const panic = std.debug.FullPanic(fuzzPanic);
+
+fn fuzzPanic(text: []const u8, _: ?usize) noreturn {
+    std.debug.print("panic: {s}\n", .{text});
+    std.process.exit(99);
+}
 const gossip = @import("network").gossipsub;
 const Messages = @FieldType(gossip.Gossipsub, "messages");
 const Layout = std.meta.Child(@typeInfo(@TypeOf(Messages.init)).@"fn".params[2].type.?);
@@ -65,11 +73,9 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
             0, 1 => {
                 var id: gossip.Gossipsub.MessageId = @splat(0);
                 std.mem.writeInt(u64, id[0..8], step + 1, .little);
-                if (validation.reserve(id)) |reserved| {
-                    var reservation = reserved;
-                    defer reservation.cancel();
-                    if (messages.history.admitPayload(store, id, "/eth2/01020304/beacon_block/ssz_snappy", payload[0 .. 1 + @as(usize, at) * (payload_max / 16)])) |message| {
-                        handles[at] = reservation.commit(store, &peers, message, source, 0, now);
+                if (validation.available()) {
+                    if (messages.history.admitPayload(store, .beacon_block, id, "/eth2/01020304/beacon_block/ssz_snappy", payload[0 .. 1 + @as(usize, at) * (payload_max / 16)])) |message| {
+                        handles[at] = validation.admit(store, &peers, message, source, 0, now);
                         store.seal(message);
                     }
                 }

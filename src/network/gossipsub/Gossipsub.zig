@@ -624,7 +624,7 @@ pub fn pump(
 ) void {
     var turn = self.beginPump(now);
     self.runTurn(router, engine, &turn);
-    if (@import("builtin").is_test) checkRoutes(self.sessions, engine);
+    if (@import("builtin").is_test or @import("builtin").fuzz) checkRoutes(self.sessions, engine);
 }
 
 /// Expires the due session deadlines, runs the heartbeat, then services up to `peers_per_pump`
@@ -661,7 +661,7 @@ pub fn runTurn(self: *Gossipsub, router: *Router, engine: *Engine, turn: *Turn) 
     self.finishPump(now);
     // Received messages and local refusals can forgive promises before this heartbeat's sweep.
     if (heartbeat_due) self.expirePromises(now.millis());
-    if (@import("builtin").is_test) self.checkScheduling();
+    if (@import("builtin").is_test or @import("builtin").fuzz) self.checkScheduling();
 }
 
 /// Pops the sessions whose earliest deadline passed. Handling an expiry clears it or retires the
@@ -692,7 +692,7 @@ pub fn finishPump(self: *Gossipsub, now: Now) void {
 /// Test builds check after every turn that the ready list holds every session that wants
 /// service, that each session off the list is keyed on its recomputed deadline, and that the
 /// connection index finds each active session.
-fn checkScheduling(self: *const Gossipsub) void {
+pub fn checkScheduling(self: *const Gossipsub) void {
     const sessions = self.sessions;
     var linked: usize = 0;
     for (sessions.rows, 0..) |*row, position| {
@@ -712,7 +712,7 @@ fn checkScheduling(self: *const Gossipsub) void {
 /// Test builds check after every pump that each stream a session holds routes to it, that a
 /// session off the ready list holds no inbound stream with an unread readable edge, and that a
 /// blocked out stream with queued output waits on armed write interest.
-fn checkRoutes(sessions: *const sessions_mod.Sessions, engine: *const Engine) void {
+pub fn checkRoutes(sessions: *const sessions_mod.Sessions, engine: *const Engine) void {
     for (sessions.rows, 0..) |*row, position| {
         if (!row.active) continue;
         const index: u24 = @intCast(position);

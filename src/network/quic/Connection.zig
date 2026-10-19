@@ -580,7 +580,8 @@ fn capacityNative(self: *Connection, index: u8, id: u64) isize {
     if (self.table.entries[index].stopped) return c.QUICHE_ERR_STREAM_STOPPED;
     var code: u64 = 0;
     const rc = c.quiche_conn_stream_capacity_with_error(self.conn.?, id, &code);
-    if (rc == c.QUICHE_ERR_STREAM_STOPPED) self.table.stop(index, code);
+    // A closed connection reports every stream stopped; its owner already has the close event.
+    if (rc == c.QUICHE_ERR_STREAM_STOPPED and self.state != .closed) self.table.stop(index, code);
     return rc;
 }
 

@@ -1,4 +1,5 @@
-pub const testing = if (@import("builtin").is_test) @import("test_pair.zig") else struct {};
+pub const testing = @import("test_pair.zig");
+pub const route_invariant = @import("route_invariant.zig");
 pub const codec = @import("codec.zig");
 pub const constants = @import("constants.zig");
 pub const request_policy = @import("request_policy.zig");

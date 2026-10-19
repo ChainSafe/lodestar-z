@@ -122,12 +122,12 @@ pub const Multiaddr = struct {
         if (!std.mem.eql(u8, quic_part, "quic-v1")) return error.InvalidMultiaddr;
 
         const address: Address = if (std.mem.eql(u8, family, "ip4")) blk: {
-            const parsed = std.Io.net.IpAddress.parseIp4(host, port) catch
-                return error.InvalidMultiaddr;
+            const parsed = Address.parseIpText(host, port) catch return error.InvalidMultiaddr;
+            if (parsed != .ip4) return error.InvalidMultiaddr;
             break :blk .{ .ip4 = .{ .octets = parsed.ip4.bytes, .port = port } };
         } else if (std.mem.eql(u8, family, "ip6")) blk: {
-            const parsed = std.Io.net.IpAddress.parseIp6(host, port) catch
-                return error.InvalidMultiaddr;
+            const parsed = Address.parseIpText(host, port) catch return error.InvalidMultiaddr;
+            if (parsed != .ip6) return error.InvalidMultiaddr;
             if (Address.isIp4Mapped(parsed.ip6.bytes)) return error.InvalidMultiaddr;
             break :blk .{ .ip6 = .{ .octets = parsed.ip6.bytes, .port = port } };
         } else return error.InvalidMultiaddr;

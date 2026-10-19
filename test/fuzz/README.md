@@ -20,6 +20,32 @@ for SSZ deserialization in lodestar-z.
 Each SSZ input is `[selector_byte][ssz_data...]`. The first byte selects
 which SSZ type to test within the target. See source files for the mapping.
 
+### Network (stateful)
+
+Single-shot decoders cover the wire formats; these harnesses drive the state machines. Each
+input is an opcode stream: one byte selects the operation and the following bytes supply
+its parameters, so AFL mutations become session histories. Every step ends with the owner's
+own invariant checks (`checkInvariants`, `checkScheduling`, the reqresp route invariant) and
+the harness's whole-table accounting.
+
+| Target | Drives | Invariants |
+|--------|--------|------------|
+| `network_gossip_sessions` | One `Gossipsub` without a transport: SUBSCRIBE, GRAFT, PRUNE, IHAVE, IWANT, IDONTWANT and messages from several sessions, clock advances, heartbeats, verdicts, outbox drains, disconnects and reconnects | store pages and entries, validation pins, promise balance, delivery pool reserves, finite scores, ready-list scheduling |
+| `network_gossip_recovery` | IHAVE floods, announced-then-delivered ids, IWANT, promise expiry and cancellation, reconnects with the same identity, penalties and decay | as above, with promise reserves exercised at capacity |
+| `network_processor_admission` | `Gossipsub` feeding a `GossipProcessor`: mixed kinds, sources and sizes, newest-first eviction, dependency checks and waits, claim, finish, report, verdict pumping, expiry, slot changes, `dropQueued` and `dropPeer` | per-kind items and bytes, per-source charges, state counts, execution credits, store entries, empty table at close |
+| `network_reqresp_session` | Two `ReqResp` instances per side over an in-process QUIC pair: requests, responses, error responses, finish, cancel, serving retain and release, raw request and response bytes with arbitrary splits and FIN placement, stream resets, clock advances for every timeout | route invariant, slot and event accounting, no pending request after `cancelAll` |
+| `network_quic_session` | Two engines through a real handshake, then stream opens, writes, reads, capacity polls, shutdowns, closes, route binds, hostile datagrams on the established path, time jumps and connection close | engine invariants after every step, route and connection counts, clean teardown |
+
+These harnesses link both snappy and quiche where needed (`all` in `network-targets.tsv`).
+Use ReleaseSafe for campaigns. Each input starts with fresh protocol state; gossip uses
+an input-driven clock and reuses allocation capacity between inputs.
+
+```sh
+zig build -Doptimize=ReleaseSafe build-network
+zig build -Doptimize=ReleaseSafe test-harnesses
+./smoke-network.sh network_gossip_sessions network_processor_admission
+```
+
 ### BLS
 
 | Target | Binary | Description |
@@ -63,9 +89,12 @@ zig build run-ssz_containers
 Or invoke `afl-fuzz` directly:
 
 ```sh
-afl-fuzz -i corpus/ssz_basic-cmin -o afl-out/ssz_basic \
-  -- zig-out/bin/fuzz-ssz_basic @@
+AFL_CRASH_EXITCODE=99 afl-fuzz -i corpus/ssz_basic-cmin -o afl-out/ssz_basic \
+  -- zig-out/bin/fuzz-ssz_basic
 ```
+
+Harness panics exit with code 99. The launch scripts and build steps configure
+`AFL_CRASH_EXITCODE` so AFL records these as crashes.
 
 The fuzzer runs indefinitely. Let it run for as long as you like; meaningful
 coverage is usually reached within a few hours, but longer runs can find

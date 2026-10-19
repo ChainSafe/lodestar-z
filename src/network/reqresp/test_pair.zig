@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_allocator = if (@import("builtin").is_test) std.testing.allocator else std.heap.c_allocator;
 const ct = @import("consensus_types");
 const reqresp = @import("ReqResp.zig");
 const protocol = @import("protocol.zig");
@@ -19,6 +20,7 @@ pub const OutputCounts = struct { application: usize, control: usize };
 pub const deneb_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xa9 };
 pub const fulu_digest = [4]u8{ 0x2f, 0x2f, 0x2f, 0x2f };
 pub const Overrides = struct {
+    connections: u16 = 128,
     outbound_max: u16 = 8,
     serving_max: u16 = 8,
     inbound_per_connection_max: u8 = 8,
@@ -115,11 +117,20 @@ const TransportPair = struct {
     handles: struct { client: Engine.Handle, server: Engine.Handle } = undefined,
 
     fn init(self: *TransportPair, client: reqresp.Options, server: reqresp.Options, client_control: reqresp.Options, server_control: reqresp.Options) !void {
-        try self.pair.init(.{}, .{});
+        const defaults: Engine.Limits = .{};
+        try self.pair.init(.{
+            .connections_max = client.connections,
+            .handshaking_max = @min(client.connections, defaults.handshaking_max),
+            .dialing_max = @min(client.connections, defaults.dialing_max),
+        }, .{
+            .connections_max = server.connections,
+            .handshaking_max = @min(server.connections, defaults.handshaking_max),
+            .dialing_max = @min(server.connections, defaults.dialing_max),
+        });
         errdefer self.pair.deinit();
-        self.client = try Endpoint.init(std.testing.allocator, client, client_control, .{ .negotiations_max = 16 });
+        self.client = try Endpoint.init(test_allocator, client, client_control, .{ .negotiations_max = 16 });
         errdefer self.client.deinit();
-        self.server = try Endpoint.init(std.testing.allocator, server, server_control, .{ .negotiations_max = 16 });
+        self.server = try Endpoint.init(test_allocator, server, server_control, .{ .negotiations_max = 16 });
         errdefer self.server.deinit();
         const handles = try support.connectPair(&self.pair);
         self.handles = .{ .client = handles.client, .server = handles.server };
@@ -185,7 +196,7 @@ pub const Pair = struct {
 
     /// Admission defaults over the fixture policy unless the caller supplies admission.
     pub fn options(overrides: Overrides, forks: []const ForkEntry) !reqresp.Options {
-        const connections = 128;
+        const connections = overrides.connections;
         return .{
             .connections = connections,
             .protocols = .application,

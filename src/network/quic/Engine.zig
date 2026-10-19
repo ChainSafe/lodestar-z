@@ -642,6 +642,7 @@ pub fn receive(
     self.registry.handshaking += 1;
     assert(self.registry.handshaking <= self.limits.handshaking_max);
     _ = self.feed(index, datagram, from, false);
+    self.rekey(index, now);
     return .{ .accepted = self.toHandle(index) };
 }
 
@@ -758,11 +759,11 @@ pub fn sent(self: *Engine, index: u16, now: Now, drained: bool) void {
 
 /// Ends a turn's flush pass. Test builds check the engine invariants here.
 pub fn finishFlush(self: *Engine, now: Now) void {
-    if (@import("builtin").is_test) self.checkInvariants(now);
+    if (@import("builtin").is_test or @import("builtin").fuzz) self.checkInvariants(now);
 }
 
 /// E1 to E5. Runs after the turn's last send.
-fn checkInvariants(self: *Engine, now: Now) void {
+pub fn checkInvariants(self: *Engine, now: Now) void {
     const slots = self.registry.slots;
     var scratch: [constants.datagram_size_max]u8 = undefined;
     for (slots, 0..) |*slot, position| {
