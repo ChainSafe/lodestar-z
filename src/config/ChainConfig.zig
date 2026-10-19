@@ -42,7 +42,8 @@ FULU_FORK_EPOCH: u64,
 // GLOAS
 GLOAS_FORK_VERSION: [4]u8,
 GLOAS_FORK_EPOCH: u64,
-// Heze timing
+// HEZE
+HEZE_FORK_VERSION: [4]u8,
 HEZE_FORK_EPOCH: u64,
 
 // Time parameters

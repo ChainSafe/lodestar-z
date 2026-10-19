@@ -37,6 +37,7 @@ pub const chain_config = ChainConfig{
     .FULU_FORK_EPOCH = 1714688,
     .GLOAS_FORK_VERSION = b(4, "0x07000064"),
     .GLOAS_FORK_EPOCH = std.math.maxInt(u64),
+    .HEZE_FORK_VERSION = b(4, "0x08000064"),
     .HEZE_FORK_EPOCH = std.math.maxInt(u64),
 
     // Time parameters
