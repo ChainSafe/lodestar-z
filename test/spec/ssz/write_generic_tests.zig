@@ -153,9 +153,8 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
-/// The YAML `ssz_generic` cases of the last consensus release that ships them. They cover far more
-/// invalid encodings than the JSON fixtures. Listing the categories, and requiring cases in each of
-/// their directories, makes missing or empty fixtures fail.
+/// The legacy YAML `ssz_generic` cases provide broader invalid-encoding coverage than the JSON
+/// fixtures. Requiring cases in every listed category makes missing or empty fixtures fail.
 const yaml_cases_path = "general/tests/general/phase0/ssz_generic";
 const yaml_categories = [_][]const u8{
     "basic_progressive_list",

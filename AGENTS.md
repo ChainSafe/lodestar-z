@@ -139,11 +139,6 @@ zig build test:spec_tests -Dtest:spec_tests.filters="pattern" -Dpreset=minimal
 Use the minimal preset for faster iteration, but run mainnet when behavior depends on preset values.
 Do not assume minimal and mainnet constants are interchangeable.
 
-The independent SSZ JSON fixtures currently use hand-maintained schemas in
-`test/spec/ssz/json_types.zig`. A follow-up should generate these from the pinned upstream
-type declarations, rather than infer types from example values. Until then, verify the mapping
-when updating the fixture pin, and preserve hard failures for unknown suites and types.
-
 ### ere verifier fixtures
 
 The execution-proof-verifier binding test verifies ere's own fixture proofs when the fixtures are present;

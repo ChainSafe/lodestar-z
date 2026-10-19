@@ -129,10 +129,12 @@
                 .default = "v1.7.0-beta.4",
                 .description = "Consensus spec tests version tag.",
             },
+            // Keep the existing YAML corpus for invalid-encoding coverage alongside the JSON fixtures.
+            // Consensus releases dropped ssz_generic in alpha.14 (ethereum/consensus-specs#5524).
             .ssz_generic_spec_test_version = .{
                 .type = .string,
                 .default = "v1.7.0-alpha.11",
-                .description = "Last consensus spec tests tag that ships the YAML ssz_generic cases.",
+                .description = "Legacy YAML ssz_generic fixture tag.",
             },
             .ssz_spec_test_url = .{
                 .type = .string,
