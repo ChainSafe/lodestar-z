@@ -161,7 +161,7 @@ test "memory_safety: translateParticipation should release participation on allo
     try state.commit();
 
     try std.testing.checkAllAllocationFailures(allocator, struct {
-        fn run(failing_allocator: Allocator, cache: *EpochCache, source: *AnyBeaconState, count: usize, participants: []const ValidatorIndex) !void {
+        fn run(failing_allocator: Allocator, cache: *EpochCache, source: *AnyBeaconState, count: usize, participants: []const u32) !void {
             const roots = try RootCache(.phase0).init(failing_allocator, source.castToFork(.phase0));
             defer roots.deinit();
 
@@ -170,7 +170,7 @@ test "memory_safety: translateParticipation should release participation on allo
 
             try std.testing.expectEqual(count, participation.items.len);
             for (participation.items, 0..) |flags, i| {
-                const expected: u8 = if (std.mem.findScalar(ValidatorIndex, participants, i) != null)
+                const expected: u8 = if (std.mem.findScalar(u32, participants, @intCast(i)) != null)
                     (1 << constants.TIMELY_SOURCE_FLAG_INDEX) | (1 << constants.TIMELY_TARGET_FLAG_INDEX) | (1 << constants.TIMELY_HEAD_FLAG_INDEX)
                 else
                     0;
