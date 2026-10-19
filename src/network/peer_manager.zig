@@ -220,9 +220,12 @@ pub const PeerManager = struct {
         }
         return null;
     }
-    pub fn endpointChanged(self: *PeerManager, conn: t.Handle, endpoint: *const t.Address) void {
-        const peer = self.catalog.findConnection(conn) orelse return;
-        _ = self.catalog.updateEndpoint(peer, conn, endpoint);
+    pub fn endpointChanged(self: *PeerManager, conn: t.Handle, endpoint: *const t.Address, now: Now) ?Retired {
+        const peer = self.catalog.findConnection(conn) orelse return null;
+        _ = self.catalog.updateEndpoint(peer, conn, endpoint) catch {
+            return self.retireConnection(peer, conn, .capacity, now);
+        };
+        return null;
     }
     /// Catalog and delivery changes apply immediately. Scores and subscriptions refresh at most
     /// one policy interval after a change; protocol and metadata deadlines may wake selection sooner.

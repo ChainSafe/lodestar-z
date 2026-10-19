@@ -43,7 +43,88 @@ test "peer options reject incompatible bounds before allocation" {
         Catalog.Options{ .max_peers = 257 },
         Catalog.Options{ .target_peers = 97 },
         Catalog.Options{ .min_outbound = 65 },
+        Catalog.Options{ .inbound_per_source_max = 0 },
+        Catalog.Options{ .inbound_per_source_max = 257 },
     }) |options| try std.testing.expectError(error.InvalidOptions, options.validate());
+}
+
+test "peer catalog caps inbound IPv4 hosts and IPv6 /64 sources independent of ports and identities" {
+    const addresses = [_][3]t.Address{
+        .{
+            .{ .ip4 = .{ .octets = .{ 203, 0, 113, 1 }, .port = 9000 } },
+            .{ .ip4 = .{ .octets = .{ 203, 0, 113, 1 }, .port = 9001 } },
+            .{ .ip4 = .{ .octets = .{ 203, 0, 113, 2 }, .port = 9000 } },
+        },
+        .{
+            .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = 9000 } },
+            .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, 0, 0, 1, 9, 8, 7, 6, 5, 4, 3, 2 }, .port = 9001 } },
+            .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = 9000 } },
+        },
+    };
+    for (addresses) |sources| {
+        var options = opts;
+        options.inbound_per_source_max = 1;
+        var c = try Catalog.init(std.testing.allocator, options, 4, 0);
+        defer c.deinit(std.testing.allocator);
+        const ref = c.admit(&remote, &local, first, &.{ .direction = .inbound, .endpoint = sources[0], .now_ms = 0 }).admitted.peer;
+        const next: Handle = .{ .index = 2, .generation = 1 };
+        try std.testing.expectEqual(Catalog.Admission.capacity, c.admit(&third, &local, next, &.{ .direction = .inbound, .endpoint = sources[1], .now_ms = 0 }));
+        try std.testing.expect(c.find(&third) == null);
+        try std.testing.expectEqual(@as(u16, 1), c.connectedCount());
+        try std.testing.expect(try c.updateEndpoint(ref, first, &sources[1]));
+        try std.testing.expect(c.admit(&third, &local, next, &.{ .direction = .inbound, .endpoint = sources[2], .now_ms = 0 }) == .admitted);
+        try std.testing.expectError(error.SourceCapacity, c.updateEndpoint(ref, first, &sources[2]));
+        try std.testing.expectEqualDeep(sources[1], c.get(ref).?.endpoint);
+        try std.testing.expectEqual(@as(f64, 0), c.get(ref).?.score);
+    }
+}
+
+test "peer catalog inbound source occupancy ends at disconnect or outbound replacement" {
+    var options = opts;
+    options.inbound_per_source_max = 1;
+    var c = try Catalog.init(std.testing.allocator, options, 4, 0);
+    defer c.deinit(std.testing.allocator);
+    const address: t.Address = .{ .ip4 = .{ .octets = .{ 203, 0, 113, 1 }, .port = 9000 } };
+    const next: Handle = .{ .index = 2, .generation = 1 };
+    const inbound: Catalog.AdmissionOptions = .{ .direction = .inbound, .endpoint = address, .now_ms = 0 };
+    const ref = c.admit(&remote, &local, first, &inbound).admitted.peer;
+    try std.testing.expect(c.markUnavailable(ref, first, .capacity));
+    try std.testing.expectEqual(Catalog.Admission.capacity, c.admit(&third, &local, next, &inbound));
+    try std.testing.expect(c.disconnect(ref, first, .capacity, .{}, at(0)));
+    try std.testing.expectEqual(@as(f64, 0), c.get(ref).?.score);
+    var events: [2]t.Event = undefined;
+    _ = c.pollEvents(&events);
+    const other = c.admit(&third, &local, next, &inbound).admitted.peer;
+    const outbound_options: Catalog.AdmissionOptions = .{ .direction = .outbound, .endpoint = address, .now_ms = 0 };
+    const replaced = c.admit(&third, &local, replacement, &outbound_options).admitted;
+    try std.testing.expectEqualDeep(next, replaced.displaced.?);
+    try std.testing.expectEqualDeep(other, replaced.peer);
+    try std.testing.expect(!c.disconnect(other, next, .transport_closed, .{}, at(0)));
+    const fresh: t.PeerId = .{ .bytes = @splat(40) };
+    try std.testing.expect(c.admit(&fresh, &local, next, &inbound) == .admitted);
+    try std.testing.expectEqual(@as(u16, 2), c.connectedCount());
+}
+
+test "peer catalog source refusal preserves an existing outbound connection and direct intent" {
+    var options = opts;
+    options.inbound_per_source_max = 1;
+    var c = try Catalog.initWithIntents(std.testing.allocator, options, 1, 4, 0);
+    defer c.deinit(std.testing.allocator);
+    const high: t.PeerId = .{ .bytes = @splat(255) };
+    const address: t.Address = .{ .ip4 = .{ .octets = .{ 203, 0, 113, 1 }, .port = 9000 } };
+    const next: Handle = .{ .index = 2, .generation = 1 };
+    const inbound: Catalog.AdmissionOptions = .{ .direction = .inbound, .endpoint = address, .now_ms = 0 };
+    _ = c.admit(&remote, &high, first, &inbound).admitted;
+    const ref = try c.retainIntent(&third);
+    try std.testing.expect(c.setDirect(ref, true));
+    try std.testing.expectEqual(Catalog.Admission.capacity, c.admit(&third, &high, next, &inbound));
+    try std.testing.expect(c.rowFor(ref).?.connection == null);
+    try std.testing.expect(c.admit(&third, &high, next, &.{ .direction = .outbound, .endpoint = address, .now_ms = 0 }) == .admitted);
+    try std.testing.expectEqual(Catalog.Admission.capacity, c.admit(&third, &high, replacement, &inbound));
+    try std.testing.expectEqualDeep(next, c.get(ref).?.connection.?);
+    try std.testing.expectEqualDeep(ref, c.findConnection(next).?);
+    try std.testing.expectEqual(@as(f64, 0), c.get(ref).?.score);
+    try std.testing.expectEqual(@as(u16, 2), c.connectedCount());
 }
 
 test "peer admission preserves dial commitments through inbound churn and goodbye" {
@@ -130,29 +211,29 @@ test "peer catalog endpoint observations preserve publication and connection gen
     const initial: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4001 } };
     const rebound: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4002 } };
     var out: [1]t.Event = undefined;
-    try std.testing.expect(c.updateEndpoint(ref, first, &initial));
+    try std.testing.expect(try c.updateEndpoint(ref, first, &initial));
     try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&out));
     try std.testing.expect(c.updateStatus(ref, first, &.{}, 0));
     try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&out));
     try std.testing.expectEqual(initial, out[0].ready.endpoint);
 
-    try std.testing.expect(c.updateEndpoint(ref, first, &rebound));
+    try std.testing.expect(try c.updateEndpoint(ref, first, &rebound));
     try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&.{}));
     try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&out));
     try std.testing.expectEqual(rebound, out[0].updated.endpoint);
-    try std.testing.expect(c.updateEndpoint(ref, first, &rebound));
+    try std.testing.expect(try c.updateEndpoint(ref, first, &rebound));
     try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&out));
 
     const admitted = admit(&c, &remote, replacement, .outbound, 1).admitted;
     try std.testing.expectEqual(first, admitted.displaced.?);
-    try std.testing.expect(c.updateEndpoint(ref, replacement, &initial));
-    try std.testing.expect(!c.updateEndpoint(ref, first, &rebound));
-    try std.testing.expect(!c.updateEndpoint(.{ .index = ref.index, .generation = ref.generation + 1 }, replacement, &rebound));
+    try std.testing.expect(try c.updateEndpoint(ref, replacement, &initial));
+    try std.testing.expect(!try c.updateEndpoint(ref, first, &rebound));
+    try std.testing.expect(!try c.updateEndpoint(.{ .index = ref.index, .generation = ref.generation + 1 }, replacement, &rebound));
     try std.testing.expectEqual(initial, c.get(ref).?.endpoint);
     try std.testing.expect(c.markUnavailable(ref, replacement, .host));
-    try std.testing.expect(!c.updateEndpoint(ref, replacement, &rebound));
+    try std.testing.expect(!try c.updateEndpoint(ref, replacement, &rebound));
     try std.testing.expect(c.disconnect(ref, replacement, .host, .{}, at(2)));
-    try std.testing.expect(!c.updateEndpoint(ref, replacement, &rebound));
+    try std.testing.expect(!try c.updateEndpoint(ref, replacement, &rebound));
 }
 test "peer catalog bounds banned retention while preserving the outbound reserve" {
     var options = opts;

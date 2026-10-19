@@ -85,7 +85,7 @@ test "peer owner replacement rejects stale endpoint updates and retirement" {
     const peer = try admit(&fixture, conn, .inbound, at(10));
     const replacement: t.Handle = .{ .index = 1, .generation = 2 };
     try std.testing.expectEqualDeep(peer, try admit(&fixture, replacement, .outbound, at(20_001)));
-    manager.endpointChanged(conn, &.{ .ip4 = .{ .octets = .{ 203, 0, 113, 2 }, .port = 9001 } });
+    try std.testing.expect(manager.endpointChanged(conn, &.{ .ip4 = .{ .octets = .{ 203, 0, 113, 2 }, .port = 9001 } }, at(20_001)) == null);
     try std.testing.expectEqualDeep(endpoint, manager.catalog.get(peer).?.endpoint);
     try std.testing.expect(manager.retireConnection(peer, conn, .health_error, at(20_001)) == null);
     try std.testing.expectEqual(at(20_001).millis(), schedule_test_support.wakeupMilliseconds(manager.control.schedule(&manager.catalog, at(20_001)), at(20_001).millis()).?);
@@ -93,6 +93,29 @@ test "peer owner replacement rejects stale endpoint updates and retirement" {
 
     try std.testing.expectEqual(@as(u64, 0), manager.control.counters.closed[@intFromEnum(t.DisconnectReason.health_error)]);
     try std.testing.expectEqual(@as(u8, 0), manager.catalog.rowFor(peer).?.dial.failures);
+}
+
+test "peer owner retires migration into a full inbound source without reputation penalty" {
+    var fixture: Fixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const manager = &fixture.manager;
+    manager.catalog.options.inbound_per_source_max = 1;
+    const conn = fixture.io.pair.shared.handles.client;
+    const peer = try admit(&fixture, conn, .inbound, at(10));
+    const other_identity: t.PeerId = .{ .bytes = @splat(2) };
+    const other_conn: t.Handle = .{ .index = 1, .generation = 1 };
+    const other_address: t.Address = .{ .ip4 = .{ .octets = .{ 203, 0, 113, 2 }, .port = 9000 } };
+    const other = manager.admit(&.{ .conn = other_conn, .peer_id = other_identity, .direction = .inbound }, other_address, &fixture.io.controlIo(), at(10)).?;
+    const retired = manager.endpointChanged(conn, &other_address, at(11)).?;
+    try std.testing.expectEqualDeep(peer, retired.peer);
+    try std.testing.expectEqualDeep(conn, retired.conn);
+    try std.testing.expect(manager.catalog.findConnection(conn) == null);
+    try std.testing.expectEqualDeep(other.peer, manager.catalog.findConnection(other_conn).?);
+    try std.testing.expectEqual(@as(f64, 0), manager.catalog.get(peer).?.score);
+    try std.testing.expectEqual(@as(u64, 0), manager.catalog.rowFor(peer).?.reputation.ban_until_ms);
+    try std.testing.expectEqual(@as(u64, 1), manager.control.counters.closed[@intFromEnum(t.DisconnectReason.capacity)]);
+    try std.testing.expect(manager.endpointChanged(conn, &other_address, at(12)) == null);
 }
 
 test "peer owner qualification clears dial evidence before later proven health" {

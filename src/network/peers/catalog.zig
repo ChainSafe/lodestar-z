@@ -115,13 +115,16 @@ pub const Catalog = struct {
         target_peers: u16 = 64,
         max_peers: u16 = 96,
         min_outbound: u16 = 16,
+        /// Concurrent inbound connections per IPv4 address or IPv6 /64, including closing peers.
+        inbound_per_source_max: u16 = 16,
 
         pub fn validate(self: Options) error{InvalidOptions}!void {
             if (self.capacity == 0 or self.capacity > 4096 or
                 self.outbound_reserve >= self.capacity or self.max_peers == 0 or
                 self.max_peers > self.capacity or
                 self.max_peers > 256 or self.target_peers > self.max_peers or
-                self.min_outbound > self.target_peers) return error.InvalidOptions;
+                self.min_outbound > self.target_peers or
+                self.inbound_per_source_max == 0 or self.inbound_per_source_max > 256) return error.InvalidOptions;
         }
     };
 
@@ -413,7 +416,8 @@ pub const Catalog = struct {
         return count;
     }
 
-    /// Identity and connection metadata must come from authenticated transport state.
+    /// Identity and connection metadata must come from authenticated transport state, with
+    /// endpoints normalized by Address.fromNetwork.
     pub fn admit(
         self: *Catalog,
         identity: *const t.PeerId,
@@ -442,6 +446,7 @@ pub const Catalog = struct {
                     options.direction != preferred) return .duplicate;
                 displaced = current;
             } else if (!self.admissionRoom(row.direct, options)) return .capacity;
+            if (options.direction == .inbound and !self.sourceRoom(&options.endpoint, ref.index)) return .capacity;
             const fresh = row.established_slot == null;
             if (fresh and !self.promote(ref, options.direction, options.now_ms)) return .capacity;
             if (row.connection == null) self.connected_count += 1;
@@ -456,6 +461,7 @@ pub const Catalog = struct {
             return .{ .admitted = .{ .peer = ref, .displaced = displaced, .fresh = fresh } };
         }
         if (!self.admissionRoom(false, options)) return .capacity;
+        if (options.direction == .inbound and !self.sourceRoom(&options.endpoint, null)) return .capacity;
         const slot = self.reclaimable(options.direction, options.now_ms) orelse return .capacity;
         if (self.established[slot]) |victim| self.forget(self.reference(victim));
         const ref = self.allocate(identity) orelse return .capacity;
@@ -476,6 +482,24 @@ pub const Catalog = struct {
         const remaining = self.options.max_peers -| self.connectedCount();
         if (remaining <= options.pending_dials) return false;
         return options.direction == .outbound or direct or options.selected_dial or remaining > options.outbound_reserved;
+    }
+
+    fn sourceRoom(self: *const Catalog, endpoint: *const t.Address, except: ?u16) bool {
+        var count: u16 = 0;
+        for (self.by_connection) |slot| {
+            const index = slot orelse continue;
+            if (except == index) continue;
+            const row = &self.rows[index];
+            if (row.direction != .inbound) continue;
+            const matches = switch (endpoint.*) {
+                .ip4 => |source| row.endpoint == .ip4 and std.mem.eql(u8, &source.octets, &row.endpoint.ip4.octets),
+                .ip6 => |source| row.endpoint == .ip6 and std.mem.eql(u8, source.octets[0..8], row.endpoint.ip6.octets[0..8]),
+            };
+            if (!matches) continue;
+            count += 1;
+            if (count >= self.options.inbound_per_source_max) return false;
+        }
+        return true;
     }
 
     pub fn reference(self: *const Catalog, index: usize) t.PeerRef {
@@ -828,10 +852,12 @@ pub const Catalog = struct {
         return true;
     }
 
-    pub fn updateEndpoint(self: *Catalog, ref: t.PeerRef, conn: t.Handle, endpoint: *const t.Address) bool {
+    /// Apply a validated, normalized transport endpoint. Close on SourceCapacity without a peer penalty.
+    pub fn updateEndpoint(self: *Catalog, ref: t.PeerRef, conn: t.Handle, endpoint: *const t.Address) error{SourceCapacity}!bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return false;
         if (row.endpoint.eql(endpoint.*)) return true;
+        if (row.direction == .inbound and !self.sourceRoom(endpoint, ref.index)) return error.SourceCapacity;
         row.endpoint = endpoint.*;
         self.selection_dirty = true;
         if (row.published) row.pending_update = true;

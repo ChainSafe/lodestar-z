@@ -11,6 +11,7 @@ test.each(["resources", "identify", "serveLightClients", "logLevel"])("rejects m
 test.each([
   ["targetPeers", 256],
   ["maxPeers", 256],
+  ["inboundPeersPerSourceMax", 256],
   ["receiveBudgetBytes", Number.MAX_SAFE_INTEGER],
   ["nativeBudgetBytes", 2 * 1024 ** 3],
   ["bridgeBudgetBytes", 1024 ** 3],
@@ -95,6 +96,17 @@ test.each([256, 257])("derives retained peer capacity from maxPeers %s", async (
   } finally {
     await runtime.close();
   }
+});
+
+test.each([0, 1, 256])("configures the inbound peer source limit %s", async (limit) => {
+  const config = applicationConfig();
+  config.resources.inboundPeersPerSourceMax = limit;
+  if (limit === 0) {
+    expect(() => startRuntime(config)).toThrow("InvalidOptions");
+    return;
+  }
+  const runtime = startRuntime(config);
+  await runtime.close();
 });
 
 test.each([

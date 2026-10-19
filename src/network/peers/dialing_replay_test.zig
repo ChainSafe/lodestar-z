@@ -57,7 +57,7 @@ test "remembered qualification takes our dialed endpoint once a ready connection
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
     // A path change moves the connection, not the endpoint our dial proved.
     const moved: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 9002 } };
-    try std.testing.expect(c.updateEndpoint(peer, conn, &moved));
+    try std.testing.expect(try c.updateEndpoint(peer, conn, &moved));
     const inbound = try candidate(2, 0);
     const inbound_conn: t.Handle = .{ .index = 1, .generation = 1 };
     const inbound_peer = admit(&c, &inbound.peer, inbound_conn.index, .inbound, 0).admitted.peer;

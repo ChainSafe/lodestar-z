@@ -32,7 +32,7 @@ pub const Config = struct {
             .forks = common.chain.forks[0..common.chain.boundary_count],
             .limits = .{ .connections_max = r.connectionCapacity, .handshaking_max = r.handshakingCapacity, .dialing_max = r.dialingCapacity, .receive_budget_bytes = r.receiveBudgetBytes, .initial_congestion_window_packets = self.transport.initialCongestionWindowPackets },
             .work_limits = .{ .receive_per_turn_max = self.transport.receiveDatagramsPerTurn },
-            .peers = .{ .capacity = r.peerCapacity, .target_peers = r.targetPeers, .max_peers = r.maxPeers, .min_outbound = r.minOutbound, .outbound_reserve = r.outboundReserve },
+            .peers = .{ .capacity = r.peerCapacity, .target_peers = r.targetPeers, .max_peers = r.maxPeers, .min_outbound = r.minOutbound, .outbound_reserve = r.outboundReserve, .inbound_per_source_max = r.inboundPeersPerSourceMax },
             .application_requests_max = 32,
             .admission_policy = common.chain.requestPolicy(),
             .gossip = gossip_options,
@@ -50,6 +50,7 @@ pub const Resources = struct {
     peerCapacity: u16,
     targetPeers: u16,
     maxPeers: u16,
+    inboundPeersPerSourceMax: u16 = (n.peers.Catalog.Options{}).inbound_per_source_max,
     minOutbound: u16,
     outboundReserve: u16,
     connectionCapacity: u16,
@@ -96,7 +97,7 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out
     try cfg.parse(value, beacon, common);
     errdefer common.wipe();
     const resources = try decode.get(value, "resources");
-    try decode.object(resources, &.{ "targetPeers", "maxPeers", "receiveBudgetBytes", "nativeBudgetBytes", "bridgeBudgetBytes" });
+    try decode.object(resources, &.{ "targetPeers", "maxPeers", "inboundPeersPerSourceMax", "receiveBudgetBytes", "nativeBudgetBytes", "bridgeBudgetBytes" });
     const target: u16 = @intCast(try decode.integer(try decode.get(resources, "targetPeers"), 256));
     const max: u16 = @intCast(try decode.integer(try decode.get(resources, "maxPeers"), 256));
     out.resources = .{
@@ -112,6 +113,8 @@ pub fn parse(value: Value, beacon: *const BeaconConfig, common: *cfg.Config, out
         .nativeBudgetBytes = 2 * 1024 * 1024 * 1024,
         .bridgeBudgetBytes = 512 * 1024 * 1024,
     };
+    const per_source = try decode.get(resources, "inboundPeersPerSourceMax");
+    if (try per_source.typeof() != .undefined) out.resources.inboundPeersPerSourceMax = @intCast(try decode.integer(per_source, 256));
     inline for (.{ "receiveBudgetBytes", "nativeBudgetBytes", "bridgeBudgetBytes" }) |field| {
         const override = try decode.get(resources, field);
         if (try override.typeof() != .undefined) @field(out.resources, field) = @intCast(try decode.integer(override, @field(resource_maxima, field)));

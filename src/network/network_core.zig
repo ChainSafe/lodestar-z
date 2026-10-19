@@ -750,7 +750,9 @@ pub const NetworkCore = struct {
                 const retired = pm.transportClosed(closed, goodbye, now) orelse return;
                 self.releaseConnection(retired, now);
             },
-            .path_changed => |*changed| pm.endpointChanged(changed.conn, &changed.peer),
+            .path_changed => |*changed| {
+                if (pm.endpointChanged(changed.conn, &changed.peer, now)) |retired| self.releaseConnection(retired, now);
+            },
             else => {},
         }
     }

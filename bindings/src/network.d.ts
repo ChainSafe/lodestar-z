@@ -130,6 +130,8 @@ export interface NativeResources {
   /** Steady peer target, strictly below maxPeers to admit locally selected trials. */
   targetPeers: number;
   maxPeers: number;
+  /** Concurrent inbound peers per IPv4 address or IPv6 /64, 1 to 256. Uses the native default when omitted. */
+  inboundPeersPerSourceMax?: number;
   /** Uses the native default when omitted. */
   receiveBudgetBytes?: number;
   /** Uses the native default when omitted. */
