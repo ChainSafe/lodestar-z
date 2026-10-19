@@ -177,32 +177,6 @@ test "variable progressive container tree decoding rejects every truncated fixed
     try std.testing.expectError(error.InvalidSize, Bounded.readFieldRanges(&.{ 4, 0, 0, 0, 1, 2, 3 }));
 }
 
-test "variable progressive container tree decoding rejects every truncated fixed prefix" {
-    const allocator = std.testing.allocator;
-    const ST = VariableProgressiveContainerType(struct {
-        flag: BoolType(),
-        bytes: FixedProgressiveListType(UintType(8), .{}),
-        bits: ProgressiveBitListType(.{}),
-    }, &.{ 1, 0, 1, 0, 0, 1 });
-    const encoded = [_]u8{ 1, 9, 0, 0, 0, 9, 0, 0, 0, 1 };
-    var pool = try Node.Pool.init(.{ .allocator = allocator, .page_allocator = allocator, .pool_size = 128 });
-    defer pool.deinit();
-    const baseline = pool.getNodesInUse();
-    for (0..encoded.len) |length| {
-        try std.testing.expectError(error.InvalidSize, ST.readFieldRanges(encoded[0..length]));
-        try std.testing.expectError(error.InvalidSize, ST.tree.deserializeFromBytes(&pool, encoded[0..length]));
-        try std.testing.expectEqual(baseline, pool.getNodesInUse());
-    }
-    const root = try ST.tree.deserializeFromBytes(&pool, &encoded);
-    pool.unref(root);
-    try std.testing.expectEqual(baseline, pool.getNodesInUse());
-
-    const Bounded = VariableProgressiveContainerType(struct {
-        bytes: FixedListType(UintType(8), 2, .{}),
-    }, &.{1});
-    try std.testing.expectError(error.InvalidSize, Bounded.readFieldRanges(&.{ 4, 0, 0, 0, 1, 2, 3 }));
-}
-
 fn expectProgressiveFromValuePoolExhaustionReclaimsNodes(
     comptime ST: type,
     value: *const ST.Type,
