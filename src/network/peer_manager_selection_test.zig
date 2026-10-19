@@ -92,7 +92,15 @@ test "peer manager reconciliation reads preserve completed demand and catalog ev
     try std.testing.expectEqualDeep(DiscoveryNeed{ .general = true }, view.discoveryNeed());
     owner.reconcile(g, now);
     try std.testing.expectEqualDeep(policy.Deficits{}, view.coverageDeficits());
+    try std.testing.expectEqualDeep(DiscoveryNeed{ .general = true }, view.discoveryNeed());
+    try std.testing.expectEqual(@as(u16, 1), owner.selection.dial_budget);
+    try std.testing.expect(!owner.policy_scratch[0].qualified);
+    try std.testing.expect(owner.catalog.updateMetadata(peer, conn, &owner.local.metadata, now.millis()));
+    owner.reconcile(g, now);
+    try std.testing.expect(owner.policy_scratch[0].qualified);
+    try std.testing.expect(!owner.policy_scratch[0].ready);
     try std.testing.expectEqualDeep(DiscoveryNeed{}, view.discoveryNeed());
+    try std.testing.expectEqual(@as(u16, 0), owner.selection.dial_budget);
 }
 
 test "peer manager periodically reconciles and observes accepted Status immediately" {
@@ -116,11 +124,11 @@ test "peer manager periodically reconciles and observes accepted Status immediat
     try std.testing.expect(owner.catalog.setDirect(peer, true));
     const accepted = Now.fromMilliseconds(.{ .mono_ms = 2000, .unix_s = 0 });
     owner.reconcile(g, accepted);
-    try std.testing.expect(!owner.policy_scratch[0].relevant);
+    try std.testing.expect(!owner.catalog.get(peer).?.relevant);
     try std.testing.expect(owner.catalog.updateStatus(peer, conn, &owner.local.status, 2000));
     try std.testing.expect(fixture.schedule(accepted, blocked).runnable);
     owner.reconcile(g, accepted);
-    try std.testing.expect(owner.policy_scratch[0].relevant);
+    try std.testing.expect(owner.catalog.get(peer).?.relevant);
     try std.testing.expect(!owner.catalog.selection_dirty);
 }
 

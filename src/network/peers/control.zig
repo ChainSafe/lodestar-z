@@ -36,6 +36,8 @@ const ConnectionState = struct {
     status_due_ms: u64 = 0,
     ping_due_ms: u64 = 0,
     retry_ms: u64 = 0,
+    stream_blocked_since_ms: ?u64 = null,
+    qualification_deadline_ms: u64 = 0,
     metadata_due_ms: ?u64 = null,
     health_failures: [health_probe_count]u8 = @splat(0),
     /// `ready` once the connection completed a Status and Metadata exchange, which clears the dialed
@@ -57,6 +59,8 @@ pub const Control = struct {
     pub const Options = struct {
         starts_per_turn_max: u16 = 8,
         inbound_status_grace_ms: u64 = 15_000,
+        qualification_timeout_ms: u64 = 30_000,
+        probe_start_timeout_ms: u64 = 10_000,
         status_interval_ms: u64 = 300_000,
         ping_inbound_ms: u64 = 15_000,
         ping_outbound_ms: u64 = 20_000,
@@ -93,6 +97,8 @@ pub const Control = struct {
             return error.InvalidOptions;
         const timers = [_]u64{
             options.inbound_status_grace_ms,
+            options.qualification_timeout_ms,
+            options.probe_start_timeout_ms,
             options.status_interval_ms,
             options.ping_inbound_ms,
             options.ping_outbound_ms,
@@ -101,6 +107,7 @@ pub const Control = struct {
             options.failure_retry_ms,
         };
         for (timers) |timer| if (timer == 0 or timer > 86_400_000) return error.InvalidOptions;
+        if (options.qualification_timeout_ms <= options.inbound_status_grace_ms) return error.InvalidOptions;
     }
 
     pub fn init(a: std.mem.Allocator, options: Options, peer_capacity: u16) !Control {
@@ -151,6 +158,7 @@ pub const Control = struct {
             else
                 0,
             .ping_due_ms = now.millis() +| self.pingInterval(direction),
+            .qualification_deadline_ms = now.millis() +| self.options.qualification_timeout_ms,
         };
         self.rekey(catalog, peer.index);
     }
@@ -303,6 +311,7 @@ pub const Control = struct {
         row.after_ready = row.evidence == .ready;
         self.counters.started +|= 1;
         row.retry_ms = 0;
+        row.stream_blocked_since_ms = null;
         if (protocol == .goodbye_v1) row.closing.?.sent = true;
     }
 
@@ -375,6 +384,9 @@ pub const Control = struct {
             const row = &self.connections[index];
             const peer = row.peer orelse continue;
             const current = connectedRow(catalog, peer, row.conn) orelse continue;
+            // Local pressure can prevent qualification too; expiry frees capacity without a strike.
+            if (row.closing == null and row.evidence == .pending and now.millis() >= row.qualification_deadline_ms)
+                _ = self.disconnect(catalog, peer, row.conn, .count_pruning, now);
             const relevant = current.status != null;
             const decision = decide(row, relevant, row.request != null, now.millis());
             if (decision.close) {
@@ -399,9 +411,18 @@ pub const Control = struct {
                     .goodbye => .goodbye_v1,
                 };
                 const code = if (action == .goodbye) goodbyeReason(row.closing.?.reason) else 0;
-                self.start(row, protocol, code, io, local, now) catch {
+                self.start(row, protocol, code, io, local, now) catch |err| {
                     self.counters.deferred +|= 1;
                     row.retry_ms = now.millis() +| self.options.local_retry_ms;
+                    if (err == error.StreamLimit and healthProbe(protocol) != null) {
+                        const since = row.stream_blocked_since_ms orelse now.millis();
+                        row.stream_blocked_since_ms = since;
+                        const deadline = since +| self.options.probe_start_timeout_ms;
+                        if (now.millis() >= deadline) {
+                            row.stream_blocked_since_ms = null;
+                            self.healthFailure(catalog, row, healthProbe(protocol).?, .timeout, now);
+                        } else row.retry_ms = @min(row.retry_ms, deadline);
+                    } else row.stream_blocked_since_ms = null;
                 };
             };
         }
@@ -793,12 +814,14 @@ fn dueAt(row: *const ConnectionState, relevant: bool, active_request: bool) ?u64
         if (closing.sent or active_request) return closing.deadline_ms;
         return @min(closing.deadline_ms, row.retry_ms);
     }
-    const identify: ?u64 = if (relevant and row.identify_state == .pending) row.identify_retry_ms else null;
-    if (active_request) return identify;
+    var deadline: ?u64 = if (relevant and row.identify_state == .pending) row.identify_retry_ms else null;
+    if (row.evidence == .pending)
+        deadline = @min(deadline orelse row.qualification_deadline_ms, row.qualification_deadline_ms);
+    if (active_request) return deadline;
     const metadata_due = if (relevant) row.metadata_due_ms else null;
     const refresh_due = metadata_due orelse row.ping_due_ms;
     const request_due = @max(@min(row.status_due_ms, refresh_due), row.retry_ms);
-    return @min(identify orelse request_due, request_due);
+    return @min(deadline orelse request_due, request_due);
 }
 
 fn decide(row: *const ConnectionState, relevant: bool, active_request: bool, now: u64) Decision {
@@ -813,6 +836,7 @@ fn decide(row: *const ConnectionState, relevant: bool, active_request: bool, now
         }
         return decision;
     }
+    if (row.evidence == .pending) decision.wake(row.qualification_deadline_ms, now);
     if (relevant) {
         if (row.identify_state == .pending) decision.wake(row.identify_retry_ms, now);
     }

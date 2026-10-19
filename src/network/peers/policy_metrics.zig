@@ -21,7 +21,7 @@ pub fn write(manager: *const PeerManager, w: *prom.Encoder) prom.Error!void {
     try w.scalar(.{
         .name = "lodestar_peer_outbound_deficit_count",
         .kind = .gauge,
-        .help = "Missing relevant outbound peers after selection",
+        .help = "Missing qualified outbound peers after selection",
     }, selection.deficits.outbound);
     const sampling_groups = try w.family(.{
         .name = "lodestar_peer_count_per_sampling_group",

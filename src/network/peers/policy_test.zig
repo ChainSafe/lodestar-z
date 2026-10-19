@@ -182,7 +182,7 @@ test "peer policy evaluates newcomers in headroom before pruning established pee
     var inputs = [_]p.Input{
         .{ .coverage = .{ .attnets = 1 }, .outbound = true },
         .{ .coverage = .{ .attnets = 2 } },
-        .{ .ready = false, .relevant = false, .evaluating = true },
+        .{ .ready = false, .qualified = false, .evaluating = true },
     };
     var result = p.select(&inputs, &.{ .attnets = 7 }, configured, 1);
     try equal(@as(u16, 3), result.retained_count);
@@ -377,4 +377,24 @@ test "peer policy group targets yield to settled count while respecting bans" {
     result = p.select(&inputs, &demand, configured, 1);
     try equal(t.DisconnectReason.banned, result.reasons[3].?);
     try expect(result.deficits.missing.groups.isSet(9));
+}
+
+test "peer policy unqualified connections occupy room without meeting peer targets" {
+    const configured: Catalog.Options = .{ .target_peers = 3, .max_peers = 5, .min_outbound = 2 };
+    var inputs = [_]p.Input{
+        .{ .outbound = true },
+        .{ .outbound = true, .qualified = false, .ready = false },
+        .{ .qualified = false, .ready = false },
+    };
+    var result = p.select(&inputs, &.{}, configured, 1);
+    try equal(@as(u16, 3), result.retained_count);
+    try equal(@as(u16, 1), result.qualified_count);
+    try equal(@as(u16, 1), result.deficits.outbound);
+    try equal(@as(u16, 2), result.dial_budget);
+    inputs[1].qualified = true;
+    inputs[2].qualified = true;
+    result = p.select(&inputs, &.{}, configured, 1);
+    try equal(@as(u16, 3), result.qualified_count);
+    try equal(@as(u16, 0), result.dial_budget);
+    try equal(@as(u16, 0), result.deficits.outbound);
 }

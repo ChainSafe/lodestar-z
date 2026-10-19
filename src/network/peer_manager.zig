@@ -240,7 +240,7 @@ pub const PeerManager = struct {
         if (self.discovery_need.general) _ = peers.Dialing.replayRemembered(&self.catalog, &self.local.fork, &self.selection.deficits.missing, now);
         if (self.catalog.intents_dirty or (if (self.dialing.selection_deadline) |due| now.millis() >= due else false)) {
             self.counters.candidate_selections +|= 1;
-            self.dialing.configureSelection(&self.catalog, &self.selection.deficits.missing, self.selection.retained_count < self.catalog.options.target_peers or self.selection.deficits.outbound > 0, &self.local.fork, now.millis());
+            self.dialing.configureSelection(&self.catalog, &self.selection.deficits.missing, self.selection.qualified_count < self.catalog.options.target_peers or self.selection.deficits.outbound > 0, &self.local.fork, now.millis());
         }
     }
     fn policySchedule(self: *const PeerManager, gossipsub: *const gossip.Gossipsub) types.Schedule {
@@ -328,7 +328,7 @@ pub const PeerManager = struct {
         };
         if (now.millis() < self.replacement_after_ms) {
             // Pruning can start the cooldown after selection computed its dial budget.
-            const refill = @max(self.catalog.options.target_peers -| self.selection.retained_count, self.selection.deficits.outbound);
+            const refill = @max(self.catalog.options.target_peers -| self.selection.qualified_count, self.selection.deficits.outbound);
             self.selection.dial_budget = @min(self.selection.dial_budget, refill);
             self.selection_deadline = @min(self.selection_deadline orelse self.replacement_after_ms, self.replacement_after_ms);
         }
@@ -349,7 +349,7 @@ pub const PeerManager = struct {
             .connected_at_ms = snapshot.connected_at_ms,
             .direct = snapshot.direct,
             .outbound = snapshot.direction == .outbound,
-            .relevant = snapshot.relevant,
+            .qualified = (snapshot.status != null or revalidation != null) and snapshot.metadata != null,
             .revalidating = revalidation != null,
             .ready = false,
             .score = peers.reputation.selectionScore(
@@ -393,7 +393,7 @@ pub const PeerManager = struct {
     }
     fn refreshDiscoveryNeed(self: *PeerManager) void {
         self.discovery_need = .{};
-        self.discovery_need.general = self.selection.retained_count < self.catalog.options.target_peers or
+        self.discovery_need.general = self.selection.qualified_count < self.catalog.options.target_peers or
             self.selection.deficits.outbound > 0;
         std.mem.writeInt(u64, &self.discovery_need.attnets, self.selection.deficits.missing.attnets, .little);
         self.discovery_need.syncnets = self.selection.deficits.missing.syncnets;
@@ -539,7 +539,7 @@ pub const PeerManager = struct {
         self.reconcile(gossipsub, now);
         self.transportProgress(engine);
         const count = self.dialing.poll(&self.catalog, now.millis(), out[0..@min(out.len, self.dialRoom())]);
-        if (count > 0 and self.selection.retained_count >= self.catalog.options.target_peers and self.selection.deficits.outbound == 0) {
+        if (count > 0 and self.selection.qualified_count >= self.catalog.options.target_peers and self.selection.deficits.outbound == 0) {
             self.replacement_after_ms = now.millis() +| replacement_interval_ms;
             self.catalog.selection_dirty = true;
         }

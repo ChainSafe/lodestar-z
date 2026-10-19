@@ -91,6 +91,7 @@ pub const RequestError = error{
     RequestTooSmall,
     NegotiationTableFull,
     StaleHandle,
+    StreamLimit,
     Transport,
 };
 
@@ -368,6 +369,7 @@ pub fn request(
             error.NegotiationTableFull => error.NegotiationTableFull,
             error.ProtocolDisabled => error.ProtocolDisabled,
             error.StaleHandle => error.StaleHandle,
+            error.StreamLimit => error.StreamLimit,
             else => error.Transport,
         };
     };

@@ -10,6 +10,8 @@ const remembered = @import("peers/remembered.zig");
 const history = @import("peers/dial_history.zig");
 const Dialing = @import("peers/dialing.zig").Dialing;
 const Engine = @import("quic/Engine.zig");
+const limits = @import("quic/limits.zig");
+const Control = @import("peers/control.zig").Control;
 
 const identity: t.PeerId = .{ .bytes = @splat(1) };
 const endpoint: t.Address = .{ .ip4 = .{ .octets = .{ 203, 0, 113, 1 }, .port = 9000 } };
@@ -232,4 +234,122 @@ test "peer owner shutdown retires published and unqualified connections once in 
     var direct: [4]t.PeerId = undefined;
     try std.testing.expectEqual(@as(usize, 1), try manager.directPeers(&direct));
     try std.testing.expectEqualDeep(identity, direct[0]);
+}
+
+fn exhaustStreams(fixture: *Fixture, conn: t.Handle) !void {
+    const engine = &fixture.io.pair.shared.pair.client;
+    for (0..limits.peer_streams_bidi) |_| {
+        const stream = engine.openStream(conn) catch |err| switch (err) {
+            error.StreamLimit => return,
+            else => return err,
+        };
+        _ = try engine.write(stream, "x", false);
+    }
+    try std.testing.expectError(error.StreamLimit, engine.openStream(conn));
+}
+
+fn receiveStatus(fixture: *Fixture, conn: t.Handle, now: Now) !void {
+    const manager = &fixture.manager;
+    var bytes: [wire.status_size_max]u8 = undefined;
+    const len = try wire.encodeStatus(.status_v1, &manager.local.status, &bytes);
+    fixture.io.receive(&manager.control, &manager.catalog, &manager.local, .{ .request = .{
+        .request = .{ .index = 0, .generation = 1, .direction = .inbound },
+        .conn = conn,
+        .protocol = .status_v1,
+        .bytes = bytes[0..len],
+    } }, now, 0);
+}
+
+test "peer owner qualification deadline survives unsolicited Status and an active request" {
+    for ([_]t.Direction{ .inbound, .outbound }) |direction| {
+        var fixture: Fixture = .{};
+        try fixture.init();
+        defer fixture.deinit();
+        const manager = &fixture.manager;
+        const conn = fixture.io.pair.shared.handles.client;
+        const peer = try admit(&fixture, conn, direction, at(10));
+        const deadline = 10 + manager.control.options.qualification_timeout_ms;
+        try receiveStatus(&fixture, conn, at(10));
+        try fixture.io.maintain(&manager.control, &manager.catalog, &manager.local, at(10));
+        const row = &manager.control.connections[peer.index];
+        try std.testing.expect(row.request != null);
+        try std.testing.expectEqual(rr.Protocol.metadata_v1, row.protocol);
+        try receiveStatus(&fixture, conn, at(deadline - 1));
+        try fixture.io.maintain(&manager.control, &manager.catalog, &manager.local, at(deadline - 1));
+        try std.testing.expect(manager.catalog.get(peer).?.disconnect_reason == null);
+        try std.testing.expectEqual(deadline, schedule_test_support.wakeupMilliseconds(manager.control.schedule(&manager.catalog, at(deadline - 1)), deadline - 1).?);
+        try fixture.io.maintain(&manager.control, &manager.catalog, &manager.local, at(deadline));
+        const snapshot = manager.catalog.get(peer).?;
+        try std.testing.expectEqual(t.DisconnectReason.count_pruning, snapshot.disconnect_reason.?);
+        try std.testing.expectEqual(@as(f64, 0), snapshot.score);
+        try std.testing.expectEqual(@as(u64, 0), snapshot.ban_until_ms);
+    }
+}
+
+test "peer owner qualification expires without Status even below the peer target" {
+    var fixture: Fixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const manager = &fixture.manager;
+    const conn = fixture.io.pair.shared.handles.client;
+    const peer = try admit(&fixture, conn, .inbound, at(0));
+    try fixture.io.maintain(&manager.control, &manager.catalog, &manager.local, at(manager.control.options.qualification_timeout_ms));
+    try std.testing.expectEqual(t.DisconnectReason.count_pruning, manager.catalog.get(peer).?.disconnect_reason.?);
+    const deadline = manager.control.connections[peer.index].closing.?.deadline_ms;
+    var closes: [4]Control.Close = undefined;
+    const closed = manager.control.maintain(&manager.catalog, &manager.local, &fixture.io.controlIo(), &fixture.io.handler, at(deadline), &closes);
+    try std.testing.expectEqual(@as(usize, 1), closed.len);
+    try std.testing.expectEqual(conn, closed[0].conn);
+    try std.testing.expectEqual(t.DisconnectReason.count_pruning, closed[0].reason);
+}
+
+test "peer owner remote stream credit starvation becomes a health failure" {
+    var fixture: Fixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const manager = &fixture.manager;
+    const peer = try outbound(&fixture, at(10));
+    try qualify(&fixture, at(10));
+    const row = &manager.control.connections[peer.index];
+    try exhaustStreams(&fixture, row.conn);
+    var now = row.ping_due_ms;
+    for (0..manager.control.options.health_failures_max) |failure| {
+        try fixture.io.maintain(&manager.control, &manager.catalog, &manager.local, at(now));
+        try std.testing.expect(row.request == null);
+        try std.testing.expectEqual(@as(u16, 0), fixture.io.pair.shared.client.control_reqresp.pendingCounts().outbound);
+        now += manager.control.options.probe_start_timeout_ms;
+        try receiveStatus(&fixture, row.conn, at(now - 1));
+        try fixture.io.maintain(&manager.control, &manager.catalog, &manager.local, at(now - 1));
+        try std.testing.expectEqual(failure, manager.control.counters.health_failures[@intFromEnum(Control.HealthProbe.ping)]);
+        try fixture.io.maintain(&manager.control, &manager.catalog, &manager.local, at(now));
+        try std.testing.expectEqual(failure + 1, manager.control.counters.health_failures[@intFromEnum(Control.HealthProbe.ping)]);
+        now += manager.control.options.failure_retry_ms;
+    }
+    try std.testing.expectEqual(t.DisconnectReason.health_timeout, manager.catalog.get(peer).?.disconnect_reason.?);
+}
+
+test "peer owner local request slot pressure does not count as remote probe failure" {
+    var fixture: Fixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const manager = &fixture.manager;
+    const peer = try outbound(&fixture, at(10));
+    try qualify(&fixture, at(10));
+    const row = &manager.control.connections[peer.index];
+    const requests = &fixture.io.pair.shared.client.control_reqresp;
+    requests.options.outbound_per_connection_max = 1;
+    const io = fixture.io.controlIo();
+    var sink: [wire.status_size_max]u8 = undefined;
+    const occupied = try requests.request(io.engine, io.router, row.conn, .ping_v1, &@as([8]u8, @splat(0)), &sink, .{}, at(row.ping_due_ms));
+    const first = row.ping_due_ms;
+    for ([_]u64{ first, first + 10_000, first + 30_000, first + 60_000 }) |now| {
+        try fixture.io.maintain(&manager.control, &manager.catalog, &manager.local, at(now));
+        try std.testing.expect(row.request == null);
+        try std.testing.expect(row.stream_blocked_since_ms == null);
+        try std.testing.expectEqual(@as(u64, 0), manager.control.counters.health_failures[@intFromEnum(Control.HealthProbe.ping)]);
+        try std.testing.expect(manager.catalog.get(peer).?.disconnect_reason == null);
+    }
+    try std.testing.expect(requests.abandon(io.engine, io.router, occupied, at(first + 60_000)) == null);
+    try fixture.io.maintain(&manager.control, &manager.catalog, &manager.local, at(row.retry_ms));
+    try std.testing.expect(row.request != null);
 }

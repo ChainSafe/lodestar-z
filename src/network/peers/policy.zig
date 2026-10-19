@@ -9,7 +9,7 @@ pub const Input = struct {
     stable: t.Coverage = .{},
     direct: bool = false,
     outbound: bool = false,
-    relevant: bool = true,
+    qualified: bool = true,
     revalidating: bool = false,
     ready: bool = true,
     evaluating: bool = false,
@@ -27,6 +27,7 @@ pub const Deficits = struct {
 pub const Result = struct {
     retained: std.StaticBitSet(256) = .empty,
     retained_count: u16 = 0,
+    qualified_count: u16 = 0,
     reasons: [256]?t.DisconnectReason = @splat(null),
     deficits: Deficits = .{},
     dial_budget: u16 = 0,
@@ -46,7 +47,7 @@ pub const Counts = struct {
     outbound: u16 = 0,
 
     fn change(self: *Counts, input: *const Input, add: bool) void {
-        if (input.outbound and (input.relevant or input.revalidating)) adjust(&self.outbound, add);
+        if (input.outbound and (input.qualified or input.revalidating)) adjust(&self.outbound, add);
         for (0..64) |i| if (input.coverage.attnets & (@as(u64, 1) << @intCast(i)) != 0) {
             adjust(&self.attestation[i], add);
         };
@@ -164,7 +165,7 @@ fn removal(
     var best: ?Rank = null;
     for (inputs, 0..) |*input, i| {
         if (!result.retained.isSet(i)) continue;
-        const outbound_floor = input.outbound and (input.relevant or input.revalidating) and
+        const outbound_floor = input.outbound and (input.qualified or input.revalidating) and
             result.coverage.outbound <= options.min_outbound;
         if (!hard and (input.direct or input.evaluating or input.revalidating or outbound_floor)) continue;
         const rank: Rank = .{
@@ -211,6 +212,7 @@ pub fn selectWithPacing(inputs: []const Input, demand: *const t.Demand, options:
         }
         result.retained.set(i);
         result.retained_count += 1;
+        if (input.qualified) result.qualified_count += 1;
         result.coverage.change(input, true);
         if (input.evaluating) evaluating += 1;
     }
@@ -223,13 +225,14 @@ pub fn selectWithPacing(inputs: []const Input, demand: *const t.Demand, options:
         result.retained.unset(index);
         result.reasons[index] = if (hard) .capacity else .count_pruning;
         result.retained_count -= 1;
+        if (input.qualified) result.qualified_count -= 1;
         result.coverage.change(input, false);
         if (input.evaluating) evaluating -= 1;
     }
     std.debug.assert(result.retained_count <= options.max_peers);
     result.deficits = result.coverage.deficits(demand, options.min_outbound);
     const coverage_missing = result.deficits.attestation > 0 or result.deficits.sync > 0 or result.deficits.groups > 0 or result.deficits.custody_groups > 0;
-    const wanted = @max(options.target_peers -| result.retained_count, @max(result.deficits.outbound, @as(u16, if (coverage_missing and allow_trials) 1 else 0)));
+    const wanted = @max(options.target_peers -| result.qualified_count, @max(result.deficits.outbound, @as(u16, if (coverage_missing and allow_trials) 1 else 0)));
     result.dial_budget = @min(wanted, options.max_peers -| result.retained_count);
     return result;
 }

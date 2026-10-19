@@ -284,7 +284,7 @@ fn rejection(err: n.NetworkCore.RequestError) error{ InvalidCapacity, SinkTooSma
         error.TooManyRequests => .too_many_requests,
         error.SlotsExhausted => .slots_exhausted,
         error.NegotiationTableFull => .negotiation_table_full,
-        error.Transport, error.Stopped => .transport,
+        error.Transport, error.StreamLimit, error.Stopped => .transport,
         error.InvalidCapacity => error.InvalidCapacity,
         error.SinkTooSmall => error.SinkTooSmall,
     };

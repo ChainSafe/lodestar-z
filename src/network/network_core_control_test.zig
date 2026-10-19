@@ -137,6 +137,7 @@ test "core fork revalidation protects retention but old replies never restore ap
     try std.testing.expect(!setup.client.peer_manager.catalog.get(peer.peer).?.relevant);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().outbound);
     try std.testing.expect(setup.client.peer_manager.policy_scratch[0].revalidating);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.selection.qualified_count);
     try std.testing.expect(!setup.client.peer_manager.policy_scratch[0].evaluating);
     try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.policy_scratch[0].coverage.custody_groups.count());
     _ = try setup.turn(&setup.client, .{});
