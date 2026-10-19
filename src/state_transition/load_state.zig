@@ -976,10 +976,17 @@ test "loadState shares compatible field schemas across forks and refuses incompa
         defer pool.deinit();
         const baseline = pool.getNodesInUse();
         {
-            var seed_value = Seed.default_value;
-            defer Seed.deinit(allocator, &seed_value);
-            var target_value = Target.default_value;
-            defer Target.deinit(allocator, &target_value);
+            // Keep the large state fixtures off the stack across the unrolled fork cases.
+            const seed_value = try allocator.create(Seed.Type);
+            defer allocator.destroy(seed_value);
+            seed_value.* = Seed.default_value;
+            defer Seed.deinit(allocator, seed_value);
+
+            const target_value = try allocator.create(Target.Type);
+            defer allocator.destroy(target_value);
+            target_value.* = Target.default_value;
+            defer Target.deinit(allocator, target_value);
+
             for (0..4) |i| {
                 var validator = types.phase0.Validator.default_value;
                 validator.pubkey[0] = @intCast(i);
@@ -991,15 +998,15 @@ test "loadState shares compatible field schemas across forks and refuses incompa
                 try target_value.validators.append(allocator, validator);
                 try target_value.inactivity_scores.append(allocator, if (i == 1) 99 else i);
             }
-            const seed_view = try Seed.TreeView.fromValue(allocator, &pool, &seed_value);
+            const seed_view = try Seed.TreeView.fromValue(allocator, &pool, seed_value);
             var seed = @unionInit(AnyBeaconState, @tagName(forks[0]), seed_view);
             defer seed.deinit();
             const seed_root = (try seed.hashTreeRoot()).*;
-            const bytes = try allocator.alloc(u8, Target.serializedSize(&target_value));
+            const bytes = try allocator.alloc(u8, Target.serializedSize(target_value));
             defer allocator.free(bytes);
-            _ = Target.serializeIntoBytes(&target_value, bytes);
+            _ = Target.serializeIntoBytes(target_value, bytes);
             var expected_root: [32]u8 = undefined;
-            try Target.hashTreeRoot(allocator, &target_value, &expected_root);
+            try Target.hashTreeRoot(allocator, target_value, &expected_root);
             var result = try loadStateForFork(allocator, &pool, forks[1], &seed, Target, bytes, null);
             defer result.state.deinit();
             defer allocator.free(result.modified_validators);
