@@ -36,7 +36,7 @@ fn parseValue(comptime ST: type, fixture_allocator: Allocator, json: std.json.Va
             try out.resize(fixture_allocator, values.len);
             for (values, 0..) |value, i| try out.set(fixture_allocator, i, value.bool);
         }
-    } else if (comptime ssz.isByteVectorType(ST) or ssz.isByteListType(ST)) {
+    } else if (comptime ssz.isByteVectorType(ST) or ssz.isByteListType(ST) or ssz.isProgressiveByteListType(ST)) {
         const encoded = unwrapData(json).string;
         const bytes = try decodeHex(fixture_allocator, encoded);
         if (comptime ssz.isByteVectorType(ST)) {
