@@ -1,5 +1,5 @@
-//! Bounded endpoint observations from authenticated, request-matched PONGs. Distinct node IDs
-//! and IPv4 /24 or IPv6 /64 sources must agree; neither proves operator independence.
+//! Bounded endpoint observations from authenticated PONGs matched to selected observation probes.
+//! Distinct node IDs and IPv4 /24 or IPv6 /48 sources must agree; neither proves operator independence.
 const std = @import("std");
 const address_policy = @import("address_policy.zig");
 const types = @import("types.zig");
@@ -67,16 +67,24 @@ pub fn localFailure(self: *AddressVotes, peer: *const types.Endpoint, handle: Ca
 }
 
 /// Only the owner of authenticated, matched response events may submit observations.
-pub fn observe(self: *AddressVotes, peer: *const types.Endpoint, pong: *const message.Pong, now_ms: u64) ?types.Address {
+pub fn observe(self: *AddressVotes, peer: *const types.Endpoint, handle: CallTable.Handle, pong: *const message.Pong, now_ms: u64) ?types.Address {
     const table = &self.tables[index(peer.address)];
-    if (!table.policy.enabled or pong.recipient_port == 0) return null;
+    if (!table.policy.enabled) return null;
+    const observation = for (&table.entries) |*slot| {
+        if (slot.*) |*entry| {
+            if (entry.expires_ms > now_ms and std.meta.eql(entry.attempt, handle) and entry.peer.eql(peer)) break entry;
+        }
+    } else return null;
+    observation.attempt = null;
+    if (pong.recipient_port == 0) return null;
     const observed: types.Address = switch (pong.recipient_ip) {
         .ip4 => |ip| .{ .ip4 = .{ .octets = ip, .port = table.policy.fixed_port orelse pong.recipient_port } },
         .ip6 => |ip| .{ .ip6 = .{ .octets = ip, .port = table.policy.fixed_port orelse pong.recipient_port } },
     };
     if (index(observed) != index(peer.address) or !observed.isUsable() or !address_policy.relayAllowed(peer.address, observed)) return null;
     if (observed == .ip6 and observed.ip6.octets[0] == 0xfe and observed.ip6.octets[1] & 0xc0 == 0x80) return null;
-    self.replace(peer, .{ .peer = peer.*, .observed = observed, .expires_ms = now_ms +| lifetime_ms }, now_ms);
+    observation.observed = observed;
+    observation.expires_ms = now_ms +| lifetime_ms;
     var live: usize = 0;
     var matching: usize = 0;
     for (&table.entries) |*slot| if (slot.*) |entry| {

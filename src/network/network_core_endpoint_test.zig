@@ -35,10 +35,13 @@ const Peers = struct {
         const owner = node.discovery.?;
         for (self.nodes[0..peers]) |*remote| {
             const record = remote.engine.localRecord();
-            _ = try owner.transport.startCall(std.testing.io, .{ .node_id = record.node_id, .address = remote.localAddress() }, record, &.{ .ping = .{
+            const peer: d.types.Endpoint = .{ .node_id = record.node_id, .address = remote.localAddress() };
+            const now_ms = try d.Transport.monotonicMilliseconds(std.testing.io);
+            const handle = try owner.transport.startCall(std.testing.io, peer, record, &.{ .ping = .{
                 .request_id = try .init(&.{id}),
                 .enr_sequence = node.localRecord().?.sequence,
-            } }, try d.Transport.monotonicMilliseconds(std.testing.io));
+            } }, now_ms);
+            if (owner.storage.observations.canProbe(&peer, now_ms)) owner.storage.observations.attempted(&peer, handle, now_ms);
             var expired: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
             var completed = false;
             for (0..100) |_| {

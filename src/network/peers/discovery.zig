@@ -263,7 +263,7 @@ pub const Discovery = struct {
         if (progress.event == .response) {
             const response = &progress.event.response;
             if (response.matched.response == .pong) {
-                if (self.storage.observations.observe(&response.peer, &response.matched.response.pong, progress.now_ms)) |address| {
+                if (self.storage.observations.observe(&response.peer, response.matched.handle, &response.matched.response.pong, progress.now_ms)) |address| {
                     result.learned[if (address == .ip4) @as(usize, 0) else 1] = address;
                 }
             }

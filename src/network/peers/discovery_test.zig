@@ -51,6 +51,49 @@ test "peer discovery seeds the configured list without claiming reachability or 
     try std.testing.expectEqual(@as(usize, 0), owner.transport.engine.calls.count());
 }
 
+test "peer discovery counts selected observation probes but not ordinary matched PONGs" {
+    var network: Network = .{};
+    const io = network.io();
+    var remote: Node = undefined;
+    try remote.init(io, 2, 9002, &.{});
+    defer remote.deinit();
+    var local: Node = undefined;
+    try local.init(io, 1, 9001, &.{
+        .bootstrap = &.{remote.transport.engine.localRecord().*},
+        .discovery = .{ .observations = .{ .{ .enabled = true }, .{} } },
+    });
+    defer local.deinit();
+    const peer: d.types.Endpoint = .{
+        .node_id = remote.transport.engine.localRecord().node_id,
+        .address = remote.transport.localAddress(),
+    };
+    const probe_ms = local.owner.maintenance.config.probe_interval_ms;
+    for (0..3) |phase| {
+        network.now_ms = if (phase == 0) 0 else probe_ms + phase - 1;
+        if (phase != 1) {
+            _ = try local.transport.startCall(io, peer, remote.transport.engine.localRecord(), &.{ .ping = .{
+                .request_id = try .init(&.{@intCast(phase + 1)}),
+                .enr_sequence = local.transport.engine.localRecord().sequence,
+            } }, network.now_ms);
+        } else {
+            const result = try support.advance(&local.owner, io, network.now_ms, &.{});
+            if (result.failure) |failure| return failure.cause;
+            try std.testing.expectEqual(@as(usize, 1), local.transport.engine.calls.count());
+            try std.testing.expect(!local.owner.storage.observations.canProbe(&peer, network.now_ms));
+        }
+        for (0..100) |_| {
+            const response = try support.advance(&remote.owner, io, network.now_ms, &.{});
+            if (response.failure) |failure| return failure.cause;
+            const result = try support.advance(&local.owner, io, network.now_ms, &.{});
+            if (result.failure) |failure| return failure.cause;
+            if (local.transport.engine.calls.count() == 0) break;
+        }
+        try std.testing.expectEqual(@as(usize, 0), local.transport.engine.calls.count());
+        try std.testing.expectEqual(@as(usize, if (phase == 0) 0 else 1), local.owner.storage.observations.count(0, network.now_ms));
+    }
+    try std.testing.expectEqual(@as(usize, 0), local.owner.storage.observations.count(0, probe_ms + d.AddressVotes.lifetime_ms));
+}
+
 test "peer discovery answers unknown TALK protocols without demand or candidate output" {
     var network: Network = .{};
     const io = network.io();

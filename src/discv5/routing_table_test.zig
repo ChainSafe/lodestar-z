@@ -410,7 +410,7 @@ test "routing table preflights endpoint refresh quotas before changing entries o
     }
 }
 
-test "routing table applies subnet limits to IPv6 prefixes" {
+test "routing table applies bucket limits across IPv6 subnets in one /48" {
     const local_id = [_]u8{0} ** 32;
     var table: RoutingTable = undefined;
     try table.init(std.testing.allocator, local_id);
@@ -420,6 +420,7 @@ test "routing table applies subnet limits to IPv6 prefixes" {
         const node_id = nodeAtDistance(256, @intCast(salt));
         var octets = [_]u8{0} ** 16;
         octets[0..8].* = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 1 };
+        octets[6] = @intCast(salt);
         octets[15] = @intCast(salt);
         const address = types.Address{ .ip6 = .{
             .octets = octets,
@@ -432,6 +433,7 @@ test "routing table applies subnet limits to IPv6 prefixes" {
     const rejected_id = nodeAtDistance(256, 3);
     var rejected_octets = [_]u8{0} ** 16;
     rejected_octets[0..8].* = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 1 };
+    rejected_octets[6] = 3;
     rejected_octets[15] = 3;
     const rejected_address = types.Address{ .ip6 = .{
         .octets = rejected_octets,
@@ -446,6 +448,31 @@ test "routing table applies subnet limits to IPv6 prefixes" {
         error.AddressLimit,
         table.upsertVerified(&rejected_peer, &rejected_record, 1, .outgoing),
     );
+    var distinct_peer = rejected_peer;
+    distinct_peer.address.ip6.octets[5] += 1;
+    var distinct_record = fakeRecord(distinct_peer.node_id, distinct_peer.address, 1);
+    _ = try table.upsertVerified(&distinct_peer, &distinct_record, 1, .outgoing);
+}
+
+test "routing table applies table limits across IPv6 subnets in one /48" {
+    var table: RoutingTable = undefined;
+    try table.init(std.testing.allocator, @splat(0));
+    defer table.deinit(std.testing.allocator);
+
+    for (0..RoutingTable.table_subnet_limit + 1) |index| {
+        const node_id = nodeAtDistance(@intCast(241 + index), @intCast(index + 1));
+        var octets = [_]u8{0} ** 16;
+        octets[0..6].* = .{ 0x20, 1, 0x0d, 0xb8, 0, 1 };
+        octets[6] = @intCast(index);
+        octets[15] = 1;
+        const peer: types.Endpoint = .{ .node_id = node_id, .address = .{ .ip6 = .{ .octets = octets, .port = 9000 } } };
+        var record = fakeRecord(peer.node_id, peer.address, 1);
+        if (index < RoutingTable.table_subnet_limit) {
+            _ = try table.upsertVerified(&peer, &record, 1, .outgoing);
+        } else {
+            try std.testing.expectError(error.AddressLimit, table.upsertVerified(&peer, &record, 1, .outgoing));
+        }
+    }
 }
 
 test "routing FINDNODE selection filters exact distances and caps the aggregate" {

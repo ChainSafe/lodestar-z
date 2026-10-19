@@ -56,5 +56,8 @@ test "endpoint equality and subnet grouping preserve distinct identity policies"
     right.address.ip6.octets[8] += 1;
     try std.testing.expect(address_policy.sameSubnet(left.address, right.address));
     right.address.ip6.octets[7] += 1;
+    right.address.ip6.octets[6] += 1;
+    try std.testing.expect(address_policy.sameSubnet(left.address, right.address));
+    right.address.ip6.octets[5] += 1;
     try std.testing.expect(!address_policy.sameSubnet(left.address, right.address));
 }

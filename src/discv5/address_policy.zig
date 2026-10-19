@@ -1,11 +1,11 @@
 const std = @import("std");
 const types = @import("types.zig");
 
-/// Compares IPv4 /24 or IPv6 /64 prefixes, ignoring ports and interface scopes.
+/// Groups discovery contacts by IPv4 /24 or IPv6 /48, ignoring ports and interface scopes.
 pub fn sameSubnet(left: types.Address, right: types.Address) bool {
     return switch (left) {
         .ip4 => |ip| right == .ip4 and std.mem.eql(u8, ip.octets[0..3], right.ip4.octets[0..3]),
-        .ip6 => |ip| right == .ip6 and std.mem.eql(u8, ip.octets[0..8], right.ip6.octets[0..8]),
+        .ip6 => |ip| right == .ip6 and std.mem.eql(u8, ip.octets[0..6], right.ip6.octets[0..6]),
     };
 }
 
