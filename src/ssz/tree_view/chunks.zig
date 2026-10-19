@@ -462,50 +462,42 @@ pub fn CompositeChunks(
                 return error.MustCommitBeforeBulkRead;
             }
 
-            if (comptime ST.kind == .progressive_list) {
-                const contents = try self.state.root.getLeft(self.state.pool);
-                var it = try progressive.NodeIterator.init(self.state.pool, contents, len);
-                for (values, 0..) |*value, i| {
-                    errdefer deinitValues(allocator, values[0..i]);
-                    try self.nodeToValue(allocator, (try it.next()).?, value);
-                }
-                return values;
-            }
-
             const nodes = try allocator.alloc(Node.Id, len);
             defer allocator.free(nodes);
 
-            try self.state.root.getNodesAtDepth(self.state.pool, chunk_depth, 0, nodes);
-            for (nodes, values, 0..) |node, *value, i| {
-                errdefer deinitValues(allocator, values[0..i]);
-                try self.nodeToValue(allocator, node, value);
-            }
-            return values;
-        }
-
-        fn nodeToValue(self: *Self, allocator: Allocator, node: Node.Id, out: *Value) !void {
-            if (comptime isFixedType(ST.Element)) {
-                try ST.Element.tree.toValue(node, self.state.pool, out);
+            if (comptime ST.kind == .progressive_list) {
+                const contents = try self.state.root.getLeft(self.state.pool);
+                var it = try progressive.NodeIterator.init(self.state.pool, contents, len);
+                for (nodes) |*node| node.* = (try it.next()).?;
             } else {
-                // Initialize value to default before toValue for variable types
-                // (e.g. BitList fields need initialized ArrayList)
-                if (comptime @hasDecl(ST.Element, "default_value")) {
-                    out.* = ST.Element.default_value;
-                } else {
-                    out.* = std.mem.zeroes(Value);
-                }
+                try self.state.root.getNodesAtDepth(self.state.pool, chunk_depth, 0, nodes);
+            }
+
+            for (nodes, 0..) |node, i| {
                 errdefer if (comptime @hasDecl(ST.Element, "deinit")) {
-                    ST.Element.deinit(allocator, out);
+                    for (values[0..i]) |*v| {
+                        ST.Element.deinit(allocator, v);
+                    }
                 };
+                if (comptime isFixedType(ST.Element)) {
+                    try ST.Element.tree.toValue(node, self.state.pool, &values[i]);
+                } else {
+                    // Initialize value to default before toValue for variable types
+                    // (e.g. BitList fields need initialized ArrayList)
+                    if (comptime @hasDecl(ST.Element, "default_value")) {
+                        values[i] = ST.Element.default_value;
+                    } else {
+                        values[i] = std.mem.zeroes(Value);
+                    }
+                    errdefer if (comptime @hasDecl(ST.Element, "deinit")) {
+                        ST.Element.deinit(allocator, &values[i]);
+                    };
 
-                try ST.Element.tree.toValue(allocator, node, self.state.pool, out);
+                    try ST.Element.tree.toValue(allocator, node, self.state.pool, &values[i]);
+                }
             }
-        }
 
-        fn deinitValues(allocator: Allocator, values: []Value) void {
-            if (comptime @hasDecl(ST.Element, "deinit")) {
-                for (values) |*v| ST.Element.deinit(allocator, v);
-            }
+            return values;
         }
 
         pub fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
