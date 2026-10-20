@@ -314,8 +314,6 @@ pub const SignedExecutionPayloadEnvelope = ssz.VariableContainerType(struct {
     signature: p.BLSSignature,
 });
 
-// Gloas BeaconBlockBody: removes executionPayload, blobKzgCommitments, executionRequests
-// Adds signedExecutionPayloadBid and payloadAttestations
 pub const BeaconBlockBody = ssz.VariableProgressiveContainerType(struct {
     randao_reveal: p.BLSSignature,
     eth1_data: Eth1Data,
@@ -326,13 +324,13 @@ pub const BeaconBlockBody = ssz.VariableProgressiveContainerType(struct {
     deposits: Deposits,
     voluntary_exits: VoluntaryExits,
     sync_aggregate: SyncAggregate,
-    // executionPayload removed in Gloas
+    // execution_payload: ExecutionPayload, // Removed in GLOAS:EIP7732
     bls_to_execution_changes: SignedBLSToExecutionChanges,
-    // blobKzgCommitments removed in Gloas
-    // executionRequests removed in Gloas
-    signed_execution_payload_bid: SignedExecutionPayloadBid,
-    payload_attestations: PayloadAttestations,
-    parent_execution_requests: ExecutionRequests,
+    // blob_kzg_commitments: deneb.BlobKzgCommitments, // Removed in GLOAS:EIP7732
+    // execution_requests: ExecutionRequests, // Removed in GLOAS:EIP7732
+    signed_execution_payload_bid: SignedExecutionPayloadBid, // New in GLOAS:EIP7732
+    payload_attestations: PayloadAttestations, // New in GLOAS:EIP7732
+    parent_execution_requests: ExecutionRequests, // New in GLOAS:EIP7732
 }, &@as([13]u1, @splat(1)));
 
 pub const BeaconBlock = ssz.VariableContainerType(struct {
@@ -348,17 +346,17 @@ pub const SignedBeaconBlock = ssz.VariableContainerType(struct {
     signature: p.BLSSignature,
 });
 
-// DataColumnSidecar simplified in Gloas
 pub const DataColumnSidecar = ssz.VariableContainerType(struct {
     index: ColumnIndex,
     column: DataColumn,
+    // kzg_commitments: deneb.BlobKzgCommitments, // Removed in GLOAS:EIP7732
     kzg_proofs: KZGProofs,
-    slot: p.Slot,
-    beacon_block_root: p.Root,
+    // signed_block_header: phase0.SignedBeaconBlockHeader, // Removed in GLOAS:EIP7732
+    // kzg_commitments_inclusion_proof: ssz.FixedVectorType(p.Bytes32, preset.KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH, .{}), // Removed in GLOAS:EIP7732
+    slot: p.Slot, // New in GLOAS:EIP7732
+    beacon_block_root: p.Root, // New in GLOAS:EIP7732
 });
 
-// Gloas BeaconState: replaces latestExecutionPayloadHeader with latestExecutionPayloadBid
-// Adds builder registry, executionPayloadAvailability, builder payments/withdrawals, latestBlockHash
 pub const BeaconState = ssz.VariableProgressiveContainerType(struct {
     genesis_time: p.Uint64,
     genesis_validators_root: p.Root,
@@ -384,8 +382,8 @@ pub const BeaconState = ssz.VariableProgressiveContainerType(struct {
     inactivity_scores: InactivityScores,
     current_sync_committee: SyncCommittee,
     next_sync_committee: SyncCommittee,
-    // latestExecutionPayloadHeader replaced by latest_block_hash in Gloas
-    latest_block_hash: p.Bytes32,
+    // latest_execution_payload_header: ExecutionPayloadHeader, // Removed in GLOAS:EIP7732
+    latest_block_hash: p.Bytes32, // New in GLOAS:EIP7732
     next_withdrawal_index: p.WithdrawalIndex,
     next_withdrawal_validator_index: p.ValidatorIndex,
     historical_summaries: ssz.FixedListType(HistoricalSummary, preset.HISTORICAL_ROOTS_LIMIT, .{}),
@@ -399,15 +397,14 @@ pub const BeaconState = ssz.VariableProgressiveContainerType(struct {
     pending_partial_withdrawals: PendingPartialWithdrawals,
     pending_consolidations: PendingConsolidations,
     proposer_lookahead: ProposerLookahead,
-    // New in Gloas
-    builders: Builders,
-    next_withdrawal_builder_index: BuilderIndex,
-    execution_payload_availability: ssz.BitVectorType(preset.SLOTS_PER_HISTORICAL_ROOT),
-    builder_pending_payments: BuilderPendingPayments,
-    builder_pending_withdrawals: BuilderPendingWithdrawals,
-    latest_execution_payload_bid: ExecutionPayloadBid,
-    payload_expected_withdrawals: Withdrawals,
-    ptc_window: PtcWindow,
+    builders: Builders, // New in GLOAS:EIP7732
+    next_withdrawal_builder_index: BuilderIndex, // New in GLOAS:EIP7732
+    execution_payload_availability: ssz.BitVectorType(preset.SLOTS_PER_HISTORICAL_ROOT), // New in GLOAS:EIP7732
+    builder_pending_payments: BuilderPendingPayments, // New in GLOAS:EIP7732
+    builder_pending_withdrawals: BuilderPendingWithdrawals, // New in GLOAS:EIP7732
+    latest_execution_payload_bid: ExecutionPayloadBid, // New in GLOAS:EIP7732
+    payload_expected_withdrawals: Withdrawals, // New in GLOAS:EIP7732
+    ptc_window: PtcWindow, // New in GLOAS:EIP7732
 }, &@as([46]u1, @splat(1)));
 
 pub const BlobSidecar = electra.BlobSidecar;
