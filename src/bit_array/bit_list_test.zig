@@ -159,16 +159,3 @@ test "BitList resize and set should enforce length bounds" {
         b.set(allocator, std.math.maxInt(usize), true),
     );
 }
-
-test "BitList intersectValues widens selected indices across byte boundaries" {
-    const allocator = std.testing.allocator;
-    var bits = try BitList(.{ .limit = 16 }).fromBitLen(allocator, 10);
-    defer bits.deinit(allocator);
-    try bits.set(allocator, 0, true);
-    try bits.set(allocator, 7, true);
-    try bits.set(allocator, 9, true);
-    const indices = [_]u32{ 0, 1, 2, 3, 4, 5, 6, std.math.maxInt(u32) - 1, 8, std.math.maxInt(u32) };
-    var selected = try bits.intersectValues(u64, allocator, indices[0..]);
-    defer selected.deinit(allocator);
-    try std.testing.expectEqualSlices(u64, &.{ 0, std.math.maxInt(u32) - 1, std.math.maxInt(u32) }, selected.items);
-}

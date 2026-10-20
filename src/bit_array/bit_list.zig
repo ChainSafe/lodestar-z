@@ -189,13 +189,12 @@ pub fn BitList(comptime options: BitListOptions) type {
             }
         }
 
-        /// Returns values whose corresponding bit is set, coercing each element to T.
-        /// Caller owns the returned list.
+        /// Returns values whose corresponding bit is set. Caller owns the returned list.
         pub fn intersectValues(
             self: *const @This(),
             comptime T: type,
             allocator: std.mem.Allocator,
-            values: anytype,
+            values: []const T,
         ) !std.ArrayList(T) {
             if (values.len != self.bit_len) return error.InvalidSize;
 
