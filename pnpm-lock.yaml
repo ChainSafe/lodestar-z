@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@chainsafe/lodestar-z': link:.
+
 importers:
 
   .:
@@ -40,20 +43,20 @@ importers:
         specifier: 6.0.15
         version: 6.0.15
       '@lodestar/config':
-        specifier: ^1.39.1
-        version: 1.39.1
+        specifier: 1.50.0
+        version: 1.50.0
       '@lodestar/era':
-        specifier: ^1.39.1
-        version: 1.39.1(libp2p@3.3.10)
+        specifier: 1.50.0
+        version: 1.50.0(libp2p@3.3.10)
       '@lodestar/reqresp':
         specifier: 1.46.0
         version: 1.46.0(libp2p@3.3.10)
       '@lodestar/state-transition':
-        specifier: ^1.39.1
-        version: 1.39.1
+        specifier: 1.50.0
+        version: 1.50.0
       '@lodestar/types':
-        specifier: ^1.39.1
-        version: 1.39.1
+        specifier: 1.50.0
+        version: 1.50.0
       '@multiformats/multiaddr':
         specifier: 13.0.3
         version: 13.0.3
@@ -155,6 +158,7 @@ packages:
 
   '@azure/ms-rest-js@2.7.0':
     resolution: {integrity: sha512-ngbzWbqF+NmztDOpLBVDxYM+XLcUj7nKhxGbSU9WtIsXfRB//cf2ZbAG5HkOrhU9/wd/ORRB6lM/d69RKVjiyA==}
+    deprecated: This package has been deprecated in favor of the new Azure SDK packages from [Azure SDK for JavaScript](https://github.com/azure/azure-sdk-for-js).
 
   '@azure/storage-blob@12.31.0':
     resolution: {integrity: sha512-DBgNv10aCSxopt92DkTDD0o9xScXeBqPKGmR50FPZQaEcH4JLQ+GEOGEDv19V5BMkB7kxr+m4h6il/cCDPvmHg==}
@@ -217,9 +221,6 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@chainsafe/as-sha256@1.2.0':
-    resolution: {integrity: sha512-H2BNHQ5C3RS+H0ZvOdovK6GjFAyq5T6LClad8ivwj9Oaiy28uvdsGVS7gNJKuZmg0FGHAI+n7F0Qju6U0QkKDA==}
-
   '@chainsafe/as-sha256@1.2.5':
     resolution: {integrity: sha512-8LzmWxBC/2O5BgbP+aRom/FaDJMrM04VZMlVIivYTc6yNQKYrONmIv27m3q/1VBgxrfrNNqmibitb2hE2tQzIw==}
 
@@ -231,52 +232,6 @@ packages:
     resolution: {integrity: sha512-juZ0Oivc8QeF5wIUDdgOfOvAH4II8N3hHjQBdyv2PjvbTXna+gTv0kucJ9Mp7HO+nwRH58fhFh7iOMfsrSfogg==}
     peerDependencies:
       '@biomejs/biome': ^2.2.0
-
-  '@chainsafe/blst-darwin-arm64@2.2.0':
-    resolution: {integrity: sha512-BOOy2KHbV028cioPWaAMqHdLRKd6/3XyEmUEcQC2E/SpyYLdNcaKiBUYIU4pT9CrWBbJJxX68UI+3vZVg0M8/w==}
-    engines: {node: '>= 16'}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@chainsafe/blst-darwin-x64@2.2.0':
-    resolution: {integrity: sha512-jG64cwIdPT7u/haRrW26tWCpfMfHBQCfGY169mFQifCwO4VEwvaiVBPOh5olFis6LjpcmD+O0jpM8GqrnsmUHQ==}
-    engines: {node: '>= 16'}
-    cpu: [x64]
-    os: [darwin]
-
-  '@chainsafe/blst-linux-arm64-gnu@2.2.0':
-    resolution: {integrity: sha512-L8xV2uuLn8we76vdzfryS9ePdheuZrmY6yArGUFaF1Uzcwml6V1/VvyPl9/uooo/YfVRIrvF/D+lQfI2GFAnhw==}
-    engines: {node: '>= 16'}
-    cpu: [arm64]
-    os: [linux]
-
-  '@chainsafe/blst-linux-arm64-musl@2.2.0':
-    resolution: {integrity: sha512-0Vn0luxLYVgC3lvWT1MapFHSAoz99PldqjhilXTGv0AcAk/X5LXPH2RC9Dp2KJGqthyUkpbk1j47jUBfBI+BIg==}
-    engines: {node: '>= 16'}
-    cpu: [arm64]
-    os: [linux]
-
-  '@chainsafe/blst-linux-x64-gnu@2.2.0':
-    resolution: {integrity: sha512-gEY/z2SDBA7kXtFEI9VNhWTJAIjx16jdeAyCaS2k4ACGurWZaWk+Ee4KniTsr4WieSqeuNTUr7Pdja0Sr4EKNQ==}
-    engines: {node: '>= 16'}
-    cpu: [x64]
-    os: [linux]
-
-  '@chainsafe/blst-linux-x64-musl@2.2.0':
-    resolution: {integrity: sha512-58GKtiUmtVSuerRzPEcMNQZpICPboBKFnL7+1Wo+PSuajkvbae7tEFrFTtWeMoKIPgOEsPMnk96LF+0yNgavUg==}
-    engines: {node: '>= 16'}
-    cpu: [x64]
-    os: [linux]
-
-  '@chainsafe/blst-win32-x64-msvc@2.2.0':
-    resolution: {integrity: sha512-UFrZshl4dfX5Uh2zeKXAZtrkQ+otczHMON2tsrapQNICWmfHZrzE6pKuBL+9QeGAbgflwpbz7+D5nQRDpiuHxQ==}
-    engines: {node: '>= 16'}
-    cpu: [x64]
-    os: [win32]
-
-  '@chainsafe/blst@2.2.0':
-    resolution: {integrity: sha512-VBaQoNE2a9d9+skAjQKv3Suk0yGKqp3mZM0YWYJNPj/Ae/f6lAyeVSgKqo2LrsNQBzD/LqrJLKUY8rJT3vDKLA==}
-    engines: {node: '>= 16'}
 
   '@chainsafe/fast-crc32c@4.2.0':
     resolution: {integrity: sha512-wbVJ3q1DBuYqs1VGwLe9o5VIDQtxGpSVzr7UY9Hq2SQ283fU6AouII/pwioS9MbiiIK42jDxtY0uLFmTuenb0g==}
@@ -373,124 +328,14 @@ packages:
   '@chainsafe/netmask@2.0.0':
     resolution: {integrity: sha512-I3Z+6SWUoaljh3TBzCnCxjlUyN8tA+NAk5L6m9IxvCf1BENQTePzPMis97CoN/iMW1St3WN+AWCCRp+TTBRiDg==}
 
-  '@chainsafe/persistent-merkle-tree@1.2.1':
-    resolution: {integrity: sha512-AOSEVLfaqwb9eTCKuY1ri0DrRxVQ3Rh+we1VBj1GahUGfEdE8OC3Vkbca7Up6RoI9Ip9FLnI31Y7AjKH9ZqAGA==}
-
   '@chainsafe/persistent-merkle-tree@1.3.1':
     resolution: {integrity: sha512-f8E1ftNhHK9zUEgb+Tdcx8TM57qeO4u9RU1kKDUDgCQyiMXrC+3rjAPAvum2HN7Du81myG7nz1WpIMZAPVWLTg==}
 
-  '@chainsafe/persistent-ts@1.0.1':
-    resolution: {integrity: sha512-VkPaBD3GxS5vpLkZWfStDL39jG1IPLhy5c3d3FtgwyfGvEthnQJeyUMinGFRoAfAW0yVkf7ggrEzyvhXFLIU0A==}
+  '@chainsafe/snappy-wasm@0.5.2':
+    resolution: {integrity: sha512-RcjdySH0LuUgCv4tx+FsS3YBbVOc5lIXklWR6HItbriGpEcPSxuHsH8RNw1vqaSDvkA0C18Kl8Tk3kECJnAvUQ==}
 
-  '@chainsafe/pubkey-index-map-darwin-arm64@3.0.0':
-    resolution: {integrity: sha512-gM/wwA6bpfeZm80aSoH2c3ddbPeZho73TUUprUFlHQNLldGzZ293yFQgj2Ontp1fMf9AI0w+F0uEN2qC6v7g9A==}
-    engines: {node: '>= 10'}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@chainsafe/pubkey-index-map-darwin-x64@3.0.0':
-    resolution: {integrity: sha512-zy4dH//kLXfQHHFVp1Pcz4HQgSh/uUKWt219hlrb5Fi+xVESVmTnLPjHmL1KtGs/R5W0XcuBrTuBHiq+zMU7lQ==}
-    engines: {node: '>= 10'}
-    cpu: [x64]
-    os: [darwin]
-
-  '@chainsafe/pubkey-index-map-linux-arm64-gnu@3.0.0':
-    resolution: {integrity: sha512-M/HODHZcKDuoRFlx+Ka4NgyFSQvOECyIg/2pCQcgfCozR7rRx7VuOJ0ZSgU+BEhuY+fpaRSTesOlDIIY0ornWQ==}
-    engines: {node: '>= 10'}
-    cpu: [arm64]
-    os: [linux]
-
-  '@chainsafe/pubkey-index-map-linux-arm64-musl@3.0.0':
-    resolution: {integrity: sha512-Sdm15mFsKiz5ndFfhcTjEl4i8TK0+gM1SEmYzmGUgnflrcvPc+US3qsMKyCqorDkHqYAYFFutQXz9QxjOMkIwg==}
-    engines: {node: '>= 10'}
-    cpu: [arm64]
-    os: [linux]
-
-  '@chainsafe/pubkey-index-map-linux-x64-gnu@3.0.0':
-    resolution: {integrity: sha512-+4h995h2xEBmYdr9Tw05uYvFmMSELyaJagJ2KsFohkRjqiUyB76l8zR8aUKx7lwLXXHxWjHMYyWKHF3tTKRFNQ==}
-    engines: {node: '>= 10'}
-    cpu: [x64]
-    os: [linux]
-
-  '@chainsafe/pubkey-index-map-linux-x64-musl@3.0.0':
-    resolution: {integrity: sha512-qwFuygeutP4o9J/8ylD+ZrqkqeyytMl9E38ucIWpbiPYXDiJxpRN148v4Ah+NWwz6PqCROVyTxEyZklzy0AxUA==}
-    engines: {node: '>= 10'}
-    cpu: [x64]
-    os: [linux]
-
-  '@chainsafe/pubkey-index-map-win32-arm64-msvc@3.0.0':
-    resolution: {integrity: sha512-2t01rQAdiM5KPM7XLsZDtMhWAXz/YKY20H1N4jvaWURjaLm+S0j9X/Mt0xOjJ5SC++1g64LXjV+wnXO5j1S8Nw==}
-    engines: {node: '>= 10'}
-    cpu: [arm64]
-    os: [win32]
-
-  '@chainsafe/pubkey-index-map-win32-x64-msvc@3.0.0':
-    resolution: {integrity: sha512-QemArQbgsLJ4eaM9S0Kdr3ucJUpZXTDfh3wTNp9eh7G3o1Y9O2Hp7G7BlEkF0cWU9ZsWe9YSzmeX24Uo5DNo4g==}
-    engines: {node: '>= 10'}
-    cpu: [x64]
-    os: [win32]
-
-  '@chainsafe/pubkey-index-map@3.0.0':
-    resolution: {integrity: sha512-KvWmKOG8WiVePHQDGyz+xo+RpsrmPEeipF8boqmXNYCLOGyVpkEXQk0IDVpnxngZziY6d97F9sml2vliDoyYyQ==}
-    engines: {node: '>= 10'}
-
-  '@chainsafe/ssz@1.3.0':
-    resolution: {integrity: sha512-+O3WHnud8ZzIVF9/hSC+UazLDPgaa98quKLj/Z1PGnfGuW4JvCfS5Wh9EoZDvqGTI/AZlIbXpn4qC2s4BzQdfA==}
-
-  '@chainsafe/ssz@1.8.0':
-    resolution: {integrity: sha512-lTan8p7p0GPqACxyPDVDEVc/WLGHmNHV7usYmy70CEiVHCB3+JJSrj14tUVgt/cx3uEClj0m05Da52r2WjNEoA==}
-
-  '@chainsafe/swap-or-not-shuffle-darwin-arm64@1.2.1':
-    resolution: {integrity: sha512-kTewLZe1KqMAJ1gHfagOxo0BI4kTcMOAkGJ7pRLFM5ZkL2P7sh3/4ixnjdbtMkO207vMZEZL3fxJSSs14kg9Kg==}
-    engines: {node: '>= 18'}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@chainsafe/swap-or-not-shuffle-darwin-x64@1.2.1':
-    resolution: {integrity: sha512-B/f/peQqOLW5Tqib5CqanAlQgoeib75FNszzHwRBwHdRY5ThOcBbARvOtef39zU5lYjj4j3iWobpD7G70kQyUw==}
-    engines: {node: '>= 18'}
-    cpu: [x64]
-    os: [darwin]
-
-  '@chainsafe/swap-or-not-shuffle-linux-arm64-gnu@1.2.1':
-    resolution: {integrity: sha512-sDpuUuo3rStvHMQgLxH1UkkUbo8rcjDI70Fq3xzbNMhfjlrP0+sJistlFJtDpWmKsFk/sgje3PzVU9G3KFXzXA==}
-    engines: {node: '>= 18'}
-    cpu: [arm64]
-    os: [linux]
-
-  '@chainsafe/swap-or-not-shuffle-linux-arm64-musl@1.2.1':
-    resolution: {integrity: sha512-FFmpDF2dRhhOCT3WBYOoQW9wqhJMfx7iULskBe5cjowVQ15U1TQJ6tC+hPpouUMt3/pKz9tIS9dNWTUuo7kpQg==}
-    engines: {node: '>= 18'}
-    cpu: [arm64]
-    os: [linux]
-
-  '@chainsafe/swap-or-not-shuffle-linux-x64-gnu@1.2.1':
-    resolution: {integrity: sha512-nGXEnFCqRmCS7ATV7QQ7b7aKHcyET9XEpJylq0sljnkuNRwoQXFUYPMYTn4TMI6g3vgZt/AVK9RdCxp68JKwGQ==}
-    engines: {node: '>= 18'}
-    cpu: [x64]
-    os: [linux]
-
-  '@chainsafe/swap-or-not-shuffle-linux-x64-musl@1.2.1':
-    resolution: {integrity: sha512-VMQxE/EZjco4damGrJkkCQ2Y2WYgJcTR/ardTnSctM1/xxwUD1wQr7YW2TQsECfK3UZcW2W6gG7iqWfJgMdGSw==}
-    engines: {node: '>= 18'}
-    cpu: [x64]
-    os: [linux]
-
-  '@chainsafe/swap-or-not-shuffle-win32-arm64-msvc@1.2.1':
-    resolution: {integrity: sha512-qV+ps6KSoR8blc3gMse1BOBUGcCtptnMYoqTMwFCIx9LGaeSo3vKu5XBQDwHIfAW73bZ+PHb5YUqkRgtWBiEUw==}
-    engines: {node: '>= 18'}
-    cpu: [arm64]
-    os: [win32]
-
-  '@chainsafe/swap-or-not-shuffle-win32-x64-msvc@1.2.1':
-    resolution: {integrity: sha512-hsDN4O6PPpF4rEA1tMngMJAOrWTGAu8TAqdEwgdP+U25o8UVlz8W2N9697AMGRnnArN2BgYS0zCeUR9kuZ2XEQ==}
-    engines: {node: '>= 18'}
-    cpu: [x64]
-    os: [win32]
-
-  '@chainsafe/swap-or-not-shuffle@1.2.1':
-    resolution: {integrity: sha512-H8YdEoXXv2Hw17gDWGOJEya4LHlBbpChJP3jDQRfIk9hhwr0c/zbBemBRmjADowZhArL+ymkO+j5hGaYySjdpw==}
-    engines: {node: '>= 18'}
+  '@chainsafe/ssz@1.9.0':
+    resolution: {integrity: sha512-JU0WnYLtFlajllDBLF779+9OS/R6RVN44thKdxljJeN3ngR+OVL/s/p3Lv6SdgDvfI3RuZHgt6f4SGlBymumHw==}
 
   '@chainsafe/zapi@4.1.0':
     resolution: {integrity: sha512-U/JgUc9KAfDeKlgJWWTvBuKEMezhnb4GVEGd3zYaMB3Vi85YTJtcd2b9eO+upk5buROwRo9DEF+ev32PaO98mg==}
@@ -848,9 +693,6 @@ packages:
   '@libp2p/interface-internal@3.1.13':
     resolution: {integrity: sha512-+vjQzpQl+0uoWCyNwV5NDnv1RAK9LDeWGeMbx/Fl2ZWrndtuFUPa9LxwqHXrTly6YOhgUatSzVqZBWnrQ1PxGg==}
 
-  '@libp2p/interface@2.11.0':
-    resolution: {integrity: sha512-0MUFKoXWHTQW3oWIgSHApmYMUKWO/Y02+7Hpyp+n3z+geD4Xo2Rku2gYWmxcq+Pyjkz6Q9YjDWz3Yb2SoV2E8Q==}
-
   '@libp2p/interface@3.1.0':
     resolution: {integrity: sha512-RE7/XyvC47fQBe1cHxhMvepYKa5bFCUyFrrpj8PuM0E7JtzxU7F+Du5j4VXbg2yLDcToe0+j8mB7jvwE2AThYw==}
 
@@ -878,54 +720,45 @@ packages:
   '@libp2p/utils@7.4.1':
     resolution: {integrity: sha512-e9cZeop+awI0rFczG4DvAwVeHqBhuCZfTyskvgONfKQrsT7L0BSlTlTTzZoFF8Dnb+QrzHsoIpnl0PrCr0h+Hg==}
 
-  '@lodestar/config@1.39.1':
-    resolution: {integrity: sha512-4WNOTuDewswshF+ohY3k6tdj5AIqmXtiL9epA4Ph25K4/rtDj8aFmJPguL99zppv7ipc6YuLqOSHBB7OwPzkwQ==}
+  '@lodestar/config@1.50.0':
+    resolution: {integrity: sha512-oaCGkcOhsQHDbhDsz3MgsYxVxy4ApRM+G6xk6Wxa6KjxpUXGAIdXOh32l8qG1b0TwBbE1hQwS/3WBfmoG+LXGg==}
 
-  '@lodestar/config@1.47.0':
-    resolution: {integrity: sha512-LjtbS977MIkwdLAvtK+oRiOZIMYnxDV0oSNJ7ak20IztbMKom8R9V8U9br5sgtXAAp70p3bDyD4sdZMTyLKY6Q==}
-
-  '@lodestar/era@1.39.1':
-    resolution: {integrity: sha512-IN1Qpcp2BoCRukX1c/VgkExCdYu+sCl+AIGt6pEnD20W0Jom2crC5uOzXpukOIIVJpQiJW3tFJf268+nkac92g==}
-
-  '@lodestar/params@1.39.1':
-    resolution: {integrity: sha512-G1kdPfpuG5JSMQLiHBbcJTZTCsKn8oXA+fCU7sLhHofQ/FBs62qLXI+c9elfu3gjFEEiIhv575BM1hEUb4FBuw==}
+  '@lodestar/era@1.50.0':
+    resolution: {integrity: sha512-3GuuFtG7ZBG35q0YCGNBrsH8RIAV4KaKoE3QFo8cCPtDykqYqm/vMvqQ7hzym4PhCmdquDMEPuqB+bDI9q4I0w==}
 
   '@lodestar/params@1.47.0':
     resolution: {integrity: sha512-cpWuc0v2VaI+HBKijja8M7TNGD7KQcaJaznrC6xlRCM4CEcy8XFPzhl/K/00JtG3IMx1FtxtBit5d6LaKrzy7g==}
 
-  '@lodestar/reqresp@1.39.1':
-    resolution: {integrity: sha512-Cpx6POFhWnbZmvBoGzC2vuZ8kjqazeXb+YcWYT2XlUKOE5JVBbapX+zHqSyzqj76faf3UVrNuh///waqhWJT8g==}
-    peerDependencies:
-      libp2p: ~2.9.0
+  '@lodestar/params@1.50.0':
+    resolution: {integrity: sha512-6UAo9aih2BARMwDCPmhack+uMckVgeatiCRTajCL4xocHhltdbIXSfk1PdGx4cSmWVuteFaCec36Vg6g7v4b1Q==}
 
   '@lodestar/reqresp@1.46.0':
     resolution: {integrity: sha512-cV2W3zrbUtNTdprGG81Z3JlMFosMPeLacju+Utd2kXobPq47gdVzG2iHkaWvuabwYt6nQItuP0/xetXSU1v7pA==}
     peerDependencies:
       libp2p: ^3.1.4
 
-  '@lodestar/state-transition@1.39.1':
-    resolution: {integrity: sha512-pgG81JplIaZP+pvDWgTDWQp8AGiJZizx4aigfmMnIstnkU4VONMeOnkkgpicm0ffrBLim5iR/BFH6pMBdK2NUA==}
+  '@lodestar/reqresp@1.50.0':
+    resolution: {integrity: sha512-7myNPlEExpttcG9L9pCJr5jbUcCBu5Faw9g3XgaDTxgmYecxmUuaBK90clYYKmml5uFM46IlEyINuGPIkJFC5Q==}
+    peerDependencies:
+      libp2p: ^3.3.9
 
-  '@lodestar/types@1.39.1':
-    resolution: {integrity: sha512-eaQLf8F9iTKqyzHfhaDSlAvUofN8LcpOOOBXYHdOQNnQk8vRCnmF2RYCBhq0AnqhY+Fvea/yVqO+M6qh5uBK0A==}
+  '@lodestar/state-transition@1.50.0':
+    resolution: {integrity: sha512-mPgFRHPS+wlIITkWn2NgCvOXwafVmaIS6Bzkc6h8CTPOLIu9648rnRjY7gBHvx6xjvTvGvrllT/XGu0F6a9ynA==}
 
-  '@lodestar/types@1.47.0':
-    resolution: {integrity: sha512-fhnS5X72pOgMVJOMuGheaIqtpJDk5f9vbvzgBxBN9tw7x49Bo2c/bSN2z1SPJbjj3gBo0MgoyMRWwrP1Kjx5yQ==}
-
-  '@lodestar/utils@1.39.1':
-    resolution: {integrity: sha512-PHEt50aODY4ZLV20vw12Z9nh130Q+4SCcAIiY4GZP5ktMLJ12gkgAj/P8VfATHsJRjjASDIS4/nhynjLK53tHw==}
+  '@lodestar/types@1.50.0':
+    resolution: {integrity: sha512-pikbQ2SI2EBVTXLJKmaZmFz6bYJE9HMlKS310gAofsofDvVxX9iqVgIcJZ2cLqH6DguDRfzOs/oo/1/PfPiDjw==}
 
   '@lodestar/utils@1.47.0':
     resolution: {integrity: sha512-lm7JXO3SbiqLlgRKCJalpqjyyGpodr7Uu93SJ2Y38PVdrYZkij1YUZ0/uRHCfrb1/KzL/9REdUsKSXufunqIoA==}
+
+  '@lodestar/utils@1.50.0':
+    resolution: {integrity: sha512-EG3Wa9C04nqNcZJ/EASypzD+ovqFQJLNPR3oSnIwNofjF//VTThoReUV18kBPfqWIMwUAbFasq9JcpqpW4HF4w==}
 
   '@multiformats/dns@1.0.11':
     resolution: {integrity: sha512-KnT4gX71zas8br5OO2mArwBgRqTx78FvK193VL8/bP8T1ydDuWUilevZlPug9Azufos+ioHd8pHAVY3v7U41tQ==}
 
   '@multiformats/multiaddr-matcher@3.0.2':
     resolution: {integrity: sha512-iphGQJliZxe2yKu57bdRDgeS+3znc5uXtMybDO1Wau3rIjas4zjrjlyxmFz3wqyUL9f3VDQwas/ZqA7N4QeSfw==}
-
-  '@multiformats/multiaddr@12.5.1':
-    resolution: {integrity: sha512-+DDlr9LIRUS8KncI1TX/FfUn8F2dl6BIxJgshS/yFQCNB5IAF0OGzcwB39g5NLE22s4qqDePv0Qof6HdpJ/4aQ==}
 
   '@multiformats/multiaddr@13.0.3':
     resolution: {integrity: sha512-mEqqJ4r3a/uuFMTpRkU316wGNIDQNhuVWpm+ebKTQeYsfv9jXbPONWM6VVnj3KGUrwfsX7GZOyp4TFqEA2SPCw==}
@@ -936,8 +769,20 @@ packages:
     cpu: [arm]
     os: [android]
 
+  '@napi-rs/snappy-android-arm-eabi@7.4.3':
+    resolution: {integrity: sha512-IUcqhinktWCfA3Cu/PaDNjixAt5hAn1sQlnl03qpQWNuv2PLju6LQqOa5kDoXnTFrLzu1/jpRexjR/KR8+ERog==}
+    engines: {node: '>= 10'}
+    cpu: [arm]
+    os: [android]
+
   '@napi-rs/snappy-android-arm64@7.3.3':
     resolution: {integrity: sha512-Uh+w18dhzjVl85MGhRnojb7OLlX2ErvMsYIunO/7l3Frvc2zQvfqsWsFJanu2dwqlE2YDooeNP84S+ywgN9sxg==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [android]
+
+  '@napi-rs/snappy-android-arm64@7.4.3':
+    resolution: {integrity: sha512-AlbjST9D7qtZS0cUKVauyO2xtGawh20n/Z1cE3Zmurgl6HBInsvO14wMxsneFfNH7WXqphu2ZbXAul+sCDMhOA==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [android]
@@ -948,8 +793,20 @@ packages:
     cpu: [arm64]
     os: [darwin]
 
+  '@napi-rs/snappy-darwin-arm64@7.4.3':
+    resolution: {integrity: sha512-eTPH4pSnuDOGi8wuKVFykZvcRlxAT3NNDeJkNWpiw+lzKLr7zmEdZqmTtTJDyzJR4zyV/kIV193JT3oDRlRE3Q==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [darwin]
+
   '@napi-rs/snappy-darwin-x64@7.3.3':
     resolution: {integrity: sha512-biLTXBmPjPmO7HIpv+5BaV9Gy/4+QJSUNJW8Pjx1UlWAVnocPy7um+zbvAWStZssTI5sfn/jOClrAegD4w09UA==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@napi-rs/snappy-darwin-x64@7.4.3':
+    resolution: {integrity: sha512-siDEFDaia02JxigbS4ST6GtgiRXJk4knGLPAVwsPerulMgwonas7djhaX5EOR/LntdZp8K4q9wdftUB7pUJaeA==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [darwin]
@@ -960,8 +817,20 @@ packages:
     cpu: [x64]
     os: [freebsd]
 
+  '@napi-rs/snappy-freebsd-x64@7.4.3':
+    resolution: {integrity: sha512-LAj4AwbDWWKLprUJ2gl0h55imFpCzIDELms3wMAu2Jo+MF0GRKSY4bx8Yb5OWhh30OSMSq9bnKQvoEIAsS8uIw==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [freebsd]
+
   '@napi-rs/snappy-linux-arm-gnueabihf@7.3.3':
     resolution: {integrity: sha512-ZuNgtmk9j0KyT7TfLyEnvZJxOhbkyNR761nk04F0Q4NTHMICP28wQj0xgEsnCHUsEeA9OXrRL4R7waiLn+rOQA==}
+    engines: {node: '>= 10'}
+    cpu: [arm]
+    os: [linux]
+
+  '@napi-rs/snappy-linux-arm-gnueabihf@7.4.3':
+    resolution: {integrity: sha512-bUTs+JWl7kwYM1RPBBY0JLQ06+iVgRS81yVwMGtpD3C12tWKtoeTKM4ai33ySc+wnKvcpqhlHz2ZufcCESQHvg==}
     engines: {node: '>= 10'}
     cpu: [arm]
     os: [linux]
@@ -972,8 +841,20 @@ packages:
     cpu: [arm64]
     os: [linux]
 
+  '@napi-rs/snappy-linux-arm64-gnu@7.4.3':
+    resolution: {integrity: sha512-NOCDEWRhgnyffjUpgYy7kdUmFwtMILkQV9+n9CvnshxXsiJwTDLMkeDXWagcVBQheCnfUPLIEl1vHk71lQBANw==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+
   '@napi-rs/snappy-linux-arm64-musl@7.3.3':
     resolution: {integrity: sha512-AAED4cQS74xPvktsyVmz5sy8vSxG/+3d7Rq2FDBZzj3Fv6v5vux6uZnECPCAqpALCdTtJ61unqpOyqO7hZCt1Q==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@napi-rs/snappy-linux-arm64-musl@7.4.3':
+    resolution: {integrity: sha512-+Lcf3PUrTE55MhCEp2FaEil8X5J68v8Y8DC1AvYmS0oODCDU2TUbn/cR6+ib1fTBjRz/b9G+NokW0bK/uE1vwA==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
@@ -984,8 +865,20 @@ packages:
     cpu: [ppc64]
     os: [linux]
 
+  '@napi-rs/snappy-linux-ppc64-gnu@7.4.3':
+    resolution: {integrity: sha512-FjY2TncYM75uwSt+jQ6QeWX0rN56QWL2nTDLlKp30mCz4xjJ9XbnwCNOtxdQ92lKDOH5SC88c41uq4zv0F+ldQ==}
+    engines: {node: '>= 10'}
+    cpu: [ppc64]
+    os: [linux]
+
   '@napi-rs/snappy-linux-riscv64-gnu@7.3.3':
     resolution: {integrity: sha512-OiHYdeuwj0TVBXADUmmQDQ4lL1TB+8EwmXnFgOutoDVXHaUl0CJFyXLa6tYUXe+gRY8hs1v7eb0vyE97LKY06Q==}
+    engines: {node: '>= 10'}
+    cpu: [riscv64]
+    os: [linux]
+
+  '@napi-rs/snappy-linux-riscv64-gnu@7.4.3':
+    resolution: {integrity: sha512-RPdXvPOF2oRLiXj6PacW2LihJ9WTqCQyjEpw5W2p4ej3rzp3e0fFaRCOl5OepZEeiPOg0mnzHjzzE7PDEJr47A==}
     engines: {node: '>= 10'}
     cpu: [riscv64]
     os: [linux]
@@ -996,8 +889,20 @@ packages:
     cpu: [s390x]
     os: [linux]
 
+  '@napi-rs/snappy-linux-s390x-gnu@7.4.3':
+    resolution: {integrity: sha512-UeJSlY2lOe6dKwhXf2CCHYWOSPkSIEb32tW7nmfTo/CwLfMe6TA3pAdczH/NtElu0V/lKVva1vnQCiMywLVtVw==}
+    engines: {node: '>= 10'}
+    cpu: [s390x]
+    os: [linux]
+
   '@napi-rs/snappy-linux-x64-gnu@7.3.3':
     resolution: {integrity: sha512-g6KURjOxrgb8yXDEZMuIcHkUr/7TKlDwSiydEQtMtP3n4iI4sNjkcE/WNKlR3+t9bZh1pFGAq7NFRBtouQGHpQ==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+
+  '@napi-rs/snappy-linux-x64-gnu@7.4.3':
+    resolution: {integrity: sha512-6fnGsH0yb48+PCYnKc6E5U1zUFXUpLtmyz8TnMstIBuiS7w1pf7e8GWN8GO//kz7+9E9jfD1/+8BZrp0FDOOqw==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
@@ -1008,8 +913,20 @@ packages:
     cpu: [x64]
     os: [linux]
 
+  '@napi-rs/snappy-linux-x64-musl@7.4.3':
+    resolution: {integrity: sha512-ixpPsplb9A3JLjjDC6q7SdOgthsmme20STwW4KMw7ri68QP6cvwmG+Bbt6aWwHS2YJPZ9cwYaXTyNDohcP9Vxg==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+
   '@napi-rs/snappy-openharmony-arm64@7.3.3':
     resolution: {integrity: sha512-I5mak/5rTprobf7wMCk0vFhClmWOL/QiIJM4XontysnadmP/R9hAcmuFmoMV2GaxC9MblqLA7Z++gy8ou5hJVw==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [openharmony]
+
+  '@napi-rs/snappy-openharmony-arm64@7.4.3':
+    resolution: {integrity: sha512-GUOv36Of8q8HbTDb4eaj0wpDQS15BsgNz/vVfjjKWJj+YMpnwiTAt1yVjAMCvYwSvLP5k8Xa2oYjuV+ZxazGKA==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [openharmony]
@@ -1025,14 +942,32 @@ packages:
     cpu: [arm64]
     os: [win32]
 
+  '@napi-rs/snappy-win32-arm64-msvc@7.4.3':
+    resolution: {integrity: sha512-pHR8PD74KBm4hEoxwiwR6jgxo0wPQJVfuv2fwBw7Jv461N+hY5VI9iLZRx3yDWp+Uy4eHWQQsqhjC7JOVjh+1w==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [win32]
+
   '@napi-rs/snappy-win32-ia32-msvc@7.3.3':
     resolution: {integrity: sha512-joRV16DsRtqjGt0CdSpxGCkO0UlHGeTZ/GqvdscoALpRKbikR2Top4C61dxEchmOd3lSYsXutuwWWGg3Nr++WA==}
     engines: {node: '>= 10'}
     cpu: [ia32]
     os: [win32]
 
+  '@napi-rs/snappy-win32-ia32-msvc@7.4.3':
+    resolution: {integrity: sha512-/LIy2afUxoybWAdathj7GAHAHPT5XKzG3XNzAPBI+BOCmADYsv0ui8vZYHmt0SqoDcEHCifUbUKGFfhqL55hjQ==}
+    engines: {node: '>= 10'}
+    cpu: [ia32]
+    os: [win32]
+
   '@napi-rs/snappy-win32-x64-msvc@7.3.3':
     resolution: {integrity: sha512-cEnQwcsdJyOU7HSZODWsHpKuQoSYM4jaqw/hn9pOXYbRN1+02WxYppD3fdMuKN6TOA6YG5KA5PHRNeVilNX86Q==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [win32]
+
+  '@napi-rs/snappy-win32-x64-msvc@7.4.3':
+    resolution: {integrity: sha512-Z0qi4GuqzWLGKa0cK8/kaRIuC78xuu1IfjYcOYDvSWd8uBFu3f+GaKdpl1YmXz+YJykCH1iBShie0PC6pzqI/g==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [win32]
@@ -1479,13 +1414,6 @@ packages:
   before-after-hook@2.2.3:
     resolution: {integrity: sha512-NzUnlZexiaH/46WDhANlyR2bXRopNg4F/zuSA3OpZnllCUgRaOF2znDioDWrmbNVsuZk6l9pMquQB38cfBZwkQ==}
 
-  bigint-buffer@1.1.5:
-    resolution: {integrity: sha512-trfYco6AoZ+rKhKnxA0hgX0HAbVP/s808/EuDSe2JDzUnCp/xAsli35Orvk67UrTEcwuxZqYZDmfA2RXJgxVvA==}
-    engines: {node: '>= 10.0.0'}
-
-  bindings@1.5.0:
-    resolution: {integrity: sha512-p2q/t/mhvuOj/UeLlV6566GD/guowlr0hHxClI0W9m7MWYkL1F0hLo+0Aexs9HSPCtR1SXQ0TD3MMKrXZajbiQ==}
-
   brace-expansion@1.1.12:
     resolution: {integrity: sha512-9T9UjW3r0UW5c1Q7GTwllptXwhvYmEzFhzMfZ9H7FQWt+uZePjZPjBP/W1ZEyZ1twGWom5/56TF4lPcqjnDHcg==}
 
@@ -1681,9 +1609,6 @@ packages:
     peerDependenciesMeta:
       picomatch:
         optional: true
-
-  file-uri-to-path@1.0.0:
-    resolution: {integrity: sha512-0Zt+s3L7Vf1biwWZ29aARiVYLx7iMGnEUl9x33fbB/j3jR81u/O2LbqK+Bm1CDSNDKVtJ/YjwY7TUd5SkeLQLw==}
 
   for-each@0.3.5:
     resolution: {integrity: sha512-dKx12eRCVIzqCxFGplyFKJMPvLEWgmNtUrpTiJIR5u97zEhRG8ySrtboPHZXx7daLxQVrl643cTzbab2tkQjxg==}
@@ -2097,6 +2022,10 @@ packages:
     resolution: {integrity: sha512-UDJVCunvgblRpfTOjo/uT7pQzfrTsSICJ4yVS4aq7SsGBaUSpJwaVP15nF//jqinSLpN7boe/BqbUmtWMTQ5MQ==}
     engines: {node: '>= 10'}
 
+  snappy@7.4.3:
+    resolution: {integrity: sha512-oP0N73t0urt9niE9PAoj8eV7SDXkCWB76oWkPbGmIJ70L4nBes66hZxRhVtOBQG1uJXkmLhs6yTxyW/I8XAeHQ==}
+    engines: {node: '>= 10'}
+
   snappyjs@0.7.0:
     resolution: {integrity: sha512-u5iEEXkMe2EInQio6Wv9LWHOQYRDbD2O9hzS27GpT/lwfIQhTCnHCTqedqHIHe9ZcvQo+9au6vngQayipz1NYw==}
 
@@ -2215,10 +2144,12 @@ packages:
 
   uuid@8.0.0:
     resolution: {integrity: sha512-jOXGuXZAWdsTH7eZLtyXMqUb9EcWMGZNbL9YcGBJl4MH4nrxHmZJhEHvyLFrkxo+28uLb/NYRcStH48fnD0Vzw==}
+    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
   uuid@8.3.2:
     resolution: {integrity: sha512-+NYs2QeMWy+GWFOEm9xnn6HCDp0l7QBD7ml8zLUmJ+93Q5NF0NocErnwkTkXVFNiX3/fpC6afS8Dhb/gz7R7eg==}
+    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
   vite@7.3.1:
@@ -2577,8 +2508,6 @@ snapshots:
   '@biomejs/cli-win32-x64@2.3.11':
     optional: true
 
-  '@chainsafe/as-sha256@1.2.0': {}
-
   '@chainsafe/as-sha256@1.2.5': {}
 
   '@chainsafe/benchmark@2.1.0':
@@ -2603,37 +2532,6 @@ snapshots:
   '@chainsafe/biomejs-config@1.0.0(@biomejs/biome@2.3.11)':
     dependencies:
       '@biomejs/biome': 2.3.11
-
-  '@chainsafe/blst-darwin-arm64@2.2.0':
-    optional: true
-
-  '@chainsafe/blst-darwin-x64@2.2.0':
-    optional: true
-
-  '@chainsafe/blst-linux-arm64-gnu@2.2.0':
-    optional: true
-
-  '@chainsafe/blst-linux-arm64-musl@2.2.0':
-    optional: true
-
-  '@chainsafe/blst-linux-x64-gnu@2.2.0':
-    optional: true
-
-  '@chainsafe/blst-linux-x64-musl@2.2.0':
-    optional: true
-
-  '@chainsafe/blst-win32-x64-msvc@2.2.0':
-    optional: true
-
-  '@chainsafe/blst@2.2.0':
-    optionalDependencies:
-      '@chainsafe/blst-darwin-arm64': 2.2.0
-      '@chainsafe/blst-darwin-x64': 2.2.0
-      '@chainsafe/blst-linux-arm64-gnu': 2.2.0
-      '@chainsafe/blst-linux-arm64-musl': 2.2.0
-      '@chainsafe/blst-linux-x64-gnu': 2.2.0
-      '@chainsafe/blst-linux-x64-musl': 2.2.0
-      '@chainsafe/blst-win32-x64-msvc': 2.2.0
 
   '@chainsafe/fast-crc32c@4.2.0':
     optionalDependencies:
@@ -2712,99 +2610,18 @@ snapshots:
     dependencies:
       '@chainsafe/is-ip': 2.1.0
 
-  '@chainsafe/persistent-merkle-tree@1.2.1':
-    dependencies:
-      '@chainsafe/as-sha256': 1.2.0
-      '@chainsafe/hashtree': 1.0.2
-      '@noble/hashes': 1.8.0
-
   '@chainsafe/persistent-merkle-tree@1.3.1':
     dependencies:
       '@chainsafe/as-sha256': 1.2.5
       '@chainsafe/hashtree': 1.0.2
       '@noble/hashes': 1.8.0
 
-  '@chainsafe/persistent-ts@1.0.1': {}
+  '@chainsafe/snappy-wasm@0.5.2': {}
 
-  '@chainsafe/pubkey-index-map-darwin-arm64@3.0.0':
-    optional: true
-
-  '@chainsafe/pubkey-index-map-darwin-x64@3.0.0':
-    optional: true
-
-  '@chainsafe/pubkey-index-map-linux-arm64-gnu@3.0.0':
-    optional: true
-
-  '@chainsafe/pubkey-index-map-linux-arm64-musl@3.0.0':
-    optional: true
-
-  '@chainsafe/pubkey-index-map-linux-x64-gnu@3.0.0':
-    optional: true
-
-  '@chainsafe/pubkey-index-map-linux-x64-musl@3.0.0':
-    optional: true
-
-  '@chainsafe/pubkey-index-map-win32-arm64-msvc@3.0.0':
-    optional: true
-
-  '@chainsafe/pubkey-index-map-win32-x64-msvc@3.0.0':
-    optional: true
-
-  '@chainsafe/pubkey-index-map@3.0.0':
-    optionalDependencies:
-      '@chainsafe/pubkey-index-map-darwin-arm64': 3.0.0
-      '@chainsafe/pubkey-index-map-darwin-x64': 3.0.0
-      '@chainsafe/pubkey-index-map-linux-arm64-gnu': 3.0.0
-      '@chainsafe/pubkey-index-map-linux-arm64-musl': 3.0.0
-      '@chainsafe/pubkey-index-map-linux-x64-gnu': 3.0.0
-      '@chainsafe/pubkey-index-map-linux-x64-musl': 3.0.0
-      '@chainsafe/pubkey-index-map-win32-arm64-msvc': 3.0.0
-      '@chainsafe/pubkey-index-map-win32-x64-msvc': 3.0.0
-
-  '@chainsafe/ssz@1.3.0':
-    dependencies:
-      '@chainsafe/as-sha256': 1.2.0
-      '@chainsafe/persistent-merkle-tree': 1.2.1
-
-  '@chainsafe/ssz@1.8.0':
+  '@chainsafe/ssz@1.9.0':
     dependencies:
       '@chainsafe/as-sha256': 1.2.5
       '@chainsafe/persistent-merkle-tree': 1.3.1
-
-  '@chainsafe/swap-or-not-shuffle-darwin-arm64@1.2.1':
-    optional: true
-
-  '@chainsafe/swap-or-not-shuffle-darwin-x64@1.2.1':
-    optional: true
-
-  '@chainsafe/swap-or-not-shuffle-linux-arm64-gnu@1.2.1':
-    optional: true
-
-  '@chainsafe/swap-or-not-shuffle-linux-arm64-musl@1.2.1':
-    optional: true
-
-  '@chainsafe/swap-or-not-shuffle-linux-x64-gnu@1.2.1':
-    optional: true
-
-  '@chainsafe/swap-or-not-shuffle-linux-x64-musl@1.2.1':
-    optional: true
-
-  '@chainsafe/swap-or-not-shuffle-win32-arm64-msvc@1.2.1':
-    optional: true
-
-  '@chainsafe/swap-or-not-shuffle-win32-x64-msvc@1.2.1':
-    optional: true
-
-  '@chainsafe/swap-or-not-shuffle@1.2.1':
-    optionalDependencies:
-      '@chainsafe/swap-or-not-shuffle-darwin-arm64': 1.2.1
-      '@chainsafe/swap-or-not-shuffle-darwin-x64': 1.2.1
-      '@chainsafe/swap-or-not-shuffle-linux-arm64-gnu': 1.2.1
-      '@chainsafe/swap-or-not-shuffle-linux-arm64-musl': 1.2.1
-      '@chainsafe/swap-or-not-shuffle-linux-x64-gnu': 1.2.1
-      '@chainsafe/swap-or-not-shuffle-linux-x64-musl': 1.2.1
-      '@chainsafe/swap-or-not-shuffle-win32-arm64-msvc': 1.2.1
-      '@chainsafe/swap-or-not-shuffle-win32-x64-msvc': 1.2.1
 
   '@chainsafe/zapi@4.1.0': {}
 
@@ -3049,17 +2866,6 @@ snapshots:
       '@multiformats/multiaddr': 13.0.3
       progress-events: 1.1.0
 
-  '@libp2p/interface@2.11.0':
-    dependencies:
-      '@multiformats/dns': 1.0.11
-      '@multiformats/multiaddr': 12.5.1
-      it-pushable: 3.2.3
-      it-stream-types: 2.0.2
-      main-event: 1.0.1
-      multiformats: 13.4.2
-      progress-events: 1.0.1
-      uint8arraylist: 2.4.8
-
   '@libp2p/interface@3.1.0':
     dependencies:
       '@multiformats/dns': 1.0.11
@@ -3165,60 +2971,38 @@ snapshots:
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
 
-  '@lodestar/config@1.39.1':
-    dependencies:
-      '@chainsafe/as-sha256': 1.2.0
-      '@chainsafe/ssz': 1.3.0
-      '@lodestar/params': 1.39.1
-      '@lodestar/types': 1.39.1
-      '@lodestar/utils': 1.39.1
-
-  '@lodestar/config@1.47.0':
+  '@lodestar/config@1.50.0':
     dependencies:
       '@chainsafe/as-sha256': 1.2.5
-      '@chainsafe/ssz': 1.8.0
-      '@lodestar/params': 1.47.0
-      '@lodestar/types': 1.47.0
-      '@lodestar/utils': 1.47.0
+      '@chainsafe/ssz': 1.9.0
+      '@lodestar/params': 1.50.0
+      '@lodestar/types': 1.50.0
+      '@lodestar/utils': 1.50.0
     transitivePeerDependencies:
       - '@vekexasia/bigint-uint8array'
 
-  '@lodestar/era@1.39.1(libp2p@3.3.10)':
+  '@lodestar/era@1.50.0(libp2p@3.3.10)':
     dependencies:
-      '@chainsafe/blst': 2.2.0
-      '@lodestar/config': 1.39.1
-      '@lodestar/params': 1.39.1
-      '@lodestar/reqresp': 1.39.1(libp2p@3.3.10)
-      '@lodestar/types': 1.39.1
-      uint8arraylist: 2.4.8
+      '@chainsafe/lodestar-z': 'link:'
+      '@lodestar/config': 1.50.0
+      '@lodestar/params': 1.50.0
+      '@lodestar/reqresp': 1.50.0(libp2p@3.3.10)
+      '@lodestar/types': 1.50.0
+      '@lodestar/utils': 1.50.0
     transitivePeerDependencies:
+      - '@vekexasia/bigint-uint8array'
       - libp2p
-
-  '@lodestar/params@1.39.1': {}
 
   '@lodestar/params@1.47.0': {}
 
-  '@lodestar/reqresp@1.39.1(libp2p@3.3.10)':
-    dependencies:
-      '@chainsafe/fast-crc32c': 4.2.0
-      '@libp2p/interface': 2.11.0
-      '@lodestar/config': 1.39.1
-      '@lodestar/params': 1.39.1
-      '@lodestar/utils': 1.39.1
-      it-all: 3.0.9
-      it-pipe: 3.0.1
-      libp2p: 3.3.10
-      snappy: 7.3.3
-      snappyjs: 0.7.0
-      uint8-varint: 2.0.4
-      uint8arraylist: 2.4.8
+  '@lodestar/params@1.50.0': {}
 
   '@lodestar/reqresp@1.46.0(libp2p@3.3.10)':
     dependencies:
       '@chainsafe/fast-crc32c': 4.2.0
       '@libp2p/interface': 3.3.0
       '@libp2p/utils': 7.4.1
-      '@lodestar/config': 1.47.0
+      '@lodestar/config': 1.50.0
       '@lodestar/params': 1.47.0
       '@lodestar/utils': 1.47.0
       libp2p: 3.3.10
@@ -3229,42 +3013,53 @@ snapshots:
     transitivePeerDependencies:
       - '@vekexasia/bigint-uint8array'
 
-  '@lodestar/state-transition@1.39.1':
+  '@lodestar/reqresp@1.50.0(libp2p@3.3.10)':
     dependencies:
-      '@chainsafe/as-sha256': 1.2.0
-      '@chainsafe/blst': 2.2.0
-      '@chainsafe/persistent-merkle-tree': 1.2.1
-      '@chainsafe/persistent-ts': 1.0.1
-      '@chainsafe/pubkey-index-map': 3.0.0
-      '@chainsafe/ssz': 1.3.0
-      '@chainsafe/swap-or-not-shuffle': 1.2.1
-      '@lodestar/config': 1.39.1
-      '@lodestar/params': 1.39.1
-      '@lodestar/types': 1.39.1
-      '@lodestar/utils': 1.39.1
-      bigint-buffer: 1.1.5
+      '@chainsafe/fast-crc32c': 4.2.0
+      '@chainsafe/snappy-wasm': 0.5.2
+      '@libp2p/interface': 3.3.0
+      '@libp2p/utils': 7.4.1
+      '@lodestar/config': 1.50.0
+      '@lodestar/params': 1.50.0
+      '@lodestar/utils': 1.50.0
+      libp2p: 3.3.10
+      snappy: 7.4.3
+      uint8-varint: 2.0.4
+      uint8arraylist: 3.0.2
+    transitivePeerDependencies:
+      - '@vekexasia/bigint-uint8array'
 
-  '@lodestar/types@1.39.1':
+  '@lodestar/state-transition@1.50.0':
     dependencies:
-      '@chainsafe/ssz': 1.3.0
-      '@lodestar/params': 1.39.1
+      '@chainsafe/as-sha256': 1.2.5
+      '@chainsafe/lodestar-z': 'link:'
+      '@chainsafe/persistent-merkle-tree': 1.3.1
+      '@chainsafe/ssz': 1.9.0
+      '@lodestar/config': 1.50.0
+      '@lodestar/params': 1.50.0
+      '@lodestar/types': 1.50.0
+      '@lodestar/utils': 1.50.0
+      '@vekexasia/bigint-buffer2': 1.1.1
+    transitivePeerDependencies:
+      - '@vekexasia/bigint-uint8array'
+
+  '@lodestar/types@1.50.0':
+    dependencies:
+      '@chainsafe/ssz': 1.9.0
+      '@lodestar/params': 1.50.0
       ethereum-cryptography: 2.2.1
-
-  '@lodestar/types@1.47.0':
-    dependencies:
-      '@chainsafe/ssz': 1.8.0
-      '@lodestar/params': 1.47.0
-      ethereum-cryptography: 2.2.1
-
-  '@lodestar/utils@1.39.1':
-    dependencies:
-      '@chainsafe/as-sha256': 1.2.0
-      any-signal: 4.2.0
-      bigint-buffer: 1.1.5
-      case: 1.6.3
-      js-yaml: 4.1.1
 
   '@lodestar/utils@1.47.0':
+    dependencies:
+      '@chainsafe/as-sha256': 1.2.5
+      '@vekexasia/bigint-buffer2': 1.1.1
+      any-signal: 4.2.0
+      case: 1.6.3
+      js-yaml: 4.1.1
+    transitivePeerDependencies:
+      - '@vekexasia/bigint-uint8array'
+
+  '@lodestar/utils@1.50.0':
     dependencies:
       '@chainsafe/as-sha256': 1.2.5
       '@vekexasia/bigint-buffer2': 1.1.1
@@ -3287,16 +3082,6 @@ snapshots:
     dependencies:
       '@multiformats/multiaddr': 13.0.3
 
-  '@multiformats/multiaddr@12.5.1':
-    dependencies:
-      '@chainsafe/is-ip': 2.1.0
-      '@chainsafe/netmask': 2.0.0
-      '@multiformats/dns': 1.0.11
-      abort-error: 1.0.1
-      multiformats: 13.4.2
-      uint8-varint: 2.0.4
-      uint8arrays: 5.1.0
-
   '@multiformats/multiaddr@13.0.3':
     dependencies:
       '@chainsafe/is-ip': 2.1.0
@@ -3307,43 +3092,85 @@ snapshots:
   '@napi-rs/snappy-android-arm-eabi@7.3.3':
     optional: true
 
+  '@napi-rs/snappy-android-arm-eabi@7.4.3':
+    optional: true
+
   '@napi-rs/snappy-android-arm64@7.3.3':
+    optional: true
+
+  '@napi-rs/snappy-android-arm64@7.4.3':
     optional: true
 
   '@napi-rs/snappy-darwin-arm64@7.3.3':
     optional: true
 
+  '@napi-rs/snappy-darwin-arm64@7.4.3':
+    optional: true
+
   '@napi-rs/snappy-darwin-x64@7.3.3':
+    optional: true
+
+  '@napi-rs/snappy-darwin-x64@7.4.3':
     optional: true
 
   '@napi-rs/snappy-freebsd-x64@7.3.3':
     optional: true
 
+  '@napi-rs/snappy-freebsd-x64@7.4.3':
+    optional: true
+
   '@napi-rs/snappy-linux-arm-gnueabihf@7.3.3':
+    optional: true
+
+  '@napi-rs/snappy-linux-arm-gnueabihf@7.4.3':
     optional: true
 
   '@napi-rs/snappy-linux-arm64-gnu@7.3.3':
     optional: true
 
+  '@napi-rs/snappy-linux-arm64-gnu@7.4.3':
+    optional: true
+
   '@napi-rs/snappy-linux-arm64-musl@7.3.3':
+    optional: true
+
+  '@napi-rs/snappy-linux-arm64-musl@7.4.3':
     optional: true
 
   '@napi-rs/snappy-linux-ppc64-gnu@7.3.3':
     optional: true
 
+  '@napi-rs/snappy-linux-ppc64-gnu@7.4.3':
+    optional: true
+
   '@napi-rs/snappy-linux-riscv64-gnu@7.3.3':
+    optional: true
+
+  '@napi-rs/snappy-linux-riscv64-gnu@7.4.3':
     optional: true
 
   '@napi-rs/snappy-linux-s390x-gnu@7.3.3':
     optional: true
 
+  '@napi-rs/snappy-linux-s390x-gnu@7.4.3':
+    optional: true
+
   '@napi-rs/snappy-linux-x64-gnu@7.3.3':
+    optional: true
+
+  '@napi-rs/snappy-linux-x64-gnu@7.4.3':
     optional: true
 
   '@napi-rs/snappy-linux-x64-musl@7.3.3':
     optional: true
 
+  '@napi-rs/snappy-linux-x64-musl@7.4.3':
+    optional: true
+
   '@napi-rs/snappy-openharmony-arm64@7.3.3':
+    optional: true
+
+  '@napi-rs/snappy-openharmony-arm64@7.4.3':
     optional: true
 
   '@napi-rs/snappy-wasm32-wasi@7.3.3':
@@ -3354,10 +3181,19 @@ snapshots:
   '@napi-rs/snappy-win32-arm64-msvc@7.3.3':
     optional: true
 
+  '@napi-rs/snappy-win32-arm64-msvc@7.4.3':
+    optional: true
+
   '@napi-rs/snappy-win32-ia32-msvc@7.3.3':
     optional: true
 
+  '@napi-rs/snappy-win32-ia32-msvc@7.4.3':
+    optional: true
+
   '@napi-rs/snappy-win32-x64-msvc@7.3.3':
+    optional: true
+
+  '@napi-rs/snappy-win32-x64-msvc@7.4.3':
     optional: true
 
   '@napi-rs/wasm-runtime@0.2.12':
@@ -3749,14 +3585,6 @@ snapshots:
 
   before-after-hook@2.2.3: {}
 
-  bigint-buffer@1.1.5:
-    dependencies:
-      bindings: 1.5.0
-
-  bindings@1.5.0:
-    dependencies:
-      file-uri-to-path: 1.0.0
-
   brace-expansion@1.1.12:
     dependencies:
       balanced-match: 1.0.2
@@ -4000,8 +3828,6 @@ snapshots:
   fdir@6.5.0(picomatch@4.0.3):
     optionalDependencies:
       picomatch: 4.0.3
-
-  file-uri-to-path@1.0.0: {}
 
   for-each@0.3.5:
     dependencies:
@@ -4471,6 +4297,26 @@ snapshots:
       '@napi-rs/snappy-win32-arm64-msvc': 7.3.3
       '@napi-rs/snappy-win32-ia32-msvc': 7.3.3
       '@napi-rs/snappy-win32-x64-msvc': 7.3.3
+
+  snappy@7.4.3:
+    optionalDependencies:
+      '@napi-rs/snappy-android-arm-eabi': 7.4.3
+      '@napi-rs/snappy-android-arm64': 7.4.3
+      '@napi-rs/snappy-darwin-arm64': 7.4.3
+      '@napi-rs/snappy-darwin-x64': 7.4.3
+      '@napi-rs/snappy-freebsd-x64': 7.4.3
+      '@napi-rs/snappy-linux-arm-gnueabihf': 7.4.3
+      '@napi-rs/snappy-linux-arm64-gnu': 7.4.3
+      '@napi-rs/snappy-linux-arm64-musl': 7.4.3
+      '@napi-rs/snappy-linux-ppc64-gnu': 7.4.3
+      '@napi-rs/snappy-linux-riscv64-gnu': 7.4.3
+      '@napi-rs/snappy-linux-s390x-gnu': 7.4.3
+      '@napi-rs/snappy-linux-x64-gnu': 7.4.3
+      '@napi-rs/snappy-linux-x64-musl': 7.4.3
+      '@napi-rs/snappy-openharmony-arm64': 7.4.3
+      '@napi-rs/snappy-win32-arm64-msvc': 7.4.3
+      '@napi-rs/snappy-win32-ia32-msvc': 7.4.3
+      '@napi-rs/snappy-win32-x64-msvc': 7.4.3
 
   snappyjs@0.7.0: {}
 

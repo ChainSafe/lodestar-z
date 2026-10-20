@@ -28,6 +28,16 @@ describe("BeaconConfig", () => {
     });
   });
 
+  it("accepts a four-byte Heze fork version", () => {
+    const config = {...mainnetChainConfig, HEZE_FORK_VERSION: new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd])};
+    expect(() => new bindings.BeaconConfig(config, new Uint8Array(32))).not.toThrow();
+  });
+
+  it.each([0, 3, 5])("rejects a Heze fork version of length %s", (length) => {
+    const config = {...mainnetChainConfig, HEZE_FORK_VERSION: new Uint8Array(length)};
+    expect(() => new bindings.BeaconConfig(config, new Uint8Array(32))).toThrow("InvalidVersionLength");
+  });
+
   describe.each(["SLOT_DURATION_MS", "SLOT_DURATION_MS_HEZE"])("%s", (field) => {
     it.each([1000, 5000, 10000, 24000])("accepts %s ms", (value) => {
       const config = {...mainnetChainConfig, [field]: value};

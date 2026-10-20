@@ -42,7 +42,8 @@ FULU_FORK_EPOCH: u64,
 // GLOAS
 GLOAS_FORK_VERSION: [4]u8,
 GLOAS_FORK_EPOCH: u64,
-// Heze timing
+// HEZE
+HEZE_FORK_VERSION: [4]u8,
 HEZE_FORK_EPOCH: u64,
 
 // Time parameters
@@ -75,7 +76,7 @@ PROPOSER_REORG_CUTOFF_BPS: u64,
 ATTESTATION_DUE_BPS: u64,
 ATTESTATION_DUE_BPS_GLOAS: u64,
 
-// Gloas (EIP-7732)
+// Gloas
 AGGREGATE_DUE_BPS_GLOAS: u64,
 SYNC_MESSAGE_DUE_BPS_GLOAS: u64,
 CONTRIBUTION_DUE_BPS_GLOAS: u64,
@@ -171,11 +172,6 @@ fn Optional(comptime T: type) type {
     return @Struct(.auto, null, &names, &types, &attrs);
 }
 
-test merge {
-    const mainnet_config = @import("./networks/mainnet.zig").chain_config;
-    const old_altair_epoch = mainnet_config.ALTAIR_FORK_EPOCH;
-    const merged_config = mainnet_config.merge(.{
-        .ALTAIR_FORK_EPOCH = old_altair_epoch + 1000,
-    });
-    try std.testing.expect(merged_config.ALTAIR_FORK_EPOCH == old_altair_epoch + 1000);
+test {
+    _ = @import("chain_config_test.zig");
 }

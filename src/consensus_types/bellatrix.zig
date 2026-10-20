@@ -40,6 +40,8 @@ pub const Attestations = phase0.Attestations;
 pub const Deposits = phase0.Deposits;
 pub const VoluntaryExits = phase0.VoluntaryExits;
 
+pub const EpochParticipation = altair.EpochParticipation;
+pub const InactivityScores = altair.InactivityScores;
 pub const SyncAggregate = altair.SyncAggregate;
 pub const SyncCommittee = altair.SyncCommittee;
 pub const SyncCommitteeMessage = altair.SyncCommitteeMessage;
@@ -89,6 +91,10 @@ pub const ExecutionPayloadHeader = ssz.VariableContainerType(struct {
     base_fee_per_gas: p.Uint256,
     block_hash: p.Bytes32,
     transactions_root: p.Root,
+});
+
+pub const NewPayloadRequest = ssz.VariableContainerType(struct {
+    execution_payload: ExecutionPayload,
 });
 
 pub const PowBlock = ssz.FixedContainerType(struct {

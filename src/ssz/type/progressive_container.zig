@@ -46,8 +46,23 @@ fn validateActiveFields(comptime active_fields: []const u1, comptime field_count
     }
 }
 
+fn defaultRoot(
+    comptime fields: []const std.builtin.Type.StructField,
+    comptime field_indices: []const usize,
+    comptime active_fields: []const u1,
+) [32]u8 {
+    var chunks: [active_fields.len][32]u8 = @splat(@as([32]u8, @splat(0)));
+    for (fields, field_indices) |field, index| chunks[index] = field.type.default_root;
+    var contents: [32]u8 = undefined;
+    progressive.merkleizeChunksComptime(active_fields.len, &chunks, &contents) catch unreachable;
+    var root: [32]u8 = undefined;
+    hashOne(&root, &contents, &packActiveFields(active_fields));
+    return root;
+}
+
 /// Returns the merkle tree index (position in active_fields) for the nth field
 fn getActiveFieldIndex(comptime active_fields: []const u1, comptime n: usize) usize {
+    @setEvalBranchQuota(100000);
     var count: usize = 0;
     for (active_fields, 0..) |bit, i| {
         if (bit == 1) {
@@ -119,6 +134,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
 
     return struct {
         const Self = @This();
+        pub const TreeView = @import("../tree_view/container.zig").ContainerTreeView(Self);
         pub const kind = TypeKind.progressive_container;
         pub const Fields: type = ST;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
@@ -142,6 +158,8 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             break :blk out;
         };
 
+        pub const default_root: [32]u8 = defaultRoot(fields, &field_indices, active_fields);
+
         pub fn equals(a: *const Type, b: *const Type) bool {
             inline for (fields) |field| {
                 if (!field.type.equals(&@field(a, field.name), &@field(b, field.name))) {
@@ -152,10 +170,22 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         }
 
         /// Creates a new `FixedProgressiveContainerType` and clones all underlying fields in the container.
+        /// `out` points to any type that contains all fields of `Type`.
         ///
         /// Caller owns the memory.
-        pub fn clone(value: *const Type, out: *Type) !void {
-            out.* = value.*;
+        pub fn clone(value: *const Type, out: anytype) !void {
+            const OutType = @TypeOf(out.*);
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out));
+                std.debug.assert(OutInfo == .pointer);
+            }
+            if (OutType == Type) {
+                out.* = value.*;
+            } else {
+                inline for (fields) |field| {
+                    @field(out, field.name) = @field(value, field.name);
+                }
+            }
         }
 
         pub fn serializedSize(_: *const Type) usize {
@@ -191,16 +221,14 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             if (data.len != fixed_size) {
                 return error.InvalidSize;
             }
-            var replacement = default_value;
             var i: usize = 0;
             inline for (fields) |field| {
                 try field.type.deserializeFromBytes(
                     data[i .. i + field.type.fixed_size],
-                    &@field(replacement, field.name),
+                    &@field(out, field.name),
                 );
                 i += field.type.fixed_size;
             }
-            out.* = replacement;
         }
 
         pub const serialized = struct {
@@ -236,19 +264,31 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         };
 
         pub const tree = struct {
-            /// Initializes `out` only on success, without reading or freeing its previous contents.
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                return fromValue(pool, &Self.default_value);
+            }
+
+            /// Borrows retained roots indexed by active-field position; the caller keeps its
+            /// references. Inactive positions contain zero nodes. `nodes` is overwritten scratch.
+            pub fn fromFieldNodes(pool: *Node.Pool, nodes: *[chunk_count]Node.Id) !Node.Id {
+                const contents = try progressive.contentsFromNodes(pool, nodes);
+                errdefer pool.unref(contents);
+                const active_fields_packed = comptime packActiveFields(active_fields);
+                const active_fields_node = try pool.createLeaf(&active_fields_packed);
+                errdefer pool.unref(active_fields_node);
+                return pool.createBranch(contents, active_fields_node);
+            }
+
             pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
-                var value = default_value;
                 inline for (fields, 0..) |field, i| {
                     for (0..comptime inactiveFieldCount(&field_indices, i)) |_| {
                         _ = (try it.next()).?;
                     }
                     const child = (try it.next()).?;
-                    try field.type.tree.toValue(child, pool, &@field(value, field.name));
+                    try field.type.tree.toValue(child, pool, &@field(out, field.name));
                 }
                 if (try it.next() != null) return error.InvalidLength;
-                out.* = value;
             }
 
             pub fn serializedSize(_: Node.Id, _: *Node.Pool) !usize {
@@ -331,7 +371,6 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                 else => return error.InvalidJson,
             }
 
-            var replacement = default_value;
             inline for (fields) |field| {
                 const field_name = switch (try source.next()) {
                     .string => |str| str,
@@ -342,7 +381,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                 }
                 try field.type.deserializeFromJson(
                     source,
-                    &@field(replacement, field.name),
+                    &@field(out, field.name),
                 );
             }
 
@@ -351,7 +390,6 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                 .object_end => {},
                 else => return error.InvalidJson,
             }
-            out.* = replacement;
         }
 
         pub fn getFieldIndex(comptime name: []const u8) usize {
@@ -364,7 +402,17 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             }
         }
 
+        pub fn hasField(comptime name: []const u8) bool {
+            inline for (fields) |field| {
+                if (std.mem.eql(u8, name, field.name)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         pub fn getFieldType(comptime name: []const u8) type {
+            @setEvalBranchQuota(100000);
             inline for (fields) |field| {
                 if (std.mem.eql(u8, name, field.name)) {
                     return field.type;
@@ -410,6 +458,7 @@ pub fn StructProgressiveContainerType(comptime ST: type, comptime active_fields:
         pub const serializeIntoJson = FixedCT.serializeIntoJson;
         pub const deserializeFromJson = FixedCT.deserializeFromJson;
         pub const getFieldIndex = FixedCT.getFieldIndex;
+        pub const hasField = FixedCT.hasField;
         pub const getFieldType = FixedCT.getFieldType;
         pub const getFieldGindex = FixedCT.getFieldGindex;
 
@@ -533,6 +582,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
 
     return struct {
         const Self = @This();
+        pub const TreeView = @import("../tree_view/container.zig").ContainerTreeView(Self);
         pub const kind = TypeKind.progressive_container;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
         pub const field_indices: [fields.len]usize = blk: {
@@ -558,6 +608,8 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             }
             break :blk out;
         };
+
+        pub const default_root: [32]u8 = defaultRoot(fields, &field_indices, active_fields);
 
         pub fn equals(a: *const Type, b: *const Type) bool {
             inline for (fields) |field| {
@@ -596,31 +648,39 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             hashOne(out, &content_root, &active_fields_packed);
         }
 
-        /// Creates a new `VariableProgressiveContainerType` and clones all underlying fields in the container.
-        ///
-        /// Caller owns the memory.
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or
+        /// error.
         pub fn clone(
             allocator: std.mem.Allocator,
             value: *const Type,
             out: *Type,
         ) !void {
-            var replacement = default_value;
-            errdefer deinit(allocator, &replacement);
+            return cloneInto(@This(), allocator, value, out);
+        }
+
+        /// Initialize `out` with `DestinationST.default_value`; the caller deinitializes it after
+        /// success or error.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
             inline for (fields) |field| {
                 if (comptime isFixedType(field.type)) {
                     try field.type.clone(
                         &@field(value, field.name),
-                        &@field(replacement, field.name),
+                        &@field(out, field.name),
                     );
                 } else {
-                    try field.type.clone(
+                    try field.type.cloneInto(
+                        DestinationST.getFieldType(field.name),
                         allocator,
                         &@field(value, field.name),
-                        &@field(replacement, field.name),
+                        &@field(out, field.name),
                     );
                 }
             }
-            out.* = replacement;
         }
 
         pub fn serializedSize(value: *const Type) usize {
@@ -661,24 +721,20 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
 
             const ranges = try readFieldRanges(data);
 
-            var replacement = default_value;
-            errdefer deinit(allocator, &replacement);
             inline for (fields, 0..) |field, i| {
                 if (comptime isFixedType(field.type)) {
                     try field.type.deserializeFromBytes(
                         data[ranges[i][0]..ranges[i][1]],
-                        &@field(replacement, field.name),
+                        &@field(out, field.name),
                     );
                 } else {
                     try field.type.deserializeFromBytes(
                         allocator,
                         data[ranges[i][0]..ranges[i][1]],
-                        &@field(replacement, field.name),
+                        &@field(out, field.name),
                     );
                 }
             }
-
-            out.* = replacement;
         }
 
         pub fn getFieldIndex(comptime name: []const u8) usize {
@@ -691,7 +747,17 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             }
         }
 
+        pub fn hasField(comptime name: []const u8) bool {
+            inline for (fields) |field| {
+                if (std.mem.eql(u8, name, field.name)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         pub fn getFieldType(comptime name: []const u8) type {
+            @setEvalBranchQuota(100000);
             inline for (fields) |field| {
                 if (std.mem.eql(u8, name, field.name)) {
                     return field.type;
@@ -732,6 +798,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
         }
 
         fn readVariableOffsets(data: []const u8, offsets: []u32) !void {
+            if (data.len < min_size or data.len > max_size or data.len > std.math.maxInt(u32)) return error.InvalidSize;
             var variable_index: usize = 0;
             var fixed_index: usize = 0;
             inline for (fields) |field| {
@@ -799,24 +866,36 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                return fromValue(pool, &Self.default_value);
+            }
+
+            /// Borrows retained roots indexed by active-field position; the caller keeps its
+            /// references. Inactive positions contain zero nodes. `nodes` is overwritten scratch.
+            pub fn fromFieldNodes(pool: *Node.Pool, nodes: *[chunk_count]Node.Id) !Node.Id {
+                const contents = try progressive.contentsFromNodes(pool, nodes);
+                errdefer pool.unref(contents);
+                const active_fields_packed = comptime packActiveFields(active_fields);
+                const active_fields_node = try pool.createLeaf(&active_fields_packed);
+                errdefer pool.unref(active_fields_node);
+                return pool.createBranch(contents, active_fields_node);
+            }
+
             /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
-                var value = default_value;
-                errdefer deinit(allocator, &value);
                 inline for (fields, 0..) |field, i| {
                     for (0..comptime inactiveFieldCount(&field_indices, i)) |_| {
                         _ = (try it.next()).?;
                     }
                     const child = (try it.next()).?;
                     if (comptime isFixedType(field.type)) {
-                        try field.type.tree.toValue(child, pool, &@field(value, field.name));
+                        try field.type.tree.toValue(child, pool, &@field(out, field.name));
                     } else {
-                        try field.type.tree.toValue(allocator, child, pool, &@field(value, field.name));
+                        try field.type.tree.toValue(allocator, child, pool, &@field(out, field.name));
                     }
                 }
                 if (try it.next() != null) return error.InvalidLength;
-                out.* = value;
             }
 
             pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
@@ -924,8 +1003,6 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 else => return error.InvalidJson,
             }
 
-            var replacement = default_value;
-            errdefer deinit(allocator, &replacement);
             inline for (fields) |field| {
                 const field_name = switch (try source.next()) {
                     .string => |str| str,
@@ -938,13 +1015,13 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 if (comptime isFixedType(field.type)) {
                     try field.type.deserializeFromJson(
                         source,
-                        &@field(replacement, field.name),
+                        &@field(out, field.name),
                     );
                 } else {
                     try field.type.deserializeFromJson(
                         allocator,
                         source,
-                        &@field(replacement, field.name),
+                        &@field(out, field.name),
                     );
                 }
             }
@@ -954,8 +1031,6 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 .object_end => {},
                 else => return error.InvalidJson,
             }
-
-            out.* = replacement;
         }
     };
 }
