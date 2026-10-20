@@ -47,7 +47,7 @@ pub fn processExecutionPayloadBid(
 
         if (!(try canBuilderCoverBid(fork, state, builder_index, amount))) return error.BuilderInsufficientBalance;
 
-        if (!(try verifyExecutionPayloadBidSignature(fork, allocator, config, state_slot, &builder.pubkey, signed_bid))) return error.InvalidBidSignature;
+        if (!(try verifyExecutionPayloadBidSignature(fork, allocator, config, &builder.pubkey, signed_bid))) return error.InvalidBidSignature;
     }
 
     if (bid.slot != state_slot) return error.BidSlotMismatch;
@@ -86,11 +86,10 @@ fn verifyExecutionPayloadBidSignature(
     comptime fork: ForkSeq,
     allocator: Allocator,
     config: *const BeaconConfig,
-    state_slot: u64,
     pubkey: *const [48]u8,
     signed_bid: *const ForkTypes(fork).SignedExecutionPayloadBid.Type,
 ) !bool {
-    const signing_root = try getExecutionPayloadBidSigningRoot(fork, allocator, config, state_slot, &signed_bid.message);
+    const signing_root = try getExecutionPayloadBidSigningRoot(fork, allocator, config, &signed_bid.message);
 
     const public_key = bls.PublicKey.uncompress(pubkey) catch return false;
     const signature = bls.Signature.uncompress(&signed_bid.signature) catch return false;
