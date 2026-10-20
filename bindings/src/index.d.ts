@@ -114,7 +114,7 @@ interface BeaconBlockLike {
       extraData: Uint8Array;
       baseFeePerGas: bigint;
       blockHash: Uint8Array;
-      transactions: Uint8Array[];
+      transactions: {readonly length: number};
     };
     executionPayloadHeader?: ExecutionPayloadHeader;
   };
