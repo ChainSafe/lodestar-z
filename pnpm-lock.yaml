@@ -6,11 +6,6 @@ settings:
 
 overrides:
   '@chainsafe/lodestar-z': link:.
-  '@lodestar/config': 1.50.0
-  '@lodestar/params': 1.50.0
-  '@lodestar/reqresp': 1.50.0
-  '@lodestar/types': 1.50.0
-  '@lodestar/utils': 1.50.0
 
 importers:
 
@@ -44,9 +39,6 @@ importers:
       '@types/node':
         specifier: ^25.0.9
         version: 25.0.9
-      libp2p:
-        specifier: 3.3.9
-        version: 3.3.9
       tsx:
         specifier: ^4.20.6
         version: 4.23.11

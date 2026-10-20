@@ -281,7 +281,7 @@ fn loadValidators(
 }
 
 /// Reports actual changed and appended validators even when the two state layouts cannot
-/// share roots. This keeps the pubkey cache correct when loading an unrelated branch.
+/// share roots, preserving the loadState result when switching layouts or branches.
 fn findModifiedAndAppendedValidators(
     allocator: Allocator,
     seed_state: *AnyBeaconState,

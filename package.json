@@ -82,7 +82,6 @@
     "@lodestar/state-transition": "1.50.0",
     "@lodestar/types": "1.50.0",
     "@types/node": "^25.0.9",
-    "libp2p": "3.3.9",
     "tsx": "^4.20.6",
     "vitest": "^4.0.17"
   }

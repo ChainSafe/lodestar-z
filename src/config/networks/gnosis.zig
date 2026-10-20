@@ -68,7 +68,7 @@ pub const chain_config = ChainConfig{
     .ATTESTATION_DUE_BPS = 3333,
     .ATTESTATION_DUE_BPS_GLOAS = 2500,
 
-    // Gloas (EIP-7732)
+    // Gloas
     // TODO: These are placeholders. Need to re-visit after gnosis values are out
     .AGGREGATE_DUE_BPS_GLOAS = 5000,
     .SYNC_MESSAGE_DUE_BPS_GLOAS = 2500,

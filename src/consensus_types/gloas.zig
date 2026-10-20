@@ -171,7 +171,7 @@ pub const Cell = fulu.Cell;
 pub const MatrixEntry = fulu.MatrixEntry;
 pub const ProposerLookahead = fulu.ProposerLookahead;
 
-// Cached payload-timeliness committees for the prev/current epoch window (EIP-7732)
+// Cached payload-timeliness committees for the previous, current, and next epochs
 pub const PayloadTimelinessCommittee = ssz.FixedVectorType(p.ValidatorIndex, preset.PTC_SIZE, .{});
 pub const PayloadTimelinessCommitteeIndices = ssz.FixedListType(p.ValidatorIndex, preset.PTC_SIZE, .{});
 pub const PayloadTimelinessCommitteeBits = ssz.BitVectorType(preset.PTC_SIZE);
@@ -217,7 +217,7 @@ pub const LightClientOptimisticUpdate = ssz.FixedContainerType(struct {
     signature_slot: p.Slot,
 });
 
-// ── New Gloas types (EIP-7732: ePBS) ──
+// New Gloas types
 
 // Alias for builder indices (Uint64 like ValidatorIndex)
 pub const BuilderIndex = p.Uint64;
@@ -326,10 +326,10 @@ pub const BeaconBlockBody = ssz.VariableProgressiveContainerType(struct {
     deposits: Deposits,
     voluntary_exits: VoluntaryExits,
     sync_aggregate: SyncAggregate,
-    // executionPayload removed in Gloas (EIP-7732)
+    // executionPayload removed in Gloas
     bls_to_execution_changes: SignedBLSToExecutionChanges,
-    // blobKzgCommitments removed in Gloas (EIP-7732)
-    // executionRequests removed in Gloas (EIP-7732)
+    // blobKzgCommitments removed in Gloas
+    // executionRequests removed in Gloas
     signed_execution_payload_bid: SignedExecutionPayloadBid,
     payload_attestations: PayloadAttestations,
     parent_execution_requests: ExecutionRequests,
@@ -348,7 +348,7 @@ pub const SignedBeaconBlock = ssz.VariableContainerType(struct {
     signature: p.BLSSignature,
 });
 
-// DataColumnSidecar simplified in Gloas (EIP-7732)
+// DataColumnSidecar simplified in Gloas
 pub const DataColumnSidecar = ssz.VariableContainerType(struct {
     index: ColumnIndex,
     column: DataColumn,
@@ -384,7 +384,7 @@ pub const BeaconState = ssz.VariableProgressiveContainerType(struct {
     inactivity_scores: InactivityScores,
     current_sync_committee: SyncCommittee,
     next_sync_committee: SyncCommittee,
-    // latestExecutionPayloadHeader replaced by latest_block_hash in Gloas (EIP-7732)
+    // latestExecutionPayloadHeader replaced by latest_block_hash in Gloas
     latest_block_hash: p.Bytes32,
     next_withdrawal_index: p.WithdrawalIndex,
     next_withdrawal_validator_index: p.ValidatorIndex,
@@ -399,7 +399,7 @@ pub const BeaconState = ssz.VariableProgressiveContainerType(struct {
     pending_partial_withdrawals: PendingPartialWithdrawals,
     pending_consolidations: PendingConsolidations,
     proposer_lookahead: ProposerLookahead,
-    // New in Gloas (EIP-7732)
+    // New in Gloas
     builders: Builders,
     next_withdrawal_builder_index: BuilderIndex,
     execution_payload_availability: ssz.BitVectorType(preset.SLOTS_PER_HISTORICAL_ROOT),

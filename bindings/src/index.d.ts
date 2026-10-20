@@ -384,9 +384,9 @@ export declare class BeaconStateView {
   /**
    * Compute expected withdrawals for the next payload (capella+).
    *
-   * processedBuilderWithdrawalsCount is withdrawals coming from builder payment since gloas (EIP-7732)
+   * processedBuilderWithdrawalsCount is withdrawals coming from builder payment since gloas
    * processedPartialWithdrawalsCount is withdrawals coming from EL since electra (EIP-7002)
-   * processedBuildersSweepCount is withdrawals from builder sweep since gloas (EIP-7732)
+   * processedBuildersSweepCount is withdrawals from builder sweep since gloas
    * processedValidatorSweepCount is withdrawals coming from validator sweep
 
    */
