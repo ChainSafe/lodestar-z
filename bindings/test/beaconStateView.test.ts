@@ -366,6 +366,15 @@ describe("BeaconStateView", () => {
       expect(bellatrixView.isExecutionEnabled({body: {executionPayload: payload}})).toBe(length !== 0);
     });
 
+    it.each([1, 32])("returns true when only extraData has %i bytes", (length) => {
+      const payload = {
+        ...ssz.bellatrix.ExecutionPayload.defaultValue(),
+        extraData: new Uint8Array(length),
+        transactions: {length: 0},
+      };
+      expect(bellatrixView.isExecutionEnabled({body: {executionPayload: payload}})).toBe(true);
+    });
+
     it("rejects transaction counts that are not exact uint32 values", () => {
       for (const length of [-1, 0.5, 2 ** 32, Number.NaN, Number.POSITIVE_INFINITY]) {
         const payload = {...ssz.bellatrix.ExecutionPayload.defaultValue(), transactions: {length}};
