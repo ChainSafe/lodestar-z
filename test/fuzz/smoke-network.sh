@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
-export AFL_CRASH_EXITCODE=99
 FUZZ_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${FUZZ_DIR}/network-targets.sh"
+source "${FUZZ_DIR}/fuzz-env.sh"
 TARGETS=("${NETWORK_TARGETS[@]}")
 if test "$#" -gt 0; then TARGETS=("$@"); fi
 for target in "${TARGETS[@]}"; do
@@ -22,14 +22,14 @@ for target in "${TARGETS[@]}"; do
         test -f "$seed" || continue
         count=$((count + 1))
         test "$count" -le 4096
-        __AFL_DEFER_FORKSRV=1 "$bin" < "$seed" >/dev/null
+        fuzz_run_harness "$bin" < "$seed" >/dev/null
     done
     test "$count" -gt 0
     output="$(mktemp -d "/tmp/lodestar-z-afl-${target}-XXXXXX")"
     dictionary_args=()
     dictionary="${FUZZ_DIR}/dictionaries/${target}.dict"
     if test -f "$dictionary"; then dictionary_args=(-x "$dictionary"); fi
-    if ! AFL_SKIP_CPUFREQ=1 AFL_NO_UI=1 afl-fuzz "${dictionary_args[@]}" -i "$corpus" -o "$output" -V 3 -G "${NETWORK_INPUT_MAX[$target]}" -- "$bin" >"$output.log" 2>&1; then
+    if ! afl-fuzz "${dictionary_args[@]}" -i "$corpus" -o "$output" -V 3 -G "${NETWORK_INPUT_MAX[$target]}" -- "$bin" >"$output.log" 2>&1; then
         cat "$output.log" >&2
         exit 1
     fi

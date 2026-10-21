@@ -8,8 +8,8 @@ network_topic_policy	initial	256	none
 network_tls	initial	4096	quiche
 network_quic_receive	initial	1500	quiche
 discv5_wire	initial	1281	none
-network_gossip_sessions	initial	4096	snappy
-network_gossip_recovery	initial	4096	snappy
-network_processor_admission	initial	4096	snappy
-network_quic_session	initial	4096	quiche
-network_reqresp_session	initial	8192	all
+network_gossip_sessions	initial	4096	snappy	snapshot
+network_gossip_recovery	initial	4096	snappy	snapshot
+network_processor_admission	initial	4096	snappy	snapshot
+network_quic_session	initial	4096	quiche	snapshot
+network_reqresp_session	initial	8192	all	snapshot

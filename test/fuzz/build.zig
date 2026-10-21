@@ -133,22 +133,37 @@ pub fn build(b: *std.Build) void {
         const corpus = fields.next().?;
         const input_max = std.fmt.parseInt(u32, fields.next().?, 10) catch @panic("invalid network fuzz input bound");
         const link = fields.next().?;
+        const mode = fields.next() orelse "persistent";
         std.debug.assert(fields.next() == null);
         const both = std.mem.eql(u8, link, "all");
         const snappy = both or std.mem.eql(u8, link, "snappy");
         const quiche = both or std.mem.eql(u8, link, "quiche");
         std.debug.assert(snappy or quiche or std.mem.eql(u8, link, "none"));
+        const snapshot = std.mem.eql(u8, mode, "snapshot");
+        std.debug.assert(snapshot or std.mem.eql(u8, mode, "persistent"));
+        var extra_args: std.ArrayList([]const u8) = .empty;
+        if (snappy or quiche) extra_args.appendSlice(b.allocator, &.{ "-lc++", "-lc++abi", "-lunwind" }) catch @panic("out of memory");
+        if (snapshot) extra_args.append(b.allocator, "-DFUZZ_SNAPSHOT") catch @panic("out of memory");
         fuzzers.append(b.allocator, .{
             .name = name,
             .corpus_suffix = corpus,
             .input_max = input_max,
             .extra_libs = if (snappy) &snappy_libs else &.{},
             .extra_objects = if (quiche) quiche_objects else gossip_objects,
-            .extra_args = if (snappy or quiche) &.{ "-lc++", "-lc++abi", "-lunwind" } else &.{},
+            .extra_args = extra_args.items,
         }) catch @panic("out of memory");
     }
     const build_network = b.step("build-network", "Build every network harness from network-targets.tsv");
     const test_harnesses = b.step("test-harnesses", "Test stateful harness ownership and reset");
+
+    // Deterministic process clock preloaded into every harness run (see pkg/afl++/fuzz_clock.c).
+    const afl_pkg = b.dependencyFromBuildZig(afl, .{});
+    const clock_mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    clock_mod.addCSourceFile(.{ .file = afl_pkg.path("fuzz_clock.c"), .flags = &.{"-fPIC"} });
+    const clock_lib = b.addLibrary(.{ .name = "fuzz_clock", .linkage = .dynamic, .root_module = clock_mod });
+    const clock_install = b.addInstallArtifact(clock_lib, .{});
+    b.getInstallStep().dependOn(&clock_install.step);
+    build_network.dependOn(&clock_install.step);
 
     for (fuzzers.items) |fuzzer| {
         const run_step = b.step(
@@ -207,6 +222,8 @@ pub fn build(b: *std.Build) void {
         );
         const run = b.addSystemCommand(&.{b.findProgram(&.{"afl-fuzz"}, &.{}) catch @panic("afl-fuzz is required")});
         run.setEnvironmentVariable("AFL_CRASH_EXITCODE", "99");
+        run.setEnvironmentVariable("AFL_PRELOAD", b.getInstallPath(.lib, "libfuzz_clock.so"));
+        run.step.dependOn(&clock_install.step);
         run.addArg("-i");
         run.addDirectoryArg(b.path(fuzzer.corpus(b)));
         run.addArg("-o");

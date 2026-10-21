@@ -36,9 +36,35 @@ the harness's whole-table accounting.
 | `network_reqresp_session` | Two `ReqResp` instances per side over an in-process QUIC pair: requests, responses, error responses, finish, cancel, serving retain and release, raw request and response bytes with arbitrary splits and FIN placement, stream resets, clock advances for every timeout | route invariant, slot and event accounting, no pending request after `cancelAll` |
 | `network_quic_session` | Two engines through a real handshake, then stream opens, writes, reads, capacity polls, shutdowns, closes, route binds, hostile datagrams on the established path, time jumps and connection close | engine invariants after every step, route and connection counts, clean teardown |
 
-These harnesses link both snappy and quiche where needed (`all` in `network-targets.tsv`).
-Use ReleaseSafe for campaigns. Each input starts with fresh protocol state; gossip uses
-an input-driven clock and reuses allocation capacity between inputs.
+These harnesses link both snappy and quiche where needed (`all` in `network-targets.tsv`)
+and run in snapshot mode (`snapshot` in the same table): `zig_fuzz_init` builds the
+protocol state once, including the QUIC handshake, and the fork server starts after it, so
+every input runs in a fresh fork of that state, runs the harness teardown checks on its own
+copy, and exits. Nothing is rebuilt per input and every input sees the identical starting
+state.
+
+quiche keeps its timers on the libc clock, so every harness run preloads
+`zig-out/lib/libfuzz_clock.so` (`pkg/afl++/fuzz_clock.c`, built with the harnesses): a
+process-local clock that starts at a fixed instant and moves only when the harness advances
+its own logical clock (the QUIC and reqresp harnesses call `fuzz_clock_advance` from their
+time-advance operations), or by `FUZZ_CLOCK_STEP_NS` per read. A fork child inherits the
+parent's value by copy, so every input starts at the same time and advances independently,
+while loss recovery and idle timers still expire as the input advances time. `fuzz-env.sh`
+holds this policy and the AFL environment; `fuzz-loop.sh`, `replay-crashes.sh`,
+`smoke-network.sh` and the build's `run-<target>` steps all apply it, and `fuzz-loop.sh`
+refuses to start a snapshot target without the library (`NO_FAKE_CLOCK=1` overrides, with
+aging snapshots). Replay an input by hand with the same policy:
+
+```sh
+source fuzz-env.sh
+fuzz_run_harness zig-out/bin/fuzz-network_quic_session < input
+```
+
+Use ReleaseSafe for campaigns; gossip uses an input-driven clock.
+
+A harness panic prints the assertion's return address as an offset into the binary, plus
+the failing step for the QUIC session harness; `addr2line -e zig-out/bin/fuzz-<target>
+<offset>` names the source line.
 
 ```sh
 zig build -Doptimize=ReleaseSafe build-network
@@ -118,35 +144,54 @@ zig build run-bls_aggregate_sig
 
 ### Running targets in a loop
 
-`fuzz-loop.sh` runs fuzzers in parallel, [minimizes the corpus]()
-with `afl-cmin` after each round, and repeats indefinitely:
+`fuzz-loop.sh` starts afl-fuzz for each target and keeps it running: a main
+instance plus any number of secondaries share `afl-out/<target>`, exchange
+queue entries, and run different power schedules. Instances are never restarted on a timer, so AFL's calibration and
+scheduling state is kept; a restart resumes each instance in place through
+`AFL_AUTORESUME`.
 
 ```sh
 ./fuzz-loop.sh --help
-Usage: ./fuzz-loop.sh [targets...]
-
-Groups:  all, ssz, bls
-Targets: ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig
+Usage: ./fuzz-loop.sh [--status | --stop | --cmin] [target[=instances]...]
 
 Examples:
-  ./fuzz-loop.sh                    # fuzz all targets
-  ./fuzz-loop.sh ssz                # fuzz all SSZ targets
-  ./fuzz-loop.sh bls                # fuzz all BLS targets
-  ./fuzz-loop.sh ssz bls_signature  # mix groups and individual targets
-
-Environment:
-  ROUND_DURATION=3600               # seconds per round (default: 3600)
+  ./fuzz-loop.sh network                                  # one instance per network target
+  ./fuzz-loop.sh network_quic_session=3 network_wire=2    # per-target instance counts
+  INSTANCES=2 ./fuzz-loop.sh ssz                          # default count for every target
+  TIMEOUT_MS=1000 ./fuzz-loop.sh network_gossip_sessions  # fixed per-run timeout
+  ./fuzz-loop.sh --status network                         # statistics without stopping
+  ./fuzz-loop.sh --stop                                   # stop everything under afl-out
 ```
 
-Logs are written to `logs/<target>.log`. Crashes are reported at the end of
-each round; run `./replay-crashes.sh` to inspect them.
+`TIMEOUT_MS` passes `-t <ms>+` so a queue entry that exceeds it is skipped
+rather than filed as a hang; the stateful harnesses run at tens of executions
+per second, where AFL's auto-scaled timeout files load spikes as hangs.
+
+Each instance records its pid with the process start time from `/proc`, so
+`--stop` and the already-running check never act on a reused pid. `--cmin`
+writes to `corpus/<target>-cmin-new` when `corpus/<target>-cmin` is tracked by
+git, since a committed corpus is a reviewed seed set rather than campaign
+output.
+
+Logs are written to `logs/<target>.<instance>.log`. `--status` prints
+executions, paths, pending favorites, stability, crashes and hangs per
+instance; run `./replay-crashes.sh` to inspect crashes. `--cmin` merges every
+instance queue of a target and minimizes it into `corpus/<target>-cmin`; use it
+before a restart that needs fresh seeds, such as after a harness change, not on
+a schedule.
+
+`overnight.sh [target[=instances]...]` starts the loop detached with the
+campaign defaults (the five stateful harnesses, `TIMEOUT_MS=1000`) and logs to
+`logs/overnight.log`.
 
 ## Finding Crashes and Hangs
 
-After (or during) a run, results are written to `afl-out/<target>/default/`:
+After (or during) a run, results are written to `afl-out/<target>/<instance>/`,
+where `<instance>` is `main` or `s1`, `s2`, ... (`default` for a run started
+by hand without `-M`/`-S`):
 
 ```
-afl-out/ssz_basic/default/
+afl-out/ssz_basic/main/
 ├── crashes/ # Inputs that triggered crashes
 ├── hangs/   # Inputs that triggered hangs/timeouts
 └── queue/   # All interesting inputs (the evolved corpus)
@@ -158,22 +203,21 @@ issue. The filename encodes metadata about how it was found (e.g.
 
 ## Reproducing a Crash
 
-Replay any crashing input by piping it into the harness:
+Replay any crashing input by piping it into the harness. The harness embeds AFL's deferred
+fork-server marker, so outside afl-fuzz set `__AFL_DEFER_FORKSRV=1` or the runtime aborts
+with "forkserver is already up" (`fuzz_run_harness` from `fuzz-env.sh` does this and applies
+the clock policy):
 
 ```sh
-cat afl-out/ssz_basic/default/crashes/<filename> | __AFL_DEFER_FORKSRV=1 zig-out/bin/fuzz-ssz_basic
+__AFL_DEFER_FORKSRV=1 zig-out/bin/fuzz-ssz_basic < afl-out/ssz_basic/main/crashes/<filename>
 ```
-
-`__AFL_DEFER_FORKSRV=1` is required outside `afl-fuzz`: the harness starts the
-fork server itself, and without it the binary aborts with "forkserver is
-already up" before reading any input.
 
 ## Corpus Management
 
-After a fuzzing run, the queue in `afl-out/<target>/default/queue/` typically
-contains many redundant inputs. Use `afl-cmin` to find the smallest
-subset that preserves full edge coverage, and `afl-tmin` to shrink
-individual test cases.
+After a fuzzing run, the queues in `afl-out/<target>/<instance>/queue/`
+typically contain many redundant inputs. `./fuzz-loop.sh --cmin <target>`
+merges them and keeps the smallest subset that preserves full edge coverage in
+`corpus/<target>-cmin`; use `afl-tmin` to shrink individual test cases.
 
 > **Important:** The instrumented binary reads input from **stdin**, not
 > from file arguments. Do **not** use `@@` with `afl-cmin`, `afl-tmin`,
@@ -196,7 +240,7 @@ Reduce the evolved queue to a minimal set covering all discovered edges:
 
 ```sh
 AFL_NO_FORKSRV=1 afl-cmin.bash \
-  -i afl-out/ssz_basic/default/queue \
+  -i afl-out/ssz_basic/main/queue \
   -o corpus/ssz_basic-cmin \
   -- zig-out/bin/fuzz-ssz_basic
 ```

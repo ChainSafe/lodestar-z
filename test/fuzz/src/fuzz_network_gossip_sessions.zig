@@ -3,8 +3,9 @@ const std = @import("std");
 /// Exit 99 lets AFL detect panics without waiting for symbolization or a core dump handler.
 pub const panic = std.debug.FullPanic(fuzzPanic);
 
-fn fuzzPanic(text: []const u8, _: ?usize) noreturn {
-    std.debug.print("panic: {s}\n", .{text});
+fn fuzzPanic(text: []const u8, ret_addr: ?usize) noreturn {
+    const addr = (ret_addr orelse @returnAddress()) -% std.process.getBaseAddress();
+    std.debug.print("panic: {s} at +0x{x}\n", .{ text, addr });
     std.process.exit(99);
 }
 const fixture = @import("gossip_fixture");
@@ -13,15 +14,14 @@ const input_max = 4096;
 const steps_max = 2048;
 
 var harness: Harness = undefined;
-var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
 
-pub export fn zig_fuzz_init() callconv(.c) void {}
+/// Snapshot mode: this runs once before the fork server, so every input starts from this state.
+pub export fn zig_fuzz_init() callconv(.c) void {
+    harness.init(std.heap.c_allocator, .{}) catch @panic("gossip harness initialization failed");
+}
 
 pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     if (len == 0 or len > input_max) return;
-    defer _ = arena.reset(.retain_capacity);
-    harness.init(arena.allocator(), .{}) catch @panic("gossip harness initialization failed");
-    defer harness.deinit();
     var cursor: fixture.Cursor = .{ .bytes = input[0..len] };
     var steps: usize = 0;
     while (cursor.next()) |op| : (steps += 1) {
@@ -73,6 +73,8 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
         if (steps % 8 == 7) harness.checkInvariants();
     }
     harness.checkInvariants();
+    // The fork child owns a copy of the snapshot, so its teardown checks cleanup for this input.
+    harness.deinit();
 }
 
 test "fuzz harness gossip starts each input with fresh state and a controlled clock" {

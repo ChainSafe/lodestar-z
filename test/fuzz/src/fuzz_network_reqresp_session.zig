@@ -3,8 +3,9 @@ const std = @import("std");
 /// Exit 99 lets AFL detect panics without waiting for symbolization or a core dump handler.
 pub const panic = std.debug.FullPanic(fuzzPanic);
 
-fn fuzzPanic(text: []const u8, _: ?usize) noreturn {
-    std.debug.print("panic: {s}\n", .{text});
+fn fuzzPanic(text: []const u8, ret_addr: ?usize) noreturn {
+    const addr = (ret_addr orelse @returnAddress()) -% std.process.getBaseAddress();
+    std.debug.print("panic: {s} at +0x{x}\n", .{ text, addr });
     std.process.exit(99);
 }
 const network = @import("network");
@@ -41,6 +42,15 @@ var wire_bytes: [96]u8 = undefined;
 
 const protocols = [_]Protocol{ .status_v1, .ping_v1, .metadata_v2, .blocks_by_range_v2, .blob_sidecars_by_range_v1, .blocks_by_root_v2, .goodbye_v1 };
 const Side = enum { client, server };
+
+/// Moves the preloaded process clock (pkg/afl++/fuzz_clock.c) with the pair's logical clock so
+/// quiche's timers track the harness; without the shim the symbol is null and only the pair moves.
+const clock_advance = @extern(?*const fn (i64) callconv(.c) void, .{ .name = "fuzz_clock_advance", .linkage = .weak });
+
+fn advanceTime(ms: u64) void {
+    pair.shared.pair.advance(ms);
+    if (clock_advance) |advance| advance(@intCast(ms * std.time.ns_per_ms));
+}
 const Outstanding = struct { handle: RequestHandle, which: Protocol, sink: u8 };
 const Inbound = struct { handle: RequestHandle, which: Protocol };
 
@@ -227,12 +237,15 @@ const overrides: testing.Overrides = .{
     .request_fork = .fulu,
 };
 
-pub export fn zig_fuzz_init() callconv(.c) void {}
+/// Snapshot mode: the pair connects once before the fork server, so every input starts from
+/// the same established connections. The loop freezes the process clock so quiche's timers do
+/// not age that snapshot.
+pub export fn zig_fuzz_init() callconv(.c) void {
+    pair.init(overrides, overrides) catch @panic("reqresp pair initialization failed");
+}
 
 pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     if (len == 0 or len > input_max) return;
-    pair.init(overrides, overrides) catch @panic("reqresp pair initialization failed");
-    defer pair.deinit();
     var state: State = .{};
     for (&wire_bytes, 0..) |*byte, i| byte.* = @truncate(i *% 13);
 
@@ -278,7 +291,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
                 _ = owner(.client, entry.which).cancel(engineOf(.client), &endpoint(.client).router, entry.handle, now);
             },
             9 => {
-                pair.shared.pair.advance(1 + @as(u64, arg) * @as(u64, if (arg > 200) 20 else 1));
+                advanceTime(1 + @as(u64, arg) * @as(u64, if (arg > 200) 20 else 1));
                 state.pump();
             },
             10 => if (state.raw_len < raw_max) {
@@ -329,7 +342,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     for (state.serving[0..state.serving_len]) |held| _ = owner(.server, held.which).releaseServing(held.handle);
     for (state.raw[0..state.raw_len]) |stream| engineOf(.client).closeStream(stream, 0);
     for (0..8) |_| {
-        pair.shared.pair.advance(100);
+        advanceTime(100);
         state.pump();
     }
     checkInvariants();
@@ -342,6 +355,8 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
             assert(counts.outbound == 0 and counts.inbound == 0);
         }
     }
+    // The fork child owns a copy of the snapshot, so its teardown checks cleanup for this input.
+    pair.deinit();
 }
 
 const Cursor = struct {

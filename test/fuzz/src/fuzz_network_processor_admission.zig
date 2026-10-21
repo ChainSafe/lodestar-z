@@ -3,8 +3,9 @@ const std = @import("std");
 /// Exit 99 lets AFL detect panics without waiting for symbolization or a core dump handler.
 pub const panic = std.debug.FullPanic(fuzzPanic);
 
-fn fuzzPanic(text: []const u8, _: ?usize) noreturn {
-    std.debug.print("panic: {s}\n", .{text});
+fn fuzzPanic(text: []const u8, ret_addr: ?usize) noreturn {
+    const addr = (ret_addr orelse @returnAddress()) -% std.process.getBaseAddress();
+    std.debug.print("panic: {s} at +0x{x}\n", .{ text, addr });
     std.process.exit(99);
 }
 const fixture = @import("gossip_fixture");
@@ -179,19 +180,19 @@ fn pumpVerdicts(table: *Table, h: *Harness, limit: usize) void {
 }
 
 var harness: Harness = undefined;
-var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+var processor_table: Table = undefined;
+var processor_consumer: Consumer = undefined;
 
-pub export fn zig_fuzz_init() callconv(.c) void {}
+/// Snapshot mode: this runs once before the fork server, so every input starts from this state.
+pub export fn zig_fuzz_init() callconv(.c) void {
+    harness.init(std.heap.c_allocator, .{ .peers = 6, .retained = 8, .validation = 64 }) catch @panic("gossip harness initialization failed");
+    processor_table = Table.init(std.heap.c_allocator, .{ .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, .random_seed = 7 }) catch @panic("processor initialization failed");
+    processor_consumer = .{ .table = &processor_table };
+    processor_consumer.attach(&harness.g);
+}
 
 pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     if (len == 0 or len > input_max) return;
-    defer _ = arena.reset(.retain_capacity);
-    harness.init(arena.allocator(), .{ .peers = 6, .retained = 8, .validation = 64 }) catch @panic("gossip harness initialization failed");
-    defer harness.deinit();
-    var table = Table.init(std.heap.c_allocator, .{ .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, .random_seed = 7 }) catch unreachable;
-    defer table.deinit();
-    var consumer: Consumer = .{ .table = &table };
-    consumer.attach(&harness.g);
     var imported: [roots_known]bool = @splat(false);
     var delivered: [delivered_max]Table.Token = undefined;
     var delivered_len: usize = 0;
@@ -217,30 +218,30 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
                 const shape = cursor.byte();
                 const size = 1 + @as(usize, cursor.byte()) * 29;
                 const delta = @as(u64, shape % 48);
-                const message_slot = (consumer.slot + 3) -| delta;
+                const message_slot = (processor_consumer.slot + 3) -| delta;
                 const root_index = @as(usize, shape / 48) % (roots_known + 2);
                 const seed: u64 = if (arg & 128 == 128) arg / 8 else harness.counter +% 0x7a3;
                 harness.counter += 1;
                 _ = harness.deliver(peer, topic, payloadFor(&payload, kind, size, arg, seed, message_slot, root_index));
             },
             3 => {
-                const batch = table.claimChecks(harness.now_ms, 1 + @as(usize, arg) % Table.batch_max);
+                const batch = processor_table.claimChecks(harness.now_ms, 1 + @as(usize, arg) % Table.batch_max);
                 for (batch.tokens[0..batch.len]) |token| {
-                    const cell = table.get(token).?;
+                    const cell = processor_table.get(token).?;
                     const known = cell.metadata.root orelse continue;
                     const index = @as(usize, known[0]) -| 1;
                     const available = (index < roots_known and imported[index]) or (arg & 1 == 1 and known[0] % 7 == 0);
-                    _ = table.classify(token, available);
+                    _ = processor_table.classify(token, available);
                 }
             },
             4 => {
-                const batch = table.claimDemand(harness.now_ms, .{ .items = 1 + @as(usize, arg) % Table.batch_max, .ordinary = arg & 1 == 1 });
+                const batch = processor_table.claimDemand(harness.now_ms, .{ .items = 1 + @as(usize, arg) % Table.batch_max, .ordinary = arg & 1 == 1 });
                 for (batch.tokens[0..batch.len]) |token| {
-                    const cell = table.get(token).?;
+                    const cell = processor_table.get(token).?;
                     assert(cell.state == .copying and cell.input.len <= copy.len);
-                    if (arg & 2 == 2) table.copyPayload(cell, copy[0..cell.input.len]);
+                    if (arg & 2 == 2) processor_table.copyPayload(cell, copy[0..cell.input.len]);
                 }
-                table.finish(&batch);
+                processor_table.finish(&batch);
                 for (batch.tokens[0..batch.len]) |token| {
                     if (delivered_len == delivered_max) break;
                     delivered[delivered_len] = token;
@@ -252,47 +253,50 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
                 const token = delivered[at];
                 delivered_len -= 1;
                 delivered[at] = delivered[delivered_len];
-                _ = table.report(token, switch (peer % 3) {
+                _ = processor_table.report(token, switch (peer % 3) {
                     0 => .accept,
                     1 => .reject,
                     else => .ignore,
                 }, harness.now_ms);
             },
-            6 => pumpVerdicts(&table, &harness, 1 + @as(usize, arg) % Table.batch_max),
+            6 => pumpVerdicts(&processor_table, &harness, 1 + @as(usize, arg) % Table.batch_max),
             7 => {
                 harness.advance(1 + @as(u64, arg));
-                if (arg % 4 == 0) consumer.slot += 1;
-                table.maintain(harness.now_ms, consumer.slot);
+                if (arg % 4 == 0) processor_consumer.slot += 1;
+                processor_table.maintain(harness.now_ms, processor_consumer.slot);
             },
-            8 => table.expire(harness.now_ms),
+            8 => processor_table.expire(harness.now_ms),
             9 => {
                 const index = @as(usize, arg) % roots_known;
                 imported[index] = true;
-                table.notifyBlock(root(index));
+                processor_table.notifyBlock(root(index));
             },
-            10 => table.dropQueued(),
-            11 => table.dropPeer(&Harness.identity(@as(usize, peer) % harness.g.options.connected_capacity)),
+            10 => processor_table.dropQueued(),
+            11 => processor_table.dropPeer(&Harness.identity(@as(usize, peer) % harness.g.options.connected_capacity)),
             12 => harness.drain(peer, 1 + @as(usize, arg) * 16),
             13 => harness.penalize(peer, @as(f64, @floatFromInt(arg))),
             14 => harness.cancelWrites(peer),
             15 => {
                 harness.advance(1000 + @as(u64, arg) * 20);
-                consumer.slot += 1 + @as(u64, arg) % 70;
-                table.maintain(harness.now_ms, consumer.slot);
+                processor_consumer.slot += 1 + @as(u64, arg) % 70;
+                processor_table.maintain(harness.now_ms, processor_consumer.slot);
             },
             else => unreachable,
         }
         if (steps % 8 == 7) {
-            checkProcessor(&table);
+            checkProcessor(&processor_table);
             harness.checkInvariants();
         }
     }
-    checkProcessor(&table);
+    checkProcessor(&processor_table);
     harness.checkInvariants();
-    table.close();
-    pumpVerdicts(&table, &harness, table.cells.len);
-    for (delivered[0..delivered_len]) |token| _ = table.report(token, .ignore, harness.now_ms);
-    pumpVerdicts(&table, &harness, table.cells.len);
-    checkProcessor(&table);
-    assert(table.diag.occupied == 0);
+    processor_table.close();
+    pumpVerdicts(&processor_table, &harness, processor_table.cells.len);
+    for (delivered[0..delivered_len]) |token| _ = processor_table.report(token, .ignore, harness.now_ms);
+    pumpVerdicts(&processor_table, &harness, processor_table.cells.len);
+    checkProcessor(&processor_table);
+    assert(processor_table.diag.occupied == 0);
+    // The fork child owns a copy of the snapshot, so its teardown checks cleanup for this input.
+    processor_table.deinit();
+    harness.deinit();
 }
