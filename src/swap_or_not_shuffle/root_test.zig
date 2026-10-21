@@ -244,7 +244,7 @@ test "computeSyncCommitteeIndices matches reference vectors" {
         293, 726, 771, 677, 530, 475, 322, 66,  521, 106, 774, 23,  508, 410, 526, 44,
         213, 948, 248, 903, 85,  853, 171, 679, 309, 791, 851, 817, 609, 119, 128, 983,
     };
-    try std.testing.expectEqualSlices(u32, expected_phase0[0..], phase0[0..expected_phase0.len]);
+    try std.testing.expectEqualSlices(u32, expected_phase0[0..], &phase0);
 
     var electra: [32]u32 = undefined;
     try shuffle.computeSyncCommitteeIndicesInto(
@@ -263,7 +263,7 @@ test "computeSyncCommitteeIndices matches reference vectors" {
         726, 475, 521, 23,  508, 410, 213, 948, 248, 85,  171, 309, 791, 817, 119, 126,
         651, 416, 273, 471, 739, 290, 588, 840, 665, 945, 496, 158, 757, 616, 226, 766,
     };
-    try std.testing.expectEqualSlices(u32, expected_electra[0..], electra[0..expected_electra.len]);
+    try std.testing.expectEqualSlices(u32, expected_electra[0..], &electra);
 }
 
 fn expectSyncCommitteeMatchesGetCommitteeIndices(

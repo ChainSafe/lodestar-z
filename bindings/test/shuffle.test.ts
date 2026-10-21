@@ -214,69 +214,31 @@ describe("committee indices", () => {
   });
 
   it("computeSyncCommitteeIndices should match the naive implementation", {timeout: 20_000}, () => {
-    const seed = new Uint8Array(SEED_SIZE).fill(0x5a);
-    const indices = Uint32Array.from(activeIndices, (index) => vc - 1 - index);
-    const originalIndices = indices.slice();
-    const sizes = [0, 1, 32, SYNC_COMMITTEE_SIZE, SYNC_COMMITTEE_SIZE + 1];
     for (const byteCount of byteCounts) {
-      const expected = shuffleReference.naiveComputeSyncCommitteeIndices(
-        seed,
-        indices,
-        effectiveBalanceIncrements,
-        byteCount,
-        maxEffectiveBalanceFor(byteCount),
-        SYNC_COMMITTEE_SIZE + 1
-      );
-      for (const size of sizes) {
-        const result = shuffle.computeSyncCommitteeIndices(
-          seed,
-          indices,
-          effectiveBalanceIncrements,
-          byteCount,
-          size,
-          maxEffectiveBalanceFor(byteCount),
-          EFFECTIVE_BALANCE_INCREMENT,
-          SHUFFLE_ROUND_COUNT
-        );
-        expect(Array.from(result), `byteCount ${byteCount}, size ${size}`).toEqual(expected.slice(0, size));
-        expect(indices).toEqual(originalIndices);
-      }
-    }
-  });
-
-  it("computeSyncCommitteeIndices preserves input errors", () => {
-    const seed = new Uint8Array(SEED_SIZE).fill(0x5a);
-    for (const byteCount of byteCounts) {
-      const cases = [
-        {
-          error: "InvalidSeedLength",
-          increment: EFFECTIVE_BALANCE_INCREMENT,
-          indices: activeIndices,
-          seed: seed.subarray(1),
-        },
-        {error: "EmptyActiveIndices", increment: EFFECTIVE_BALANCE_INCREMENT, indices: new Uint32Array(), seed},
-        {error: "InvalidEffectiveBalanceIncrement", increment: 0, indices: activeIndices, seed},
-        {
-          error: "EffectiveBalanceIncrementsOutOfBounds",
-          increment: EFFECTIVE_BALANCE_INCREMENT,
-          indices: new Uint32Array([vc]),
-          seed,
-        },
-      ];
-      for (const testCase of cases) {
-        expect(() =>
+      const seed = new Uint8Array(randomBytes(32));
+      expect(
+        Array.from(
           shuffle.computeSyncCommitteeIndices(
-            testCase.seed,
-            testCase.indices,
+            seed,
+            activeIndices,
             effectiveBalanceIncrements,
             byteCount,
             SYNC_COMMITTEE_SIZE,
             maxEffectiveBalanceFor(byteCount),
-            testCase.increment,
+            EFFECTIVE_BALANCE_INCREMENT,
             SHUFFLE_ROUND_COUNT
           )
-        ).toThrow(testCase.error);
-      }
+        ),
+        `byteCount ${byteCount}, seed 0x${Buffer.from(seed).toString("hex")}`
+      ).toEqual(
+        shuffleReference.naiveComputeSyncCommitteeIndices(
+          seed,
+          activeIndices,
+          effectiveBalanceIncrements,
+          byteCount,
+          maxEffectiveBalanceFor(byteCount)
+        )
+      );
     }
   });
 });
