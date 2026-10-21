@@ -25,7 +25,7 @@ pub fn getNextSyncCommittee(
     io: std.Io,
     pubkey_cache: *const PubkeyCache,
     state: *BeaconState(fork),
-    active_validator_indices: []const ValidatorIndex,
+    active_validator_indices: []const u32,
     effective_balance_increments: EffectiveBalanceIncrements,
     out: *SyncCommitteeInfo,
 ) !void {

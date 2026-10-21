@@ -13,6 +13,8 @@ pub const isBitVectorType = @import("bit_vector.zig").isBitVectorType;
 
 pub const ByteListType = @import("byte_list.zig").ByteListType;
 pub const isByteListType = @import("byte_list.zig").isByteListType;
+pub const ProgressiveByteListType = @import("progressive_byte_list.zig").ProgressiveByteListType;
+pub const isProgressiveByteListType = @import("progressive_byte_list.zig").isProgressiveByteListType;
 
 pub const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 pub const isByteVectorType = @import("byte_vector.zig").isByteVectorType;
@@ -35,6 +37,7 @@ pub const chunkDepth = chunk.chunkDepth;
 pub const getPathGindex = @import("path.zig").getPathGindex;
 
 pub const FixedProgressiveContainerType = @import("progressive_container.zig").FixedProgressiveContainerType;
+pub const StructProgressiveContainerType = @import("progressive_container.zig").StructProgressiveContainerType;
 pub const VariableProgressiveContainerType = @import("progressive_container.zig").VariableProgressiveContainerType;
 
 pub const FixedProgressiveListType = @import("progressive_list.zig").FixedProgressiveListType;
@@ -52,6 +55,7 @@ test {
     _ = @import("bit_list.zig");
     _ = @import("bit_vector.zig");
     _ = @import("byte_list.zig");
+    _ = @import("progressive_byte_list.zig");
     _ = @import("byte_vector.zig");
     _ = @import("list.zig");
     _ = @import("progressive_list.zig");
