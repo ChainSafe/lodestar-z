@@ -9,7 +9,7 @@ fn expectDigest(expected_hex: *const [64]u8, message: []const u8) !void {
     try std.testing.expectEqualStrings(expected_hex, &std.fmt.bytesToHex(digest, .lower));
 }
 
-test "hash matches known SHA-256 digests" {
+test "hash should match known SHA-256 digests" {
     try expectDigest("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "");
     try expectDigest("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "abc");
     try expectDigest(
@@ -18,7 +18,7 @@ test "hash matches known SHA-256 digests" {
     );
 }
 
-test "blst sha256 matches std for every message length up to five blocks" {
+test "blst sha256 should match std for every message length up to five blocks" {
     const block_len = StdSha256.block_length;
     var prng = std.Random.DefaultPrng.init(0);
     var message: [5 * block_len]u8 = undefined;
