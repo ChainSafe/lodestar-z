@@ -58,8 +58,13 @@ test "engine writable event re-arms only when send capacity grows" {
     try pair.pump();
     try std.testing.expectEqual(@as(usize, 0), countWritable(&pair, stream));
 
-    // A repeated WouldBlock at the armed watermark queues nothing.
+    // A repeated WouldBlock re-dirties the connection, because quiche queues DATA_BLOCKED for
+    // every write the connection window cannot fit; this stream-level block has nothing to send.
     try std.testing.expectError(error.WouldBlock, pair.client.write(stream, payload[4096..], false));
+    try std.testing.expect(pair.client.backlog());
+    var scratch: [constants.datagram_size_max]u8 = undefined;
+    try std.testing.expect(pair.client.sendOne(handles.client.index, pair.now, &scratch) == null);
+    pair.client.sent(handles.client.index, pair.now, true);
     try std.testing.expect(!pair.client.backlog());
 
     // A PING and a duplicate of it carry no credit.

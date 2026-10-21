@@ -496,14 +496,13 @@ fn readNative(self: *Connection, index: u8, id: u64, buf: []u8, effects: *Effect
 pub fn write(self: *Connection, index: u8, id: u64, bytes: []const u8, fin: bool, effects: *Effects) Error!usize {
     const written = self.writeNative(index, id, bytes, fin, effects) catch |err| {
         if (err == error.WouldBlock) {
-            effects.dirty = self.armWrite(index, id, bytes.len);
+            _ = self.armWrite(index, id, bytes.len);
         } else if (self.table.matches(index, id)) self.table.disarm(index);
         return err;
     };
-    effects.dirty = written > 0 or (fin and written == bytes.len);
     if (self.table.matches(index, id)) {
         if (written < bytes.len) {
-            effects.dirty = self.armWrite(index, id, bytes.len - written) or effects.dirty;
+            _ = self.armWrite(index, id, bytes.len - written);
         } else self.table.disarm(index);
     }
     return written;
@@ -521,6 +520,8 @@ fn writeNative(self: *Connection, index: u8, id: u64, bytes: []const u8, fin: bo
     }
     var code: u64 = 0;
     const rc = c.quiche_conn_stream_send(self.conn.?, id, bytes.ptr, bytes.len, fin, &code);
+    // quiche queues DATA_BLOCKED for any send the connection window cannot fit, whatever rc says.
+    effects.dirty = true;
     if (rc == c.QUICHE_ERR_STREAM_STOPPED) {
         self.table.markFinSent(index);
         if (self.table.entries[index].fin_received) self.finishStream(index, code, effects);
@@ -545,7 +546,10 @@ fn writeNative(self: *Connection, index: u8, id: u64, bytes: []const u8, fin: bo
 pub fn capacity(self: *Connection, index: u8, id: u64, effects: *Effects) Error!usize {
     assert(self.conn != null and self.table.matches(index, id));
     if (self.table.entries[index].stopped) return error.StreamStopped;
-    return (try self.streamResult(index, self.capacityNative(index, id), effects)) orelse error.WouldBlock;
+    const rc = self.capacityNative(index, id);
+    // quiche collects a complete stopped stream here, which can raise MAX_STREAMS credit and queue the frame.
+    if (rc == c.QUICHE_ERR_STREAM_STOPPED) effects.dirty = true;
+    return (try self.streamResult(index, rc, effects)) orelse error.WouldBlock;
 }
 
 fn streamResult(self: *Connection, index: u8, rc: isize, effects: *Effects) Error!?usize {

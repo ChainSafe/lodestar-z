@@ -1,6 +1,7 @@
 const schedule_test_support = @import("schedule_test_support.zig");
 const protocols_test = @import("protocols_test_support.zig");
 const std = @import("std");
+const constants = @import("constants.zig");
 const Engine = @import("quic/Engine.zig");
 const multistream = @import("wire/multistream.zig");
 const Negotiator = @import("negotiate.zig").Negotiator;
@@ -512,9 +513,13 @@ test "negotiator retains an accepted tag across blocked acknowledgement and dela
         try std.testing.expectEqual(@as(usize, 0), setup.listener.pump(&setup.pair.server, setup.pair.now, &supported, &outcomes));
         try std.testing.expect(!setup.pair.server.backlog());
     }
-    // A retry that blocks again at the armed watermark queues nothing.
+    // A retry that blocks again re-dirties the connection; this stream-level block sends nothing.
     setup.listener.streamReady(row, inbound);
     _ = setup.listener.pump(&setup.pair.server, setup.pair.now, &supported, &outcomes);
+    try std.testing.expect(setup.pair.server.backlog());
+    var scratch: [constants.datagram_size_max]u8 = undefined;
+    try std.testing.expect(setup.pair.server.sendOne(inbound.conn.index, setup.pair.now, &scratch) == null);
+    setup.pair.server.sent(inbound.conn.index, setup.pair.now, true);
     try std.testing.expect(!setup.pair.server.backlog());
     try setup.pair.pump();
     var received: usize = 0;

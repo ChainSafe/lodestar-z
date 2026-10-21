@@ -690,3 +690,92 @@ test "engine capacity on a reported closed connection leaves it retirable" {
     pair.client.releaseReported();
     try std.testing.expect(slot.state == .free);
 }
+
+test "engine blocked write marks the connection dirty after a flush" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+    const stream = try pair.client.openStream(handles.client);
+    var payload: [bulk_length]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% 5);
+    var attempts: usize = 0;
+    while (attempts < 64) : (attempts += 1) {
+        _ = pair.client.write(stream, &payload, false) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => return err,
+        };
+    }
+    try std.testing.expect(attempts < 64);
+    try pair.flush(&pair.client);
+    try std.testing.expect(pair.client.nextDirty() == null);
+
+    try std.testing.expectError(error.WouldBlock, pair.client.write(stream, &payload, false));
+    try std.testing.expect(pair.client.nextDirty() != null);
+}
+
+test "engine write on a stopped stream marks the connection dirty when the window is exhausted" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    binding.c.quiche_config_set_initial_max_data(pair.server.config.ptr, 16 * 1024);
+    const handles = try connectPair(&pair);
+    const stopped = try pair.client.openStream(handles.client);
+    var payload: [bulk_length]u8 = @splat(0x61);
+    try std.testing.expectEqual(@as(usize, 16), try pair.client.write(stopped, payload[0..16], false));
+    try pair.pump();
+    var storage: [8]Event = undefined;
+    const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    // Deliver the STOP_SENDING without advancing the client, so the engine has not yet recorded
+    // the stop and the write reaches quiche.
+    pair.server.shutdown(inbound, .read, 7);
+    try pair.flush(&pair.server);
+
+    const filler = try pair.client.openStream(handles.client);
+    var attempts: usize = 0;
+    while (attempts < 64) : (attempts += 1) {
+        _ = pair.client.write(filler, &payload, false) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => return err,
+        };
+    }
+    try std.testing.expect(attempts < 64);
+    try pair.flush(&pair.client);
+    try std.testing.expect(pair.client.nextDirty() == null);
+
+    try std.testing.expectError(error.StreamStopped, pair.client.write(stopped, payload[0..1], true));
+    try std.testing.expect(pair.client.nextDirty() != null);
+}
+
+test "engine capacity on a stopped complete stream marks the connection dirty" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    binding.c.quiche_config_set_initial_max_streams_bidi(pair.server.config.ptr, 1);
+    const handles = try connectPair(&pair);
+    const stream = try pair.client.openStream(handles.client);
+    try std.testing.expectEqual(@as(usize, 16), try pair.client.write(stream, "0123456789abcdef", true));
+    try pair.pump();
+    var storage: [8]Event = undefined;
+    const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    var scratch: [64]u8 = undefined;
+    var received: usize = 0;
+    for (0..8) |_| {
+        const read = try pair.server.read(inbound, &scratch);
+        received += read.len;
+        if (read.fin or read.len == 0) break;
+    }
+    try std.testing.expectEqual(@as(usize, 16), received);
+
+    // The client stops reading the server's half and acknowledges the resulting reset, all through
+    // one-way flushes so the server engine never advances and has not recorded the stop itself.
+    pair.client.shutdown(stream, .read, 9);
+    try pair.flush(&pair.client);
+    try pair.flush(&pair.server);
+    try pair.flush(&pair.client);
+    try pair.flush(&pair.server);
+    try std.testing.expect(pair.server.nextDirty() == null);
+
+    try std.testing.expectError(error.StreamStopped, pair.server.streamCapacity(inbound));
+    try std.testing.expect(pair.server.nextDirty() != null);
+}

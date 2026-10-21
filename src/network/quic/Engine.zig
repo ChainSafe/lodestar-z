@@ -465,11 +465,11 @@ pub fn streamReadable(self: *Engine, stream: StreamHandle) StreamError!bool {
     return target.slot.streamReadable(target.index, target.id);
 }
 
-/// Marks the connection dirty only when bytes were accepted or a FIN was queued. A WouldBlock
-/// or short write arms write interest at min(unwritten bytes, the connection's watermark
-/// ceiling); a writable event follows once the stream's send capacity reaches it. Arming may
-/// queue a blocked frame, so it marks the connection dirty; a repeated WouldBlock at the same
-/// watermark marks nothing.
+/// Marks the connection dirty whenever the write reaches quiche: besides accepted bytes or a
+/// queued FIN, quiche queues DATA_BLOCKED for any send the connection window cannot fit, even
+/// one it refuses. A WouldBlock or short write arms write interest at min(unwritten bytes, the
+/// connection's watermark ceiling); a writable event follows once the stream's send capacity
+/// reaches it.
 pub fn write(self: *Engine, stream: StreamHandle, bytes: []const u8, fin: bool) StreamError!usize {
     const target = try self.liveStream(stream);
     var effects: Connection.Effects = .{};
