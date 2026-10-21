@@ -79,7 +79,7 @@ jobs:
             for bin in /opt/fuzz/bin/fuzz-*; do
               t=${bin#/opt/fuzz/bin/fuzz-}
               seed=$(ls -d /opt/fuzz/corpus/$t-cmin/* /opt/fuzz/corpus/$t-initial/* 2>/dev/null | head -1)
-              if [ -n "$seed" ]; then "$bin" < "$seed"; else printf "\000" | "$bin"; fi \
+              if [ -n "$seed" ]; then LD_PRELOAD="$AFL_PRELOAD" "$bin" < "$seed"; else printf "\000" | LD_PRELOAD="$AFL_PRELOAD" "$bin"; fi \
                 && echo "ok   $t" || { echo "FAIL $t (exit $?)"; rc=1; }
             done
             exit $rc'

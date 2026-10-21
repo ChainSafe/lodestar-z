@@ -269,7 +269,7 @@ rename the output files to replace colons with underscores before committing:
 
 `Dockerfile.fuzz` (repository root) packages **every target** into one image,
 `ghcr.io/chainsafe/lodestar-z-fuzz`, for the ChainSafe fuzz platform. The
-image contains the instrumented binaries, `afl-fuzz` and the seed corpora; the
+image contains the ReleaseSafe instrumented binaries, the clock shim, `afl-fuzz` and the seed corpora; the
 Zig and LLVM toolchain stays in the build stage. `FUZZ_TARGET` picks the
 target a container runs.
 
@@ -356,7 +356,8 @@ crash with `--init`, or the target runs as PID 1, ignores `SIGABRT`, and the
 crash reports as `SIGTRAP`:
 
 ```sh
-docker run --rm -i --init --entrypoint /opt/fuzz/bin/fuzz-ssz_basic \
+docker run --rm -i --init -e LD_PRELOAD=/opt/fuzz/lib/libfuzz_clock.so \
+  --entrypoint /opt/fuzz/bin/fuzz-ssz_basic \
   lodestar-z-fuzz < /tmp/fuzz/failures/crash-<hash>
 ```
 
