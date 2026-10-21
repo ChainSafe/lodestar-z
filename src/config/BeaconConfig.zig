@@ -243,9 +243,9 @@ pub fn getMaxRequestBlobSidecars(self: *const BeaconConfig, fork: ForkSeq) u64 {
 
 /// Convert basis points to milliseconds into the slot.
 ///
-/// Integer rounding via `(x + 5000) / 10000`.
+/// Floor division, matching the spec's `get_slot_component_duration_ms`.
 pub fn getSlotComponentDurationMs(self: *const BeaconConfig, basis_points: u64) u64 {
-    return (basis_points * self.chain.SLOT_DURATION_MS + 5000) / 10000;
+    return basis_points * self.chain.SLOT_DURATION_MS / 10000;
 }
 
 /// Return the proposer reorg cutoff in milliseconds.
@@ -310,11 +310,6 @@ fn computeForkDataRoot(current_version: Version, genesis_validators_root: Root, 
     ct.phase0.ForkData.hashTreeRoot(&fork_data, out) catch unreachable;
 }
 
-test "getDomain" {
-    const root = [_]u8{0} ** 32;
-    var beacon_config = BeaconConfig.init(@import("./networks/mainnet.zig").chain_config, root);
-
-    const domain = try beacon_config.getDomain(100, DOMAIN_VOLUNTARY_EXIT, null);
-    const domain2 = try beacon_config.getDomain(100, DOMAIN_VOLUNTARY_EXIT, null);
-    try std.testing.expectEqualSlices(u8, domain, domain2);
+test {
+    _ = @import("BeaconConfig_test.zig");
 }
