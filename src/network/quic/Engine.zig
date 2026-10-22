@@ -726,17 +726,10 @@ pub fn sendOne(self: *Engine, index: u16, now: Now, out: []u8) ?Sent {
     if (index >= self.registry.slots.len) return null;
     const slot = &self.registry.slots[index];
     if (slot.state == .free or slot.state == .closed) return null;
-    // quiche answers a whole send call with Done when the stream at the head of its flushable
-    // queue yields no bytes, after rotating that stream to the back, so the next call can still
-    // carry the next stream's data. One call per stream covers every rotation.
-    var attempts: u16 = 0;
-    const datagram = while (attempts < bounds.streams_per_connection) : (attempts += 1) {
-        const emitted = slot.send(now.millis(), out) catch {
-            self.refresh(index);
-            return null;
-        };
-        if (emitted) |value| break value;
-    } else null;
+    const datagram = slot.send(now.millis(), out) catch {
+        self.refresh(index);
+        return null;
+    };
     if (datagram == null) {
         // The establishing pass acknowledges the server's Handshake flight, and quiche sends that
         // ACK regardless of congestion and then discards the Initial space's bytes in flight.
