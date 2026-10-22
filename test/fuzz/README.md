@@ -80,6 +80,13 @@ zig build -Doptimize=ReleaseSafe test-harnesses
 ./smoke-network.sh network_gossip_sessions network_processor_admission
 ```
 
+The build instruments quiche with LLVM sanitizer coverage (`RUSTFLAGS` set on
+quiche-zig's cargo step, so it is part of the step's cache key): its guards land
+in the section the AFL shim registers for the Zig code, so AFL sees edges inside
+quiche as well as in the engine. The quic_session harness went from a plateau of
+about 800 edges to over 5,000 within a minute of the first instrumented run.
+`-Dquiche_sancov=false` builds the plain library.
+
 ### BLS
 
 | Target | Binary | Description |

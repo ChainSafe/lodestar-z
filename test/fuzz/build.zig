@@ -27,6 +27,15 @@ pub fn build(b: *std.Build) void {
 
     const quiche_module = lodestar_z.module("network").import_table.get("quiche_zig:quiche").?;
     std.debug.assert(quiche_module.link_objects.items.len == 1);
+    const quiche_sancov = b.option(bool, "quiche_sancov", "Instrument quiche with LLVM sanitizer coverage so AFL sees its edges (default true)") orelse true;
+    if (quiche_sancov) {
+        // quiche-zig offers no flag option, and RUSTFLAGS from the shell would not enter the cargo
+        // step's cache manifest, so set it on the step: the guards land in the same section the
+        // AFL shim registers for the Zig code.
+        const libquiche = quiche_module.link_objects.items[0].static_path;
+        const cargo = libquiche.generated.file.step.cast(std.Build.Step.Run) orelse @panic("quiche is no longer built by a run step");
+        cargo.setEnvironmentVariable("RUSTFLAGS", "-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-trace-pc-guard -Cllvm-args=-sanitizer-coverage-prune-blocks=0");
+    }
     // A harness links its bitcode, so it takes the network module's own objects (the accelerated
     // gossip SHA-256 object where the target has one) explicitly, as it takes quiche's.
     const network_objects = lodestar_z.module("network").link_objects.items;
@@ -212,6 +221,7 @@ pub fn build(b: *std.Build) void {
             });
             test_mod.addImport("network", lodestar_z.module("network"));
             test_mod.addImport("gossip_fixture", gossip_fixture);
+            if (quiche_sancov) test_mod.addCSourceFile(.{ .file = b.path("tools/sancov_stubs.c") });
             const tests = b.addTest(.{ .root_module = test_mod, .filters = &.{"fuzz harness"} });
             test_harnesses.dependOn(&b.addRunArtifact(tests).step);
         }
