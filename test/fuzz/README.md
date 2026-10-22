@@ -200,9 +200,9 @@ instance queue of a target and minimizes it into `corpus/<target>-cmin`; use it
 before a restart that needs fresh seeds, such as after a harness change, not on
 a schedule.
 
-`overnight.sh [target[=instances]...]` starts the loop detached with the
-campaign defaults (the five stateful harnesses, `TIMEOUT_MS=1000`) and logs to
-`logs/overnight.log`.
+To keep a campaign running after the shell exits, start the loop detached, for
+example `TIMEOUT_MS=1000 setsid nohup ./fuzz-loop.sh network_quic_session=2 >>
+logs/loop.log 2>&1 < /dev/null &`; `--status` and `--stop` work from any shell.
 
 ## Finding Crashes and Hangs
 
@@ -283,7 +283,7 @@ rename the output files to replace colons with underscores before committing:
 | Directory | Contents |
 |-----------|----------|
 | `corpus/<target>-initial/` | Hand-crafted seeds + spec test vectors |
-| `corpus/<target>-cmin/` | Output of `afl-cmin` (edge-deduplicated corpus) |
+| `corpus/<target>-cmin/` | Output of `afl-cmin` (edge-deduplicated corpus); tracked for the SSZ and BLS targets, local for the network targets |
 
 ## Container image
 

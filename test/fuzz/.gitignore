@@ -12,3 +12,8 @@ corpus/*-initial/default-*
 
 # Archived campaign outputs from overnight restarts
 afl-out-run*/
+
+# Local campaign tooling and the minimized network corpora --cmin writes from the queues
+overnight.sh
+corpus/network_*-cmin/
+corpus/discv5_wire-cmin/

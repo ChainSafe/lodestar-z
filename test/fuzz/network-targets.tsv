@@ -1,4 +1,4 @@
-network_wire	cmin	131072	none
+network_wire	initial	131072	none
 network_reqresp	initial	131072	snappy
 network_gossip	initial	131072	snappy
 network_gossip_lifecycle	initial	512	none
