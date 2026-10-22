@@ -15,7 +15,7 @@ export AFL_AUTORESUME="${AFL_AUTORESUME:-1}"
 source "${FUZZ_DIR}/network-targets.sh"
 source "${FUZZ_DIR}/fuzz-env.sh"
 
-SSZ_TARGETS=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists ssz_chunked_leaf_set)
+SSZ_TARGETS=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists ssz_chunked_leaf_set ssz_wire_types)
 BLS_TARGETS=(bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig)
 DISCV5_TARGETS=(discv5_wire)
 ALL_TARGETS=("${SSZ_TARGETS[@]}" "${BLS_TARGETS[@]}" "${DISCV5_TARGETS[@]}" "${NETWORK_TARGETS[@]}")

@@ -16,9 +16,14 @@ for SSZ deserialization in lodestar-z.
 | `ssz_containers` | `fuzz-ssz_containers` | Fork, Checkpoint, Eth1Data, Attestation, etc. |
 | `ssz_lists` | `fuzz-ssz_lists` | FixedList(Uint64/32/Bool), VariableList(ByteList) |
 | `ssz_chunked_leaf_set` | `fuzz-ssz_chunked_leaf_set` | FixedList(Uint64, chunked_leaf=true): replay set/commit/get op stream, assert root equivalence against fromValue(reference) |
+| `ssz_wire_types` | `fuzz-ssz_wire_types` | Every consensus type that arrives over gossip or reqresp, phase0 through gloas (blocks, blinded blocks, blob and data column sidecars, attestations, aggregates, slashings, exits, sync messages, light client updates, payload envelopes and bids): the value decoder, the serialized validator and the tree decoder must agree on acceptance, re-encoded bytes and hash tree root, through a leak-checking allocator. Selector table in `tools/ssz_wire_types.zig` |
 
 Each SSZ input is `[selector_byte][ssz_data...]`. The first byte selects
 which SSZ type to test within the target. See source files for the mapping.
+`zig build extract-corpus` writes the `-initial` seed directories from the
+downloaded spec vectors (`zig build run:download_spec_tests` at the repository
+root); `ssz_wire_types` gets one default-value seed per selector plus every
+mainnet `ssz_static` vector up to 1 MiB.
 
 ### Network (stateful)
 

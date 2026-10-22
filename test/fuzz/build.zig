@@ -48,6 +48,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     gossip_fixture.addImport("network", lodestar_z.module("network"));
+    const ssz_wire_types = b.createModule(.{
+        .root_source_file = b.path("tools/ssz_wire_types.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ssz_wire_types.addImport("consensus_types", lodestar_z.module("consensus_types"));
     gossip_fixture.addImport("snappy", dep_snappy.module("snappy"));
     const seeds_module = b.createModule(.{
         .root_source_file = b.path("tools/network_corpus.zig"),
@@ -75,6 +81,7 @@ pub fn build(b: *std.Build) void {
             "snappy",
             dep_snappy.module("snappy"),
         );
+        extract_mod.addImport("ssz_wire_types", ssz_wire_types);
         const extract_exe = b.addExecutable(.{
             .name = "extract_spec_corpus",
             .root_module = extract_mod,
@@ -117,6 +124,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ssz_chunked_leaf_set", .extra_libs = &.{dep_hashtree.artifact("hashtree")} },
         .{ .name = "ssz_nested_opaque_proof", .extra_libs = &.{dep_hashtree.artifact("hashtree")} },
         .{ .name = "ssz_opaque_roundtrip", .extra_libs = &.{dep_hashtree.artifact("hashtree")} },
+        .{ .name = "ssz_wire_types", .extra_libs = &.{dep_hashtree.artifact("hashtree")} },
         .{ .name = "bls_public_key", .extra_libs = &.{dep_blst.artifact("blst")} },
         .{ .name = "bls_signature", .extra_libs = &.{dep_blst.artifact("blst")} },
         .{ .name = "bls_aggregate_pk", .extra_libs = &.{dep_blst.artifact("blst")} },
@@ -155,6 +163,7 @@ pub fn build(b: *std.Build) void {
     }
     const build_network = b.step("build-network", "Build every network harness from network-targets.tsv");
     const test_harnesses = b.step("test-harnesses", "Test stateful harness ownership and reset");
+    test_harnesses.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ssz_wire_types })).step);
 
     // Deterministic process clock preloaded into every harness run (see pkg/afl++/fuzz_clock.c).
     const afl_pkg = b.dependencyFromBuildZig(afl, .{});
@@ -193,6 +202,7 @@ pub fn build(b: *std.Build) void {
         lib_mod.addImport("network_fixture", network_fixture);
         lib_mod.addImport("snappy", dep_snappy.module("snappy"));
         lib_mod.addImport("gossip_fixture", gossip_fixture);
+        lib_mod.addImport("ssz_wire_types", ssz_wire_types);
 
         if (std.mem.eql(u8, fuzzer.name, "network_reqresp_session") or std.mem.eql(u8, fuzzer.name, "network_gossip_sessions")) {
             const test_mod = b.createModule(.{
