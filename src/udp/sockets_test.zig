@@ -3,6 +3,7 @@ const Sockets = @import("sockets.zig").Sockets;
 const Address = @import("address.zig").Address;
 const net = std.Io.net;
 const fault_io = @import("fault_io");
+const waitForDatagram = @import("socket_test_support").waitForDatagram;
 
 const loopbacks: Sockets.Bindings = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
 
@@ -156,7 +157,10 @@ test "UDP partial wait startup failure cancels the first task and leaves sockets
     var buffer: [16]u8 = undefined;
     try std.testing.expectError(error.ConcurrencyUnavailable, sockets.receiveTimeout(io, &buffer, .none));
     try std.testing.expectEqual(@as(u8, 2), Provider.starts);
-    for (sockets.values) |target| try target.?.send(std.testing.io, &target.?.address, "retained");
+    for (sockets.values) |target| {
+        try target.?.send(std.testing.io, &target.?.address, "retained");
+        try waitForDatagram(target.?);
+    }
     for (0..2) |_| {
         const packet = (try readAny(&sockets, std.testing.io, &buffer)).?;
         try std.testing.expectEqualStrings("retained", packet.data);
@@ -172,7 +176,10 @@ test "UDP dual-stack timeout joins waits and ready reads need no concurrency" {
     var buffer: [16]u8 = undefined;
     try std.testing.expectEqual(null, try readAny(&sockets, io, &buffer));
     try std.testing.expectError(error.Timeout, sockets.receiveTimeout(io, &buffer, timeout(0)));
-    for (sockets.values) |target| try target.?.send(io, &target.?.address, "ready");
+    for (sockets.values) |target| {
+        try target.?.send(io, &target.?.address, "ready");
+        try waitForDatagram(target.?);
+    }
     for (0..2) |_| {
         const packet = try sockets.receiveTimeout(io, &buffer, timeout(0));
         try std.testing.expectEqualStrings("ready", packet.data);
@@ -278,6 +285,7 @@ test "UDP batches report the exact prefix before a failing datagram and resume a
     try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 1, .failure = null }, sendMany(&sockets, std.testing.io, messages[2..]));
     var buffer: [16]u8 = undefined;
     for ([_][]const u8{ "first", "third" }) |expected| {
+        try waitForDatagram(sockets.primary());
         try std.testing.expectEqualStrings(expected, (try readAny(&sockets, std.testing.io, &buffer)).?.data);
     }
     try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
@@ -303,6 +311,7 @@ test "UDP native single batch and ready receive check cancellation before I/O" {
     var buffer: [16]u8 = undefined;
     try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
     try sockets.sendTo(std.testing.io, message.to, "retained", 16);
+    try waitForDatagram(sockets.primary());
     var ready: [2]bool = .{ true, false };
     try std.testing.expectError(error.Canceled, sockets.receiveReady(io, &buffer, &ready));
     try std.testing.expectEqual([2]bool{ true, false }, ready);
@@ -363,6 +372,7 @@ test "UDP ready reads alternate marked families across turns and clear each one 
     for ([_][]const []const u8{ &.{ "4a", "6a", "4b" }, &.{ "6b", "4c" } }) |turn| {
         var ready: [2]bool = @splat(true);
         for (turn) |expected| {
+            try waitForDatagram(if (expected[0] == '4') ip4 else ip6);
             const message = (try sockets.receiveReady(std.testing.io, &buffer, &ready)).?;
             try std.testing.expectEqualStrings(expected, message.data);
             try std.testing.expectEqual([2]bool{ true, true }, ready);
@@ -373,6 +383,7 @@ test "UDP ready reads alternate marked families across turns and clear each one 
         }
     }
     try ip6.send(std.testing.io, &ip6.address, "6c");
+    try waitForDatagram(ip6);
     var ready: [2]bool = .{ true, false };
     try std.testing.expectEqual(null, try sockets.receiveReady(std.testing.io, &buffer, &ready));
     try std.testing.expectEqual([2]bool{ false, false }, ready);
@@ -388,7 +399,10 @@ test "UDP ready reads alternate marked families across turns and clear each one 
 test "UDP ready reads leave a provider that replaces timed receives on its own receive" {
     var sockets = try Sockets.bind(std.testing.io, loopbacks);
     defer sockets.close(std.testing.io);
-    for (sockets.values) |target| try target.?.send(std.testing.io, &target.?.address, "provider");
+    for (sockets.values) |target| {
+        try target.?.send(std.testing.io, &target.?.address, "provider");
+        try waitForDatagram(target.?);
+    }
     var faults: fault_io = .{};
     var buffer: [16]u8 = undefined;
     var ready: [2]bool = .{ true, false };

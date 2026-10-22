@@ -12,6 +12,7 @@ const lookup_batch = @import("lookup_batch.zig");
 const message = discv5.wire.message;
 const packet = discv5.wire.packet;
 const types = discv5.types;
+const waitForDatagram = @import("socket_test_support").waitForDatagram;
 
 test "lookup batch rotates priority under one-call contention" {
     var network: Network = undefined;
@@ -355,6 +356,7 @@ const Network = struct {
             },
         });
         try self.remote.sendTo(std.testing.io, discv5.types.Address.fromNetwork(self.transport.sockets.primary().address), bytes, discv5.wire.constants.packet_size_max);
+        try waitForDatagram(self.transport.sockets.primary());
     }
 
     fn challenge(self: *Network, request: []const u8) !void {
@@ -370,6 +372,7 @@ const Network = struct {
             .enr_sequence = 0,
         }, null);
         try self.remote.sendTo(std.testing.io, discv5.types.Address.fromNetwork(self.transport.sockets.primary().address), bytes, discv5.wire.constants.packet_size_max);
+        try waitForDatagram(self.transport.sockets.primary());
     }
 };
 

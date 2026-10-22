@@ -2,6 +2,7 @@ const std = @import("std");
 const FaultIo = @import("fault_io");
 const Sockets = @import("sockets.zig").Sockets;
 const Address = @import("address.zig").Address;
+const waitForDatagram = @import("socket_test_support").waitForDatagram;
 const payload_max = 1500;
 
 const net = std.Io.net;
@@ -249,8 +250,11 @@ test "dual-stack UDP ready reads reject a truncated datagram and keep reading it
     try target.sendTo(std.testing.io, local[0].?, "ip4", payload_max);
     try target.sendTo(std.testing.io, local[1].?, "ip6", payload_max);
     var ready: [2]bool = @splat(true);
+    try waitForDatagram(target.values[0].?);
     try std.testing.expectError(error.DatagramTooLarge, target.receiveReadyDatagram(std.testing.io, &buffer, &ready));
+    try waitForDatagram(target.values[1].?);
     try std.testing.expectEqualSlices(u8, "ip6", (try target.receiveReadyDatagram(std.testing.io, &buffer, &ready)).?.bytes);
+    try waitForDatagram(target.values[0].?);
     try std.testing.expectEqualSlices(u8, "ip4", (try target.receiveReadyDatagram(std.testing.io, &buffer, &ready)).?.bytes);
     try std.testing.expectEqual([2]bool{ true, true }, ready);
     try std.testing.expectEqual(null, try target.receiveReadyDatagram(std.testing.io, &buffer, &ready));
