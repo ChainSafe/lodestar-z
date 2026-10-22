@@ -151,6 +151,7 @@ test "transport drops replies its destination refuses and keeps the step's expir
             &test_support.sealEntropy(0x33),
         );
         _ = try pair.transport_b.startCall(std.testing.io, endpoint(&pair.record_a), &pair.record_a, &request, try Transport.monotonicMilliseconds(std.testing.io));
+        try waitForDatagram(pair.transport_a.sockets.primary());
         // A challenge answers the cold request and a PONG the established one.
         var host = fault_io{ .send = .{ .socket = pair.transport_a.sockets.primary().handle } };
         var expired: [4]CallTable.Expired = undefined;
