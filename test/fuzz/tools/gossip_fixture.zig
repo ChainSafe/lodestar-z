@@ -157,7 +157,10 @@ pub const Harness = struct {
         for (local_topics) |topic| try support.subscribe(&self.g, topic);
     }
 
-    pub fn deinit(self: *Harness) void {
+    /// Closes every peer and drains the engine, then checks that every pooled resource came
+    /// back. A fork child stops here: the kernel reclaims its copy of the snapshot, whereas
+    /// freeing it fills a hundred megabytes with undefined bytes and copies every page.
+    pub fn settle(self: *Harness) void {
         const g = &self.g;
         for (0..peers_max) |index| self.closePeer(index);
         g.messages.validation.clear(&g.messages.store, &g.peers);
@@ -172,6 +175,12 @@ pub const Harness = struct {
         assert(g.messages.store.free_pages == g.messages.store.next.len);
         for (g.peers.rows) |peer| assert(peer.pins == 0);
         assert(g.recovery.len == 0);
+        assert(g.sessions.deliveries.available == g.sessions.deliveries.slots.len);
+        assert(g.sessions.receive_pool.free_pages == g.sessions.receive_pool.next.len);
+    }
+
+    pub fn deinit(self: *Harness) void {
+        self.settle();
         self.g.message_sink = null;
         self.g.deinit();
     }

@@ -296,7 +296,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     pumpVerdicts(&processor_table, &harness, processor_table.cells.len);
     checkProcessor(&processor_table);
     assert(processor_table.diag.occupied == 0);
-    // The fork child owns a copy of the snapshot, so its teardown checks cleanup for this input.
+    // The fork child ends with the teardown checks; the kernel reclaims its copy of the snapshot.
     processor_table.deinit();
-    harness.deinit();
+    harness.settle();
 }

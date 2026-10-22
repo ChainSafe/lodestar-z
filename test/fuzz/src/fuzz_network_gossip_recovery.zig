@@ -93,6 +93,6 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
         if (steps % 8 == 7) harness.checkInvariants();
     }
     harness.checkInvariants();
-    // The fork child owns a copy of the snapshot, so its teardown checks cleanup for this input.
-    harness.deinit();
+    // The fork child ends with the teardown checks; the kernel reclaims its copy of the snapshot.
+    harness.settle();
 }

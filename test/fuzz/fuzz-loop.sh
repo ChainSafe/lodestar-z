@@ -48,7 +48,7 @@ usage() {
     echo ""
     echo "Environment:"
     echo "  INSTANCES=1    instances per target without an explicit =count"
-    echo "  TIMEOUT_MS=    afl-fuzz -t value; entries exceeding it are skipped, not fatal"
+    echo "  TIMEOUT_MS=    afl-fuzz -t value; seeds exceeding it are skipped, not fatal"
     echo "  NO_FAKE_CLOCK=1      run without the preloaded process clock (snapshots then age)"
     echo "  FUZZ_CLOCK_STEP_NS=  nanoseconds the process clock advances per read (default 0)"
     exit 0
@@ -178,7 +178,8 @@ start_target() {
     if [[ -n "${NETWORK_INPUT_MAX[$target]:-}" ]]; then extra_args+=(-G "${NETWORK_INPUT_MAX[$target]}"); fi
     local dictionary="${FUZZ_DIR}/dictionaries/${target}.dict"
     if [ -f "$dictionary" ]; then extra_args+=(-x "$dictionary"); fi
-    if [ -n "${TIMEOUT_MS:-}" ]; then extra_args+=(-t "${TIMEOUT_MS}+"); fi
+    # AFL++ 4.09c stores the slowest seed's exec_us as the -t ...+ timeout in ms, a thousandfold too long.
+    if [ -n "${TIMEOUT_MS:-}" ]; then extra_args+=(-t "${TIMEOUT_MS}"); fi
 
     local i
     for ((i = 0; i < count; i++)); do
@@ -215,7 +216,7 @@ run() {
                 if [ -n "${NO_FAKE_CLOCK:-}" ]; then
                     echo "Warning: ${target} runs in snapshot mode without the process clock; its connected snapshot ages between forks." >&2
                 else
-                    echo "Error: ${target} runs in snapshot mode and needs zig-out/lib/libfuzz_clock.so; build it with 'zig build build-network' (NO_FAKE_CLOCK=1 overrides)" >&2
+                    echo "Error: ${target} runs in snapshot mode and needs zig-out/lib/libfuzz_clock.so; build it with 'zig build -Doptimize=ReleaseSafe build-network' (NO_FAKE_CLOCK=1 overrides)" >&2
                     exit 1
                 fi
             fi
@@ -269,7 +270,7 @@ status() {
             total_crashes=$((total_crashes + ${crashes:-0}))
             total_hangs=$((total_hangs + ${hangs:-0}))
             printf '%-28s %-5s %-5s %10s %8s %6s %7s %8s %7s %6s %12s\n' "$target" "$inst" "$state" \
-                "$(stat_field "$stats" execs_done)" "$(stat_field "$stats" execs_per_sec)" \
+                "$(stat_field "$stats" execs_done)" "$(stat_field "$stats" execs_ps_last_min)" \
                 "$(stat_field "$stats" corpus_count)" "$(stat_field "$stats" pending_favs)" \
                 "$(stat_field "$stats" stability)" "$crashes" "$hangs" "$last"
         done

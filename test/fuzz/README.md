@@ -38,10 +38,13 @@ the harness's whole-table accounting.
 
 These harnesses link both snappy and quiche where needed (`all` in `network-targets.tsv`)
 and run in snapshot mode (`snapshot` in the same table): `zig_fuzz_init` builds the
-protocol state once, including the QUIC handshake, and the fork server starts after it, so
-every input runs in a fresh fork of that state, runs the harness teardown checks on its own
-copy, and exits. Nothing is rebuilt per input and every input sees the identical starting
-state.
+protocol state once, including the QUIC handshake, and the fork server starts after it.
+Every input runs in a fresh fork of that state and checks cleanup on its own copy.
+The gossip fixture closes peers and checks pooled resources without freeing its large
+allocations: the kernel reclaims them when the child exits, avoiding the copy-on-write
+cost of filling freed memory with undefined bytes. The processor, QUIC and reqresp
+instances still run their deinitializers. Nothing is rebuilt per input and every input
+sees the identical starting state.
 
 quiche keeps its timers on the libc clock, so every harness run preloads
 `zig-out/lib/libfuzz_clock.so` (`pkg/afl++/fuzz_clock.c`, built with the harnesses): a
@@ -163,9 +166,11 @@ Examples:
   ./fuzz-loop.sh --stop                                   # stop everything under afl-out
 ```
 
-`TIMEOUT_MS` passes `-t <ms>+` so a queue entry that exceeds it is skipped
-rather than filed as a hang; the stateful harnesses run at tens of executions
-per second, where AFL's auto-scaled timeout files load spikes as hangs.
+`TIMEOUT_MS` passes `-t <ms>` so a seed that exceeds it is skipped rather
+than fatal; the stateful harnesses run at tens of executions per second, where
+AFL's auto-scaled timeout files load spikes as hangs. The loop never adds AFL's
+`+` suffix: AFL++ 4.09c stores the slowest seed's exec time in microseconds as
+the millisecond timeout, a thousandfold too long.
 
 Each instance records its pid with the process start time from `/proc`, so
 `--stop` and the already-running check never act on a reused pid. `--cmin`
