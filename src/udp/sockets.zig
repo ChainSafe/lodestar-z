@@ -342,6 +342,7 @@ pub const Sockets = struct {
 
     pub fn sendTo(self: *const Sockets, io: std.Io, destination: Address, bytes: []const u8, payload_max: usize) SendError!void {
         if (bytes.len > payload_max) return error.DatagramTooLarge;
+        if (destination.port() == 0) return error.DestinationRefused;
         const address = destination.toNetwork();
         const family: usize = if (destination == .ip4) 0 else 1;
         const socket = self.values[family] orelse return error.AddressFamilyUnsupported;
@@ -353,18 +354,19 @@ pub const Sockets = struct {
     }
 
     /// Sends in input order, stopping at the first error with its exact accepted prefix.
-    /// A later oversized entry is checked only after sending its valid prefix; earlier I/O
+    /// A later invalid entry is checked only after sending its valid prefix; earlier I/O
     /// failures win. Larger slices use bounded scratch chunks.
     pub fn sendMany(self: *const Sockets, io: std.Io, messages: []const Outgoing, payload_max: usize, scratch: *BatchScratch) SendOutcome {
         var begin: usize = 0;
         while (begin < messages.len) {
             if (messages[begin].bytes.len > payload_max) return .{ .sent = begin, .failure = error.DatagramTooLarge };
+            if (messages[begin].to.port() == 0) return .{ .sent = begin, .failure = error.DestinationRefused };
             const family: usize = if (messages[begin].to == .ip4) 0 else 1;
             const socket = self.values[family] orelse return .{ .sent = begin, .failure = error.AddressFamilyUnsupported };
             if (!self.native[family] and compat.threadedSend(io)) return .{ .sent = begin, .failure = error.IncompatibleProvider };
             var end = begin + 1;
             const limit = begin + @min(BatchScratch.capacity, messages.len - begin);
-            while (end < limit and std.meta.activeTag(messages[end].to) == std.meta.activeTag(messages[begin].to) and messages[end].bytes.len <= payload_max) : (end += 1) {}
+            while (end < limit and std.meta.activeTag(messages[end].to) == std.meta.activeTag(messages[begin].to) and messages[end].bytes.len <= payload_max and messages[end].to.port() != 0) : (end += 1) {}
             const run = messages[begin..end];
             const outcome = if (native_sockets and self.native[family] and compat.threadedSend(io)) blk: {
                 scratch.* = .{ .native = undefined };
