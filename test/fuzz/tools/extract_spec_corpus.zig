@@ -726,8 +726,12 @@ pub fn main(init: std.process.Init) !void {
         total += n;
     }
 
-    // ssz_wire_types
+    // ssz_wire_types: every seed here is generated, so a fresh checkout has no directory yet.
     {
+        cwd.createDirPath(io, "corpus/ssz_wire_types-initial") catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
         var dir = try cwd.openDir(
             io,
             "corpus/ssz_wire_types-initial",
