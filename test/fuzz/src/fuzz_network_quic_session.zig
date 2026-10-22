@@ -22,6 +22,8 @@ const assert = std.debug.assert;
 const input_max = 4096;
 const steps_max = 1024;
 const streams_max = 16;
+const extra_max = 1;
+const dials_max = 1;
 const write_max = 4096;
 
 var pair: support.Pair = .{};
@@ -30,6 +32,30 @@ const Handles = struct { client: Engine.Handle, server: Engine.Handle };
 var session: Handles = undefined;
 
 const Side = enum { client, server };
+
+/// Connections dialed during the input, one table per side: the client's dial handle and the
+/// server's accepted one. Each handshake verifies a secp256k1 identity signature per side, which
+/// costs more than the rest of an input, so `dials_max` bounds the handshakes that complete;
+/// further dial attempts hit the dialing and connection limits and cost nothing.
+const Extra = struct {
+    handles: [extra_max]?Engine.Handle = @splat(null),
+
+    fn add(self: *Extra, conn: Engine.Handle) void {
+        for (&self.handles) |*slot| if (slot.* == null) {
+            slot.* = conn;
+            return;
+        };
+    }
+
+    fn pick(self: *const Extra, at: usize) ?Engine.Handle {
+        return self.handles[at % extra_max];
+    }
+
+    fn take(self: *Extra, at: usize) ?Engine.Handle {
+        defer self.handles[at % extra_max] = null;
+        return self.handles[at % extra_max];
+    }
+};
 
 /// Moves the preloaded process clock (pkg/afl++/fuzz_clock.c) with the pair's logical clock so
 /// quiche's timers track the harness; without the shim the symbol is null and only the pair moves.
@@ -65,20 +91,41 @@ fn connHandle(handles: anytype, side: Side) Engine.Handle {
     return if (side == .client) handles.client else handles.server;
 }
 
-/// Polls one side's events, remembering peer-opened streams.
-fn poll(side: Side, streams: *Streams) void {
+/// Polls one side's events, remembering peer-opened streams and accepted connections.
+fn poll(side: Side, streams: *Streams, extra: *Extra) void {
     var storage: [64]Event = undefined;
     for (pair.events(engine(side), &storage)) |event| switch (event) {
         .stream_opened => |stream| streams.add(stream),
+        .connected => |connected| if (connected.direction == .inbound) extra.add(connected.conn),
         else => {},
     };
+}
+
+/// Read-only views the host consults between operations; none may fault on a stale handle.
+fn query(side: Side, conn: Engine.Handle, stream: ?StreamHandle) void {
+    const e = engine(side);
+    _ = e.peerId(conn);
+    _ = e.peerAddress(conn);
+    _ = e.receiveEndpoint(conn);
+    _ = e.dialAnswered(conn);
+    _ = e.resourceSnapshot();
+    _ = e.metricsSnapshot();
+    _ = e.nextDeadlineNs();
+    _ = e.eventsPending();
+    _ = e.backlog();
+    _ = e.dirtyCount();
+    if (stream) |handle| {
+        _ = e.route(handle);
+        _ = e.streamWaits(handle);
+        _ = e.streamReadable(handle) catch {};
+    }
 }
 
 fn checkInvariants() void {
     for ([_]*Engine{ &pair.client, &pair.server }) |e| {
         e.checkInvariants(pair.now);
         assert(e.registry.routes.count <= e.registry.active_len);
-        assert(e.registry.active_len <= 4);
+        assert(e.registry.active_len <= 2);
     }
 }
 
@@ -86,7 +133,7 @@ fn checkInvariants() void {
 /// the same established connection. The loop freezes the process clock so quiche's timers do
 /// not age that snapshot.
 pub export fn zig_fuzz_init() callconv(.c) void {
-    const limits: Engine.Limits = .{ .connections_max = 4, .handshaking_max = 2, .handshaking_per_source_max = 2, .dialing_max = 2 };
+    const limits: Engine.Limits = .{ .connections_max = 2, .handshaking_max = 1, .handshaking_per_source_max = 1, .dialing_max = 1 };
     pair.init(limits, limits) catch @panic("QUIC pair initialization failed");
     for (&pattern, 0..) |*byte, i| byte.* = @truncate(i *% 31);
     const fresh = support.connectPair(&pair) catch @panic("QUIC handshake failed");
@@ -96,6 +143,8 @@ pub export fn zig_fuzz_init() callconv(.c) void {
 pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     if (len == 0 or len > input_max) return;
     var streams: [2]Streams = .{ .{}, .{} };
+    var extra: [2]Extra = .{ .{}, .{} };
+    var dials: usize = 0;
     var read_buffer: [write_max]u8 = undefined;
     var datagram: [network.constants.datagram_size_max]u8 = undefined;
     var output: [network.constants.datagram_size_max]u8 = undefined;
@@ -104,11 +153,11 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     while (cursor.next()) |op| : (steps += 1) {
         if (steps == steps_max) break;
         const arg = cursor.byte();
-        trace = .{ .step = steps, .op = op % 13, .arg = arg };
+        trace = .{ .step = steps, .op = op % 19, .arg = arg };
         const side: Side = if (arg & 1 == 1) .server else .client;
         const other: Side = if (side == .client) .server else .client;
         const at = arg / 2;
-        switch (op % 13) {
+        switch (op % 19) {
             0 => if (engine(side).openStream(connHandle(session, side))) |stream| {
                 streams[@intFromEnum(side)].add(stream);
                 _ = engine(side).write(stream, pattern[0 .. 1 + at % 64], at & 1 == 1) catch {};
@@ -117,7 +166,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
                 const count = 1 + @as(usize, cursor.byte()) * 16;
                 _ = engine(side).write(stream, pattern[0..@min(count, write_max)], at & 8 == 8) catch {};
             },
-            2 => poll(side, &streams[@intFromEnum(side)]),
+            2 => poll(side, &streams[@intFromEnum(side)], &extra[@intFromEnum(side)]),
             3 => if (streams[@intFromEnum(side)].pick(at)) |stream| {
                 const result = engine(side).read(stream, read_buffer[0 .. 1 + @as(usize, at) * 8]) catch continue;
                 assert(result.len <= 1 + @as(usize, at) * 8);
@@ -162,6 +211,30 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
                 _ = engine(side).read(stream, &read_buffer) catch {};
                 _ = engine(side).write(stream, pattern[0..1], false) catch {};
             },
+            13 => if (at == 0 and (dials < dials_max or extra[0].pick(at) != null)) {
+                if (pair.dial()) |conn| {
+                    dials += 1;
+                    extra[0].add(conn);
+                } else |_| {}
+            },
+            14 => if (extra[@intFromEnum(side)].pick(at)) |conn| {
+                if (engine(side).openStream(conn)) |stream| {
+                    streams[@intFromEnum(side)].add(stream);
+                    _ = engine(side).write(stream, pattern[0 .. 1 + at % 64], at & 1 == 1) catch {};
+                } else |_| {}
+            },
+            15 => pair.drop_to_address = switch (at % 3) {
+                0 => null,
+                1 => support.client_address,
+                else => support.server_address,
+            },
+            16 => if (extra[@intFromEnum(side)].take(at)) |conn| {
+                if (at & 2 == 2) {
+                    _ = engine(side).abandon(conn);
+                } else _ = engine(side).close(conn, at);
+            },
+            17 => if (at & 2 == 2) engine(side).closeAll() else engine(side).stopAdmission(),
+            18 => query(side, extra[@intFromEnum(side)].pick(at) orelse connHandle(session, side), streams[@intFromEnum(side)].pick(at)),
             else => unreachable,
         }
         checkInvariants();

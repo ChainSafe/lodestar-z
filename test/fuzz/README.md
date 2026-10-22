@@ -39,7 +39,7 @@ the harness's whole-table accounting.
 | `network_gossip_recovery` | IHAVE floods, announced-then-delivered ids, IWANT, promise expiry and cancellation, reconnects with the same identity, penalties and decay | as above, with promise reserves exercised at capacity |
 | `network_processor_admission` | `Gossipsub` feeding a `GossipProcessor`: mixed kinds, sources and sizes, newest-first eviction, dependency checks and waits, claim, finish, report, verdict pumping, expiry, slot changes, `dropQueued` and `dropPeer` | per-kind items and bytes, per-source charges, state counts, execution credits, store entries, empty table at close |
 | `network_reqresp_session` | Two `ReqResp` instances per side over an in-process QUIC pair: requests, responses, error responses, finish, cancel, serving retain and release, raw request and response bytes with arbitrary splits and FIN placement, stream resets, clock advances for every timeout | route invariant, slot and event accounting, no pending request after `cancelAll` |
-| `network_quic_session` | Two engines through a real handshake, then stream opens, writes, reads, capacity polls, shutdowns, closes, route binds, hostile datagrams on the established path, time jumps and connection close | engine invariants after every step, route and connection counts, clean teardown |
+| `network_quic_session` | Two engines through a real handshake, then stream opens, writes, reads, capacity polls, shutdowns, closes, route binds, hostile datagrams on the established path, time jumps, connection close, one further dial per input with its handshake under the same operations (more attempts hit the dialing and connection limits), streams on it, abandon and close, stop admission, close all, a datagram-loss policy toward either address, and the host's read-only queries | engine invariants after every step, route and connection counts, clean teardown |
 
 These harnesses link both snappy and quiche where needed (`all` in `network-targets.tsv`)
 and run in snapshot mode (`snapshot` in the same table): `zig_fuzz_init` builds the
@@ -57,7 +57,10 @@ process-local clock that starts at a fixed instant and moves only when the harne
 its own logical clock (the QUIC and reqresp harnesses call `fuzz_clock_advance` from their
 time-advance operations), or by `FUZZ_CLOCK_STEP_NS` per read. A fork child inherits the
 parent's value by copy, so every input starts at the same time and advances independently,
-while loss recovery and idle timers still expire as the input advances time. `fuzz-env.sh`
+while loss recovery and idle timers still expire as the input advances time. The same
+library pins entropy (`getrandom`, `getentropy` and the raw syscall) to a generator in
+process memory: BoringSSL reseeds itself after it detects a fork, so without this every
+child's handshake drew different TLS randoms and the map varied run to run. `fuzz-env.sh`
 holds this policy and the AFL environment; `fuzz-loop.sh`, `replay-crashes.sh`,
 `smoke-network.sh` and the build's `run-<target>` steps all apply it, and `fuzz-loop.sh`
 refuses to start a snapshot target without the library (`NO_FAKE_CLOCK=1` overrides, with

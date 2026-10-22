@@ -1,12 +1,13 @@
 #!/bin/bash
-# Shared AFL and clock policy for every script that runs a harness. Source it; it never fails.
+# Shared AFL, clock and entropy policy for every script that runs a harness. Source it; it never fails.
 #
 # Snapshot-mode harnesses fork every input from a connected QUIC pair, and quiche keeps its
 # timers on the libc clock. The build installs zig-out/lib/libfuzz_clock.so (pkg/afl++/
 # fuzz_clock.c), a process-local clock that starts at a fixed instant and moves only when the
 # harness advances its own logical clock, or by FUZZ_CLOCK_STEP_NS per read. A fork child
 # inherits the parent's value by copy, so every input starts at the same time and advances
-# independently. NO_FAKE_CLOCK=1 disables it; FUZZ_CLOCK_LIB points at another build.
+# independently. The library also pins getrandom, getentropy and the raw syscall, since BoringSSL
+# reseeds after a fork. NO_FAKE_CLOCK=1 disables it; FUZZ_CLOCK_LIB points at another build.
 FUZZ_ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export AFL_CRASH_EXITCODE=99
 export AFL_SKIP_CPUFREQ="${AFL_SKIP_CPUFREQ:-1}"
