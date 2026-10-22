@@ -14,6 +14,17 @@ const driver = @import("driver.zig");
 const constants = @import("wire/constants.zig");
 const fault_io = @import("fault_io");
 
+fn waitForDatagram(socket: std.Io.net.Socket) !void {
+    var messages: [1]std.Io.net.IncomingMessage = .{.init};
+    var buffer: [1]u8 = undefined;
+    const failure, const count = socket.receiveManyTimeout(std.testing.io, &messages, &buffer, .{ .peek = true }, .{ .duration = .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    } });
+    if (failure) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), count);
+}
+
 test "maintenance retains a routing incumbent that answers through Transport" {
     var pair: Pair = undefined;
     try pair.init(std.testing.io, 1_000, true);
@@ -221,6 +232,7 @@ test "discovery ready steps expire calls with no eligible socket and preserve la
     const late = try pair.transport_a.advance(faults.io(), try Transport.monotonicMilliseconds(faults.io()), &expired, pair.transport_a.receive(faults.io(), &eligible));
     try std.testing.expect(late.datagram == .timeout and late.failure == null);
     try std.testing.expectEqual(@as(usize, 0), faults.receive_calls);
+    try waitForDatagram(pair.transport_a.sockets.primary());
     eligible = .{ true, false };
     const next = try pair.transport_a.advance(std.testing.io, try Transport.monotonicMilliseconds(std.testing.io), &expired, pair.transport_a.receive(std.testing.io, &eligible));
     try std.testing.expect(next.datagram == .rejected and next.failure == null);
@@ -238,7 +250,10 @@ test "discovery ready steps retain one family mask through the drain" {
     owned = false;
     defer transport.deinit(std.testing.allocator, std.testing.io);
     const addresses = transport.sockets.localAddresses();
-    for (addresses) |address| try transport.sockets.sendTo(std.testing.io, address.?, &.{0xff}, 1280);
+    for (addresses, transport.sockets.values) |address, socket| {
+        try transport.sockets.sendTo(std.testing.io, address.?, &.{0xff}, 1280);
+        try waitForDatagram(socket.?);
+    }
     var faults: fault_io = .{ .receive = .{ .socket = transport.sockets.values[1].?.handle } };
     var eligible: [2]bool = .{ true, false };
     var expired: [4]CallTable.Expired = undefined;
