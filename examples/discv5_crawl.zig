@@ -115,14 +115,14 @@ pub fn main(init: std.process.Init) !void {
         advertised_address,
     );
     var transport: discv5.Transport = undefined;
-    try transport.init(allocator, sockets, key_pair, local_record, .{ .engine = .{
+    try transport.init(allocator, sockets, key_pair, local_record, .{
         .session_capacity = 256,
         .challenge_capacity = 1024,
         .call_capacity = call_capacity,
         .request_timeout_ms = 1_000,
         .challenge_timeout_ms = 1_000,
         .session_idle_timeout_ms = 86_400_000,
-    } });
+    });
     sockets_owned = false;
     defer transport.deinit(allocator, io);
 

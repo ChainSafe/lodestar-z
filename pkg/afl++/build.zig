@@ -39,6 +39,7 @@ pub fn addInstrumentedExe(
     }
     for (extra_objects) |object| afl_cc.addFileArg(object);
     afl_cc.addArgs(extra_args);
+    afl_cc.addArg("-lm");
     return fuzz_exe;
 }
 

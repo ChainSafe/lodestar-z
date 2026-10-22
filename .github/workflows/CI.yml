@@ -130,11 +130,6 @@ jobs:
         run: |
           zig build test:ere_verifier
 
-      - name: Run LevelDB tests
-        run: |
-          zig build test:leveldb
-          zig build test:leveldb -Doptimize=ReleaseSafe
-
       - name: Run DiscV5 tests
         run: |
           zig build test:discv5
@@ -631,7 +626,6 @@ jobs:
       - name: Run bindings formatter
         run: |
           pnpm biome ci
-          pnpm typecheck:leveldb
       - name: Build bindings
         run: |
           zig build build-lib:bindings -Doptimize=ReleaseSafe

@@ -22,6 +22,7 @@ ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends afl++ llvm ca-certificates curl xz-utils \
+        git cmake libclang-18-dev libc++-18-dev libc++abi-18-dev libunwind-18-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN case "${TARGETARCH}" in \
@@ -34,9 +35,14 @@ RUN case "${TARGETARCH}" in \
     && echo "${sum}  /tmp/zig.tar.xz" | sha256sum -c - \
     && mkdir /opt/zig && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 \
     && rm /tmp/zig.tar.xz
-ENV PATH=/opt/zig:$PATH
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh \
+    && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain none \
+    && rm /tmp/rustup-init.sh
+ENV PATH=/root/.cargo/bin:/opt/zig:$PATH
 
 WORKDIR /src
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install
 COPY . .
 
 # ReleaseSafe keeps the stateful harnesses' invariant checks enabled. The cache mount
@@ -55,7 +61,7 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libpython3.12t64 \
+    && apt-get install -y --no-install-recommends libpython3.12t64 libc++1-18 libc++abi1-18 libunwind-18 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /usr/bin/afl-fuzz /usr/bin/afl-showmap /usr/bin/afl-tmin /usr/bin/afl-whatsup /usr/local/bin/

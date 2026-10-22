@@ -322,10 +322,8 @@ pub fn main(init: std.process.Init) !void {
     const policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&config.mainnet.config, &blob_schedule);
     const admission = try ReqResp.Options.Admission.defaults(&policy, 4, 1);
     var control_admission = try ReqResp.Options.Admission.defaults(&policy, 4, 4);
-    for (&control_admission.limits.peer, &control_admission.limits.global) |*peer_quotas, *global_quotas| {
-        peer_quotas[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 16, .period_ms = 30_000 };
-        global_quotas[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 4 * 16, .period_ms = 30_000 };
-    }
+    control_admission.limits.peer.protocols[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 16, .period_ms = 30_000 };
+    control_admission.limits.global.protocols[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 4 * 16, .period_ms = 30_000 };
     var gossip_topics: [1]Gossip.topic_policy.Boundary = .{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 } }};
     gossip_topics[0].rules[@intFromEnum(Gossip.topic.Kind.beacon_block)] = .{ .count = 1, .ssz_min = 0, .ssz_max = max_payload };
     const peer = try a.create(Peer);

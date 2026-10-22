@@ -33,14 +33,14 @@ pub fn main(init: std.process.Init) !void {
         .{ .key = "secp256k1", .value = .{ .bytes = &public_key } },
     }) else try discv5.identity.enr.Record.create(&key, 1, discv5.types.Address.fromNetwork(sockets.primary().address));
     var driver: discv5.Transport = undefined;
-    try driver.init(allocator, sockets, key, local, .{ .engine = .{
+    try driver.init(allocator, sockets, key, local, .{
         .session_capacity = 4,
         .challenge_capacity = 4,
         .call_capacity = call_capacity,
         .request_timeout_ms = 2_000,
         .challenge_timeout_ms = 2_000,
         .session_idle_timeout_ms = 60_000,
-    } });
+    });
     sockets_owned = false;
     defer driver.deinit(allocator, io);
     try printRecord(io, &local);
