@@ -8,7 +8,7 @@ const mode = process.argv[2];
 let warnings = 0;
 let thrown = 0;
 if (mode === "notifier") process.on("warning", (warning) => {
-  assert.match(warning.message, /Uncaught N-API callback exception/);
+  assert.equal(warning.code, "DEP0168");
   warnings++;
 });
 let pair = await incomingPair(undefined, mode === "notifier" ? () => { thrown++; throw Error("incoming-notifier"); } : () => undefined);

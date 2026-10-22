@@ -210,6 +210,7 @@ fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key:
         .seed = 7,
         .forks = network_config.forks[0..network_config.boundary_count],
         .admission_policy = network_config.requestPolicy(),
+        .byte_limit = 1024 * 1024 * 1024,
         .router = .{ .capabilities = update.capabilities },
         .gossip = .{ .topic_policy = network_config.topics[0..network_config.boundary_count], .message_id_policy = .{ .phase0_digest = network_config.phase0_digest } },
     });
@@ -559,7 +560,7 @@ fn idleConnections(init: std.process.Init) !void {
         .forks = network_config.forks[0..network_config.boundary_count],
         .admission_policy = network_config.requestPolicy(),
         .limits = .{ .connections_max = 256, .handshaking_max = 256, .handshaking_per_source_max = 256, .dialing_max = 32, .receive_budget_bytes = 512 * 1024 * 1024 },
-        .peers = .{ .capacity = 512, .outbound_reserve = 32, .target_peers = 200, .max_peers = 210, .min_outbound = 16 },
+        .peers = .{ .capacity = 512, .outbound_reserve = 32, .target_peers = 200, .max_peers = 210, .min_outbound = 16, .inbound_per_source_max = idle_connections_spokes },
         .byte_limit = 1024 * 1024 * 1024,
         .router = .{ .capabilities = update.capabilities },
         .gossip = .{ .topic_policy = network_config.topics[0..network_config.boundary_count], .message_id_policy = .{ .phase0_digest = network_config.phase0_digest } },

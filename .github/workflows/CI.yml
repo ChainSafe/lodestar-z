@@ -224,7 +224,7 @@ jobs:
       - name: Build and test the native network and bindings
         run: |
           zig build test:network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
-          zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- small
+          zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- owner
           zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- idle_transport
           zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- idle_connections
           zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- idle_wait
