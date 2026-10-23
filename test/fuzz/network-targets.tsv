@@ -13,3 +13,4 @@ network_gossip_recovery	initial	4096	snappy	snapshot
 network_processor_admission	initial	4096	snappy	snapshot
 network_quic_session	initial	4096	quiche	snapshot
 network_reqresp_session	initial	8192	all	snapshot
+network_discv5_session	initial	4096	none	snapshot

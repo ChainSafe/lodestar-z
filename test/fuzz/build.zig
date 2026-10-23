@@ -213,13 +213,14 @@ pub fn build(b: *std.Build) void {
         lib_mod.addImport("gossip_fixture", gossip_fixture);
         lib_mod.addImport("ssz_wire_types", ssz_wire_types);
 
-        if (std.mem.eql(u8, fuzzer.name, "network_reqresp_session") or std.mem.eql(u8, fuzzer.name, "network_gossip_sessions")) {
+        if (std.mem.eql(u8, fuzzer.name, "network_reqresp_session") or std.mem.eql(u8, fuzzer.name, "network_gossip_sessions") or std.mem.eql(u8, fuzzer.name, "network_discv5_session")) {
             const test_mod = b.createModule(.{
                 .root_source_file = b.path(fuzzer.source(b)),
                 .target = target,
                 .optimize = optimize,
             });
             test_mod.addImport("network", lodestar_z.module("network"));
+            test_mod.addImport("discv5", lodestar_z.module("discv5"));
             test_mod.addImport("gossip_fixture", gossip_fixture);
             if (quiche_sancov) test_mod.addCSourceFile(.{ .file = b.path("tools/sancov_stubs.c") });
             const tests = b.addTest(.{ .root_module = test_mod, .filters = &.{"fuzz harness"} });
