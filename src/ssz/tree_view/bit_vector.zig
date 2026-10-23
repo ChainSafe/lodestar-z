@@ -108,7 +108,3 @@ pub fn BitVectorTreeView(comptime ST: type) type {
     assertTreeViewType(TreeView);
     return TreeView;
 }
-
-test {
-    _ = @import("bit_vector_test.zig");
-}

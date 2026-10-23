@@ -3,3 +3,7 @@ pub const CloneOpts = struct {
     /// When false, the clone starts with an empty cache and `self` keeps its caches.
     transfer_cache: bool = true,
 };
+
+test {
+    _ = @import("clone_opts_test.zig");
+}
