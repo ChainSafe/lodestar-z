@@ -130,6 +130,10 @@ const plan: [topics.kind_count]Plan = blk: {
         .{ Kind.bls_to_execution_change, 128, 1, 1, 1 },
         .{ Kind.blob_sidecar, 256, 8, 4, 8 },
         .{ Kind.data_column_sidecar, 256, 16, 8, 24 },
+        .{ Kind.execution_payload, 8, 24, 1, 32 },
+        .{ Kind.payload_attestation_message, 1024, 2, 4, 1 },
+        .{ Kind.execution_payload_bid, 128, 4, 2, 1 },
+        .{ Kind.proposer_preferences, 128, 1, 1, 1 },
     };
     for (entries) |entry| result[@intFromEnum(entry[0])] = .{ .items = entry[1], .mib = entry[2], .execution_items = entry[3], .execution_bytes = entry[4] };
     break :blk result;
@@ -152,6 +156,10 @@ fn topicScores(slot_ms: u64, validators: u64) [topics.kind_count]score.TopicPoli
         .mesh_cap_factor = 3,
         .activation_ms = slot_ms * p.SLOTS_PER_EPOCH,
     });
+    result[@intFromEnum(Kind.execution_payload)] = result[@intFromEnum(Kind.beacon_block)];
+    result[@intFromEnum(Kind.payload_attestation_message)] = topicScore(slot_ms, &.{ .weight = 0.05, .rate = p.PTC_SIZE, .first_epochs = 100 });
+    result[@intFromEnum(Kind.execution_payload_bid)] = topicScore(slot_ms, &.{ .weight = 0.05, .rate = 1024, .first_epochs = 100 });
+    result[@intFromEnum(Kind.proposer_preferences)] = topicScore(slot_ms, &.{ .weight = 0.05, .rate = 64 / slots, .first_epochs = 100 });
     result[@intFromEnum(Kind.beacon_aggregate_and_proof)] = topicScore(slot_ms, &.{
         .weight = 0.5,
         .rate = aggregatorsPerSlot(validators, committees),

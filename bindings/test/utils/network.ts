@@ -182,7 +182,7 @@ export function applicationConfig(): NativeApplicationConfig & ReturnType<typeof
     resources: {
       bridgeBudgetBytes: 512 * MIB,
       maxPeers: 12,
-      nativeBudgetBytes: 512 * MIB,
+      nativeBudgetBytes: 1024 * MIB,
       receiveBudgetBytes: 64 * 1024 * 1024,
       targetPeers: 8,
     },

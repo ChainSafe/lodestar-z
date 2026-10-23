@@ -7,7 +7,10 @@ const Epoch = ct.primitive.Epoch.Type;
 const ForkDigest = ct.primitive.ForkDigest.Type;
 
 pub fn computeForkDigest(config: *const BeaconConfig, epoch: Epoch) ForkDigest {
-    const version = config.forkInfoAtEpoch(epoch).version;
+    return computeForkDigestForVersion(config, epoch, config.forkInfoAtEpoch(epoch).version);
+}
+
+pub fn computeForkDigestForVersion(config: *const BeaconConfig, epoch: Epoch, version: [4]u8) ForkDigest {
     var base: [32]u8 = undefined;
     BeaconConfig.computeForkDataRoot(version, config.genesis_validator_root, &base);
     var digest: ForkDigest = base[0..4].*;

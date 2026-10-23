@@ -34,6 +34,7 @@ const Fixture = struct {
             .ELECTRA_FORK_EPOCH = 0,
             .FULU_FORK_EPOCH = 4,
             .GLOAS_FORK_EPOCH = unsupported_epoch,
+            .HEZE_FORK_EPOCH = unsupported_epoch,
             .BLOB_SCHEDULE = &.{.{ .EPOCH = 8, .MAX_BLOBS_PER_BLOCK = 9 }},
             .SLOT_DURATION_MS = 12000,
         }), @splat(0));

@@ -15,8 +15,7 @@ pub fn admit(table: *processor.GossipProcessor, candidate: *gossip.Gossipsub.Mes
         return false;
     };
     const deneb = @intFromEnum(fork) >= @intFromEnum(@as(@TypeOf(fork), .deneb));
-    const electra = @intFromEnum(fork) >= @intFromEnum(@as(@TypeOf(fork), .electra));
-    const metadata = processor.metadata.extract(kind, electra, message.bytes);
+    const metadata = processor.metadata.extract(kind, fork, message.bytes);
     if (!processor.metadata.eligible(&metadata, kind, deneb, slot)) {
         table.diag.slotRefusals +|= 1;
         table.refuse(kind, .ineligible);

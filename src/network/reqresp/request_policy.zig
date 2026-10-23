@@ -14,6 +14,8 @@ pub const Config = struct {
     fulu_start_slot: ?u64 = null,
     blocks_pre_deneb: u32,
     blocks_deneb: u32,
+    payloads: u32 = constants.MAX_REQUEST_PAYLOADS,
+    gloas_column_max: u64 = constants_mod.MAX_PAYLOAD_SIZE,
     blob_identifiers_deneb: u32,
     blob_identifiers_electra: u32,
     number_of_columns: u16,
@@ -25,6 +27,7 @@ pub const Config = struct {
     /// Borrows schedule storage until ReqResp.init copies the validated policy.
     pub fn fromBeaconConfig(cfg: *const BeaconConfig, storage: *[schedule_max]BlobLimit) error{InvalidPolicy}!Config {
         const chain = &cfg.chain;
+        if (chain.BLOB_SCHEDULE.len > schedule_max) return error.InvalidPolicy;
         var count: usize = 0;
         for ([_]u64{ chain.DENEB_FORK_EPOCH, chain.ELECTRA_FORK_EPOCH }) |epoch| {
             if (epoch < chain.FULU_FORK_EPOCH) try addEpoch(storage, &count, epoch);
@@ -48,6 +51,8 @@ pub const Config = struct {
             .fulu_start_slot = if (chain.FULU_FORK_EPOCH == constants.FAR_FUTURE_EPOCH) null else std.math.mul(u64, chain.FULU_FORK_EPOCH, preset.preset.SLOTS_PER_EPOCH) catch return error.InvalidPolicy,
             .blocks_pre_deneb = std.math.cast(u32, chain.MAX_REQUEST_BLOCKS) orelse return error.InvalidPolicy,
             .blocks_deneb = std.math.cast(u32, chain.MAX_REQUEST_BLOCKS_DENEB) orelse return error.InvalidPolicy,
+            .payloads = std.math.cast(u32, chain.MAX_REQUEST_PAYLOADS) orelse return error.InvalidPolicy,
+            .gloas_column_max = @import("response_bounds.zig").gloasColumnMax(chain),
             .blob_identifiers_deneb = std.math.cast(u32, chain.MAX_REQUEST_BLOB_SIDECARS) orelse return error.InvalidPolicy,
             .blob_identifiers_electra = std.math.cast(u32, chain.MAX_REQUEST_BLOB_SIDECARS_ELECTRA) orelse return error.InvalidPolicy,
             .number_of_columns = preset.NUMBER_OF_COLUMNS,
@@ -80,6 +85,8 @@ pub const Policy = struct {
 
     pub fn init(config: *const Config) error{InvalidPolicy}!Policy {
         if (config.max_payload_size < protocol.payloadMaxControl() or config.max_payload_size > constants_mod.MAX_PAYLOAD_SIZE or
+            config.payloads == 0 or config.payloads > constants.MAX_REQUEST_PAYLOADS or
+            config.gloas_column_max < ct.gloas.DataColumnSidecar.min_size or
             config.blocks_pre_deneb == 0 or config.blocks_pre_deneb > constants.MAX_REQUEST_BLOCKS or
             config.blocks_deneb == 0 or config.blocks_deneb > constants.MAX_REQUEST_BLOCKS_DENEB or
             config.blob_identifiers_deneb == 0 or config.blob_identifiers_deneb > constants_mod.blob_identifiers_capacity or
@@ -106,6 +113,7 @@ pub const Policy = struct {
         var result = which.info();
         result.response_max = @min(result.response_max, self.config.max_payload_size);
         switch (which) {
+            .execution_payload_envelopes_by_root_v1 => result.request_max = @as(usize, self.config.payloads) * 32,
             .blocks_by_root_v2 => result.request_max = @as(usize, self.blocks(fork)) * ct.primitive.Root.fixed_size,
             .blob_sidecars_by_root_v1 => result.request_max = @as(usize, self.blobs(fork)) * ct.deneb.BlobIdentifier.fixed_size,
             .data_column_sidecars_by_root_v1 => result.request_max = @as(usize, self.config.blocks_deneb) *
@@ -114,6 +122,7 @@ pub const Policy = struct {
         }
         result.request_max = @min(result.request_max, self.config.max_payload_size);
         if (which == .blob_sidecars_by_root_v1 or which == .blob_sidecars_by_range_v1) result.chunks_max = self.blobs(fork);
+        if (which == .execution_payload_envelopes_by_range_v1 or which == .execution_payload_envelopes_by_root_v1) result.chunks_max = self.config.payloads;
         return result;
     }
 
@@ -137,7 +146,7 @@ pub const Policy = struct {
         var cost: u128 = 1;
         var ceiling: u128 = bounds.chunks_max;
         switch (which) {
-            .blocks_by_range_v2, .blob_sidecars_by_range_v1, .data_column_sidecars_by_range_v1, .light_client_updates_by_range_v1 => {
+            .blocks_by_range_v2, .blob_sidecars_by_range_v1, .data_column_sidecars_by_range_v1, .light_client_updates_by_range_v1, .execution_payload_envelopes_by_range_v1 => {
                 const start = scalar(bytes, 0);
                 const count = scalar(bytes, 8);
                 if (count == 0 and which != .light_client_updates_by_range_v1) return error.InvalidRequest;
@@ -146,6 +155,7 @@ pub const Policy = struct {
                 const limit = switch (which) {
                     .blocks_by_range_v2 => if (self.config.deneb_start_slot != null and start >= self.config.deneb_start_slot.?) self.config.blocks_deneb else self.config.blocks_pre_deneb,
                     .light_client_updates_by_range_v1 => constants.MAX_REQUEST_LIGHT_CLIENT_UPDATES,
+                    .execution_payload_envelopes_by_range_v1 => self.config.payloads,
                     else => self.config.blocks_deneb,
                 };
                 const effective = @min(count, limit);
@@ -169,9 +179,9 @@ pub const Policy = struct {
                     ceiling *= occurrences;
                 }
             },
-            .blocks_by_root_v2 => {
+            .blocks_by_root_v2, .execution_payload_envelopes_by_root_v1 => {
                 if (bytes.len % 32 != 0) return error.MalformedSsz;
-                if (bytes.len / 32 > self.blocks(request_fork)) return error.UnsupportedBounds;
+                if (bytes.len / 32 > (if (which == .blocks_by_root_v2) self.blocks(request_fork) else self.config.payloads)) return error.UnsupportedBounds;
                 cost = bytes.len / 32;
                 ceiling = cost;
             },

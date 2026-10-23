@@ -211,6 +211,8 @@ pub fn requestBounds(self: *const ReqResp, which: Protocol) protocol_mod.Info {
 
 pub fn responseBounds(self: *const ReqResp, which: Protocol, fork: config.ForkSeq) error{InvalidResponseContext}!codec.Bounds {
     var result = try which.responseBounds(fork);
+    if (fork.gte(.gloas) and (which == .data_column_sidecars_by_range_v1 or which == .data_column_sidecars_by_root_v1))
+        result.max = @intCast(@min(result.max, self.policy.config.gloas_column_max));
     result.protocol_max = result.max;
     result.max = @min(result.max, self.policy.config.max_payload_size);
     if (result.min > result.max) return error.InvalidResponseContext;

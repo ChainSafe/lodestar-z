@@ -32,17 +32,17 @@ test "configuration preserves gossip storage derived from payload limits in diff
             try request.gossip.setPayloadLimits(&limits);
             const resolved = try resolve(request);
             const options = resolved.core.protocols.gossipsub;
-            try std.testing.expectEqual(@as(usize, 26), options.validation_capacity);
-            try std.testing.expectEqual(@as(usize, if (bytes == 4096) gossip_options.mcache_arena_bytes_min else 26 * mib), options.mcache_arena_bytes);
+            try std.testing.expectEqual(@as(usize, 2 * gossip_limits.kind_count), options.validation_capacity);
+            try std.testing.expectEqual(@as(usize, if (bytes == 4096) gossip_options.mcache_arena_bytes_min else 2 * gossip_limits.kind_count * mib), options.mcache_arena_bytes);
             try std.testing.expectEqualDeep(limits, options.payload_limits.?);
             try std.testing.expectEqual(defaults.core.protocols.gossipsub.mcache_capacity, options.mcache_capacity);
             try std.testing.expectEqual(defaults.core.protocols.gossipsub.receive_arena_bytes, options.receive_arena_bytes);
 
-            request.gossip.mcache_arena_bytes = 32 * mib;
-            try std.testing.expectEqual(@as(usize, 32 * mib), (try resolve(request)).core.protocols.gossipsub.mcache_arena_bytes);
-            request.gossip.validation_capacity = 25;
+            request.gossip.mcache_arena_bytes = 64 * mib;
+            try std.testing.expectEqual(@as(usize, 64 * mib), (try resolve(request)).core.protocols.gossipsub.mcache_arena_bytes);
+            request.gossip.validation_capacity = 2 * gossip_limits.kind_count - 1;
             try std.testing.expectError(error.InvalidLimits, resolve(request));
-            request.gossip.validation_capacity = 26;
+            request.gossip.validation_capacity = 2 * gossip_limits.kind_count;
             request.gossip.mcache_arena_bytes = gossip_options.mcache_arena_bytes_min - 1;
             try std.testing.expectError(error.InvalidLimits, resolve(request));
         }
@@ -145,7 +145,7 @@ test "configuration resolves shared capacities from their owners" {
     try std.testing.expectEqual(beacon.limits.connections_max, control.connections);
     inline for (.{ "reqresp", "control_reqresp" }) |field| {
         const starts = @field(beacon.core.protocols, field).admission.limits.starts;
-        try std.testing.expectEqual(@as(u32, 36), starts.tokens);
+        try std.testing.expectEqual(@as(u32, 40), starts.tokens);
         try std.testing.expectEqual(@as(u64, 10_000), starts.period_ms);
     }
 }

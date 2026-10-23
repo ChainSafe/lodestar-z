@@ -89,7 +89,11 @@ export type NativeTopicKind =
   | "light_client_optimistic_update"
   | "bls_to_execution_change"
   | "blob_sidecar"
-  | "data_column_sidecar";
+  | "data_column_sidecar"
+  | "execution_payload"
+  | "payload_attestation_message"
+  | "execution_payload_bid"
+  | "proposer_preferences";
 
 export interface NativeRuntimeConfig {
   activeValidatorCount: number;
@@ -214,7 +218,9 @@ export type NativeRequestProtocolId =
   | "/eth2/beacon_chain/req/light_client_bootstrap/1/ssz_snappy"
   | "/eth2/beacon_chain/req/light_client_updates_by_range/1/ssz_snappy"
   | "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy"
-  | "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy";
+  | "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy"
+  | "/eth2/beacon_chain/req/execution_payload_envelopes_by_range/1/ssz_snappy"
+  | "/eth2/beacon_chain/req/execution_payload_envelopes_by_root/1/ssz_snappy";
 
 export type NativePeerAction = "fatal" | "low_tolerance" | "mid_tolerance" | "high_tolerance";
 export type NativeDisconnectReason =
@@ -479,7 +485,11 @@ export interface GossipJob {
   readonly messages: readonly GossipMessage[];
 }
 
+/** Unverified gossip metadata used only for bounded dependency recovery, never consensus validation. */
 export interface DependencyCheck {
+  readonly kind: NativeTopicKind;
+  readonly payloadPresent: boolean;
+  readonly parentBlockHash: Uint8Array | null;
   readonly root: Uint8Array;
   readonly slot: bigint;
   readonly peerId: PeerIdStr;

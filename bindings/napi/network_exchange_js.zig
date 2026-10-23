@@ -94,6 +94,9 @@ fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
         const check = try env.createObject();
         const reference = try network_js.handle(env, token.index, token.generation);
         try check.setNamedProperty("handle", reference);
+        try check.setNamedProperty("kind", try env.createStringUtf8(@tagName(view.kind)));
+        try check.setNamedProperty("payloadPresent", try env.getBoolean(view.payload_present));
+        try check.setNamedProperty("parentBlockHash", if (view.parent_hash) |*hash| try bytes(env, hash) else try env.getNull());
         try check.setNamedProperty("root", try bytes(env, &view.root));
         try check.setNamedProperty("slot", try env.createBigintUint64(view.slot));
         try check.setNamedProperty("peerId", try network_js.peerIdValue(env, &view.identity));

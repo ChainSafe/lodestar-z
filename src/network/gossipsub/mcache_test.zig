@@ -28,15 +28,19 @@ test "gossip full pending kind refuses admission without evicting history" {
         "/eth2/01020304/bls_to_execution_change/ssz_snappy",
         "/eth2/01020304/blob_sidecar_0/ssz_snappy",
         "/eth2/01020304/data_column_sidecar_0/ssz_snappy",
+        "/eth2/01020304/execution_payload/ssz_snappy",
+        "/eth2/01020304/payload_attestation_message/ssz_snappy",
+        "/eth2/01020304/execution_payload_bid/ssz_snappy",
+        "/eth2/01020304/proposer_preferences/ssz_snappy",
     };
     const limits: gossip_limits.Limits = @splat(.{ .items = 2, .bytes = 1024 * 1024 });
     var store = try storage.Store.init(std.testing.allocator, 2 * gossip_limits.items(&limits), 2 * gossip_limits.bytes(&limits));
     defer store.deinit(std.testing.allocator);
     store.limits = limits;
-    var history = try History.init(std.testing.allocator, gossip_limits.items(&limits), 1, 13);
+    var history = try History.init(std.testing.allocator, gossip_limits.items(&limits), 1, gossip_limits.kind_count);
     defer history.deinit(std.testing.allocator);
     const payload = [_]u8{9} ** (storage.inline_bytes + 1);
-    var pending: [26]storage.Handle = undefined;
+    var pending: [2 * gossip_limits.kind_count]storage.Handle = undefined;
     for (names, 0..) |name, i| {
         try std.testing.expectEqual(@as(topic.Kind, @enumFromInt(i)), topic.parseCanonical(name).?.name.kind);
         for (0..2) |j| {
@@ -50,9 +54,9 @@ test "gossip full pending kind refuses admission without evicting history" {
     }
     try std.testing.expectEqual(store.entries.len, store.used_entries);
     const free_pages = store.free_pages;
-    try std.testing.expectEqual(@as(usize, 26), history.count);
+    try std.testing.expectEqual(@as(usize, 2 * gossip_limits.kind_count), history.count);
     try std.testing.expect(history.admitPayload(&store, .beacon_block, @splat(255), names[0], &payload) == null);
-    try std.testing.expectEqual(@as(usize, 26), history.count);
+    try std.testing.expectEqual(@as(usize, 2 * gossip_limits.kind_count), history.count);
     try std.testing.expectEqual(free_pages, store.free_pages);
     for (pending) |handle| store.releaseValidation(handle);
 }

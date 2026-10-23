@@ -385,7 +385,15 @@ export class NativePump {
     let available = null;
     try {
       const answers = this.#host.checkDependencies(
-        checks.map(({root, slot, peerId, topic}) => ({peerId, root, slot, topic}))
+        checks.map(({root, slot, peerId, topic, kind, payloadPresent, parentBlockHash}) => ({
+          kind,
+          parentBlockHash,
+          payloadPresent,
+          peerId,
+          root,
+          slot,
+          topic,
+        }))
       );
       // Every index is checked, since array methods skip the holes of a sparse array.
       const answered = Array.isArray(answers) && answers.length === checks.length;

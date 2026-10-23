@@ -16,7 +16,7 @@ pub const serving_max = 8;
 pub const completion_max = 32;
 pub const bytes_max = 8 * 1024 * 1024;
 
-const CheckView = struct { root: [32]u8, slot: u64, identity: n.PeerId, topic: [g.topic_max]u8, topic_len: u16 };
+const CheckView = struct { kind: n.gossip_processor.limits.Kind, payload_present: bool, parent_hash: ?[32]u8, root: [32]u8, slot: u64, identity: n.PeerId, topic: [g.topic_max]u8, topic_len: u16 };
 
 /// What one exchange pinned. Pinned cells stay in place: the owner never retires a copying cell.
 pub const Selection = struct {
@@ -52,7 +52,7 @@ fn selectLocked(runtime: *Runtime, now: u64, selection: *Selection) void {
         selection.checks = table.claimChecks(now, g.batch_max);
         for (selection.checks.tokens[0..selection.checks.len], selection.views[0..selection.checks.len]) |token, *view| {
             const cell = table.get(token).?;
-            view.* = .{ .root = cell.metadata.root.?, .slot = cell.metadata.slot.?, .identity = cell.identity, .topic = cell.topic, .topic_len = cell.topic_len };
+            view.* = .{ .kind = cell.kind, .payload_present = cell.metadata.payload_present, .parent_hash = cell.metadata.parent_hash, .root = cell.metadata.root.?, .slot = cell.metadata.slot.?, .identity = cell.identity, .topic = cell.topic, .topic_len = cell.topic_len };
         }
     }
     if (runtime.deliverableLocked(.gossip)) {

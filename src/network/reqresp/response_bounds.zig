@@ -8,6 +8,7 @@ pub const Family = enum {
     block,
     blob,
     column,
+    execution_payload,
     light_client_bootstrap,
     light_client_update,
     light_client_finality_update,
@@ -29,6 +30,7 @@ pub fn forFork(family: Family, fork: config.ForkSeq) error{InvalidResponseContex
                 .block => typeBounds(types.SignedBeaconBlock),
                 .blob => if (comptime selected.gte(.deneb)) typeBounds(types.BlobSidecar) else error.InvalidResponseContext,
                 .column => if (comptime selected.gte(.fulu)) typeBounds(types.DataColumnSidecar) else error.InvalidResponseContext,
+                .execution_payload => if (comptime selected.gte(.gloas)) typeBounds(types.SignedExecutionPayloadEnvelope) else error.InvalidResponseContext,
                 .light_client_bootstrap => if (comptime selected.gte(.altair)) typeBounds(types.LightClientBootstrap) else error.InvalidResponseContext,
                 .light_client_update => if (comptime selected.gte(.altair)) typeBounds(types.LightClientUpdate) else error.InvalidResponseContext,
                 .light_client_finality_update => if (comptime selected.gte(.altair)) typeBounds(types.LightClientFinalityUpdate) else error.InvalidResponseContext,
@@ -48,4 +50,12 @@ pub fn unionFor(family: Family) codec.Bounds {
     }
     std.debug.assert(bounds.min <= bounds.max);
     return bounds;
+}
+
+/// Progressive SSZ columns use the largest configured blob count across all epochs.
+pub fn gloasColumnMax(chain: *const config.ChainConfig) u64 {
+    std.debug.assert(chain.BLOB_SCHEDULE.len <= @import("request_policy.zig").schedule_max);
+    var blobs = chain.MAX_BLOBS_PER_BLOCK_ELECTRA;
+    for (chain.BLOB_SCHEDULE) |point| blobs = @max(blobs, point.MAX_BLOBS_PER_BLOCK);
+    return ct.gloas.DataColumnSidecar.min_size +| blobs *| (ct.fulu.Cell.fixed_size + ct.primitive.KZGProof.fixed_size);
 }

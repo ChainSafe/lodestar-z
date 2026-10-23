@@ -28,7 +28,7 @@ pub fn bytes(limits: *const Limits) usize {
     return total;
 }
 
-pub const priority = [_]Kind{ .beacon_block, .blob_sidecar, .data_column_sidecar, .beacon_aggregate_and_proof, .voluntary_exit, .bls_to_execution_change, .beacon_attestation, .proposer_slashing, .attester_slashing, .sync_committee_contribution_and_proof, .sync_committee, .light_client_finality_update, .light_client_optimistic_update };
+pub const priority = [_]Kind{ .beacon_block, .execution_payload, .blob_sidecar, .data_column_sidecar, .beacon_aggregate_and_proof, .voluntary_exit, .bls_to_execution_change, .beacon_attestation, .proposer_slashing, .attester_slashing, .sync_committee_contribution_and_proof, .sync_committee, .light_client_finality_update, .light_client_optimistic_update, .payload_attestation_message, .execution_payload_bid, .proposer_preferences };
 
 comptime {
     std.debug.assert(priority.len == kind_count);
@@ -40,7 +40,7 @@ comptime {
 }
 
 pub fn urgent(kind: Kind) bool {
-    return kind == .beacon_block or kind == .blob_sidecar or kind == .data_column_sidecar;
+    return kind == .beacon_block or kind == .execution_payload or kind == .blob_sidecar or kind == .data_column_sidecar;
 }
 
 pub fn newestFirst(kind: Kind) bool {

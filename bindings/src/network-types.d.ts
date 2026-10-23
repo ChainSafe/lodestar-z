@@ -60,6 +60,9 @@ export interface NativeGossipHandle {
 export type NativeGossipVerdict = "accept" | "reject" | "ignore";
 
 export interface NativeGossipDependencyCheck {
+  readonly kind: NativeTopicKind;
+  readonly payloadPresent: boolean;
+  readonly parentBlockHash: Uint8Array | null;
   handle: NativeGossipHandle;
   root: Uint8Array;
   slot: bigint;

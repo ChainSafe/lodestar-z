@@ -7,7 +7,7 @@ const Gossipsub = @import("../gossipsub/root.zig").Gossipsub;
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 
 test "gossip processor validates explicit execution overrides before allocating" {
-    const limits: p.limits.Limits = @splat(.{ .items = 4096, .bytes = 4096 });
+    const limits: p.limits.Limits = @splat(.{ .items = 3840, .bytes = 4096 });
     const cases = [_]p.limits.Limit{
         .{ .items = 0, .bytes = 4096 },
         .{ .items = 4097, .bytes = 4096 },
@@ -24,10 +24,10 @@ test "gossip processor validates explicit execution overrides before allocating"
 }
 
 test "gossip processor preserves derived defaults above explicit execution ceilings" {
-    const limits: p.limits.Limits = @splat(.{ .items = 4096, .bytes = 4096 });
+    const limits: p.limits.Limits = @splat(.{ .items = 3840, .bytes = 4096 });
     const resolved = try p.GossipProcessor.Options.resolve(limits, null, &.{}, &.{}, 1);
     try t.expectEqual(@as(?p.limits.Limits, null), resolved.execution);
-    try t.expectEqual(@as(u32, 2048), resolved.executionLimits()[0].items);
+    try t.expectEqual(@as(u32, 1920), resolved.executionLimits()[0].items);
     for ([_]p.GossipProcessor.Options{ .{ .limits = limits }, resolved }) |options| {
         var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
         try t.expectError(error.OutOfMemory, p.GossipProcessor.init(failing.allocator(), options));

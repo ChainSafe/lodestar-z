@@ -264,3 +264,26 @@ test "native Ping and Metadata preserve full u64 sequences under host integer po
         try std.testing.expectError(error.HostIntegerRange, policy.inspect(.blocks_by_range_v2, &range, .fulu));
     }
 }
+
+test "reqresp Gloas payload requests enforce configured roots counts and host integer bounds" {
+    var cfg = fixture();
+    cfg.payloads = 3;
+    cfg.host_integer_max = 9007199254740991;
+    const policy = try p.Policy.init(&cfg);
+    var bytes: [128]u8 = @splat(0);
+    const range: Protocol = .execution_payload_envelopes_by_range_v1;
+    const roots: Protocol = .execution_payload_envelopes_by_root_v1;
+    try std.testing.expectError(error.InvalidRequest, policy.inspect(range, bytes[0..16], .gloas));
+    put(&bytes, 8, 4);
+    const result = try policy.inspect(range, bytes[0..16], .gloas);
+    try std.testing.expectEqual(@as(u128, 4), result.charged_cost);
+    try std.testing.expectEqual(@as(u32, 3), result.chunks_max);
+    put(&bytes, 0, cfg.host_integer_max.?);
+    try std.testing.expectError(error.HostIntegerRange, policy.inspect(range, bytes[0..16], .gloas));
+    try std.testing.expectEqual(@as(u32, 3), (try policy.inspect(roots, bytes[0..96], .gloas)).chunks_max);
+    try std.testing.expectError(error.UnsupportedBounds, policy.inspect(roots, &bytes, .gloas));
+    try std.testing.expectError(error.MalformedSsz, policy.inspect(roots, bytes[0..31], .gloas));
+    try std.testing.expectEqual(@as(u32, 0), (try policy.inspect(roots, &.{}, .gloas)).chunks_max);
+    cfg.payloads = c.MAX_REQUEST_PAYLOADS + 1;
+    try std.testing.expectError(error.InvalidPolicy, p.Policy.init(&cfg));
+}

@@ -88,7 +88,7 @@ test "application score policy matches Lodestar across committee boundaries and 
 const config = @import("config");
 const chain = @import("chain.zig");
 
-test "application resource policy preserves Lodestar mainnet and Hoodi plans" {
+test "application resource policy preserves legacy queues while sharing the execution budget with Gloas" {
     if (preset.active_preset != .mainnet) return error.SkipZigTest;
     const KindLimits = struct { processor: limits.Limit, execution: limits.Limit };
     const Fixture = struct { network: enum { mainnet, hoodi }, validators: u64, limits: std.json.ArrayHashMap(KindLimits) };
@@ -105,9 +105,35 @@ test "application resource policy preserves Lodestar mainnet and Hoodi plans" {
         const processing = try policy.processor(boundaries, fixture.validators);
         const execution = try policy.execution(boundaries, &processing, .{});
         inline for (std.meta.fields(topics.Kind), 0..) |field, k| {
-            const expected = fixture.limits.map.get(field.name).?;
-            try std.testing.expectEqualDeep(expected.processor, processing[k]);
-            try std.testing.expectEqualDeep(expected.execution, execution[k]);
+            if (fixture.limits.map.get(field.name)) |expected| {
+                try std.testing.expectEqualDeep(expected.processor, processing[k]);
+                try std.testing.expect(execution[k].items <= expected.execution.items);
+                try std.testing.expect(execution[k].bytes <= expected.execution.bytes);
+            }
         }
     }
+}
+
+test "application Gloas shares admit every configured topic maximum within the total budget" {
+    var input = if (preset.active_preset == .minimal) config.minimal.chain_config else config.mainnet.chain_config;
+    input.ALTAIR_FORK_EPOCH = 0;
+    input.BELLATRIX_FORK_EPOCH = 0;
+    input.CAPELLA_FORK_EPOCH = 0;
+    input.DENEB_FORK_EPOCH = 0;
+    input.ELECTRA_FORK_EPOCH = 0;
+    input.FULU_FORK_EPOCH = 0;
+    input.GLOAS_FORK_EPOCH = 0;
+    input.BLOB_SCHEDULE = &.{};
+    input.MAX_PAYLOAD_SIZE = @import("gossipsub/constants.zig").MAX_PAYLOAD_SIZE;
+    const beacon = config.BeaconConfig.init(input, @splat(0));
+    const derived = try chain.Config.init(&beacon, true);
+    const boundaries = derived.topics[0..derived.boundary_count];
+    const processing = try policy.processor(boundaries, 1_000_000);
+    const budget: policy.Execution = .{};
+    const execution = try policy.execution(boundaries, &processing, budget);
+    try std.testing.expect(limits.bytes(&execution) <= budget.bytes);
+    try std.testing.expect(limits.items(&execution) <= budget.items);
+    for (boundaries) |boundary| for (boundary.rules, execution) |rule, share| {
+        try std.testing.expect(share.bytes >= rule.ssz_max);
+    };
 }

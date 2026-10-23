@@ -60,33 +60,44 @@ test "network chain resolves same epoch forks BPO contexts and clock identity" {
     try std.testing.expectEqualDeep(fulu, try chain_config.update(local, null, 3 * preset.preset.SLOTS_PER_EPOCH));
 }
 
-test "network chain advertises scheduled Gloas but rejects activation" {
-    for ([_]u64{ 3, 8, constants.FAR_FUTURE_EPOCH - 1 }) |epoch| {
-        var input = fixture();
-        input.ELECTRA_FORK_EPOCH = 0;
-        input.FULU_FORK_EPOCH = 0;
-        input.GLOAS_FORK_EPOCH = epoch;
-        const cfg = config.BeaconConfig.init(input, @splat(0));
-        const derived = try chain.Config.init(&cfg, false);
-        const local: LocalState = .{ .metadata = .{ .custody_group_count = 8 }, .status = .{ .earliest_available_slot = 0 } };
-        const slot = @as(u64, @min(epoch - 1, 16)) * preset.preset.SLOTS_PER_EPOCH;
-        const update = try derived.update(local, null, slot);
-        try std.testing.expectEqual(.fulu, update.local.fork.fork);
-        try std.testing.expectEqual(epoch, update.schedule.next_epoch);
-        try std.testing.expectEqual(input.GLOAS_FORK_VERSION, update.schedule.next_version);
-        try std.testing.expectEqual(config.fork_digest.computeForkDigest(&cfg, epoch), update.schedule.next_digest);
-        for (derived.forks[0..derived.boundary_count]) |fork| try std.testing.expect(fork.fork.lt(.gloas));
-        if (epoch < 16) {
-            try std.testing.expectError(error.UnsupportedNetworkFork, derived.update(local, null, epoch * preset.preset.SLOTS_PER_EPOCH));
-            try std.testing.expectError(error.UnsupportedNetworkFork, derived.update(local, null, (epoch + 1) * preset.preset.SLOTS_PER_EPOCH));
-        }
-    }
+test "network chain activates Gloas and rejects the next unsupported fork" {
     var input = fixture();
     input.ELECTRA_FORK_EPOCH = 0;
     input.FULU_FORK_EPOCH = 0;
-    input.GLOAS_FORK_EPOCH = 0;
+    input.GLOAS_FORK_EPOCH = 3;
+    input.HEZE_FORK_EPOCH = 12;
     const cfg = config.BeaconConfig.init(input, @splat(0));
-    try std.testing.expectError(error.UnsupportedNetworkFork, chain.Config.init(&cfg, false));
+    const derived = try chain.Config.init(&cfg, true);
+    const local: LocalState = .{ .metadata = .{ .custody_group_count = 8 }, .status = .{ .earliest_available_slot = 0 } };
+    const before = try derived.update(local, null, 2 * preset.preset.SLOTS_PER_EPOCH);
+    try std.testing.expectEqual(input.GLOAS_FORK_VERSION, before.schedule.next_version);
+    try std.testing.expectEqual(@as(u64, 3), before.schedule.next_epoch);
+    const active = try derived.update(local, null, 3 * preset.preset.SLOTS_PER_EPOCH);
+    try std.testing.expectEqual(.gloas, active.local.fork.fork);
+    try std.testing.expect(active.capabilities.receive.contains(.{ .reqresp = .execution_payload_envelopes_by_range_v1 }));
+    try std.testing.expect(active.capabilities.request.contains(.{ .reqresp = .execution_payload_envelopes_by_root_v1 }));
+    const bpo = try derived.update(local, null, 8 * preset.preset.SLOTS_PER_EPOCH);
+    try std.testing.expectEqual(.gloas, bpo.local.fork.fork);
+    try std.testing.expect(!std.mem.eql(u8, &active.local.fork.digest, &bpo.local.fork.digest));
+    try std.testing.expectEqual(input.HEZE_FORK_VERSION, bpo.schedule.next_version);
+    try std.testing.expectEqual(config.fork_digest.computeForkDigestForVersion(&cfg, 12, input.HEZE_FORK_VERSION), bpo.schedule.next_digest);
+    try std.testing.expectError(error.UnsupportedNetworkFork, derived.update(local, null, 12 * preset.preset.SLOTS_PER_EPOCH));
+    for (derived.topics[0..derived.boundary_count]) |boundary| {
+        const gloas = boundary.fork.? == .gloas;
+        inline for (.{ topics.Kind.execution_payload, topics.Kind.payload_attestation_message, topics.Kind.execution_payload_bid, topics.Kind.proposer_preferences }) |kind|
+            try std.testing.expectEqual(@as(u16, @intFromBool(gloas)), boundary.rules[@intFromEnum(kind)].count);
+        if (!gloas) continue;
+        try std.testing.expectEqual(preset.preset.MAX_SIGNED_AGGREGATE_AND_PROOF_SIZE, boundary.rules[@intFromEnum(topics.Kind.beacon_aggregate_and_proof)].ssz_max);
+        try std.testing.expectEqual(preset.preset.MAX_ATTESTER_SLASHING_SIZE, boundary.rules[@intFromEnum(topics.Kind.attester_slashing)].ssz_max);
+        try std.testing.expectEqual(preset.preset.MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE, boundary.rules[@intFromEnum(topics.Kind.execution_payload_bid)].ssz_max);
+        try std.testing.expectEqual(@as(u32, 56 + 40 * 2096), boundary.rules[@intFromEnum(topics.Kind.data_column_sidecar)].ssz_max);
+    }
+    const request = derived.requestPolicy();
+    var requests = try rr.init(std.testing.allocator, .{ .forks = derived.forks[0..derived.boundary_count], .admission = try rr.Options.Admission.defaults(&request, 8, 1) });
+    defer requests.deinit();
+    try std.testing.expectEqual(@as(usize, 56 + 40 * 2096), (try requests.responseBounds(.data_column_sidecars_by_root_v1, .gloas)).max);
+    try std.testing.expectError(error.InvalidResponseContext, requests.responseBounds(.execution_payload_envelopes_by_root_v1, .fulu));
+    try std.testing.expectEqual(consensus_types.gloas.SignedExecutionPayloadEnvelope.min_size, (try requests.responseBounds(.execution_payload_envelopes_by_root_v1, .gloas)).min);
 }
 
 test "network chain derives fixed request storage and historical blob limits independently of BPO" {

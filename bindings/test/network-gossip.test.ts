@@ -326,7 +326,7 @@ test("gossip payload credit retires on close while descriptors remain held", asy
   }
 }, 15000);
 test("gossip and both request directions retain independent payload capacity", async () => {
-  const pair = await gossipPair(192 * 1024 * 1024);
+  const pair = await gossipPair(256 * 1024 * 1024);
   try {
     const outgoing = pair.right.request(pair.identity.peerId, BLOCKS, new Uint8Array(32));
     const outboundPull = outgoing.next();

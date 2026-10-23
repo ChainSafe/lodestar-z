@@ -51,9 +51,7 @@ pub const Directional = struct { receive: Set, request: Set };
 
 /// Produces the implemented host subset. Phase0 block v1 is not implemented.
 /// Metadata3 serving requires a real configured local custody count even before Fulu.
-/// Gloas requires payload protocols that are not yet implemented.
 pub fn forFork(fork: ForkSeq, serve_light_clients: bool, meshsub_versions: []const Version) error{InvalidCapabilities}!Directional {
-    if (fork.gte(.gloas)) return error.InvalidCapabilities;
     if (meshsub_versions.len == 0 or meshsub_versions.len > 3) return error.InvalidCapabilities;
     var common: Set = .initEmpty();
     for (meshsub_versions) |version| {
@@ -72,6 +70,10 @@ pub fn forFork(fork: ForkSeq, serve_light_clients: bool, meshsub_versions: []con
     if (fork.gte(.deneb)) {
         common.insert(.{ .reqresp = .blob_sidecars_by_range_v1 });
         common.insert(.{ .reqresp = .blob_sidecars_by_root_v1 });
+    }
+    if (fork.gte(.gloas)) {
+        common.insert(.{ .reqresp = .execution_payload_envelopes_by_range_v1 });
+        common.insert(.{ .reqresp = .execution_payload_envelopes_by_root_v1 });
     }
     var active: Directional = .{ .receive = common, .request = common };
     // Control applies the established peer's fixed revalidation deadline to old Status bytes.

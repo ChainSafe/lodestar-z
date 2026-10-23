@@ -19,7 +19,7 @@ pub const Boundary = struct { epoch: u64, fork: config.ForkSeq, digest: [4]u8, v
 pub const Config = struct {
     boundaries: [boundary_max]Boundary = undefined,
     boundary_count: u8 = 0,
-    unsupported_fork: ?Boundary = null,
+    unsupported_fork: ?struct { epoch: u64, version: [4]u8, digest: [4]u8 } = null,
     forks: [boundary_max]ForkEntry = undefined,
     topics: [boundary_max]topics.Boundary = undefined,
     policy: policy.Policy,
@@ -43,14 +43,14 @@ pub const Config = struct {
         for (cfg.forks_ascending_epoch_order, 0..) |fork, i| {
             if (i > 0 and fork.epoch < cfg.forks_ascending_epoch_order[i - 1].epoch) return error.InvalidNetworkChain;
             if (fork.epoch == constants.FAR_FUTURE_EPOCH) continue;
-            if (fork.fork_seq.gte(.gloas)) continue;
+            if (fork.epoch >= chain.HEZE_FORK_EPOCH) continue;
             epochs[count] = fork.epoch;
             count += 1;
         }
         for (chain.BLOB_SCHEDULE, 0..) |entry, i| {
             if (entry.MAX_BLOBS_PER_BLOCK == 0 or entry.MAX_BLOBS_PER_BLOCK > preset.preset.MAX_BLOB_COMMITMENTS_PER_BLOCK or
                 (i > 0 and entry.EPOCH <= chain.BLOB_SCHEDULE[i - 1].EPOCH)) return error.InvalidNetworkChain;
-            if (entry.EPOCH < chain.FULU_FORK_EPOCH or entry.EPOCH >= chain.GLOAS_FORK_EPOCH) continue;
+            if (entry.EPOCH < chain.FULU_FORK_EPOCH or entry.EPOCH >= chain.HEZE_FORK_EPOCH) continue;
             epochs[count] = entry.EPOCH;
             count += 1;
         }
@@ -66,17 +66,16 @@ pub const Config = struct {
             .custody_requirement = @intCast(chain.CUSTODY_REQUIREMENT),
             .serve_light_clients = serve_light_clients,
         };
-        if (chain.GLOAS_FORK_EPOCH != constants.FAR_FUTURE_EPOCH) result.unsupported_fork = .{
-            .epoch = chain.GLOAS_FORK_EPOCH,
-            .fork = .gloas,
-            .version = chain.GLOAS_FORK_VERSION,
-            .digest = config.fork_digest.computeForkDigest(cfg, chain.GLOAS_FORK_EPOCH),
+        if (chain.HEZE_FORK_EPOCH != constants.FAR_FUTURE_EPOCH) result.unsupported_fork = .{
+            .epoch = chain.HEZE_FORK_EPOCH,
+            .version = chain.HEZE_FORK_VERSION,
+            .digest = config.fork_digest.computeForkDigestForVersion(cfg, chain.HEZE_FORK_EPOCH, chain.HEZE_FORK_VERSION),
         };
         for (epochs[0..count]) |epoch| {
             if (result.boundary_count > 0 and result.boundaries[result.boundary_count - 1].epoch == epoch) continue;
             _ = std.math.mul(u64, epoch, preset.preset.SLOTS_PER_EPOCH) catch return error.InvalidNetworkChain;
             const fork = cfg.forkInfoAtEpoch(epoch);
-            if (fork.fork_seq.gte(.gloas)) continue;
+            if (epoch >= chain.HEZE_FORK_EPOCH) continue;
             const digest = config.fork_digest.computeForkDigest(cfg, epoch);
             result.boundaries[result.boundary_count] = .{ .epoch = epoch, .fork = fork.fork_seq, .version = fork.version, .digest = digest };
             for (result.forks[0..result.boundary_count]) |prior| {
@@ -180,13 +179,12 @@ fn topicBoundary(cfg: *const config.BeaconConfig, fork: config.ForkSeq, digest: 
     r[@intFromEnum(topics.Kind.proposer_slashing)] = try rule(ct.phase0.ProposerSlashing, 1, max);
     r[@intFromEnum(topics.Kind.voluntary_exit)] = try rule(ct.phase0.SignedVoluntaryExit, 1, max);
     switch (fork) {
-        .gloas => return error.UnsupportedNetworkFork,
         inline else => |selected| {
             const types = @field(ct, @tagName(selected));
             r[@intFromEnum(topics.Kind.beacon_block)] = try rule(types.SignedBeaconBlock, 1, max);
-            r[@intFromEnum(topics.Kind.beacon_aggregate_and_proof)] = try rule(types.SignedAggregateAndProof, 1, max);
+            r[@intFromEnum(topics.Kind.beacon_aggregate_and_proof)] = try rule(types.SignedAggregateAndProof, 1, if (comptime selected.gte(.gloas)) @min(max, preset.preset.MAX_SIGNED_AGGREGATE_AND_PROOF_SIZE) else max);
             r[@intFromEnum(topics.Kind.beacon_attestation)] = try rule(if (comptime selected.gte(.electra)) types.SingleAttestation else types.Attestation, constants.ATTESTATION_SUBNET_COUNT, max);
-            r[@intFromEnum(topics.Kind.attester_slashing)] = try rule(types.AttesterSlashing, 1, max);
+            r[@intFromEnum(topics.Kind.attester_slashing)] = try rule(types.AttesterSlashing, 1, if (comptime selected.gte(.gloas)) @min(max, preset.preset.MAX_ATTESTER_SLASHING_SIZE) else max);
             if (comptime selected.gte(.altair)) {
                 r[@intFromEnum(topics.Kind.sync_committee_contribution_and_proof)] = try rule(ct.altair.SignedContributionAndProof, 1, max);
                 r[@intFromEnum(topics.Kind.sync_committee)] = try rule(ct.altair.SyncCommitteeMessage, constants.SYNC_COMMITTEE_SUBNET_COUNT, max);
@@ -194,7 +192,14 @@ fn topicBoundary(cfg: *const config.BeaconConfig, fork: config.ForkSeq, digest: 
                 r[@intFromEnum(topics.Kind.light_client_optimistic_update)] = try rule(types.LightClientOptimisticUpdate, 1, max);
             }
             if (comptime selected.gte(.capella)) r[@intFromEnum(topics.Kind.bls_to_execution_change)] = try rule(ct.capella.SignedBLSToExecutionChange, 1, max);
-            if (comptime selected.gte(.fulu)) {
+            if (comptime selected.gte(.gloas)) {
+                r[@intFromEnum(topics.Kind.execution_payload)] = try rule(types.SignedExecutionPayloadEnvelope, 1, max);
+                r[@intFromEnum(topics.Kind.payload_attestation_message)] = try rule(types.PayloadAttestationMessage, 1, max);
+                r[@intFromEnum(topics.Kind.execution_payload_bid)] = try rule(types.SignedExecutionPayloadBid, 1, @min(max, preset.preset.MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE));
+                r[@intFromEnum(topics.Kind.proposer_preferences)] = try rule(types.SignedProposerPreferences, 1, max);
+                const column_max = @import("reqresp/response_bounds.zig").gloasColumnMax(chain);
+                r[@intFromEnum(topics.Kind.data_column_sidecar)] = try rule(types.DataColumnSidecar, chain.DATA_COLUMN_SIDECAR_SUBNET_COUNT, @min(max, column_max));
+            } else if (comptime selected.gte(.fulu)) {
                 const per_blob = ct.fulu.Cell.fixed_size + ct.primitive.KZGCommitment.fixed_size + ct.primitive.KZGProof.fixed_size;
                 const column_max = types.DataColumnSidecar.min_size +| cfg.getMaxBlobsPerBlock(epoch) *| per_blob;
                 r[@intFromEnum(topics.Kind.data_column_sidecar)] = try rule(types.DataColumnSidecar, chain.DATA_COLUMN_SIDECAR_SUBNET_COUNT, @min(max, column_max));

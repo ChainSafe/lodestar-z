@@ -185,7 +185,7 @@ test("actual 200/210 resources resolve and publish complete capacity", async () 
   config.resources = {
     bridgeBudgetBytes: 512 * 1024 * 1024,
     maxPeers: 210,
-    nativeBudgetBytes: 768 * 1024 * 1024,
+    nativeBudgetBytes: 1024 * 1024 * 1024,
     receiveBudgetBytes: 512 * 1024 * 1024,
     targetPeers: 200,
   };
