@@ -79,7 +79,7 @@ test "gossip admission enforces compressed pages independently of retained histo
     try t.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.kind_payload)]);
     try t.expectEqual(@as(usize, 1), g.messages.store.pending_by_kind[kind]);
     try t.expectEqual(@as(usize, 1), g.resourceSnapshot().pending_validations);
-    try t.expect(!g.messages.wasSeen(incoming, 1));
+    try t.expect(!g.messages.known(incoming, 1));
 
     try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .accept }, g.report(accepted, .accept, now));
     try t.expectEqual(@as(?usize, 1), support.receiveMessage(&g, 1, .{ .topic = name, .data = compressed[0..len] }, now));

@@ -355,14 +355,14 @@ test "gossip processor retains reported verdicts across bounded drains" {
         table.finish(&batch);
         for (batch.tokens[0..batch.len]) |token| try t.expect(table.report(token, .accept, 2));
     }
-    try t.expectEqual(count, table.diag.pendingVerdicts);
-    for (0..p.GossipProcessor.batch_max) |_| table.retire(table.nextVerdict().?);
+    try t.expectEqual(count, table.diag.pendingCompletions);
+    for (0..p.GossipProcessor.batch_max) |_| table.retire(table.nextCompletion().?);
     try t.expect(table.pending());
-    try t.expectEqual(16, table.diag.pendingVerdicts);
-    for (0..16) |_| table.retire(table.nextVerdict().?);
+    try t.expectEqual(16, table.diag.pendingCompletions);
+    for (0..16) |_| table.retire(table.nextCompletion().?);
     try t.expectEqual(0, table.diag.occupied);
     try t.expect(!table.pending());
-    try t.expectEqual(null, table.nextVerdict());
+    try t.expectEqual(null, table.nextCompletion());
 }
 
 test "gossip processor retires expired verdicts and rejects stale generations" {
@@ -379,7 +379,7 @@ test "gossip processor retires expired verdicts and rejects stale generations" {
         try std.testing.expect(table.report(token, .accept, 2));
         try std.testing.expect(!table.report(token, .reject, 2));
     }
-    try std.testing.expectEqual(@as(usize, 64), table.snapshot(1).pendingVerdicts);
+    try std.testing.expectEqual(@as(usize, 64), table.snapshot(1).pendingCompletions);
     try std.testing.expect(table.pending());
     table.expire(100);
     try std.testing.expect(!table.pending() and table.deadline() == null);
@@ -462,20 +462,20 @@ test "gossip processor fatal peer cleanup is bounded and preserves other peers a
     const allocations = allocator.allocations;
     table.dropPeer(&bad.identity());
     for (0..std.math.divCeil(usize, table.cells.len, p.GossipProcessor.batch_max) catch unreachable) |_| {
-        const before = table.diag.pendingVerdicts;
+        const before = table.diag.pendingCompletions;
         table.maintain(1, 0);
-        try t.expect(table.diag.pendingVerdicts - before <= p.GossipProcessor.batch_max);
+        try t.expect(table.diag.pendingCompletions - before <= p.GossipProcessor.batch_max);
     }
     try t.expectEqual(@as(usize, 0), table.prune_remaining);
-    try t.expectEqual(@as(usize, 66), table.diag.pendingVerdicts);
+    try t.expectEqual(@as(usize, 66), table.diag.pendingCompletions);
     for (queued, 0..) |token, i| {
         const cell = table.get(token).?;
-        try t.expectEqual(if (i % 2 == 0) p.GossipProcessor.State.verdict_pending else .queued, cell.state);
-        if (i % 2 == 0) try t.expectEqual(Gossipsub.Verdict.ignore, cell.verdict);
+        try t.expectEqual(if (i % 2 == 0) p.GossipProcessor.State.completion_pending else .queued, cell.state);
+        if (i % 2 == 0) try t.expectEqual(p.GossipProcessor.Completion.cancelled, cell.completion);
     }
     for ([_]p.GossipProcessor.Token{ waiting, needs_check }) |token| {
-        try t.expectEqual(p.GossipProcessor.State.verdict_pending, table.get(token).?.state);
-        try t.expectEqual(Gossipsub.Verdict.ignore, table.get(token).?.verdict);
+        try t.expectEqual(p.GossipProcessor.State.completion_pending, table.get(token).?.state);
+        try t.expectEqual(p.GossipProcessor.Completion.cancelled, table.get(token).?.completion);
     }
     try t.expectEqual(p.GossipProcessor.State.checking, table.get(checking).?.state);
     try t.expectEqual(p.GossipProcessor.State.delivered, table.get(delivered).?.state);
@@ -533,7 +533,7 @@ test "gossip processor claims skip fatal peers before their prune pass reaches t
     try t.expectEqualSlices(p.GossipProcessor.Token, &.{ good, fresh, grouped_good }, batch.tokens[0..batch.len]);
     table.finish(&batch);
     for ([_]p.GossipProcessor.Token{ bad, bad_check, grouped_bad }) |token| {
-        try t.expectEqual(p.GossipProcessor.State.verdict_pending, table.get(token).?.state);
+        try t.expectEqual(p.GossipProcessor.State.completion_pending, table.get(token).?.state);
     }
 }
 
@@ -553,11 +553,11 @@ test "gossip processor fatal reports preserve unrelated work at full source capa
     for (0..bad.len) |i| table.dropPeer(&(TestPeer{ .index = @intCast(i) }).identity());
     const fresh = try good.capture(&table, .data_column_sidecar, .{}, 1);
     for (0..std.math.divCeil(usize, table.cells.len, p.GossipProcessor.batch_max) catch unreachable) |_| {
-        const before = table.diag.pendingVerdicts;
+        const before = table.diag.pendingCompletions;
         table.maintain(1, 0);
-        try t.expect(table.diag.pendingVerdicts - before <= p.GossipProcessor.batch_max);
+        try t.expect(table.diag.pendingCompletions - before <= p.GossipProcessor.batch_max);
     }
-    for (bad) |token| try t.expectEqual(p.GossipProcessor.State.verdict_pending, table.get(token).?.state);
+    for (bad) |token| try t.expectEqual(p.GossipProcessor.State.completion_pending, table.get(token).?.state);
     try t.expectEqual(p.GossipProcessor.State.queued, table.get(old).?.state);
     try t.expectEqual(p.GossipProcessor.State.queued, table.get(fresh).?.state);
     try t.expectEqual(@as(usize, 0), table.prune_remaining);
@@ -585,7 +585,7 @@ test "gossip processor repeated and unknown fatal reports preserve prune progres
         try t.expectEqual(cursor, table.prune_cursor);
     }
     try t.expectEqual(@as(usize, 0), table.prune_remaining);
-    try t.expectEqual(p.GossipProcessor.State.verdict_pending, table.get(old).?.state);
+    try t.expectEqual(p.GossipProcessor.State.completion_pending, table.get(old).?.state);
     const fresh = try peer.capture(&table, .data_column_sidecar, .{}, 1);
     const batch = table.claim(1);
     try t.expectEqualSlices(p.GossipProcessor.Token, &.{fresh}, batch.tokens[0..batch.len]);
@@ -607,7 +607,7 @@ test "gossip processor fatal cutoff survives dependency checks returning after p
     try t.expectEqual(p.GossipProcessor.State.checking, table.get(checking).?.state);
     try t.expect(table.classify(checking, true));
     try t.expectEqual(@as(usize, 0), table.claim(1).len);
-    try t.expectEqual(p.GossipProcessor.State.verdict_pending, table.get(checking).?.state);
+    try t.expectEqual(p.GossipProcessor.State.completion_pending, table.get(checking).?.state);
 }
 
 test "gossip processor fatal cutoff does not transfer across source generations" {
@@ -623,7 +623,7 @@ test "gossip processor fatal cutoff does not transfer across source generations"
     const queued = try old.capture(&table, .sync_committee, .{}, 1);
     table.dropPeer(&old.identity());
     for (0..std.math.divCeil(usize, table.cells.len, p.GossipProcessor.batch_max) catch unreachable) |_| table.maintain(1, 0);
-    try t.expectEqual(p.GossipProcessor.State.verdict_pending, table.get(queued).?.state);
+    try t.expectEqual(p.GossipProcessor.State.completion_pending, table.get(queued).?.state);
     table.retire(queued);
     table.expire(101);
     const fresh = try new.capture(&table, .beacon_block, .{}, 102);

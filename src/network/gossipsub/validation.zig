@@ -264,6 +264,19 @@ pub const Validation = struct {
         self.resolved_records.append(self.recent, "link", pending.delivery);
     }
 
+    pub fn cancel(self: *Validation, store: *storage.Store, peers: *Peers, h: Handle, now: u64) bool {
+        if (self.inspect(store, peers, h, now) != null) return false;
+        self.discardPending(store, peers, h.index);
+        self.entries[h.index].state = .free;
+        return true;
+    }
+
+    fn discardPending(self: *Validation, store: *storage.Store, peers: *Peers, index: u32) void {
+        const pending = self.entries[index].state.pending;
+        self.releasePending(store, index);
+        self.removeRecord(pending.delivery, peers);
+    }
+
     pub fn expire(self: *Validation, store: *storage.Store, peers: *Peers, now: u64) void {
         var bytes: usize = 0;
         for (0..64) |_| {
@@ -287,8 +300,7 @@ pub const Validation = struct {
         const pending = e.state.pending;
         const record = &self.recent[pending.delivery];
         std.log.scoped(.network_gossip).debug("validation_expired message_id={x} topic_index={d} generation={d} elapsed_ms={d}", .{ record.id, record.topic, e.generation, now -| record.admitted_ms });
-        self.releasePending(store, index);
-        self.removeRecord(pending.delivery, peers);
+        self.discardPending(store, peers, index);
         e.state = .{ .expired = pending.deadline +| self.tombstone_ms };
     }
 

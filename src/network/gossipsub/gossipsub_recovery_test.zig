@@ -620,7 +620,7 @@ test "gossipsub heartbeat processes a received message before expiring its promi
     pair.shared.pair.advance(heartbeat_at - now.millis());
     try pair.shared.pair.pump();
     _ = pair.shared.processClient(.{});
-    try std.testing.expect(g.messages.wasSeen(id, heartbeat_at));
+    try std.testing.expect(g.messages.known(id, heartbeat_at));
     try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
 }

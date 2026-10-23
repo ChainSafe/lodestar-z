@@ -240,11 +240,11 @@ test "gossipsub tombstones suppress Seen eviction replays and expire for natural
     try std.testing.expectEqual(@as(usize, 0), setup.shared.server.gossipsub.messages.store.used_entries);
     _ = try setup.shared.server.gossipsub.publish(test_topic, "B", setup.shared.pair.now);
     const id = topic_mod.validMessageId(test_topic, "A", .{});
-    try std.testing.expect(!setup.shared.server.gossipsub.messages.wants(id, setup.shared.pair.now.millis()));
+    try std.testing.expect(setup.shared.server.gossipsub.messages.known(id, setup.shared.pair.now.millis()));
     const suppressed = try publishAdmissionA(&setup);
     try std.testing.expectEqual(@as(usize, 0), suppressed.count);
     setup.shared.pair.advance(100);
-    try std.testing.expect(setup.shared.server.gossipsub.messages.wants(id, setup.shared.pair.now.millis()));
+    try std.testing.expect(!setup.shared.server.gossipsub.messages.known(id, setup.shared.pair.now.millis()));
     const second = try publishAdmissionA(&setup);
     try std.testing.expectEqual(@as(usize, 1), second.count);
     const current = second.handle.?;

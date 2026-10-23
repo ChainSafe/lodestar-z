@@ -52,7 +52,7 @@ test "gossipsub pinned payload pressure drops the publication and releases recei
     try std.testing.expectEqual(@as(usize, 1), g.messages.pendingValidations());
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peer].io.overflow.pages);
     try std.testing.expect(g.sessions.rows[peer].io.rpc == null);
-    try std.testing.expect(!g.messages.wasSeen(refused_id, setup.shared.pair.now.millis()));
+    try std.testing.expect(!g.messages.known(refused_id, setup.shared.pair.now.millis()));
     try std.testing.expectEqual(@as(u64, 0), g.counters.local_pressure_resets);
     _ = g.report(handle.?, .ignore, setup.shared.pair.now);
     payload[0] ^= 1;

@@ -29,8 +29,8 @@ pub fn admit(table: *processor.GossipProcessor, candidate: *gossip.Gossipsub.Mes
     const victims = preflight(table, candidate) orelse return false;
     for (victims) |index| {
         const cell = &table.cells[index];
-        const result = candidate.messages.report(candidate.context, cell.handle, .ignore, message.admitted_ms);
-        table.outcome(result.outcome());
+        _ = candidate.messages.cancel(candidate.context.peers, cell.handle, message.admitted_ms);
+        table.cancel(cell);
         table.retire(.{ .index = @intCast(index), .generation = cell.generation });
     }
     candidate.commit();

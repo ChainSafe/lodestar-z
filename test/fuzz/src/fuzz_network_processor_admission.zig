@@ -92,7 +92,7 @@ fn checkProcessor(table: *const Table) void {
     var checking: usize = 0;
     var copying: usize = 0;
     var copying_bytes: usize = 0;
-    var pending_verdicts: usize = 0;
+    var pending_completions: usize = 0;
     var payload_bytes: usize = 0;
     var handles: usize = 0;
     const page_bytes = table.store.bytes.len / table.store.next.len;
@@ -112,7 +112,7 @@ fn checkProcessor(table: *const Table) void {
                 copying += 1;
                 copying_bytes += cell.input.len;
             },
-            .verdict_pending => pending_verdicts += 1,
+            .completion_pending => pending_completions += 1,
             .delivered => {},
             .free => unreachable,
         }
@@ -141,7 +141,7 @@ fn checkProcessor(table: *const Table) void {
     assert(checking == table.diag.checking);
     assert(copying == table.diag.copying);
     assert(copying_bytes == table.diag.copyingBytes);
-    assert(pending_verdicts == table.diag.pendingVerdicts);
+    assert(pending_completions == table.diag.pendingCompletions);
     assert(payload_bytes == table.diag.payloadBytes);
     assert(handles == table.store.used_entries);
     var waiting_total: usize = 0;
@@ -168,13 +168,15 @@ fn checkProcessor(table: *const Table) void {
     };
 }
 
-/// Applies the host verdicts the processor holds back to gossipsub, at most `limit` per call.
-fn pumpVerdicts(table: *Table, h: *Harness, limit: usize) void {
+/// Applies processor completions to gossipsub, at most `limit` per call.
+fn pumpCompletions(table: *Table, h: *Harness, limit: usize) void {
     for (0..limit) |_| {
-        const token = table.nextVerdict() orelse break;
+        const token = table.nextCompletion() orelse break;
         const cell = table.get(token).?;
-        const result = h.g.report(cell.handle, cell.verdict, h.now());
-        table.outcome(result);
+        switch (cell.completion) {
+            .verdict => |verdict| table.outcome(h.g.report(cell.handle, verdict, h.now())),
+            .cancelled => _ = h.g.cancel(cell.handle, h.now()),
+        }
         table.retire(token);
     }
 }
@@ -259,7 +261,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
                     else => .ignore,
                 }, harness.now_ms);
             },
-            6 => pumpVerdicts(&processor_table, &harness, 1 + @as(usize, arg) % Table.batch_max),
+            6 => pumpCompletions(&processor_table, &harness, 1 + @as(usize, arg) % Table.batch_max),
             7 => {
                 harness.advance(1 + @as(u64, arg));
                 if (arg % 4 == 0) processor_consumer.slot += 1;
@@ -291,9 +293,9 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     checkProcessor(&processor_table);
     harness.checkInvariants();
     processor_table.close();
-    pumpVerdicts(&processor_table, &harness, processor_table.cells.len);
+    pumpCompletions(&processor_table, &harness, processor_table.cells.len);
     for (delivered[0..delivered_len]) |token| _ = processor_table.report(token, .ignore, harness.now_ms);
-    pumpVerdicts(&processor_table, &harness, processor_table.cells.len);
+    pumpCompletions(&processor_table, &harness, processor_table.cells.len);
     checkProcessor(&processor_table);
     assert(processor_table.diag.occupied == 0);
     // The fork child ends with the teardown checks; the kernel reclaims its copy of the snapshot.

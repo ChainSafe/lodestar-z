@@ -43,12 +43,14 @@ pub fn maintain(runtime: *Runtime, io: std.Io, tick: n.Now) !bool {
     table.maintain(clock.millis(), @intCast(@max(0, try core.clock.read(tick))));
     var retired_bytes: usize = 0;
     for (0..batch_max) |_| {
-        const token = table.nextVerdict() orelse break;
+        const token = table.nextCompletion() orelse break;
         const cell = table.get(token).?;
         if (retired_bytes > 0 and cell.input.len > batch_bytes -| retired_bytes) break;
         retired_bytes += cell.input.len;
-        const result = core.reportValidation(cell.handle, cell.verdict, tick);
-        table.outcome(result);
+        switch (cell.completion) {
+            .verdict => |verdict| table.outcome(core.reportValidation(cell.handle, verdict, tick)),
+            .cancelled => _ = core.cancelValidation(cell.handle, tick),
+        }
         table.retire(token);
     }
     runtime.notifyIfReadyLocked();

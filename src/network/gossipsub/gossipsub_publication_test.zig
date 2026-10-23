@@ -47,7 +47,7 @@ test "publication uses history capacity while remote block validation is full" {
     _ = try g.publish(test_topic, "local", Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 8), g.messages.pendingValidations());
     try std.testing.expectEqual(@as(usize, 1), g.messages.history.count);
-    try std.testing.expect(g.messages.wasSeen(topic_mod.validMessageId(test_topic, "local", .{}), 2));
+    try std.testing.expect(g.messages.known(topic_mod.validMessageId(test_topic, "local", .{}), 2));
 }
 
 test "publication queues despite a full ordinary block allowance" {
@@ -78,7 +78,7 @@ test "publication queues despite a full ordinary block allowance" {
     try std.testing.expect(queue.bytes < constants.tx_peer_bytes - constants.tx_local_bytes);
     const outcome = try g.publishWithOptions(test_topic, "local", .{ .allow_zero_peers = false }, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }));
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, outcome);
-    try std.testing.expect(g.messages.wasSeen(topic_mod.validMessageId(test_topic, "local", .{}), 3));
+    try std.testing.expect(g.messages.known(topic_mod.validMessageId(test_topic, "local", .{}), 3));
     try std.testing.expectError(error.Duplicate, g.publish(test_topic, "local", Now.fromMilliseconds(.{ .mono_ms = 4, .unix_s = 0 })));
 }
 

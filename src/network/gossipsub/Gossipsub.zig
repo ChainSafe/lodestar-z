@@ -316,7 +316,7 @@ pub fn publishWithOptions(self: *Gossipsub, topic_str: []const u8, ssz: []const 
     if (ssz.len < match.rule.ssz_min) return error.PayloadTooSmall;
     if (ssz.len > match.rule.ssz_max) return error.PayloadTooLarge;
     const id = topic_mod.validMessageId(topic_str, ssz, self.options.message_id_policy);
-    if (self.messages.wasSeen(id, now_ms)) {
+    if (self.messages.known(id, now_ms)) {
         if (options.ignore_duplicate) return .{ .duplicate = true };
         return error.Duplicate;
     }
@@ -340,18 +340,24 @@ pub fn messageContext(self: *Gossipsub) messages_mod.Context {
 
 pub fn report(self: *Gossipsub, handle: ValidationHandle, verdict: Verdict, now: Now) ReportOutcome {
     self.last_now_ms = @max(self.last_now_ms, now.millis());
+    const now_ms = self.last_now_ms;
     const context = self.messageContext();
-    const result = self.messages.report(&context, handle, verdict, now.millis());
+    const result = self.messages.report(&context, handle, verdict, now_ms);
     if (result == .applied) {
         const applied = &result.applied;
         if (self.trace_gossip) if (topic_mod.parseCanonical(applied.topicString())) |topic| {
             if (trace.selected(topic.name.kind, applied.id)) std.log.scoped(.network_gossip_trace).info("validation message_id={x} kind={s} verdict={s} admitted_ms={d}", .{ applied.id, @tagName(topic.name.kind), @tagName(applied.verdict), applied.admitted_ms });
         };
         if (applied.forward) |forward| {
-            if (self.deliver(self.overlay.mesh(forward.topic), forward.message, forward.source, now.millis()).queued > 0) self.topic_metrics.get(applied.topicString()).forwarded +|= 1;
+            if (self.deliver(self.overlay.mesh(forward.topic), forward.message, forward.source, now_ms).queued > 0) self.topic_metrics.get(applied.topicString()).forwarded +|= 1;
         }
     }
     return result.outcome();
+}
+
+pub fn cancel(self: *Gossipsub, handle: ValidationHandle, now: Now) bool {
+    self.last_now_ms = @max(self.last_now_ms, now.millis());
+    return self.messages.cancel(&self.peers, handle, self.last_now_ms);
 }
 
 fn deliver(self: *Gossipsub, peers: *const sessions_mod.PeerSet, h: storage.Handle, source: ?validation_mod.PeerRef, now_ms: u64) PublishOutcome {

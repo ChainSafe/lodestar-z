@@ -109,10 +109,12 @@ const FastEntry = struct {
     fingerprint: [32]u8 = @splat(0),
     result: union(enum) { empty, valid: topic_mod.MessageId, invalid: topic_mod.MessageId } = .empty,
 };
+const Lookup = union(enum) { unknown, seen, attributed: *Attribution };
 
 pub const Messages = struct {
     store: storage.Store,
     history: mcache.History,
+    /// Completed decisions and local publications. Pending IDs belong to `validation`.
     seen: mcache.SeenCache,
     validation: validation.Validation,
     gossip_ids: []MessageId,
@@ -176,12 +178,14 @@ pub const Messages = struct {
         return self.validation.nextDeadline();
     }
 
-    pub fn wasSeen(self: *Messages, id: MessageId, now: u64) bool {
-        return self.seen.contains(id, now);
+    fn lookup(self: *Messages, id: MessageId, now: u64) Lookup {
+        if (self.validation.find(id, now)) |entry| return .{ .attributed = entry };
+        return if (self.seen.contains(id, now)) .seen else .unknown;
     }
 
-    pub fn wants(self: *Messages, id: MessageId, now: u64) bool {
-        return !self.seen.contains(id, now) and self.validation.find(id, now) == null;
+    /// Shared duplicate policy for receipt, recovery and local publication.
+    pub fn known(self: *Messages, id: MessageId, now: u64) bool {
+        return self.lookup(id, now) != .unknown;
     }
 
     pub fn gossipIds(self: *Messages, topic: u16, epoch: u64) []MessageId {
@@ -204,6 +208,7 @@ pub const Messages = struct {
     }
 
     pub fn publish(self: *Messages, id: MessageId, topic: u16, kind: topic_mod.Kind, name: []const u8, compressed: []const u8, now: u64, epoch: u64) ?storage.Handle {
+        assert(!self.known(id, now));
         const handle = self.history.admitPublication(&self.store, kind, id, name, compressed, topic, epoch) catch |err| {
             if (err == error.Retention) {
                 self.retention_refusals[@intFromEnum(kind)] +|= 1;
@@ -211,7 +216,8 @@ pub const Messages = struct {
             return null;
         };
         self.store.seal(handle);
-        std.debug.assert(self.seen.add(id, now));
+        const added = self.seen.add(id, now);
+        assert(added);
         return handle;
     }
 
@@ -283,12 +289,12 @@ pub const Messages = struct {
     }
 
     fn duplicateId(self: *Messages, context: *const Context, source: *const Source, topic: u16, id: topic_mod.MessageId, now: u64) bool {
-        const pending = self.validation.find(id, now);
-        if (pending != null or self.seen.contains(id, now)) {
-            if (pending) |entry| recordDuplicate(context, entry, source, topic, now);
-            return true;
+        switch (self.lookup(id, now)) {
+            .unknown => return false,
+            .seen => {},
+            .attributed => |entry| recordDuplicate(context, entry, source, topic, now),
         }
-        return false;
+        return true;
     }
 
     fn invalid(context: *const Context, source: *const Source, topic: u16, reason: InvalidReason) Received {
@@ -305,7 +311,7 @@ pub const Messages = struct {
 
     fn refuseStorage(self: *Messages, reason: StorageRefusal, id: ?MessageId) Received {
         self.storage_refusals[@intFromEnum(reason)] +|= 1;
-        return .{ .refused = if (id) |known| .{ .identified = known } else .unidentified };
+        return .{ .refused = if (id) |message_id| .{ .identified = message_id } else .unidentified };
     }
 
     pub fn report(self: *Messages, context: *const Context, handle: Handle, verdict: Verdict, now: u64) Report {
@@ -340,6 +346,8 @@ pub const Messages = struct {
             }
         }
         self.validation.finish(&self.store, context.peers, handle, verdict, now);
+        // Resolution order preserves the seen cache's FIFO expiry order.
+        _ = self.seen.add(result.id, now);
         const counts = context.topic_metrics.get(result.topicString());
         switch (verdict) {
             .accept => counts.accepted +|= 1,
@@ -349,6 +357,11 @@ pub const Messages = struct {
         context.validation_time.observe(now -| result.admitted_ms);
         if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, result.id, @tagName(verdict), result.topicString(), logging.peer(&result.source), now -| result.admitted_ms });
         return .{ .applied = result };
+    }
+
+    /// Releases unfinished validation without retaining a decision about its message ID.
+    pub fn cancel(self: *Messages, peers: *Peers, handle: Handle, now: u64) bool {
+        return self.validation.cancel(&self.store, peers, handle, now);
     }
 
     pub fn expire(self: *Messages, peers: *Peers, now: u64) void {

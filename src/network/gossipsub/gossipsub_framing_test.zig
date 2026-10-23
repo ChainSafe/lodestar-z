@@ -104,7 +104,7 @@ test "gossipsub receive page exhaustion discards only the requesting frame witho
     rng.random().bytes(&payload);
     _ = try setup.shared.client.gossipsub.publish(test_topic, &payload, setup.shared.pair.now);
     for (0..64) |_| try setup.pumpOnce();
-    try std.testing.expect(!g.messages.wasSeen(topic_mod.validMessageId(test_topic, &payload, .{}), setup.shared.pair.now.millis()));
+    try std.testing.expect(!g.messages.known(topic_mod.validMessageId(test_topic, &payload, .{}), setup.shared.pair.now.millis()));
     try std.testing.expectEqual(@as(usize, 0), setup.serverMessages().len);
     try std.testing.expectEqual(@as(u64, 0), g.counters.local_pressure_resets);
     try std.testing.expectEqual(@as(u64, 0), g.counters.malformed_rpcs);

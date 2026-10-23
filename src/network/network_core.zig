@@ -340,6 +340,9 @@ pub const NetworkCore = struct {
     pub fn reportValidation(self: *NetworkCore, handle: gossip.Gossipsub.ValidationHandle, verdict: gossip.Gossipsub.Verdict, now: Now) gossip.Gossipsub.ReportOutcome {
         return self.protocols.gossipsub.report(handle, verdict, now);
     }
+    pub fn cancelValidation(self: *NetworkCore, handle: gossip.Gossipsub.ValidationHandle, now: Now) bool {
+        return self.protocols.gossipsub.cancel(handle, now);
+    }
     pub const PeerScore = struct {
         identity: t.PeerId,
         score: f64,

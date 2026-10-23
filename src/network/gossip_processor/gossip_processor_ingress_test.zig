@@ -85,19 +85,74 @@ test "gossip fatal reports preserve unrelated validation through direct processo
     for (0..std.math.divCeil(usize, table.cells.len, processor.GossipProcessor.batch_max) catch unreachable) |_| table.maintain(2, 1);
     for (tokens[1..]) |token| {
         const cell = table.get(token).?;
-        try t.expectEqual(processor.GossipProcessor.State.verdict_pending, cell.state);
-        try t.expectEqual(Gossipsub.Verdict.ignore, cell.verdict);
-        try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(cell.handle, cell.verdict, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
+        try t.expectEqual(processor.GossipProcessor.State.completion_pending, cell.state);
+        try t.expectEqual(processor.GossipProcessor.Completion.cancelled, cell.completion);
+        try t.expect(g.cancel(cell.handle, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
         table.retire(token);
     }
     try t.expectEqual(@as(usize, 1), g.resourceSnapshot().pending_validations);
+    var retry: [108]u8 = @splat(0);
+    retry[0] = 1;
+    std.mem.writeInt(u64, retry[100..108], 1, .little);
+    try t.expectEqual(@as(?usize, 1), try support.message(&g, 0, &retry, 2));
     const batch = table.claim(2);
-    try t.expectEqualSlices(processor.GossipProcessor.Token, tokens[0..1], batch.tokens[0..batch.len]);
+    try t.expectEqual(@as(usize, 2), batch.len);
+    try t.expectEqual(tokens[0], batch.tokens[0]);
     table.finish(&batch);
-    try t.expect(table.report(tokens[0], .accept, 2));
-    try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .accept }, g.report(table.get(tokens[0]).?.handle, .accept, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
-    table.retire(tokens[0]);
+    for (batch.tokens[0..batch.len]) |token| {
+        try t.expect(table.report(token, .accept, 2));
+        try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .accept }, g.report(table.get(token).?.handle, .accept, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
+        table.retire(token);
+    }
     try t.expectEqual(@as(usize, 0), g.resourceSnapshot().pending_validations);
+}
+
+test "gossip queue cancellation and validation expiry permit retries while host work stays charged" {
+    for ([_]bool{ false, true }) |executing| {
+        var opts = options;
+        opts.validation_timeout_ms = 10;
+        var g = try support.init(t.allocator, opts);
+        defer g.deinit();
+        const limits: processor.limits.Limits = @splat(.{ .items = 4, .bytes = 8192 });
+        var table = try processor.GossipProcessor.init(t.allocator, .{ .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
+        defer table.deinit();
+        defer table.close();
+        var consumer: Consumer = .{ .table = &table };
+        const sink = consumer.sink();
+        g.message_sink = &sink;
+        defer g.message_sink = null;
+        try support.subscribe(&g, block);
+        for (0..2) |i| _ = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+        try t.expectEqual(@as(?usize, 1), try support.message(&g, 0, "retry", 1));
+        const old_index = table.expiry.tail;
+        const old: processor.GossipProcessor.Token = .{ .index = @intCast(old_index), .generation = table.cells[old_index].generation };
+        const old_handle = table.get(old).?.handle;
+        if (executing) {
+            const batch = table.claim(2);
+            table.finish(&batch);
+            table.expire(11);
+            g.messages.expire(&g.peers, 11);
+            try t.expectEqual(@as(usize, 1), table.diag.executing);
+        } else {
+            table.dropQueued();
+            try t.expectEqual(@as(usize, 0), table.claim(2).len);
+            try t.expectEqual(processor.GossipProcessor.Completion.cancelled, table.get(old).?.completion);
+            try t.expect(g.cancel(old_handle, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
+            table.retire(old);
+        }
+        try t.expectEqual(@as(?usize, 1), try support.message(&g, 1, "retry", 12));
+        const batch = table.claim(12);
+        try t.expectEqual(@as(usize, 1), batch.len);
+        table.finish(&batch);
+        try t.expectEqual(1 + @as(usize, @intFromBool(executing)), table.diag.executing);
+        try t.expect(!table.report(old, .reject, 12));
+        try t.expectEqual(@as(usize, 1), table.diag.executing);
+        const current = batch.tokens[0];
+        try t.expect(table.report(current, .accept, 12));
+        try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .accept }, g.report(table.get(current).?.handle, .accept, Now.fromMilliseconds(.{ .mono_ms = 12, .unix_s = 0 })));
+        table.retire(current);
+        try t.expectEqual(@as(usize, 0), table.diag.occupied);
+    }
 }
 
 test "gossip direct processor admission drains paged RPCs while the host queue stays full" {
@@ -251,7 +306,7 @@ test "gossip admission rejects ineligible candidates without replacing work and 
     vote(&bytes, 8, 1);
     try receive(&g, 0, attestation, &bytes);
     try t.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.peer_validations)]);
-    try t.expectEqual(@as(u64, 0), table.diag.reportsAppliedIgnore);
+    try t.expectEqual(@as(u64, 0), table.diag.cancelled);
     try t.expect(table.get(victim) != null);
     vote(&bytes, 9, 1000);
     try receive(&g, 2, attestation, &bytes);
@@ -263,11 +318,11 @@ test "gossip admission rejects ineligible candidates without replacing work and 
     vote(&bytes, 10, 1);
     try receive(&g, 2, attestation, &bytes);
     try t.expect(table.get(victim) == null);
-    try t.expectEqual(@as(u64, 1), table.diag.reportsAppliedIgnore);
-    try t.expectEqual(@as(u64, 1), g.topic_metrics.get(attestation).ignored);
+    try t.expectEqual(@as(u64, 1), table.diag.cancelled);
+    try t.expectEqual(@as(u64, 0), g.topic_metrics.get(attestation).ignored);
     try t.expectEqual(@as(usize, 4), table.diag.occupied);
     try t.expectEqual(@as(usize, 4), g.resourceSnapshot().pending_validations);
-    try t.expectEqual(Gossipsub.ReportOutcome.already_resolved, g.report(handle, .reject, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
+    try t.expectEqual(Gossipsub.ReportOutcome.stale_handle, g.report(handle, .reject, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
     try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&g));
 }
 
@@ -308,7 +363,7 @@ test "gossip admission leaves queued work intact when a host copy pins the requi
     var candidate: [1000]u8 = undefined;
     vote(&candidate, 4, 1);
     try receive(&g, 2, attestation, &candidate);
-    try t.expectEqual(@as(u64, 0), table.diag.reportsAppliedIgnore);
+    try t.expectEqual(@as(u64, 0), table.diag.cancelled);
     try t.expectEqual(@as(usize, 3), table.diag.occupied);
     try t.expectEqual(@as(usize, 3), g.resourceSnapshot().pending_validations);
     try t.expect(table.get(victim) != null);
@@ -351,12 +406,12 @@ test "gossip admission after a refused victim selection retires only its own vic
     vote(&candidate, 4, 1);
     try receive(&g, 2, attestation, &candidate);
     try t.expectEqual(@as(u64, 1), table.diag.capacityRefusals);
-    try t.expectEqual(@as(u64, 0), table.diag.reportsAppliedIgnore);
+    try t.expectEqual(@as(u64, 0), table.diag.cancelled);
     try t.expectEqual(@as(usize, 3), table.diag.occupied);
     table.finish(&copying);
     vote(&candidate, 5, 1);
     try receive(&g, 2, attestation, &candidate);
-    try t.expectEqual(@as(u64, 0), table.diag.reportsAppliedIgnore);
+    try t.expectEqual(@as(u64, 0), table.diag.cancelled);
     try t.expect(table.get(copying.tokens[0]) != null);
     try t.expect(table.get(oldest_small) != null);
     try t.expectEqual(@as(usize, 4), table.diag.occupied);
@@ -478,7 +533,7 @@ test "gossip identified receipts settle only their IWANT ID across providers des
         const x = topic_mod.validMessageId(attestation, payload, .{});
         if (case == .cached) {
             _ = try f.message(0, payload);
-            try t.expect(!f.g.messages.wasSeen(x, f.now));
+            try t.expect(!f.g.messages.known(x, f.now));
             f.table.close();
         }
         if (case == .source_items or case == .processor_source or case == .processor_bytes or case == .validation_capacity) {
@@ -504,7 +559,7 @@ test "gossip identified receipts settle only their IWANT ID across providers des
         _ = try f.message(0, payload);
         try t.expectEqual(@as(usize, 1), f.g.recovery.len);
         try t.expectEqual(before + @intFromBool(case == .admitted), f.table.diag.occupied);
-        try t.expectEqual(case == .admitted, f.g.messages.wasSeen(x, f.now));
+        try t.expectEqual(case == .admitted, f.g.messages.known(x, f.now));
         try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
         switch (case) {
             .admitted => {
@@ -565,7 +620,7 @@ test "gossip invalid-domain and malformed receipts do not satisfy valid-domain p
     _ = try f.receiveCompressed(0, &.{0x80});
     try t.expectEqual(@as(usize, 3), f.g.recovery.len);
     try t.expectEqual(@as(f64, 2), support.invalidDeliveries(&f.g));
-    try t.expect(f.g.messages.wasSeen(invalid_id, 200));
+    try t.expect(f.g.messages.known(invalid_id, 200));
     try f.expire(2, 1);
 }
 
@@ -728,8 +783,8 @@ test "gossip replacement keeps original arrival age across dependency promotion"
     try t.expect(f.table.get(first) == null);
     for (later.tokens[0..later.len]) |token| try t.expect(f.table.get(token) != null);
     try t.expectEqual(@as(usize, 4), f.table.diag.occupied);
-    try t.expectEqual(@as(u64, 1), f.table.diag.reportsAppliedIgnore);
-    try t.expectEqual(Gossipsub.ReportOutcome.already_resolved, f.g.report(first_handle, .reject, Now.fromMilliseconds(.{ .mono_ms = f.now, .unix_s = 0 })));
+    try t.expectEqual(@as(u64, 1), f.table.diag.cancelled);
+    try t.expectEqual(Gossipsub.ReportOutcome.stale_handle, f.g.report(first_handle, .reject, Now.fromMilliseconds(.{ .mono_ms = f.now, .unix_s = 0 })));
     try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
 }
 
@@ -775,16 +830,16 @@ test "gossip eviction scan is work charged and leaves candidates untouched on ex
         try t.expectEqual(.pending, f.g.messages.validation.find(original_id, f.now).?.state);
         try t.expectEqual(handle, f.table.get(victim).?.handle);
         try t.expectEqual(@as(usize, 5), f.table.diag.occupied);
-        try t.expectEqual(@as(u64, 0), f.table.diag.reportsAppliedIgnore);
-        try t.expect(!f.g.messages.wasSeen(id, f.now));
-        try t.expect(f.g.messages.wants(id, f.now));
+        try t.expectEqual(@as(u64, 0), f.table.diag.cancelled);
+        try t.expect(!f.g.messages.known(id, f.now));
+        try t.expect(!f.g.messages.known(id, f.now));
         _ = try f.message(2, &data);
         try t.expect(f.table.get(victim) == null);
-        try t.expect(f.g.messages.wasSeen(id, f.now));
+        try t.expect(f.g.messages.known(id, f.now));
     }
 }
 
-test "gossip local replacement suppresses push and IHAVE through the retained ignore tombstone" {
+test "gossip local replacement permits recovery and readmission without accepting stale verdicts" {
     var f: IwantFixture = .{};
     try f.init(64);
     defer f.deinit();
@@ -802,28 +857,20 @@ test "gossip local replacement suppresses push and IHAVE through the retained ig
     vote(&data, 9, 96);
     _ = try f.message(2, &data);
     try t.expect(f.table.get(victim) == null);
-    // Natural capacity pressure removes seen independently of attribution.
-    for (0..f.g.messages.seen.ids.len) |i| {
-        var other: Gossipsub.MessageId = @splat(0xee);
-        std.mem.writeInt(u64, other[0..8], @intCast(i), .little);
-        _ = f.g.messages.seen.add(other, f.now);
-    }
-    try t.expect(!f.g.messages.wasSeen(id, f.now));
-    const tombstone = f.g.messages.validation.find(id, f.now).?;
-    const until = tombstone.until;
-    try t.expectEqual(.resolved, tombstone.state);
-    try t.expectEqual(.ignore, tombstone.verdict);
-    try t.expect(!f.g.messages.wants(id, f.now));
+    try t.expect(!f.g.messages.known(id, f.now));
+    try t.expectEqual(null, f.g.messages.validation.find(id, f.now));
+    try t.expect(!f.g.messages.known(id, f.now));
     try f.request(2, id);
     try f.flush(2);
-    try t.expectEqual(@as(usize, 0), f.g.recovery.len);
+    try t.expectEqual(@as(usize, 1), f.g.recovery.len);
     vote(&data, 1, 96);
     _ = try f.message(2, &data);
     try t.expectEqual(@as(usize, 4), f.table.diag.occupied);
-    try t.expectEqual(@as(u64, 1), f.table.diag.reportsAppliedIgnore);
-    try t.expect(!f.g.messages.wasSeen(id, f.now));
-    try t.expectEqual(until, f.g.messages.validation.find(id, f.now).?.until);
-    try t.expectEqual(Gossipsub.ReportOutcome.already_resolved, f.g.report(handle, .reject, Now.fromMilliseconds(.{ .mono_ms = f.now, .unix_s = 0 })));
+    try t.expectEqual(@as(usize, 0), f.g.recovery.len);
+    const current = f.g.messages.validation.find(id, f.now).?.handle;
+    try t.expect(!std.meta.eql(handle, current));
+    try t.expectEqual(Gossipsub.ReportOutcome.stale_handle, f.g.report(handle, .reject, Now.fromMilliseconds(.{ .mono_ms = f.now, .unix_s = 0 })));
+    try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .accept }, f.g.report(current, .accept, Now.fromMilliseconds(.{ .mono_ms = f.now, .unix_s = 0 })));
     try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
 }
 
@@ -864,14 +911,14 @@ test "gossip replacement preflights compressed and decoded pages across multiple
     random.random().bytes(&data);
     std.mem.writeInt(u64, data[16..24], 1, .little);
     try receive(&g, 2, attestation, &data);
-    try t.expectEqual(@as(u64, 2), table.diag.reportsAppliedIgnore);
+    try t.expectEqual(@as(u64, 2), table.diag.cancelled);
     try t.expectEqual(@as(usize, 3), table.diag.occupied);
     try t.expectEqual(@as(usize, 3), g.resourceSnapshot().pending_validations);
     try t.expectEqual(@as(usize, 8192), table.used_bytes[k]);
     try t.expectEqual(@as(usize, 2), g.messages.store.pending_by_kind[k]);
     for (tokens, ids, 0..) |token, id, i| {
         try t.expectEqual(i >= 2, table.get(token) != null);
-        try t.expect(!g.messages.wants(id, 1));
+        try t.expectEqual(i >= 2, g.messages.known(id, 1));
     }
 }
 
@@ -989,7 +1036,7 @@ test "gossip processor ignores unsearchable unknown roots after checking while r
     const k = @intFromEnum(processor.limits.Kind.beacon_attestation);
     const refusal = @intFromEnum(processor.GossipProcessor.Refusal.dependency_unsearchable);
     const cases = [_]struct { slot: u64, available: bool, state: processor.GossipProcessor.State }{
-        .{ .slot = 29, .available = false, .state = .verdict_pending },
+        .{ .slot = 29, .available = false, .state = .completion_pending },
         .{ .slot = 30, .available = false, .state = .waiting },
         .{ .slot = 29, .available = true, .state = .queued },
         .{ .slot = 33, .available = false, .state = .waiting },
@@ -1006,10 +1053,10 @@ test "gossip processor ignores unsearchable unknown roots after checking while r
         try t.expect(table.classify(token, case.available));
         try t.expectEqual(case.state, cell.state);
         try t.expectEqual(@as(u64, 1), table.refusals[k][refusal]);
-        if (case.state == .verdict_pending) {
-            try t.expectEqual(Gossipsub.Verdict.ignore, cell.verdict);
+        if (case.state == .completion_pending) {
+            try t.expectEqual(processor.GossipProcessor.Completion.cancelled, cell.completion);
             const now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
-            try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(cell.handle, cell.verdict, now));
+            try t.expect(g.cancel(cell.handle, now));
             table.retire(token);
         }
     }

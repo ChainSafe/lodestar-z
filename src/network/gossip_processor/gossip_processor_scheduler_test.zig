@@ -167,7 +167,7 @@ test "gossip scheduler indexes survive bounded randomized lifecycle interleaving
             const queue = table.queues[@intFromEnum(selected)][@intFromEnum(p.GossipProcessor.State.delivered)];
             if (queue.head != lists.none and step % 4 != 0) _ = table.report(.{ .index = @intCast(queue.head), .generation = table.cells[queue.head].generation }, .accept, now);
         }
-        for (0..p.GossipProcessor.batch_max) |_| table.retire(table.nextVerdict() orelse break);
+        for (0..p.GossipProcessor.batch_max) |_| table.retire(table.nextCompletion() orelse break);
         try verify(&table);
     }
 }

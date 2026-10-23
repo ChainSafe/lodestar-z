@@ -393,6 +393,8 @@ pub const Harness = struct {
         for (validation.recent) |record| {
             if (record.state != .pending) continue;
             records += 1;
+            assert(g.messages.known(record.id, self.now_ms));
+            assert(!g.messages.seen.contains(record.id, self.now_ms));
             assert(g.peers.matches(record.source));
             pins[record.source.index] += 1;
             for (record.duplicates[0..record.duplicate_len]) |duplicate| {

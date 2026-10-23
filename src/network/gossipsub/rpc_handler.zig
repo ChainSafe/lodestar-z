@@ -173,7 +173,7 @@ fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
     const limit = @min(constants.gossip_ids_max, id_budget, selected.capacity);
     count = 0;
     for (candidates[0..selected.count]) |id| {
-        if (!self.messages.wants(id, now.millis())) continue;
+        if (self.messages.known(id, now.millis())) continue;
         candidates[count] = id;
         count += 1;
     }

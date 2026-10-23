@@ -109,13 +109,13 @@ pub const Admission = struct {
     pub fn commit(self: *Admission) void {
         assert(!self.committed);
         const owner = self.messages;
+        assert(!owner.known(self.event.id, self.event.admitted_ms));
         const fits_now = self.fits(&self.room());
         assert(fits_now);
         const payload = owner.history.admitPayload(&owner.store, self.canonical.name.kind, self.event.id, self.event.topic, self.compressed).?;
         self.event.handle = owner.validation.admit(&owner.store, self.context.peers, payload, self.source.peer, self.topic_index, self.event.admitted_ms);
         owner.validation.attribution(self.event.handle).source_eligible = self.context.overlay.inMesh(self.topic_index, self.source.session.index);
         owner.store.seal(payload);
-        _ = owner.seen.add(self.event.id, self.event.admitted_ms);
         self.committed = true;
     }
 };

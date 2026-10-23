@@ -65,7 +65,8 @@ sources: [peer_book.capacity]struct {
 victims: [batch_max]u32 = undefined,
 
 pub const Token = struct { index: u16, generation: u64 };
-pub const State = enum { free, needs_check, checking, waiting, queued, copying, delivered, verdict_pending };
+pub const Completion = union(enum) { verdict: native.Gossipsub.Verdict, cancelled };
+pub const State = enum { free, needs_check, checking, waiting, queued, copying, delivered, completion_pending };
 pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,
@@ -100,7 +101,7 @@ pub const Cell = struct {
     execution_bytes: usize = 0,
     source_charge: usize = 0,
     retired: bool = false,
-    verdict: native.Gossipsub.Verdict = .ignore,
+    completion: Completion = .cancelled,
 
     pub fn replaceable(self: *const Cell) bool {
         if (self.executing or self.retired) return false;
@@ -115,7 +116,7 @@ pub const Diagnostics = struct {
     occupied: usize = 0,
     highWater: usize = 0,
     queued: usize = 0,
-    pendingVerdicts: usize = 0,
+    pendingCompletions: usize = 0,
     payloadBytes: usize = 0,
     copyingBytes: usize = 0,
     copying: usize = 0,
@@ -129,6 +130,7 @@ pub const Diagnostics = struct {
     reportsAppliedAccept: u64 = 0,
     reportsAppliedReject: u64 = 0,
     reportsAppliedIgnore: u64 = 0,
+    cancelled: u64 = 0,
     waiting: usize = 0,
     checking: usize = 0,
     executing: usize = 0,
@@ -389,7 +391,7 @@ fn countState(self: *GossipProcessor, state: State, add: bool, bytes: usize) voi
         .waiting => &self.diag.waiting,
         .copying => &self.diag.copying,
         .needs_check, .checking => &self.diag.checking,
-        .verdict_pending => &self.diag.pendingVerdicts,
+        .completion_pending => &self.diag.pendingCompletions,
         else => null,
     };
     if (count) |value| {
@@ -490,7 +492,7 @@ pub fn expire(self: *GossipProcessor, now: u64) void {
         if (bytes > 0 and cost > batch_bytes -| bytes) break;
         bytes += cost;
         self.expiry.remove(self.cells, "expiry_link", index);
-        if (cell.state != .delivered and cell.state != .verdict_pending) self.diag.queuedExpired +|= 1 else self.diag.deliveredExpired +|= 1;
+        if (cell.state != .delivered and cell.state != .completion_pending) self.diag.queuedExpired +|= 1 else self.diag.deliveredExpired +|= 1;
         cell.retired = true;
         if (cell.state != .copying and cell.state != .delivered) self.retire(self.token(index));
     }
@@ -513,8 +515,8 @@ pub fn maintain(self: *GossipProcessor, now: u64, slot: u64) void {
         self.prune_remaining -= 1;
         const cell = &self.cells[index];
         switch (cell.state) {
-            .needs_check, .waiting, .queued => if (!self.eligible(cell) or self.peerDropped(cell)) self.ignore(cell),
-            .checking => if (!self.eligible(cell)) self.ignore(cell),
+            .needs_check, .waiting, .queued => if (!self.eligible(cell) or self.peerDropped(cell)) self.cancel(cell),
+            .checking => if (!self.eligible(cell)) self.cancel(cell),
             else => {},
         }
     }
@@ -562,7 +564,7 @@ pub fn claimDemand(self: *GossipProcessor, now: u64, demand: Claim) Batch {
             const cell = &self.cells[index];
             if (now >= cell.deadline or !self.eligible(cell) or self.peerDropped(cell)) {
                 work += 1;
-                self.ignore(cell);
+                self.cancel(cell);
                 continue;
             }
             if (!self.executable(cell)) break;
@@ -573,7 +575,7 @@ pub fn claimDemand(self: *GossipProcessor, now: u64, demand: Claim) Batch {
                 if (batch.len >= @min(batch_max, demand.items)) break;
                 const member = if (group == none) index else self.groups.rows[group].members.tail;
                 if (now >= self.cells[member].deadline or !self.eligible(&self.cells[member]) or self.peerDropped(&self.cells[member])) {
-                    self.ignore(&self.cells[member]);
+                    self.cancel(&self.cells[member]);
                     work += 1;
                     continue;
                 }
@@ -617,7 +619,7 @@ pub fn claimChecks(self: *GossipProcessor, now: u64, limit: usize) Batch {
             work += 1;
             const cell = &self.cells[index];
             if (now >= cell.deadline or !self.eligible(cell) or self.peerDropped(cell)) {
-                self.ignore(cell);
+                self.cancel(cell);
                 continue;
             }
             self.transition(index, .checking);
@@ -636,13 +638,13 @@ pub fn classify(self: *GossipProcessor, handle: Token, available: bool) bool {
     else
         true;
     if (self.last_now >= cell.deadline or !self.eligible(cell)) {
-        self.ignore(cell);
+        self.cancel(cell);
     } else if (available) {
         self.transition(handle.index, .queued);
     } else if (cell.check_notification != self.dependencies.notification or self.dependencies.notification == std.math.maxInt(u64)) {
         self.transition(handle.index, .needs_check);
     } else if (!searchable) {
-        self.ignore(cell);
+        self.cancel(cell);
         self.refuse(cell.kind, .dependency_unsearchable);
     } else {
         const k = @intFromEnum(cell.kind);
@@ -651,7 +653,7 @@ pub fn classify(self: *GossipProcessor, handle: Token, available: bool) bool {
         else
             false;
         if (peer_full or self.waiting_items[k] >= self.limits[k].items / 2) {
-            self.ignore(cell);
+            self.cancel(cell);
             self.refuse(cell.kind, .dependency_full);
         } else self.transition(handle.index, .waiting);
     }
@@ -660,11 +662,12 @@ pub fn classify(self: *GossipProcessor, handle: Token, available: bool) bool {
 pub fn notifyBlock(self: *GossipProcessor, root: [32]u8) void {
     self.dependencies.notify(&root);
 }
-pub fn ignore(self: *GossipProcessor, cell: *Cell) void {
+pub fn cancel(self: *GossipProcessor, cell: *Cell) void {
     assert(!cell.executing);
     if (!self.eligible(cell)) self.diag.slotRefusals +|= 1;
-    self.transition(self.indexOf(cell), .verdict_pending);
-    cell.verdict = .ignore;
+    self.transition(self.indexOf(cell), .completion_pending);
+    cell.completion = .cancelled;
+    self.diag.cancelled +|= 1;
 }
 pub fn dropQueued(self: *GossipProcessor) void {
     self.drop_before = self.order;
@@ -684,9 +687,9 @@ fn peerDropped(self: *const GossipProcessor, cell: *const Cell) bool {
     const usage = &self.sources[source.index];
     return usage.generation == source.generation and cell.order <= usage.drop_before;
 }
-pub fn nextVerdict(self: *const GossipProcessor) ?Token {
+pub fn nextCompletion(self: *const GossipProcessor) ?Token {
     for (limits_mod.priority) |kind| {
-        const index = self.queueValue(kind, .verdict_pending).head;
+        const index = self.queueValue(kind, .completion_pending).head;
         if (index != none) return self.token(index);
     }
     return null;
@@ -710,8 +713,8 @@ pub fn report(self: *GossipProcessor, handle: Token, verdict: native.Gossipsub.V
             self.retire(handle);
             return false;
         }
-        cell.verdict = verdict;
-        self.transition(handle.index, .verdict_pending);
+        cell.completion = .{ .verdict = verdict };
+        self.transition(handle.index, .completion_pending);
         self.diag.reportsAccepted +|= 1;
         return true;
     };
@@ -728,10 +731,10 @@ pub fn outcome(self: *GossipProcessor, result: native.Gossipsub.ReportOutcome) v
     }
 }
 
-/// Work the owner carries over turns in bounded batches: slot pruning, dependency promotion and submitted verdicts.
+/// Work the owner carries over turns in bounded batches: slot pruning, dependency promotion and pending completions.
 pub fn pending(self: *const GossipProcessor) bool {
     if (self.closed) return false;
-    return self.prune_remaining > 0 or self.dependencies.promoting.len > 0 or self.diag.pendingVerdicts > 0;
+    return self.prune_remaining > 0 or self.dependencies.promoting.len > 0 or self.diag.pendingCompletions > 0;
 }
 /// Earliest attestation group or expiry deadline. O(1).
 pub fn deadline(self: *const GossipProcessor) ?u64 {
