@@ -396,7 +396,7 @@ fn run(input: []const u8) void {
             5 => if (link.take(arg)) |datagram| {
                 var corrupt = datagram;
                 const position = cursor.byte();
-                corrupt.bytes[position % corrupt.len] ^= 1 + cursor.byte();
+                corrupt.bytes[position % corrupt.len] ^= cursor.byte() | 1;
                 if (arg & 8 == 8) corrupt.len = 1 + position % corrupt.len;
                 deliver(&corrupt, seed);
             },
