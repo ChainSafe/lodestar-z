@@ -33,3 +33,8 @@ We may deprioritize or close low-effort issues and pull requests at our discreti
 ## License
 
 Apache-2.0
+
+## Network architecture
+
+The [network module](./src/network/root.zig) documents the owner, protocol, scheduling,
+storage, and delivery vocabulary used across discovery, QUIC, and the binding.

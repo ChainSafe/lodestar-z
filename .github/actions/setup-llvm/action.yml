@@ -1,0 +1,12 @@
+name: Setup LLVM
+description: Install llvm-objcopy for Linux GNU verifier archive preparation
+runs:
+  using: composite
+  steps:
+    - name: Install LLVM
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes llvm
+        llvm-objcopy --version
