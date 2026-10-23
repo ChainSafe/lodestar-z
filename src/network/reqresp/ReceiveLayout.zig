@@ -1,5 +1,6 @@
 //! Each authenticated connection has independently backed protocol reservations.
 //! A selected request keeps its buffers across fork changes and execution admission.
+//! Control responses reuse decoding scratch once their complete request has been admitted.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const constants = @import("constants.zig");
@@ -39,7 +40,8 @@ pub fn init(policy: *const Policy, protocols: Protocol.Set) ReceiveLayout {
     for (std.enums.values(Protocol)) |which| {
         const index = protocols.index(which) orelse continue;
         const size = policy.requestMaxFor(which);
-        const scratch = codec.frameLengthMax(@min(constants.frame_uncompressed_max, @max(size, codec.error_message_max)));
+        const response_size = if (which.isControl()) which.info().response_max else 0;
+        const scratch = codec.frameLengthMax(@min(constants.frame_uncompressed_max, @max(size, response_size, codec.error_message_max)));
         const read = @max(handoff_max, @min(read_max, codec.header_max + codec.frameLengthMax(@min(size, constants.frame_uncompressed_max))));
         layout.entries[index] = .{
             .sink_offset = layout.sink_bytes,

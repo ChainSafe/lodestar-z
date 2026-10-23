@@ -213,14 +213,15 @@ pub fn closingGoodbye(self: *Server, owner: *ReqResp, engine: *Engine, router: *
     return null;
 }
 
-pub fn admit(self: *Server, index: u16, lease: *const InboundAdmission.Lease, now: Now) void {
+pub fn admit(self: *Server, index: u16, storage: *const InboundAdmission.Storage, now: Now) void {
     const request = &self.request;
     assert(request.running() and self.state == .ready);
     assert(!self.admission.start_pending);
+    assert((storage.execution == null) == request.protocol.isControl());
     const payload: []const u8 = if (request.io.decoding) request.io.decoder.payload() else &.{};
     request.io.decoding = false;
-    request.io.scratch = lease.scratch;
-    self.execution = lease.execution;
+    request.io.scratch = storage.scratch;
+    self.execution = storage.execution;
     self.state = .serving;
     self.serving_started_ms = now.millis();
     self.progress_ms = now.millis();

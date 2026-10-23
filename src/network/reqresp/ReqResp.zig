@@ -8,7 +8,7 @@
 //! - pending chunk/chunk_sent notifications precede the terminal. Terminal delivery ends borrows;
 //!   the slot is reusable as soon as its terminal is delivered. Explicit abandon ends outbound borrows
 //!   immediately; the caller must first discard all delivered views for that request.
-//! - retainServing/releaseServing cover asynchronous host execution independently of stream lifetime.
+//! - retainServing/releaseServing cover asynchronous application execution independently of stream lifetime.
 //! - every terminal transition detaches Router and transport ownership before returning.
 //!   Undelivered events keep their payload borrows until delivery.
 const time = @import("../time.zig");
@@ -142,7 +142,7 @@ inbound: []Server,
 arena: []u8,
 request_sinks: []u8,
 receive_layout: ReceiveLayout,
-serving: ServingPool,
+serving: ?ServingPool,
 /// Indexed by slot id: outbound slots are `[0, outbound.len)`, and inbound slot `i` is
 /// `outbound.len + i`, which belongs to connection index `i / slots_per_connection`.
 links: []SlotLinks,
@@ -179,10 +179,13 @@ pub const Resources = struct {
 };
 
 pub fn resourceSnapshot(self: *const ReqResp) Resources {
-    var result: Resources = .{ .serving_capacity = self.serving.entries.len };
-    for (self.serving.entries) |entry| {
-        result.serving_occupied += @intFromBool(entry.request != null);
-        result.retiring += @intFromBool(entry.retiring);
+    var result: Resources = .{};
+    if (self.serving) |*pool| {
+        result.serving_capacity = pool.entries.len;
+        for (pool.entries) |entry| {
+            result.serving_occupied += @intFromBool(entry.request != null);
+            result.retiring += @intFromBool(entry.retiring);
+        }
     }
     for (self.outbound) |*slot| {
         if (slot.request.occupied()) result.outbound_occupied += 1;
@@ -253,8 +256,11 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
     }
     assert(cursor == arena.len);
 
-    var serving = try ServingPool.init(allocator, options.serving_max, options.serving_per_peer_max, outbound_sizes.scratch);
-    errdefer serving.deinit(allocator);
+    var serving: ?ServingPool = if (options.protocols.bits & Protocol.Set.application.bits != 0)
+        try ServingPool.init(allocator, options.serving_max, options.serving_per_group_max, outbound_sizes.scratch)
+    else
+        null;
+    errdefer if (serving) |*pool| pool.deinit(allocator);
     const links = try allocator.alloc(SlotLinks, outbound.len + inbound.len);
     errdefer allocator.free(links);
     @memset(links, .{});
@@ -298,7 +304,7 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
 /// Call cancelAll first, or destroy the attached transport and Router before deinit.
 pub fn deinit(self: *ReqResp) void {
     self.admission.deinit(self.allocator);
-    self.serving.deinit(self.allocator);
+    if (self.serving) |*pool| pool.deinit(self.allocator);
     self.allocator.free(self.outbound_by_connection);
     self.deadlines.deinit(self.allocator);
     self.allocator.free(self.links);
@@ -510,15 +516,18 @@ pub fn finish(self: *ReqResp, handle: RequestHandle, now: Now) bool {
 
 pub const ServingHandle = ServingPool.Handle;
 
-/// Holds execution capacity independently of the request. Does not extend payload borrows.
+/// Holds application execution capacity independently of the request. Control requests have no
+/// serving lease. Does not extend payload borrows.
 /// Release the returned handle when host execution ends, even if the request already ended.
 pub fn retainServing(self: *ReqResp, handle: RequestHandle) ?ServingHandle {
-    return self.serving.retain(handle);
+    const pool = if (self.serving) |*pool| pool else return null;
+    return pool.retain(handle);
 }
 
 /// A release may free serving capacity for a `.ready` slot.
 pub fn releaseServing(self: *ReqResp, handle: ServingHandle) bool {
-    if (!self.serving.release(handle)) return false;
+    const pool = if (self.serving) |*pool| pool else return false;
+    if (!pool.release(handle)) return false;
     self.admission.capacityReleased();
     return true;
 }
@@ -606,15 +615,16 @@ fn routedSlot(self: *const ReqResp, route: types.Route, stream: StreamHandle) ?u
 pub fn memoryPlan(self: *const ReqResp) MemoryPlan {
     const slot_bytes = self.outbound.len * @sizeOf(Client) + self.inbound.len * @sizeOf(Server);
     const admission_bytes = self.admission.limiter.memoryPlan().allocated_bytes;
+    const serving_bytes = if (self.serving) |*pool| pool.memoryBytes() else 0;
     return .{
         .facade_bytes = @sizeOf(ReqResp),
         .slot_bytes = slot_bytes,
         .io_bytes = self.arena.len,
         .admission_bytes = admission_bytes,
         .request_sink_bytes = self.request_sinks.len,
-        .serving_bytes = self.serving.memoryBytes(),
+        .serving_bytes = serving_bytes,
         .scheduler_bytes = self.schedulerBytes(),
-        .total_bytes = @sizeOf(ReqResp) + slot_bytes + self.arena.len + admission_bytes + self.request_sinks.len + self.serving.memoryBytes() + self.schedulerBytes(),
+        .total_bytes = @sizeOf(ReqResp) + slot_bytes + self.arena.len + admission_bytes + self.request_sinks.len + serving_bytes + self.schedulerBytes(),
     };
 }
 
@@ -889,7 +899,7 @@ fn retire(self: *ReqResp, id: u32) void {
     } else {
         const slot = &self.inbound[id - self.outbound.len];
         if (slot.execution) |index| {
-            self.serving.retire(index);
+            self.serving.?.retire(index);
             self.admission.capacityReleased();
         }
         slot.execution = null;

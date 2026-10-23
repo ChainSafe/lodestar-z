@@ -134,6 +134,92 @@ fn deferStart(owner: *rr, index: u16, now_ms: u64) void {
     owner.settleSlot(.inbound, index);
 }
 
+test "inbound admission shares serving capacity across identities in an address group" {
+    for ([_]bool{ false, true }) |ipv6| {
+        var opts = options(6);
+        opts.serving_max = 8;
+        opts.admission.limits.starts.tokens = 16;
+        opts.admission.limits.group = quotas(16, 1000);
+        opts.admission.limits.global = quotas(16, 1000);
+        var owner = try rr.init(std.testing.allocator, opts);
+        defer owner.deinit();
+        const now = Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 });
+        for (0..6) |peer| {
+            const prefix: u8 = if (peer == 5) 2 else 1;
+            const endpoint: @import("udp").Address = if (ipv6)
+                .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, prefix, @intCast(peer), 0, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = @intCast(peer + 1) } }
+            else
+                .{ .ip4 = .{ .octets = .{ 192, 0, prefix, @intCast(peer + 1) }, .port = @intCast(peer + 1) } };
+            owner.connectionOpened(.{ .index = @intCast(peer), .generation = 1 }, &endpoint, now);
+            const index = readySlot(&owner, @intCast(peer), .blocks_by_root_v2, 0, .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) }, 0);
+            owner.inbound[index].admission.decoded(1, now.millis());
+            _ = owner.admission.promote(&owner, index, now);
+            const slot = &owner.inbound[index];
+            if (peer == 4) {
+                try std.testing.expectEqual(.ready, slot.state);
+                try std.testing.expectEqual(.serving, slot.admission.wait);
+                try std.testing.expectEqual(@as(u128, 0), slot.admission.paid);
+                try std.testing.expect(slot.request.peer_fault == null);
+            } else {
+                try std.testing.expectEqual(.serving, slot.state);
+                try std.testing.expectEqual(@as(u128, 1), slot.admission.paid);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 5), owner.resourceSnapshot().serving_occupied);
+    }
+}
+
+test "inbound admission retains serving group through migration disconnect and quota row reuse" {
+    var opts = options(2);
+    opts.serving_per_group_max = 1;
+    var owner = try rr.init(std.testing.allocator, opts);
+    defer owner.deinit();
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    var router = try Router.init(std.testing.allocator, .{});
+    defer router.deinit();
+    const endpoint: @import("udp").Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } };
+    const other: @import("udp").Address = .{ .ip4 = .{ .octets = .{ 198, 51, 100, 1 }, .port = 2 } };
+    const group = @import("udp").AddressGroup.fromAddress(&endpoint);
+    const other_group = @import("udp").AddressGroup.fromAddress(&other);
+    const conn: types.Handle = .{ .index = 0, .generation = 1 };
+    var now = Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 });
+    owner.connectionOpened(conn, &endpoint, now);
+    const original_row = owner.admission.group(conn);
+    const index = readySlot(&owner, 0, .blocks_by_root_v2, 0, .{ .bytes = @splat(1) }, 0);
+    owner.connectionOpened(conn, &other, now);
+    try std.testing.expectEqual(.admitted, owner.admission.promote(&owner, index, now));
+    const retained = owner.retainServing(owner.inbound[index].request.handle(index)).?;
+    try std.testing.expect(owner.serving.?.available(group) == null);
+    try std.testing.expect(owner.serving.?.available(other_group) != null);
+
+    owner.connectionClosed(&pair.server, &router, conn, now);
+    var events: [1]rr.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), owner.pump(&pair.server, &router, now, &events));
+    try std.testing.expectEqual(rr.Failure.connection_closed, events[0].failed.reason);
+    try std.testing.expectEqual(@as(usize, 1), owner.resourceSnapshot().retiring);
+    now = Now.fromMilliseconds(.{ .mono_ms = 2000, .unix_s = 2 });
+    const replacement: types.Handle = .{ .index = 0, .generation = 2 };
+    owner.connectionOpened(replacement, &other, now);
+    try std.testing.expectEqual(original_row, owner.admission.group(replacement));
+    try std.testing.expectEqual(other_group, owner.admission.limiter.rows[original_row].group);
+    try std.testing.expect(owner.serving.?.available(group) == null);
+    try std.testing.expect(owner.serving.?.available(other_group) != null);
+
+    owner.connectionOpened(.{ .index = 1, .generation = 1 }, &endpoint, now);
+    const waiting = readySlot(&owner, 1, .blocks_by_root_v2, 0, .{ .bytes = @splat(2) }, now.millis());
+    _ = owner.admission.promote(&owner, waiting, now);
+    try std.testing.expectEqual(.serving, owner.inbound[waiting].admission.wait);
+    owner.settleSlot(.inbound, waiting);
+    try std.testing.expect(owner.releaseServing(retained));
+    owner.admission.promoteReady(&owner, now);
+    try std.testing.expectEqual(.serving, owner.inbound[waiting].state);
+    try std.testing.expect(!owner.releaseServing(retained));
+    try std.testing.expect(owner.serving.?.available(group) == null);
+    try std.testing.expectEqual(@as(usize, 0), owner.resourceSnapshot().retiring);
+}
+
 test "inbound admission delayed decode and equal timestamps retain acceptance then slot ordering" {
     var owner = try rr.init(std.testing.allocator, options(1));
     defer owner.deinit();
@@ -235,11 +321,12 @@ test "inbound admission cancellation removes each wait without refunding or spin
                 try std.testing.expectEqual(.allowed, owner.admission.limiter.take(owner.admission.group(.{ .index = 0, .generation = 1 }), .blocks_by_root_v2, 3, .phase0, 0));
             },
             .serving => {
-                owner.serving.per_peer_max = 1;
-                const execution = owner.serving.available(&identity).?;
-                _ = owner.serving.acquire(execution, holder, &identity);
+                owner.serving.?.per_group_max = 1;
+                const group = owner.admission.limiter.rows[owner.admission.group(slot.request.conn)].group;
+                const execution = owner.serving.?.available(group).?;
+                _ = owner.serving.?.acquire(execution, holder, group);
                 serving = owner.retainServing(holder) orelse return error.TestUnexpectedResult;
-                owner.serving.retire(execution);
+                owner.serving.?.retire(execution);
             },
         }
         owner.settleSlot(.inbound, index);

@@ -30,10 +30,11 @@ pub const Options = struct {
 
     connections: u16 = limits.connections_max_default,
     outbound_max: u16 = constants.outbound_max_default,
-    /// Concurrent serving executions.
+    /// Concurrent application executions. Control responses use their request storage.
     serving_max: u16 = constants.serving_max_default,
+    /// Shared by IPv4 /24 or IPv6 /48, including host-retained executions after disconnect.
     /// Two concurrent sync batches can each request blocks and sidecars.
-    serving_per_peer_max: u8 = 2 * constants.MAX_CONCURRENT_REQUESTS,
+    serving_per_group_max: u8 = 2 * constants.MAX_CONCURRENT_REQUESTS,
     /// Zero disables the aggregate outbound limit.
     outbound_per_connection_max: u8 = 0,
     inbound_per_connection_max: u8 = constants.inbound_per_connection_max_default,
@@ -78,12 +79,12 @@ pub const Options = struct {
         if (options.outbound_max == 0 or options.outbound_max > constants.slots_ceiling) {
             return error.InvalidOptions;
         }
-        if (options.serving_max == 0 or options.serving_max > constants.slots_ceiling) {
-            return error.InvalidOptions;
-        }
+        if (options.serving_max > constants.slots_ceiling) return error.InvalidOptions;
+        if (options.protocols.bits & Protocol.Set.application.bits != 0 and
+            (options.serving_max == 0 or options.serving_per_group_max == 0)) return error.InvalidOptions;
         if (options.outbound_per_connection_max > limits.peer_streams_bidi - outbound_stream_headroom or
             options.outbound_per_connection_max > options.outbound_max) return error.InvalidOptions;
-        if (options.inbound_per_connection_max == 0 or options.connections == 0 or options.serving_per_peer_max == 0) return error.InvalidOptions;
+        if (options.inbound_per_connection_max == 0 or options.connections == 0) return error.InvalidOptions;
         if (options.connections > constants.slots_ceiling) return error.InvalidOptions;
         if (options.progress_timeout_ms == 0 or options.host_timeout_ms == 0 or
             options.quota_timeout_ms == 0 or options.work_per_pump_max == 0 or

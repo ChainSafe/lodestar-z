@@ -6,6 +6,8 @@ const Router = @import("../router.zig").Router;
 const support = @import("../quic/test_support.zig");
 const policy_fixture = @import("policy_fixture.zig");
 const Endpoint = @import("test_pair.zig").Endpoint;
+const codec = @import("codec.zig");
+const status_size = @import("consensus_types").fulu.StatusV2.fixed_size;
 
 const control_fixture = @import("control_fixture.zig");
 const applicationOptions = control_fixture.applicationOptions;
@@ -509,4 +511,127 @@ test "reqresp reserved physical sinks admit full native control wave and recycle
     const replacement = (server.control_reqresp.accept(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = .status_v1 }, .leftover = &.{}, .fin = false }, pair.now) catch null).?;
     try std.testing.expectEqual(wave[0].index, replacement.index);
     try std.testing.expectEqual(wave[0].generation + 1, replacement.generation);
+}
+
+const ControlRequest = struct { stream: Engine.StreamHandle, incoming: @FieldType(rr.Event, "request") };
+
+fn receiveControlRequest(pair: *support.Pair, requests: *rr, router: *Router, conn: Engine.Handle, bytes: *const [status_size]u8) !ControlRequest {
+    const stream = try pair.client.openStream(conn);
+    var wire: [codec.encodedLengthMax(status_size)]u8 = undefined;
+    const encoded = try codec.encodeRequest(bytes, &wire);
+    try std.testing.expectEqual(encoded.len, try pair.client.write(stream, encoded, true));
+    try pair.pump();
+    const inbound = found: {
+        var events: [16]Engine.Event = undefined;
+        for (pair.events(&pair.server, &events)) |event| {
+            if (event == .stream_opened and event.stream_opened.id == stream.id) break :found event.stream_opened;
+        }
+        return error.RequestStreamNotReceived;
+    };
+    const handle = try requests.accept(&pair.server, inbound, .{
+        .protocol = .{ .reqresp = .status_v2 },
+        .leftover = &.{},
+        .fin = false,
+    }, pair.now);
+    for (0..16) |_| {
+        @import("test_pair.zig").forward(pair, &pair.server, requests);
+        var events: [1]rr.Event = undefined;
+        if (requests.pump(&pair.server, router, pair.now, &events) == 0) continue;
+        try std.testing.expect(events[0] == .request);
+        try std.testing.expectEqual(handle, events[0].request.request);
+        try std.testing.expectEqualSlices(u8, bytes, events[0].request.bytes);
+        try std.testing.expectEqual(@as(u128, 1), requests.inbound[handle.index].admission.paid);
+        return .{ .stream = stream, .incoming = events[0].request };
+    }
+    return error.RequestNotReceived;
+}
+
+fn expectControlReply(pair: *support.Pair, requests: *rr, router: *Router, pending: *const ControlRequest, code: u8, expected: []const u8) !void {
+    var sink: [status_size]u8 = undefined;
+    var scratch: [protocol.control_scratch_length]u8 = undefined;
+    var decoder = codec.Decoder.initResponse(.{ .min = status_size, .max = status_size }, false, &sink, &scratch);
+    var finished = false;
+    for (0..64) |_| {
+        try pair.pump();
+        @import("test_pair.zig").forward(pair, &pair.server, requests);
+        _ = requests.pump(&pair.server, router, pair.now, &.{});
+        try pair.pump();
+        var wire: [codec.encodedLengthMax(codec.error_message_max)]u8 = undefined;
+        const read = try pair.client.read(pending.stream, &wire);
+        try std.testing.expect(read.reset_code == null);
+        if (read.len > 0) {
+            const decoded = try decoder.feed(wire[0..read.len]);
+            try std.testing.expectEqual(read.len, decoded.consumed);
+        }
+        if (read.fin) {
+            finished = true;
+            break;
+        }
+    }
+    try std.testing.expect(finished and decoder.isDone());
+    try std.testing.expectEqual(code, decoder.result());
+    try std.testing.expectEqualSlices(u8, expected, decoder.payload());
+    for (0..16) |_| {
+        @import("test_pair.zig").forward(pair, &pair.server, requests);
+        var events: [1]rr.Event = undefined;
+        if (requests.pump(&pair.server, router, pair.now, &events) == 0) continue;
+        try std.testing.expect(events[0] == .served);
+        try std.testing.expectEqual(pending.incoming.request, events[0].served.request);
+        try std.testing.expectEqual(@as(u32, if (code == 0) 1 else 0), events[0].served.chunks);
+        try std.testing.expectEqual(.stale, requests.responseReadiness(pending.incoming.request));
+        return;
+    }
+    return error.RequestNotRetired;
+}
+
+test "reqresp control replies preserve blocked writes and decoded requests through reuse" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    @import("../quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 16);
+    const handles = try support.connectPair(&pair);
+    var router = try Router.init(std.testing.allocator, .{});
+    defer router.deinit();
+    var requests = try rr.init(std.testing.allocator, try control_fixture.controlOptions());
+    defer requests.deinit();
+    defer requests.cancelAll(&pair.server, &router, pair.now);
+
+    const first_bytes = [_]u8{0x31} ** status_size;
+    const second_bytes = [_]u8{0x72} ** status_size;
+    const first = try receiveControlRequest(&pair, &requests, &router, handles.client, &first_bytes);
+    var response: [status_size]u8 = undefined;
+    for (&response, 0..) |*byte, index| byte.* = @intCast(index);
+    try requests.respond(first.incoming.request, &response, null, pair.now);
+    try std.testing.expect(requests.finish(first.incoming.request, pair.now));
+    const expected_first = response;
+    @memset(&response, 0xee);
+    for (0..4) |_| _ = requests.pump(&pair.server, &router, pair.now, &.{});
+    const blocked = &requests.inbound[first.incoming.request.index];
+    try std.testing.expectEqual(.writing_chunk, blocked.state);
+    try std.testing.expect(!blocked.request.io.outbox.idle());
+    try std.testing.expectEqual(@as(usize, 0), try pair.server.streamCapacity(blocked.request.stream));
+
+    const second = try receiveControlRequest(&pair, &requests, &router, handles.client, &second_bytes);
+    try std.testing.expect(first.incoming.request.index != second.incoming.request.index);
+    const expected_second = [_]u8{0xa7} ** status_size;
+    try requests.respond(second.incoming.request, &expected_second, null, pair.now);
+    try std.testing.expect(requests.finish(second.incoming.request, pair.now));
+    try expectControlReply(&pair, &requests, &router, &second, 0, &expected_second);
+    try std.testing.expectEqual(.writing_chunk, blocked.state);
+    try std.testing.expect(!blocked.request.io.outbox.idle());
+    try std.testing.expectEqualSlices(u8, &first_bytes, first.incoming.bytes);
+    try expectControlReply(&pair, &requests, &router, &first, 0, &expected_first);
+
+    const replacement = try receiveControlRequest(&pair, &requests, &router, handles.client, &second_bytes);
+    try std.testing.expectEqual(first.incoming.request.index, replacement.incoming.request.index);
+    try std.testing.expectEqual(first.incoming.request.generation + 1, replacement.incoming.request.generation);
+    try std.testing.expectError(error.StaleHandle, requests.respond(first.incoming.request, &first_bytes, null, pair.now));
+    var message: [codec.error_message_max]u8 = undefined;
+    for (&message, 0..) |*byte, index| byte.* = @intCast(index);
+    const expected_error = message;
+    try requests.respondError(replacement.incoming.request, 2, &message, pair.now);
+    @memset(&message, 0xee);
+    try expectControlReply(&pair, &requests, &router, &replacement, 2, &expected_error);
+    try std.testing.expectEqual(@as(u16, 0), requests.pendingCounts().inbound);
+    try std.testing.expectEqual(@as(usize, 0), requests.memoryPlan().serving_bytes);
 }

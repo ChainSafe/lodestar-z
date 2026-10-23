@@ -60,7 +60,7 @@ fn receive(setup: *harness.Pair) !@FieldType(rr.Event, "request") {
 
 test "reqresp admission lifecycle incomplete requests cannot consume another connection's receive reservation" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .serving_max = 1, .control_serving_max = 1, .control_serving_per_peer_max = 1 });
+    try setup.init(.{}, .{ .serving_max = 1 });
     defer setup.deinit();
     for (0..2) |_| {
         const stream = try setup.openRaw(.blocks_by_root_v2);
@@ -83,7 +83,7 @@ test "reqresp admission lifecycle incomplete requests cannot consume another con
 
 test "reqresp admission lifecycle cancellation retains execution until host retirement" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .serving_max = 1, .control_serving_max = 1, .control_serving_per_peer_max = 1, .serving_per_peer_max = 1 });
+    try setup.init(.{}, .{ .serving_max = 1, .serving_per_group_max = 1 });
     defer setup.deinit();
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
@@ -119,16 +119,18 @@ test "reqresp admission lifecycle cancellation retains execution until host reti
     try std.testing.expectEqual(@as(usize, 0), owner.resourceSnapshot().retiring);
 }
 
-fn allocation(allocator: std.mem.Allocator) !void {
+fn allocation(allocator: std.mem.Allocator, protocols: Protocol.Set) !void {
     var owner = try rr.init(allocator, .{
+        .protocols = protocols,
         .connections = 2,
         .forks = &.{},
         .admission = try rr.Options.Admission.defaults(&policy(), 1),
         .outbound_max = 2,
-        .serving_max = 2,
+        .serving_max = if (protocols.bits & Protocol.Set.application.bits != 0) 2 else 0,
     });
     defer owner.deinit();
     for (0..2) |peer| for (std.enums.values(Protocol)) |which| {
+        if (!protocols.contains(which)) continue;
         const first = owner.receive_layout.first(@intCast(peer), which);
         const bounds = owner.policy.requestMaxFor(which);
         try std.testing.expectEqual(bounds, owner.inbound[first].receive.sink.len);
@@ -141,8 +143,6 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
         .serving_max = 2,
-        .control_serving_max = 1,
-        .control_serving_per_peer_max = 1,
         .admission = .{ .policy = policy(), .limits = .{ .group = quotas, .global = quotas } },
     });
     defer setup.deinit();
@@ -188,15 +188,14 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
 }
 
 test "reqresp admission lifecycle protocol buffers and all startup allocation failures" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocation, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocation, .{Protocol.Set.all});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocation, .{Protocol.Set.control});
 }
 
 test "reqresp admission lifecycle a fresh burst starts full requests before splitting residual quota" {
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
         .serving_max = 2,
-        .control_serving_max = 1,
-        .control_serving_per_peer_max = 1,
         .admission = .{ .policy = policy(), .limits = .{
             .group = admission_fixture.quotas(4, 1000),
             .global = admission_fixture.quotas(8, 1000),

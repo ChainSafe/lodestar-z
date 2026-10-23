@@ -450,7 +450,7 @@ test "reqresp request start another address group progresses while one waits" {
 
 test "reqresp request start a waiter that then waits for serving is charged its start once" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .serving_per_peer_max = 1, .admission = limits() });
+    try setup.init(.{}, .{ .serving_per_group_max = 1, .admission = limits() });
     defer setup.deinit();
     const owner = &setup.shared.server.reqresp;
     const limiter = &owner.admission.limiter;
@@ -458,12 +458,13 @@ test "reqresp request start a waiter that then waits for serving is charged its 
     const start = setup.shared.pair.now.millis();
     const source = connectSource(owner, 1, &identity, start);
     for (0..2) |_| try std.testing.expectEqual(.allowed, limiter.start(source, start));
-    // Retired but retained host work holds the identity's only serving entry.
+    // Retired but retained host work holds the group's only serving entry.
     const holder: rr.RequestHandle = .{ .index = 0, .generation = 1, .direction = .inbound };
-    const entry = owner.serving.available(&identity).?;
-    _ = owner.serving.acquire(entry, holder, &identity);
+    const group = limiter.rows[source].group;
+    const entry = owner.serving.?.available(group).?;
+    _ = owner.serving.?.acquire(entry, holder, group);
     const serving = owner.retainServing(holder) orelse return error.TestUnexpectedResult;
-    owner.serving.retire(entry);
+    owner.serving.?.retire(entry);
     const index = deferredSlot(owner, 1, .blocks_by_root_v2, &identity, start);
     var events: [4]rr.Event = undefined;
     try std.testing.expectEqual(@as(usize, 0), pumpOwner(&setup, &events));

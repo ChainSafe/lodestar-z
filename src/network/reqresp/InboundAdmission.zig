@@ -57,7 +57,7 @@ pub const Acceptance = struct {
     state: State,
 };
 
-pub const Lease = struct { execution: u16, scratch: []u8 };
+pub const Storage = struct { execution: ?u16, scratch: []u8 };
 pub const Progress = enum { waiting, charged, admitted };
 
 const InboundAdmission = @This();
@@ -260,13 +260,14 @@ pub fn promote(self: *InboundAdmission, owner: *ReqResp, index: u16, now: Now) P
         if (!self.chargeStart(owner.inbound, index, now)) return .waiting;
         progress = .charged;
     }
-    const execution = owner.serving.available(&slot.identity) orelse {
+    const source = self.group(request.conn);
+    const group_key = self.limiter.rows[source].group;
+    const execution: ?u16 = if (request.protocol.isControl()) null else owner.serving.?.available(group_key) orelse {
         state.wait = .serving;
         return progress;
     };
     const cost = self.limiter.requestCost(request.protocol, state.cost, slot.request_fork);
     if (state.paid < cost) {
-        const source = self.group(request.conn);
         const granted = self.limiter.grant(source, request.protocol, cost - state.paid, slot.request_fork, now.millis());
         state.paid += granted;
         if (granted > 0) progress = .charged;
@@ -277,8 +278,11 @@ pub fn promote(self: *InboundAdmission, owner: *ReqResp, index: u16, now: Now) P
         }
     }
     state.wait = .none;
-    const lease: Lease = .{ .execution = execution, .scratch = owner.serving.acquire(execution, request.handle(index), &slot.identity) };
-    slot.admit(index, &lease, now);
+    const storage: Storage = .{
+        .execution = execution,
+        .scratch = if (execution) |entry| owner.serving.?.acquire(entry, request.handle(index), group_key) else slot.receive.scratch,
+    };
+    slot.admit(index, &storage, now);
     return .admitted;
 }
 

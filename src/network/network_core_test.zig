@@ -62,7 +62,6 @@ const MaintenancePeers = struct {
             opts.resolved.core.control.starts_per_turn_max = 1;
             opts.resolved.core.protocols.reqresp.outbound_max = 6;
             opts.resolved.core.protocols.control_reqresp.outbound_max = 4;
-            opts.resolved.core.protocols.control_reqresp.serving_max = 4;
             opts.resolved.core.protocols.reqresp.outbound_per_connection_max = 2;
             opts.resolved.core.protocols.router = .{ .negotiations_max = 16, .outbound_control_reserved = 4, .outbound_reserved = 8 };
             try node.init(if (index == 0) hub_allocator else std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);

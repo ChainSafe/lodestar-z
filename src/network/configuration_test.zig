@@ -73,7 +73,7 @@ test "configuration resolves dial concurrency independently of peer headroom" {
         try std.testing.expectEqual(reserved, resolved.core.dial.outbound_reserved);
         try std.testing.expectEqual(reserved, resolved.limits.outbound_reserved);
         try std.testing.expectEqual(@as(?u16, 242), resolved.limits.outbound_max);
-        try std.testing.expectEqual(200 + headroom, resolved.core.protocols.control_reqresp.serving_max);
+        try std.testing.expectEqual(@as(u16, 0), resolved.core.protocols.control_reqresp.serving_max);
     }
     const beacon = try resolve(.{ .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     try std.testing.expectEqual(@as(u16, 32), beacon.core.dial.concurrent_max);
@@ -143,7 +143,8 @@ test "configuration resolves shared capacities from their owners" {
     try std.testing.expectEqual(@as(u8, 8), beacon.core.protocols.reqresp.inbound_per_connection_max);
     try std.testing.expectEqual(@as(u16, 20), beacon.core.protocols.router.inbound_per_connection_max);
     try std.testing.expectEqual(@as(u8, 1), control.outbound_per_connection_max);
-    try std.testing.expectEqual(@as(u8, 1), control.serving_per_peer_max);
+    try std.testing.expectEqual(@as(u8, 0), control.serving_per_group_max);
+    try std.testing.expectEqual(@as(u8, 4), beacon.core.protocols.reqresp.serving_per_group_max);
     try std.testing.expectEqual(beacon.limits.connections_max, control.connections);
     inline for (.{ "reqresp", "control_reqresp" }) |field| {
         const starts = @field(beacon.core.protocols, field).admission.limits.starts;
@@ -169,7 +170,7 @@ test "configuration overrides preserve defaults and derive shared fields" {
     try std.testing.expectEqualSlices(ForkEntry, forks, protocols.reqresp.forks);
     try std.testing.expectEqual(@as(u16, 56), protocols.reqresp.outbound_max);
     try std.testing.expectEqual(@as(u16, 7), protocols.reqresp.work_per_pump_max);
-    try std.testing.expectEqual(resolved.core.peers.max_peers, protocols.control_reqresp.serving_max);
+    try std.testing.expectEqual(@as(u16, 0), protocols.control_reqresp.serving_max);
     try std.testing.expectEqual(@as(u16, 6), protocols.router.outbound_control_reserved);
     try std.testing.expectEqual(@as(u16, 20), protocols.router.negotiations_max);
     try std.testing.expectEqual(@as(u16, 6), protocols.gossipsub.connected_capacity);
@@ -187,7 +188,7 @@ test "configuration rejects inconsistent capacity sections before owners" {
     options.protocols.router.outbound_control_reserved += 1;
     try validate(resolved.limits, options);
     options = resolved.core;
-    options.protocols.control_reqresp.serving_max = options.peers.max_peers - 1;
+    options.protocols.reqresp.serving_max = 0;
     try std.testing.expectError(error.InvalidOptions, validate(resolved.limits, options));
     options = resolved.core;
     options.protocols.router.outbound_control_reserved = 0;

@@ -141,7 +141,7 @@ test "core shutdown discards retained host serving work without a release" {
     try std.testing.expect(serving != null);
     core.shutdown(setup.pair.now);
     try std.testing.expectError(error.ProtocolDisabled, core.protocols.request(&core.transport.engine, .{ .index = 0, .generation = 1 }, .ping_v1, &.{}, &.{}, .{}, setup.pair.now));
-    try std.testing.expect(core.protocols.reqresp.serving.entries[serving.?.index].retained);
+    try std.testing.expect(core.protocols.reqresp.serving.?.entries[serving.?.index].retained);
     core.deinit(setup.pair.io());
     try std.testing.expect(!core.initialized);
     try std.testing.expectEqual(@as(usize, 0), core.allocations.bytes);

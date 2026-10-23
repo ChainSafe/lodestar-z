@@ -16,7 +16,7 @@ const request_policy = @import("reqresp/request_policy.zig");
 pub const ReqRespOverrides = struct {
     outbound_max: ?u16 = null,
     serving_max: ?u16 = null,
-    serving_per_peer_max: ?u8 = null,
+    serving_per_group_max: ?u8 = null,
     outbound_per_connection_max: ?u8 = null,
     inbound_per_connection_max: ?u8 = null,
     progress_timeout_ms: ?u64 = null,
@@ -132,8 +132,8 @@ pub fn resolve(options: Options) !Resolved {
         .routes = .control,
         .report_non_completion = false,
         .outbound_max = peer_options.max_peers,
-        .serving_max = peer_options.max_peers,
-        .serving_per_peer_max = 1,
+        .serving_max = 0,
+        .serving_per_group_max = 0,
         .outbound_per_connection_max = 1,
         .inbound_per_connection_max = 8,
         .progress_timeout_ms = requests.progress_timeout_ms,
@@ -193,7 +193,6 @@ pub fn validate(limits: Engine.Limits, options: Core) !void {
         options.dial.concurrent_max != limits.dialing_max or
         options.dial.outbound_reserved != limits.outbound_reserved or
         limits.outbound_max != limits.connections_max or
-        options.protocols.control_reqresp.serving_max < options.peers.max_peers or
         options.protocols.control_reqresp.outbound_max < options.peers.max_peers or
         options.protocols.router.outbound_control_reserved < options.protocols.control_reqresp.outbound_max)
         return error.InvalidOptions;
