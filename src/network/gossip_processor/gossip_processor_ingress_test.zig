@@ -54,6 +54,52 @@ fn receive(g: *Gossipsub, source: u16, topic: []const u8, payload: []const u8) !
     try t.expectEqual(.done, g.receiveItem(g.sessions.ref(source), .{ .message = .{ .topic = topic, .data = compressed[0..len] } }, &turn, &credit));
 }
 
+test "gossip fatal reports preserve unrelated validation through direct processor admission" {
+    var opts = options;
+    opts.connected_capacity = 18;
+    opts.retained_capacity = 32;
+    var g = try support.init(t.allocator, opts);
+    defer g.deinit();
+    const limits: processor.limits.Limits = @splat(.{ .items = 32, .bytes = 8192 });
+    var table = try processor.GossipProcessor.init(t.allocator, .{ .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
+    defer table.deinit();
+    defer table.close();
+    var consumer: Consumer = .{ .table = &table };
+    const sink = consumer.sink();
+    g.message_sink = &sink;
+    defer g.message_sink = null;
+    try support.subscribe(&g, block);
+    var tokens: [18]processor.GossipProcessor.Token = undefined;
+    for (&tokens, 0..) |*token, i| {
+        const peer = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+        var payload: [108]u8 = @splat(0);
+        payload[0] = @intCast(i);
+        std.mem.writeInt(u64, payload[100..108], 1, .little);
+        try receive(&g, peer.index, block, &payload);
+        const index = table.expiry.tail;
+        token.* = .{ .index = @intCast(index), .generation = table.cells[index].generation };
+        try t.expect(table.get(token.*).?.source != null);
+    }
+    try t.expectEqual(tokens.len, g.resourceSnapshot().pending_validations);
+    for (tokens[1..]) |token| table.dropPeer(&table.get(token).?.identity);
+    for (0..std.math.divCeil(usize, table.cells.len, processor.GossipProcessor.batch_max) catch unreachable) |_| table.maintain(2, 1);
+    for (tokens[1..]) |token| {
+        const cell = table.get(token).?;
+        try t.expectEqual(processor.GossipProcessor.State.verdict_pending, cell.state);
+        try t.expectEqual(Gossipsub.Verdict.ignore, cell.verdict);
+        try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(cell.handle, cell.verdict, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
+        table.retire(token);
+    }
+    try t.expectEqual(@as(usize, 1), g.resourceSnapshot().pending_validations);
+    const batch = table.claim(2);
+    try t.expectEqualSlices(processor.GossipProcessor.Token, tokens[0..1], batch.tokens[0..batch.len]);
+    table.finish(&batch);
+    try t.expect(table.report(tokens[0], .accept, 2));
+    try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .accept }, g.report(table.get(tokens[0]).?.handle, .accept, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
+    table.retire(tokens[0]);
+    try t.expectEqual(@as(usize, 0), g.resourceSnapshot().pending_validations);
+}
+
 test "gossip direct processor admission drains paged RPCs while the host queue stays full" {
     var pair: test_pair.Pair = .{};
     try pair.initOpts(options, options);

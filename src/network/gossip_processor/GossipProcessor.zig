@@ -41,9 +41,6 @@ slot: u64 = 0,
 last_now: u64 = 0,
 prune_cursor: usize = 0,
 prune_remaining: usize = 0,
-drop_peers: [16]PeerId = undefined,
-drop_peer_count: usize = 0,
-peer_drop_before: u64 = 0,
 drop_before: u64 = 0,
 closed: bool = false,
 refusals: [limits_mod.kind_count][refusal_count]u64 = @splat(@splat(0)),
@@ -57,6 +54,8 @@ fork_count: usize = 0,
 source_maximum: [limits_mod.kind_count]usize = @splat(payload_max),
 sources: [peer_book.capacity]struct {
     generation: u64 = 0,
+    identity: PeerId = undefined,
+    drop_before: u64 = 0,
     items: [limits_mod.kind_count]usize = @splat(0),
     bytes: [limits_mod.kind_count]usize = @splat(0),
     waiting: [limits_mod.kind_count]u16 = @splat(0),
@@ -272,6 +271,8 @@ pub fn occupancy(self: *const GossipProcessor, kind: Kind) [occupancy_count]u64 
         self.executing_items[@intFromEnum(kind)],
     };
 }
+/// Source accounting and peer drops require `message.source`. Its generation must retain
+/// the identity until the validation deadline; pending gossipsub validation pins that row.
 pub fn capture(self: *GossipProcessor, message: *const native.Gossipsub.MessageEvent, canonical: native.topic.Canonical, metadata: *const metadata_mod.Metadata, deneb: bool, received_at: u64) !void {
     const kind = canonical.name.kind;
     const len = message.bytes.len;
@@ -317,8 +318,10 @@ pub fn capture(self: *GossipProcessor, message: *const native.Gossipsub.MessageE
     };
     @memcpy(cell.topic[0..message.topic.len], message.topic);
     if (message.source) |source| {
+        assert(source.generation != 0);
         const usage = &self.sources[source.index];
-        if (usage.generation != source.generation) usage.* = .{ .generation = source.generation };
+        if (usage.generation != source.generation) usage.* = .{ .generation = source.generation, .identity = message.identity };
+        assert(usage.identity.eql(&message.identity));
         cell.source_charge = chargedBytes(len);
         usage.items[k] += 1;
         usage.bytes[k] += cell.source_charge;
@@ -515,10 +518,6 @@ pub fn maintain(self: *GossipProcessor, now: u64, slot: u64) void {
             else => {},
         }
     }
-    if (self.prune_remaining == 0) {
-        self.drop_peer_count = 0;
-        self.peer_drop_before = 0;
-    }
 }
 fn eligible(self: *const GossipProcessor, cell: *const Cell) bool {
     return cell.order > self.drop_before and metadata_mod.eligible(&cell.metadata, cell.kind, cell.deneb, self.slot);
@@ -671,23 +670,19 @@ pub fn dropQueued(self: *GossipProcessor) void {
     self.drop_before = self.order;
     self.prune_remaining = self.cells.len;
 }
+/// Marks the identity's currently captured source work for bounded pruning, not future admissions.
 pub fn dropPeer(self: *GossipProcessor, identity: *const PeerId) void {
     if (self.closed) return;
-    for (self.drop_peers[0..self.drop_peer_count]) |*peer| if (peer.eql(identity)) return;
-    if (self.drop_peer_count == self.drop_peers.len) {
-        self.peer_drop_before = self.order;
-        self.drop_peer_count = 0;
-    } else {
-        self.drop_peers[self.drop_peer_count] = identity.*;
-        self.drop_peer_count += 1;
+    for (&self.sources) |*source| {
+        if (source.generation == 0 or !source.identity.eql(identity) or source.drop_before == self.order) continue;
+        source.drop_before = self.order;
+        self.prune_remaining = self.cells.len;
     }
-    // Keep the cursor moving even under a continuous stream of fatal reports.
-    self.prune_remaining = self.cells.len;
 }
 fn peerDropped(self: *const GossipProcessor, cell: *const Cell) bool {
-    if (cell.order <= self.peer_drop_before) return true;
-    for (self.drop_peers[0..self.drop_peer_count]) |*peer| if (peer.eql(&cell.identity)) return true;
-    return false;
+    const source = cell.source orelse return false;
+    const usage = &self.sources[source.index];
+    return usage.generation == source.generation and cell.order <= usage.drop_before;
 }
 pub fn nextVerdict(self: *const GossipProcessor) ?Token {
     for (limits_mod.priority) |kind| {
