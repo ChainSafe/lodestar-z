@@ -10,9 +10,9 @@ const validation = @import("validation.zig");
 
 test "gossip validation topic pins follow attribution ownership through replacement expiry and clear" {
     const a = std.testing.allocator;
-    var peers = try Peers.init(a, &.{ .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
+    var peers = try Peers.init(a, &.{ .connected_capacity = 2, .retained_capacity = 5, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(a);
-    peers.rows[0] = .{ .occupied = true, .generation = 1 };
+    peers.rows[0] = .{ .occupied = true, .generation = 1, .admission_group = @import("udp").AddressGroup.fromAddress(&.unspecified) };
     const source: PeerRef = .{ .index = 0, .generation = 1 };
     var store = try storage.Store.init(a, 3, storage.page_bytes);
     defer store.deinit(a);
@@ -63,7 +63,7 @@ test "gossip validation topic pins follow attribution ownership through replacem
 test "gossip validation expires without pump and resolves exactly once" {
     var peers = try Peers.init(std.testing.allocator, &.{ .retained_score_ms = 100 }, 512);
     defer peers.deinit(std.testing.allocator);
-    peers.rows[0] = .{ .occupied = true, .generation = 1 };
+    peers.rows[0] = .{ .occupied = true, .generation = 1, .admission_group = @import("udp").AddressGroup.fromAddress(&.unspecified) };
     var store = try storage.Store.init(std.testing.allocator, 2, 8192);
     defer store.deinit(std.testing.allocator);
     var v = try Validation.init(std.testing.allocator, 1, 10, 20);
@@ -87,7 +87,7 @@ test "gossip validation expires without pump and resolves exactly once" {
 test "gossip validation readmission skips exhausted generation without hiding pending ID" {
     var peers = try Peers.init(std.testing.allocator, &.{ .retained_score_ms = 100 }, 512);
     defer peers.deinit(std.testing.allocator);
-    peers.rows[0] = .{ .occupied = true, .generation = 1 };
+    peers.rows[0] = .{ .occupied = true, .generation = 1, .admission_group = @import("udp").AddressGroup.fromAddress(&.unspecified) };
     var store = try storage.Store.init(std.testing.allocator, 2, 8192);
     defer store.deinit(std.testing.allocator);
     var v = try Validation.init(std.testing.allocator, 2, 10, 20);
@@ -117,7 +117,7 @@ test "gossip validation readmission skips exhausted generation without hiding pe
 
 test "gossip validation destruction releases pending payloads and peer pins" {
     const a = std.testing.allocator;
-    var peers = try Peers.init(a, &.{ .retained_score_ms = 100, .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 100, .connected_capacity = 2, .retained_capacity = 5, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(a);
     const source = peers.admit(.{ .index = 0, .generation = 1 }, &.{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound }, 0).admitted.peer;
     var store = try storage.Store.init(a, 2, 8192);
@@ -141,9 +141,9 @@ test "gossip validation destruction releases pending payloads and peer pins" {
 
 test "gossip validation index bounds sparse lookups and follows replacement expiry and clear" {
     const a = std.testing.allocator;
-    var peers = try Peers.init(a, &.{ .retained_score_ms = 100, .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 100, .connected_capacity = 2, .retained_capacity = 5, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(a);
-    peers.rows[0] = .{ .occupied = true, .generation = 1 };
+    peers.rows[0] = .{ .occupied = true, .generation = 1, .admission_group = @import("udp").AddressGroup.fromAddress(&.unspecified) };
     const source: PeerRef = .{ .index = 0, .generation = 1 };
     var store = try storage.Store.init(a, 1, storage.page_bytes);
     defer store.deinit(a);

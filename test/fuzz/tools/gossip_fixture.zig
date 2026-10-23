@@ -57,7 +57,7 @@ pub const Cursor = struct {
 
 pub const Overrides = struct {
     peers: u16 = 4,
-    retained: u16 = 8,
+    retained: u16 = 9,
     validation: usize = 8,
     heartbeat_ms: u64 = 20,
     followup_ms: u64 = 30,
@@ -407,7 +407,12 @@ pub const Harness = struct {
             assert(g.peers.matches(batch.peer));
             pins[batch.peer.index] += 1;
         }
-        for (g.peers.rows, 0..) |peer, i| assert(peer.pins == pins[i]);
+        var pinned: u16 = 0;
+        for (g.peers.rows, 0..) |peer, i| {
+            assert(peer.pins == pins[i]);
+            pinned += @intFromBool(pins[i] > 0);
+        }
+        assert(g.peers.pinned == pinned and pinned <= g.peers.pin_limit);
         assert(g.recovery.len <= gossip.constants.promises_cap);
         assert(g.recovery.available() == gossip.constants.promises_cap - g.recovery.len);
         for (g.sessions.rows) |*row| {

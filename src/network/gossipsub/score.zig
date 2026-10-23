@@ -59,6 +59,7 @@ pub const Params = struct {
 pub const TopicCounters = struct {
     in_mesh: bool = false,
     graft_ms: u64 = 0,
+    delivery_restart_ms: u64 = 0,
     first_deliveries: f64 = 0,
     mesh_deliveries: f64 = 0,
     mesh_failures: f64 = 0,
@@ -178,7 +179,7 @@ pub const PeerScore = struct {
     pub fn prune(self: *PeerScore, peer: u16, topic: u16, now_ms: u64) void {
         var next = self.load(peer, topic);
         const params = self.topic_params[topic];
-        const elapsed = now_ms -| next.graft_ms;
+        const elapsed = now_ms -| @max(next.graft_ms, next.delivery_restart_ms);
         if (next.in_mesh and elapsed > params.mesh_delivery_activation_ms and
             next.mesh_deliveries < params.mesh_delivery_threshold)
         {
@@ -199,6 +200,15 @@ pub const PeerScore = struct {
     pub fn creditMesh(self: *PeerScore, peer: u16, topic: u16) void {
         var next = self.load(peer, topic);
         next.mesh_deliveries = @min(next.mesh_deliveries + 1, self.topic_params[topic].mesh_delivery_cap);
+        self.store(peer, topic, next);
+    }
+
+    /// Locally refused attribution leaves an incomplete delivery sample. Resume deficit
+    /// scoring after a full observation interval, without awarding delivery credit.
+    pub fn localPressure(self: *PeerScore, peer: u16, topic: u16, now_ms: u64) void {
+        var next = self.load(peer, topic);
+        if (!next.in_mesh) return;
+        next.delivery_restart_ms = @max(next.delivery_restart_ms, now_ms);
         self.store(peer, topic, next);
     }
 
@@ -271,6 +281,8 @@ pub const PeerScore = struct {
                 counters.mesh_failures == 0 and counters.invalid == 0) continue;
             var weights: TopicWeights = .{};
             const elapsed: u64 = if (counters.in_mesh) now_ms -| counters.graft_ms else 0;
+            const delivery_start = @max(counters.graft_ms, counters.delivery_restart_ms);
+            const delivery_elapsed = now_ms -| delivery_start;
             if (counters.in_mesh) {
                 const p1 = @min(
                     @as(f64, @floatFromInt(elapsed / params.time_in_mesh_quantum_ms)),
@@ -286,16 +298,16 @@ pub const PeerScore = struct {
                     }
                 }
                 if (params.weight != 0 and params.mesh_delivery_weight != 0 and
-                    counters.mesh_deliveries < params.mesh_delivery_threshold and elapsed <= params.mesh_delivery_activation_ms and
-                    params.mesh_delivery_activation_ms < std.math.maxInt(u64) - counters.graft_ms)
+                    counters.mesh_deliveries < params.mesh_delivery_threshold and delivery_elapsed <= params.mesh_delivery_activation_ms and
+                    params.mesh_delivery_activation_ms < std.math.maxInt(u64) - delivery_start)
                 {
-                    const next = counters.graft_ms + params.mesh_delivery_activation_ms + 1;
+                    const next = delivery_start + params.mesh_delivery_activation_ms + 1;
                     next_change = @min(next_change orelse next, next);
                 }
             }
             weights.p2 = params.first_delivery_weight *
                 @min(counters.first_deliveries, params.first_delivery_cap);
-            if (counters.in_mesh and elapsed > params.mesh_delivery_activation_ms and
+            if (counters.in_mesh and delivery_elapsed > params.mesh_delivery_activation_ms and
                 counters.mesh_deliveries < params.mesh_delivery_threshold)
             {
                 const deficit = params.mesh_delivery_threshold - counters.mesh_deliveries;
@@ -333,7 +345,7 @@ pub const PeerScore = struct {
             before.mesh_failures != after.mesh_failures or before.invalid != after.invalid) return true;
         if (!after.in_mesh) return false;
         const threshold = params.mesh_delivery_threshold;
-        return before.graft_ms != after.graft_ms or (before.mesh_deliveries != after.mesh_deliveries and
+        return before.graft_ms != after.graft_ms or before.delivery_restart_ms != after.delivery_restart_ms or (before.mesh_deliveries != after.mesh_deliveries and
             (before.mesh_deliveries < threshold or after.mesh_deliveries < threshold));
     }
 
@@ -1097,4 +1109,34 @@ test "score cache matches fresh evaluation across random mutations" {
     }
     // The walk must exercise both invalidating and cache-preserving mutations.
     try std.testing.expect(kept > 1_000 and scores.calculations > 1_000 and scores.calculations < reads / 2);
+}
+
+test "gossip local retention pressure restarts delivery observation without credit or penalty laundering" {
+    var score = try testScores(std.testing.allocator, .{ .behaviour_threshold = 0, .topic = .{ .mesh_delivery_threshold = 2, .mesh_delivery_activation_ms = 10 } }, 1);
+    defer score.deinit(std.testing.allocator);
+    score.graft(0, 0, 0);
+    score.creditMesh(0, 0);
+    score.prune(0, 0, 11);
+    score.graft(0, 0, 12);
+    score.invalid(0, 0);
+    score.penalizeFor(0, .broken_iwant);
+    const before = score.score(0, 23, 0);
+    const counters = score.load(0, 0);
+    score.localPressure(0, 0, 23);
+    try std.testing.expectEqual(before + 1, score.score(0, 23, 0));
+    var expected = counters;
+    expected.delivery_restart_ms = 23;
+    try std.testing.expectEqualDeep(expected, score.load(0, 0));
+    try std.testing.expectEqual(@as(f64, 1), score.rows[0].behaviour);
+    try expectCached(&score, 0, 33, 0);
+    try std.testing.expectEqual(before, score.score(0, 34, 0));
+    try expectExact(&score, 0, 34, 0);
+    score.localPressure(0, 0, 34);
+    score.prune(0, 0, 35);
+    try std.testing.expectEqual(counters.mesh_failures, score.load(0, 0).mesh_failures);
+    score.localPressure(0, 0, 40);
+    try std.testing.expectEqual(@as(u64, 34), score.load(0, 0).delivery_restart_ms);
+    score.graft(0, 0, 41);
+    score.prune(0, 0, 52);
+    try std.testing.expectEqual(counters.mesh_failures + 1, score.load(0, 0).mesh_failures);
 }

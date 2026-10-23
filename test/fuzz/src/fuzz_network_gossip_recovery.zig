@@ -21,7 +21,7 @@ var harness: Harness = undefined;
 
 /// Snapshot mode: this runs once before the fork server, so every input starts from this state.
 pub export fn zig_fuzz_init() callconv(.c) void {
-    harness.init(std.heap.c_allocator, .{ .peers = 12, .retained = 16, .validation = 8 }) catch @panic("gossip harness initialization failed");
+    harness.init(std.heap.c_allocator, .{ .peers = 12, .retained = 25, .validation = 8 }) catch @panic("gossip harness initialization failed");
 }
 
 pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {

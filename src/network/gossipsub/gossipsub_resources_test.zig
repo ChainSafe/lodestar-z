@@ -19,7 +19,7 @@ const QueueResult = @import("outbox.zig").QueueResult;
 const snappy = @import("snappy");
 const metrics = @import("metrics.zig");
 const turn_mod = @import("turn.zig");
-const resource_options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 3, .retained_capacity = 4, .retained_outbound_reserve = 1, .validation_capacity = 1, .mcache_capacity = 2, .seen_capacity = 4 };
+const resource_options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 3, .retained_capacity = 9, .retained_outbound_reserve = 1, .validation_capacity = 1, .mcache_capacity = 2, .seen_capacity = 4 };
 
 test "gossipsub pinned payload pressure drops the publication and releases receive pages" {
     var setup: Pair = .{};
@@ -88,12 +88,12 @@ test "gossipsub resource snapshot starts empty" {
 
 test "gossip resolved capacities allocate owner rows and reject stale ceiling handles" {
     var ledger: CountingAllocator = .{ .backing = std.testing.allocator };
-    var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
+    var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 9, .retained_outbound_reserve = 1 });
     try std.testing.expectEqual(@as(usize, 2), g.sessions.rows.len);
-    try std.testing.expectEqual(@as(usize, 4), g.peers.rows.len);
-    try std.testing.expectEqual(@as(usize, 4), g.peers.scores.rows.len);
+    try std.testing.expectEqual(@as(usize, 9), g.peers.rows.len);
+    try std.testing.expectEqual(@as(usize, 9), g.peers.scores.rows.len);
     try std.testing.expect(!g.sessions.matches(.{ .index = 2, .generation = 0 }));
-    try std.testing.expect(!g.peers.matches(.{ .index = 4, .generation = 0 }));
+    try std.testing.expect(!g.peers.matches(.{ .index = 9, .generation = 0 }));
     try std.testing.expectEqual(ledger.bytes, g.memoryPlan().total_bytes - @sizeOf(Gossipsub));
     g.deinit();
     try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
@@ -113,7 +113,7 @@ test "gossip default owner memory reconciles requested allocations" {
 test "gossip resource snapshot releases queued bytes and descriptors with the owner" {
     var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var ledger: CountingAllocator = .{ .backing = backing.allocator() };
-    var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
+    var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 9, .retained_outbound_reserve = 1 });
     defer g.deinit();
     const calls = backing.allocations;
     const conn: Handle = .{ .index = 0, .generation = 1 };
@@ -137,7 +137,7 @@ test "gossip resource snapshot releases queued bytes and descriptors with the ow
 }
 
 test "gossip lifecycle sequence preserves ownership under pressure reconnect and late verdicts" {
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 91, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .validation_capacity = 2, .mcache_capacity = 4, .seen_capacity = 8, .mcache_arena_bytes = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + storage.page_bytes, .validation_timeout_ms = 100, .validation_tombstone_ms = 200 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 91, .connected_capacity = 2, .retained_capacity = 9, .retained_outbound_reserve = 1, .validation_capacity = 2, .mcache_capacity = 4, .seen_capacity = 8, .mcache_arena_bytes = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + storage.page_bytes, .validation_timeout_ms = 100, .validation_tombstone_ms = 200 });
     defer g.deinit();
     var rng = std.Random.DefaultPrng.init(17);
     var conn: Handle = .{ .index = 0, .generation = 1 };
@@ -214,7 +214,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
         }
         try std.testing.expectEqual(g.messages.store.next.len, occupied_pages + g.messages.store.free_pages);
         var records_pending: usize = 0;
-        var pins: [4]u32 = @splat(0);
+        var pins: [9]u32 = @splat(0);
         for (g.messages.validation.recent) |*record| {
             records_pending += @intFromBool(record.state == .pending);
             if (record.state != .pending) continue;

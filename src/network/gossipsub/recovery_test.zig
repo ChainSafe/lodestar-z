@@ -10,7 +10,7 @@ const score = @import("score.zig");
 
 test "recovery receipts bind connection generation and token and release only cancelled pins" {
     const allocator = std.testing.allocator;
-    var peers = try Peers.init(allocator, &.{ .retained_score_ms = 10_000, .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
+    var peers = try Peers.init(allocator, &.{ .retained_score_ms = 10_000, .connected_capacity = 2, .retained_capacity = 5, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(allocator);
     var recovery = try Recovery.init(allocator);
     defer recovery.deinit(allocator, &peers);
@@ -22,8 +22,8 @@ test "recovery receipts bind connection generation and token and release only ca
         .direction = .inbound,
     };
     const peer = peers.admit(connection, &metadata, 0).admitted.peer;
-    recovery.add(&peers, [_]u8{1} ** 20, peer, connection, 7, 30_000);
-    recovery.add(&peers, [_]u8{2} ** 20, peer, connection, 8, 30_000);
+    try recovery.add(&peers, [_]u8{1} ** 20, peer, connection, 7, 30_000);
+    try recovery.add(&peers, [_]u8{2} ** 20, peer, connection, 8, 30_000);
     recovery.controlSent(next_connection, 7, 3000, 10);
     recovery.controlSent(connection, 6, 3000, 10);
     try std.testing.expectEqual(@as(u64, 30_000), recovery.batches[0].expiry);
@@ -44,7 +44,7 @@ test "recovery receipts bind connection generation and token and release only ca
 
 test "recovery capacity resolves every matching attribution and deinit releases remaining pins" {
     const allocator = std.testing.allocator;
-    var peers = try Peers.init(allocator, &.{ .retained_score_ms = 10_000, .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
+    var peers = try Peers.init(allocator, &.{ .retained_score_ms = 10_000, .connected_capacity = 2, .retained_capacity = 5, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(allocator);
     const connection: Handle = .{ .index = 0, .generation = 1 };
     const metadata: peer_book.Metadata = .{
@@ -56,18 +56,18 @@ test "recovery capacity resolves every matching attribution and deinit releases 
     {
         var recovery = try Recovery.init(allocator);
         defer recovery.deinit(allocator, &peers);
-        for (0..constants.promises_cap) |_| recovery.add(&peers, [_]u8{1} ** 20, peer, connection, 7, 30_000);
+        for (0..constants.promises_cap) |_| try recovery.add(&peers, [_]u8{1} ** 20, peer, connection, 7, 30_000);
         try std.testing.expectEqual(@as(usize, 0), recovery.available());
         _ = recovery.resolve(&peers, [_]u8{1} ** 20);
         try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
-        recovery.add(&peers, [_]u8{2} ** 20, peer, connection, 8, 30_000);
+        try recovery.add(&peers, [_]u8{2} ** 20, peer, connection, 8, 30_000);
     }
     try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
 }
 
 test "recovery batches pin identity once and score one randomly selected promise" {
     const a = std.testing.allocator;
-    var peers = try Peers.init(a, &.{ .retained_score_ms = 10000, .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 10000, .connected_capacity = 2, .retained_capacity = 5, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(a);
     var recovery = try Recovery.init(a);
     defer recovery.deinit(a, &peers);
@@ -76,14 +76,14 @@ test "recovery batches pin identity once and score one randomly selected promise
     const peer = peers.admit(connection, &metadata, 0).admitted.peer;
     var ids: [constants.gossip_ids_max]MessageId = undefined;
     for (&ids, 0..) |*id, i| id.* = @splat(@intCast(i));
-    recovery.addBatch(&peers, &ids, peer, connection, 1, 64, 30_000);
+    try recovery.addBatch(&peers, &ids, peer, connection, 1, 64, 30_000);
     try std.testing.expectEqual(@as(u32, 1), peers.rows[peer.index].pins);
     try std.testing.expectEqual(@as(u64, 0), recovery.expire(&peers, 20000));
     recovery.controlSent(connection, 1, 3000, 20000);
     try std.testing.expectEqual(@as(u64, 1), recovery.expire(&peers, 23000));
     try std.testing.expectEqual(@as(f64, 1), peers.scores.rows[peer.index].behaviour);
     try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
-    recovery.addBatch(&peers, &ids, peer, connection, 2, 64, 30_000);
+    try recovery.addBatch(&peers, &ids, peer, connection, 2, 64, 30_000);
     recovery.controlSent(connection, 2, 3000, 24000);
     _ = recovery.resolve(&peers, ids[64]);
     try std.testing.expectEqual(@as(usize, 127), recovery.len);
@@ -163,7 +163,7 @@ fn expectIndexed(recovery: *const Recovery) !void {
 
 test "recovery index separates colliding ids and resolves an id's duplicates across batches and peers" {
     const a = std.testing.allocator;
-    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .retained_capacity = 4, .retained_outbound_reserve = 1 }, 512);
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .connected_capacity = 4, .retained_capacity = 9, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(a);
     var recovery = try Recovery.init(a);
     defer recovery.deinit(a, &peers);
@@ -172,10 +172,10 @@ test "recovery index separates colliding ids and resolves an id's duplicates acr
     const third = admit(&peers, 2);
     var ids: [6]MessageId = undefined;
     collidingIds(&recovery, &ids);
-    recovery.addBatch(&peers, ids[0..3], first, .{ .index = 0, .generation = 1 }, 1, 0, 30_000);
-    recovery.add(&peers, ids[1], first, .{ .index = 0, .generation = 1 }, 2, 30_000);
-    recovery.addBatch(&peers, &.{ ids[1], ids[3] }, second, .{ .index = 1, .generation = 1 }, 3, 1, 30_000);
-    recovery.add(&peers, ids[4], third, .{ .index = 2, .generation = 1 }, 4, 30_000);
+    try recovery.addBatch(&peers, ids[0..3], first, .{ .index = 0, .generation = 1 }, 1, 0, 30_000);
+    try recovery.add(&peers, ids[1], first, .{ .index = 0, .generation = 1 }, 2, 30_000);
+    try recovery.addBatch(&peers, &.{ ids[1], ids[3] }, second, .{ .index = 1, .generation = 1 }, 3, 1, 30_000);
+    try recovery.add(&peers, ids[4], third, .{ .index = 2, .generation = 1 }, 4, 30_000);
     try expectIndexed(&recovery);
     try std.testing.expectEqual(recovery.buckets.len - 1, std.mem.count(u16, recovery.buckets, &.{none}));
     try std.testing.expectEqual(missWork(&recovery, 7), recovery.resolve(&peers, ids[5]));
@@ -206,7 +206,7 @@ test "recovery index separates colliding ids and resolves an id's duplicates acr
 
 test "recovery index fills to capacity and reuses released slots for new ids" {
     const a = std.testing.allocator;
-    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .retained_capacity = 4, .retained_outbound_reserve = 1 }, 512);
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .connected_capacity = 4, .retained_capacity = 9, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(a);
     var recovery = try Recovery.init(a);
     defer recovery.deinit(a, &peers);
@@ -219,7 +219,7 @@ test "recovery index fills to capacity and reuses released slots for new ids" {
     const batches = constants.promises_cap / constants.gossip_ids_max;
     for (0..batches) |batch| {
         const owner = batch % owners.len;
-        recovery.addBatch(&peers, ids[batch * constants.gossip_ids_max ..][0..constants.gossip_ids_max], owners[owner], .{ .index = @intCast(owner), .generation = 1 }, batch, batch % constants.gossip_ids_max, 30_000);
+        try recovery.addBatch(&peers, ids[batch * constants.gossip_ids_max ..][0..constants.gossip_ids_max], owners[owner], .{ .index = @intCast(owner), .generation = 1 }, batch, batch % constants.gossip_ids_max, 30_000);
     }
     try std.testing.expectEqual(@as(usize, 0), recovery.available());
     try expectIndexed(&recovery);
@@ -230,7 +230,7 @@ test "recovery index fills to capacity and reuses released slots for new ids" {
     try std.testing.expectEqual(@as(usize, batches - 1), recovery.batch_len);
     try expectIndexed(&recovery);
     const fresh = ids[constants.promises_cap..];
-    recovery.addBatch(&peers, fresh, owners[0], .{ .index = 0, .generation = 1 }, batches, 0, 30_000);
+    try recovery.addBatch(&peers, fresh, owners[0], .{ .index = 0, .generation = 1 }, batches, 0, 30_000);
     try std.testing.expectEqual(@as(usize, 0), recovery.available());
     try expectIndexed(&recovery);
     for (released) |id| _ = recovery.resolve(&peers, id);
@@ -248,7 +248,7 @@ test "recovery index fills to capacity and reuses released slots for new ids" {
 
 test "recovery breaks a sent promise only while its sampled request is unresolved" {
     const a = std.testing.allocator;
-    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .retained_capacity = 4, .retained_outbound_reserve = 1 }, 512);
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .connected_capacity = 4, .retained_capacity = 9, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(a);
     var recovery = try Recovery.init(a);
     defer recovery.deinit(a, &peers);
@@ -256,9 +256,9 @@ test "recovery breaks a sent promise only while its sampled request is unresolve
     const sampled = admit(&peers, 1);
     const unsent = admit(&peers, 2);
     const ids = [_]MessageId{ @splat(1), @splat(2), @splat(3) };
-    recovery.addBatch(&peers, &ids, unsampled, .{ .index = 0, .generation = 1 }, 1, 1, 30_000);
-    recovery.addBatch(&peers, &ids, sampled, .{ .index = 1, .generation = 1 }, 2, 2, 30_000);
-    recovery.addBatch(&peers, &ids, unsent, .{ .index = 2, .generation = 1 }, 3, 2, 3_010);
+    try recovery.addBatch(&peers, &ids, unsampled, .{ .index = 0, .generation = 1 }, 1, 1, 30_000);
+    try recovery.addBatch(&peers, &ids, sampled, .{ .index = 1, .generation = 1 }, 2, 2, 30_000);
+    try recovery.addBatch(&peers, &ids, unsent, .{ .index = 2, .generation = 1 }, 3, 2, 3_010);
     recovery.controlSent(.{ .index = 0, .generation = 1 }, 1, 3_000, 10);
     recovery.controlSent(.{ .index = 1, .generation = 1 }, 2, 3_000, 10);
     _ = recovery.resolve(&peers, ids[2]);
@@ -275,7 +275,7 @@ test "recovery breaks a sent promise only while its sampled request is unresolve
 
 test "recovery cancellation removes a connection's requests from the index" {
     const a = std.testing.allocator;
-    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .retained_capacity = 4, .retained_outbound_reserve = 1 }, 512);
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .connected_capacity = 4, .retained_capacity = 9, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(a);
     var recovery = try Recovery.init(a);
     defer recovery.deinit(a, &peers);
@@ -283,9 +283,9 @@ test "recovery cancellation removes a connection's requests from the index" {
     const other = admit(&peers, 1);
     const connection: Handle = .{ .index = 0, .generation = 1 };
     const ids = [_]MessageId{ @splat(1), @splat(2), @splat(3), @splat(4) };
-    recovery.addBatch(&peers, ids[0..2], cancelled, connection, 1, 0, 30_000);
-    recovery.addBatch(&peers, ids[1..3], cancelled, connection, 2, 0, 30_000);
-    recovery.addBatch(&peers, &.{ ids[1], ids[3] }, other, .{ .index = 1, .generation = 1 }, 3, 0, 30_000);
+    try recovery.addBatch(&peers, ids[0..2], cancelled, connection, 1, 0, 30_000);
+    try recovery.addBatch(&peers, ids[1..3], cancelled, connection, 2, 0, 30_000);
+    try recovery.addBatch(&peers, &.{ ids[1], ids[3] }, other, .{ .index = 1, .generation = 1 }, 3, 0, 30_000);
     recovery.controlSent(connection, 1, 3_000, 10);
     try std.testing.expectEqual(@as(u64, 2), recovery.cancel(&peers, connection, false).removed);
     try expectIndexed(&recovery);
@@ -322,7 +322,7 @@ fn find(seen: []const Seen, token: u64) ?*const Seen {
 
 test "recovery index resolves what a scan of every batch finds under random operations" {
     const a = std.testing.allocator;
-    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .retained_capacity = 4, .retained_outbound_reserve = 1 }, 512);
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .connected_capacity = 4, .retained_capacity = 9, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(a);
     var recovery = try Recovery.init(a);
     defer recovery.deinit(a, &peers);
@@ -342,7 +342,7 @@ test "recovery index resolves what a scan of every batch finds under random oper
             random.shuffle(MessageId, &pool);
             const count = random.intRangeAtMost(usize, 1, 8);
             const owner = random.uintLessThan(usize, owners.len);
-            recovery.addBatch(&peers, pool[0..count], owners[owner], .{ .index = @intCast(owner), .generation = 1 }, step, random.uintLessThan(usize, count), now + random.intRangeAtMost(u64, 1, 4_000));
+            try recovery.addBatch(&peers, pool[0..count], owners[owner], .{ .index = @intCast(owner), .generation = 1 }, step, random.uintLessThan(usize, count), now + random.intRangeAtMost(u64, 1, 4_000));
         } else if (op < 14) {
             const id = pool[random.uintLessThan(usize, pool.len)];
             _ = recovery.resolve(&peers, id);
@@ -389,7 +389,7 @@ test "recovery index resolves what a scan of every batch finds under random oper
 
 test "recovery arms one sampled promise per sent batch whose sample is still outstanding" {
     const a = std.testing.allocator;
-    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .connected_capacity = 2, .retained_capacity = 5, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(a);
     var recovery = try Recovery.init(a);
     defer recovery.deinit(a, &peers);
@@ -397,27 +397,27 @@ test "recovery arms one sampled promise per sent batch whose sample is still out
     const connection: Handle = .{ .index = 0, .generation = 1 };
     const ids = [_]MessageId{ @splat(1), @splat(2), @splat(3), @splat(4), @splat(5), @splat(6), @splat(7) };
     // Resolved before the send: the sample of one batch, then all of another.
-    recovery.addBatch(&peers, ids[0..2], peer, connection, 1, 0, 30_000);
-    recovery.addBatch(&peers, ids[2..3], peer, connection, 2, 0, 30_000);
+    try recovery.addBatch(&peers, ids[0..2], peer, connection, 1, 0, 30_000);
+    try recovery.addBatch(&peers, ids[2..3], peer, connection, 2, 0, 30_000);
     _ = recovery.resolve(&peers, ids[0]);
     _ = recovery.resolve(&peers, ids[2]);
     recovery.controlSent(connection, 1, 3_000, 10);
     recovery.controlSent(connection, 2, 3_000, 10);
     try std.testing.expectEqual(@as(u64, 0), recovery.armed);
     // Armed once however often its send completes, then broken at expiry.
-    recovery.addBatch(&peers, ids[3..4], peer, connection, 3, 0, 30_000);
+    try recovery.addBatch(&peers, ids[3..4], peer, connection, 3, 0, 30_000);
     for (0..2) |_| recovery.controlSent(connection, 3, 3_000, 10);
     try std.testing.expectEqual(@as(u64, 1), recovery.armed);
     try std.testing.expectEqual(@as(u64, 1), recovery.expire(&peers, 3_010));
     // Local pressure cancels an armed promise before it can break; a send after expiry arms none.
-    recovery.addBatch(&peers, ids[4..5], peer, connection, 4, 0, 30_000);
-    recovery.addBatch(&peers, ids[5..6], peer, connection, 5, 0, 3_020);
+    try recovery.addBatch(&peers, ids[4..5], peer, connection, 4, 0, 30_000);
+    try recovery.addBatch(&peers, ids[5..6], peer, connection, 5, 0, 3_020);
     recovery.controlSent(connection, 4, 3_000, 3_020);
     recovery.controlSent(connection, 5, 3_000, 3_020);
     try std.testing.expectEqual(@as(u64, 2), recovery.armed);
     try std.testing.expectEqual(@as(u64, 2), recovery.cancel(&peers, connection, true).removed);
     // A sample resolved after the send keeps its promise.
-    recovery.addBatch(&peers, ids[6..7], peer, connection, 6, 0, 30_000);
+    try recovery.addBatch(&peers, ids[6..7], peer, connection, 6, 0, 30_000);
     recovery.controlSent(connection, 6, 3_000, 3_030);
     _ = recovery.resolve(&peers, ids[6]);
     try std.testing.expectEqual(@as(u64, 3), recovery.armed);

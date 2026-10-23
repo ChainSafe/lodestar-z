@@ -6,9 +6,13 @@ const PeerId = @import("../wire/peer_id.zig").PeerId;
 const assert = std.debug.assert;
 const score_mod = @import("score.zig");
 const options_mod = @import("options.zig");
+const AddressGroup = @import("udp").AddressGroup;
 
 pub const capacity = constants.retained_peers_cap;
 pub const outbound_reserve = 32;
+pub const retention_headroom = 32;
+pub const pinned_per_group_max = 16;
+pub const pinned_capacity = constants.peers_cap + retention_headroom;
 pub const Ref = struct { index: u16, generation: u64 };
 pub const Backoff = struct { until: u64 = 0 };
 pub const Ip = [16]u8;
@@ -26,6 +30,8 @@ pub const Row = struct {
     address: Ip = [_]u8{0} ** 16,
     direction: types.Direction = .inbound,
     pins: u32 = 0,
+    admission_group: AddressGroup = undefined,
+    pin_group: AddressGroup = undefined,
     ip_peers: u16 = 0,
     retain_until: u64 = 0,
     large_frame_denied_until: u64 = 0,
@@ -47,13 +53,30 @@ pub const PeerBook = struct {
     backoffs: []Backoff,
     retention_ms: u64,
     reserved: u16,
+    pinned: u16 = 0,
+    pin_limit: u16,
+
+    pub fn retainedCapacity(connected: u16, reserved: u16) error{InvalidLimits}!u16 {
+        const count = 2 * @as(u32, connected) + reserved + @min(connected, retention_headroom);
+        if (count > capacity) return error.InvalidLimits;
+        _ = try pinLimit(@intCast(count), connected, reserved);
+        return @intCast(count);
+    }
+
+    pub fn pinLimit(count: u16, connected: u16, reserved: u16) error{InvalidLimits}!u16 {
+        if (connected == 0 or connected > constants.peers_cap or count > capacity or reserved >= count) return error.InvalidLimits;
+        if (count < 2 * @as(u32, connected) + reserved) return error.InvalidLimits;
+        // A pinned identity may disconnect without releasing work. Reserve live capacity
+        // separately, including inbound admissions that cannot use the outbound reserve.
+        return @min(count - reserved - connected, connected + retention_headroom);
+    }
 
     pub fn init(a: std.mem.Allocator, options: *const options_mod.Options, topic_count: u16) !PeerBook {
         const retention_ms = options.retained_score_ms;
         const count = options.retained_capacity;
         const reserved = options.retained_outbound_reserve;
+        const pin_limit = try pinLimit(count, options.connected_capacity, reserved);
         if (options.ip_allowlist.len > 32) return error.InvalidLimits;
-        if (count == 0 or count > capacity or reserved >= count) return error.InvalidLimits;
         assert(retention_ms > 0);
         const rows = try a.alloc(Row, count);
         errdefer a.free(rows);
@@ -62,7 +85,7 @@ pub const PeerBook = struct {
         errdefer a.free(backoffs);
         @memset(backoffs, .{});
         const scores = try score_mod.PeerScore.initForTopics(a, options.score_params, count, topic_count);
-        var book: PeerBook = .{ .rows = rows, .backoffs = backoffs, .scores = scores, .retention_ms = retention_ms, .reserved = reserved };
+        var book: PeerBook = .{ .rows = rows, .backoffs = backoffs, .scores = scores, .retention_ms = retention_ms, .reserved = reserved, .pin_limit = pin_limit };
         @memcpy(book.ip_allowlist[0..options.ip_allowlist.len], options.ip_allowlist);
         book.ip_allowlist_len = @intCast(options.ip_allowlist.len);
         return book;
@@ -116,6 +139,7 @@ pub const PeerBook = struct {
         const row = &self.rows[index];
         self.scores.setConnected(index, true, now);
         row.connection = conn;
+        row.admission_group = AddressGroup.fromAddress(&metadata.address);
         row.address = normalize(metadata.address);
         row.direction = metadata.direction;
         row.direct = metadata.direct;
@@ -210,16 +234,39 @@ pub const PeerBook = struct {
         self.scores.refresh(now);
     }
 
-    pub fn retain(self: *PeerBook, ref: Ref) void {
+    pub fn canRetain(self: *const PeerBook, ref: Ref) bool {
+        assert(self.matches(ref));
+        const row = &self.rows[ref.index];
+        if (row.pins > 0) return true;
+        if (self.pinned == self.pin_limit) return false;
+        var grouped: u16 = 0;
+        for (self.rows) |*other| {
+            if (other.pins > 0 and other.pin_group.eql(row.admission_group)) grouped += 1;
+        }
+        return grouped < pinned_per_group_max;
+    }
+
+    pub fn retain(self: *PeerBook, ref: Ref) bool {
         assert(self.matches(ref));
         assert(self.rows[ref.index].pins < std.math.maxInt(u32));
+        if (!self.canRetain(ref)) return false;
+        if (self.rows[ref.index].pins == 0) {
+            self.rows[ref.index].pin_group = self.rows[ref.index].admission_group;
+            self.pinned += 1;
+            assert(self.pinned <= self.pin_limit);
+        }
         self.rows[ref.index].pins += 1;
+        return true;
     }
 
     pub fn release(self: *PeerBook, ref: Ref) void {
         assert(self.matches(ref));
         assert(self.rows[ref.index].pins > 0);
         self.rows[ref.index].pins -= 1;
+        if (self.rows[ref.index].pins == 0) {
+            assert(self.pinned > 0);
+            self.pinned -= 1;
+        }
     }
 
     pub fn backoff(self: *PeerBook, ref: Ref, topic: u16) *Backoff {

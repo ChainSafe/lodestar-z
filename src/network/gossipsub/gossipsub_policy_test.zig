@@ -187,7 +187,7 @@ test "gossip policy sent promise survives reconnect without token rearming" {
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const first = g.addPeer(conn, &metadata, now).admitted;
     const ref = g.sessions.rows[first.index].logical;
-    g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[first.index].logical, g.sessions.rows[first.index].conn, 9, 30_000);
+    try g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[first.index].logical, g.sessions.rows[first.index].conn, 9, 30_000);
     g.recovery.controlSent(g.sessions.rows[first.index].conn, 9, g.options.iwant_followup_ms, 10);
     g.connectionClosed(conn);
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
@@ -377,7 +377,7 @@ test "gossip topic retirement clears expired scores while backoff remains" {
     var g = try support.init(std.testing.allocator, .{
         .random_seed = 1,
         .connected_capacity = 2,
-        .retained_capacity = 4,
+        .retained_capacity = 9,
         .retained_outbound_reserve = 1,
     });
     defer g.deinit();
@@ -430,7 +430,7 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     var g = try support.init(std.testing.allocator, .{
         .random_seed = 1,
         .connected_capacity = 2,
-        .retained_capacity = 4,
+        .retained_capacity = 9,
         .retained_outbound_reserve = 1,
         .topic_policy = &.{topic_fixture.full(.{ 1, 2, 3, 4 })},
     });

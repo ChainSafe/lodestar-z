@@ -19,7 +19,7 @@ const protobuf = @import("protobuf.zig");
 fn publicationLimits() !Gossipsub.Options {
     var limits: gossip_limits.Limits = @splat(.{ .items = 2, .bytes = 4096 });
     limits[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .items = 8, .bytes = 24 * 1024 * 1024 };
-    var options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 3, .retained_capacity = 4, .retained_outbound_reserve = 1 };
+    var options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 3, .retained_capacity = 9, .retained_outbound_reserve = 1 };
     try options.setPayloadLimits(&limits);
     return options;
 }
@@ -114,7 +114,7 @@ test "publication refusal retry duplicate and exact expiry preserve admission" {
 }
 
 test "publication recipient policy tops up without graft and accounts unique shared descriptors" {
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .score_params = .{ .publish_threshold = -9000 }, .connected_capacity = 16, .retained_capacity = 32, .retained_outbound_reserve = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .score_params = .{ .publish_threshold = -9000 }, .connected_capacity = 16, .retained_capacity = 33, .retained_outbound_reserve = 1 });
     defer g.deinit();
     try support.subscribe(&g, test_topic);
     const t = g.overlay.findTopic(test_topic).?;
@@ -199,8 +199,8 @@ test "publication failed history admission retains payloads and recovery attribu
     const second_conn: Engine.Handle = .{ .index = 1, .generation = 1 };
     const second_peer = support.addPeer(&g, second_conn, .v1_2).?;
     const second_logical = g.sessions.rows[second_peer.index].logical;
-    g.recovery.add(&g.peers, id, logical, conn, 1, 30_000);
-    g.recovery.add(&g.peers, id, second_logical, second_conn, 2, 30_000);
+    try g.recovery.add(&g.peers, id, logical, conn, 1, 30_000);
+    try g.recovery.add(&g.peers, id, second_logical, second_conn, 2, 30_000);
     g.recovery.controlSent(conn, 1, 12_000, 1);
     try std.testing.expectError(error.ResourceExhausted, g.publish(test_topic, retry, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
     try std.testing.expectEqual(@as(u64, retained.len), g.topic_metrics.get(test_topic).published);
@@ -231,7 +231,7 @@ test "publication failed history admission retains payloads and recovery attribu
 }
 
 test "publication empty subscribed mesh reuses bounded fanout and full mesh excludes extra peers" {
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 16, .retained_capacity = 32, .retained_outbound_reserve = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 16, .retained_capacity = 33, .retained_outbound_reserve = 1 });
     defer g.deinit();
     try support.subscribe(&g, test_topic);
     const t = g.overlay.findTopic(test_topic).?;

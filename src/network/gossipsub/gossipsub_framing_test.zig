@@ -326,7 +326,7 @@ test "gossip paged RPC cursors survive shared workspace reuse without runtime al
     var g = try support.init(ledger.allocator(), .{
         .random_seed = 1,
         .connected_capacity = 4,
-        .retained_capacity = 8,
+        .retained_capacity = 17,
         .retained_outbound_reserve = 1,
         .body_buffer_bytes = 2,
     });
@@ -391,7 +391,7 @@ test "gossip invalid verdict stops remaining publications in the same RPC" {
         .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })},
         .random_seed = 1,
         .connected_capacity = 4,
-        .retained_capacity = 8,
+        .retained_capacity = 17,
         .retained_outbound_reserve = 1,
         .body_buffer_bytes = 64,
     };

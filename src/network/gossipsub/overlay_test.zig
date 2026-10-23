@@ -499,7 +499,7 @@ fn subscriptionFixture() !Gossipsub {
     return gossip_test.init(std.testing.allocator, .{
         .random_seed = 1,
         .connected_capacity = 2,
-        .retained_capacity = 4,
+        .retained_capacity = 9,
         .retained_outbound_reserve = 1,
         .seen_capacity = 16,
         .mcache_capacity = 16,

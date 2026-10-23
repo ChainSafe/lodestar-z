@@ -16,7 +16,7 @@ const outbox = @import("outbox.zig");
 const delivery = @import("delivery.zig");
 const Recovery = @import("recovery.zig");
 const IwantOutcome = @import("metrics.zig").IwantOutcome;
-const resource_options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 3, .retained_capacity = 4, .retained_outbound_reserve = 1, .validation_capacity = 1, .mcache_capacity = 2, .seen_capacity = 4 };
+const resource_options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 3, .retained_capacity = 9, .retained_outbound_reserve = 1, .validation_capacity = 1, .mcache_capacity = 2, .seen_capacity = 4 };
 
 test "gossipsub IHAVE saturation preserves recovery for new and reconnected identities" {
     const decay = @exp(@log(@as(f64, 0.01)) / 320);
@@ -45,7 +45,7 @@ test "gossipsub IHAVE saturation preserves recovery for new and reconnected iden
         }
     }
     const reserve = Recovery.promises_reserved_per_peer;
-    try std.testing.expectEqual(constants.promises_cap - (420 - 7) * reserve, g.recovery.len);
+    try std.testing.expectEqual(constants.promises_cap - @as(usize, g.peers.pin_limit - 7) * reserve, g.recovery.len);
     const occupied = g.recovery.len;
     const old = g.logical(0);
     const conn = g.sessions.rows[0].conn;
@@ -204,7 +204,7 @@ test "gossipsub IHAVE pending and duplicate prefixes do not hide new tail IDs" {
 }
 
 test "gossipsub IHAVE samples eligible IDs across the advertisement independently per peer" {
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 9, .retained_outbound_reserve = 1 });
     defer g.deinit();
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
@@ -337,8 +337,8 @@ test "recovery owner clear releases sent and unsent attribution pins" {
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
     const ref = g.sessions.rows[peer.index].logical;
-    g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[peer.index].logical, g.sessions.rows[peer.index].conn, 1, 30_000);
-    g.recovery.add(&g.peers, [_]u8{2} ** 20, g.sessions.rows[peer.index].logical, g.sessions.rows[peer.index].conn, 2, 30_000);
+    try g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[peer.index].logical, g.sessions.rows[peer.index].conn, 1, 30_000);
+    try g.recovery.add(&g.peers, [_]u8{2} ** 20, g.sessions.rows[peer.index].logical, g.sessions.rows[peer.index].conn, 2, 30_000);
     g.recovery.controlSent(g.sessions.rows[peer.index].conn, 1, g.options.iwant_followup_ms, 10);
     try std.testing.expectEqual(@as(u32, 2), g.peers.rows[ref.index].pins);
     g.recovery.clear(&g.peers);
@@ -355,7 +355,7 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
     const p = support.addPeer(&g, conn, .v1_2).?;
     const io = &g.sessions.rows[p.index].io;
     const token = io.tx.injectFrame("control", false, 1).?;
-    g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[p.index].logical, conn, token, 30_000);
+    try g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[p.index].logical, conn, token, 30_000);
     g.recovery.controlSent(.{ .index = 0, .generation = 2 }, token, 12_000, 5);
     g.recovery.controlSent(g.sessions.rows[p.index].conn, token + 1, g.options.iwant_followup_ms, 5);
     try std.testing.expectEqual(@as(u64, 30_000), g.recovery.batches[0].expiry);
@@ -380,7 +380,7 @@ test "gossip unsent IWANT expiry refunds recovery slots without blaming the peer
     const peer = support.addPeer(&g, conn, .v1_2).?;
     const logical = g.sessions.rows[peer.index].logical;
     const capacity = g.recovery.available();
-    g.recovery.add(&g.peers, @splat(1), logical, conn, 1, 100);
+    try g.recovery.add(&g.peers, @splat(1), logical, conn, 1, 100);
     try std.testing.expectEqual(@as(u32, 1), g.peers.rows[logical.index].pins);
     g.recovery.controlSent(conn, 1, 3000, 100);
     support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 100, .unix_s = 0 }));
@@ -582,9 +582,9 @@ test "gossipsub recovery expires on heartbeats without scheduling its own wakeup
     try std.testing.expect(heartbeat_at > now.millis());
     const expiry = heartbeat_at - 1;
     const before = g.schedule();
-    g.recovery.add(&g.peers, @splat(1), peer, conn, 1, heartbeat_at + 1000);
+    try g.recovery.add(&g.peers, @splat(1), peer, conn, 1, heartbeat_at + 1000);
     g.recovery.controlSent(conn, 1, expiry - now.millis(), now.millis());
-    g.recovery.add(&g.peers, @splat(2), peer, conn, 2, expiry);
+    try g.recovery.add(&g.peers, @splat(2), peer, conn, 2, expiry);
     try std.testing.expectEqualDeep(before, g.schedule());
 
     const expired = Now.fromMilliseconds(.{ .mono_ms = expiry, .unix_s = now.unixSeconds() });
@@ -611,7 +611,7 @@ test "gossipsub heartbeat processes a received message before expiring its promi
     const heartbeat_at = g.heartbeat_at;
     const payload = "received on the heartbeat";
     const id = topic_mod.validMessageId(test_topic, payload, .{});
-    g.recovery.add(&g.peers, id, peer, conn, 1, heartbeat_at + 1000);
+    try g.recovery.add(&g.peers, id, peer, conn, 1, heartbeat_at + 1000);
     g.recovery.controlSent(conn, 1, heartbeat_at - now.millis(), now.millis());
 
     const published = try pair.shared.server.gossipsub.publish(test_topic, payload, now);
@@ -623,4 +623,37 @@ test "gossipsub heartbeat processes a received message before expiring its promi
     try std.testing.expect(g.messages.known(id, heartbeat_at));
     try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
+}
+
+test "gossip recovery retention refusal preserves sent promises and submits no new IWANT" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 1, .retained_capacity = 3, .retained_outbound_reserve = 1 });
+    defer g.deinit();
+    const conn: Handle = .{ .index = 0, .generation = 1 };
+    const source = support.addPeer(&g, conn, .v1_2).?;
+    const original = g.logical(source.index);
+    try g.recovery.add(&g.peers, @splat(1), original, conn, 7, 30_000);
+    try g.recovery.add(&g.peers, @splat(2), original, conn, 8, 30_000);
+    try std.testing.expectEqual(@as(u16, 1), g.peers.pinned);
+    g.recovery.controlSent(conn, 7, 12_000, 1);
+    g.connectionClosed(conn);
+    try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
+    const fresh = support.addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
+    const row = &g.sessions.rows[fresh.index];
+    var ids = [_]MessageId{@splat(3)};
+    try std.testing.expectError(error.PeerCapacity, g.recovery.filterPending(&g.peers, row.logical, &ids));
+    try std.testing.expect(!row.io.tx.pending());
+    try std.testing.expectError(error.PeerCapacity, g.recovery.requestBatch(&g.peers, &row.io.tx, &g.sessions.control_scratch, &ids, row.logical, row.conn, g.overlay.rng.random(), 12_000, 2));
+    try std.testing.expect(!row.io.tx.pending());
+    try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
+    try std.testing.expectEqual(@as(usize, 1), g.recovery.batch_len);
+    try std.testing.expectEqual(@as(u32, 0), g.peers.rows[row.logical.index].pins);
+    try std.testing.expectEqual(@as(u64, 1), g.recovery.expire(&g.peers, 12_001));
+    try std.testing.expect(g.peers.matches(original));
+    try std.testing.expectEqual(@as(f64, 1), g.peers.scores.rows[original.index].behaviour);
+    try std.testing.expectEqual(@as(f64, 0), g.peers.scores.rows[row.logical.index].behaviour);
+    try std.testing.expectEqual(@as(u16, 0), g.peers.pinned);
+    try std.testing.expectEqual(@as(usize, 1), (try g.recovery.filterPending(&g.peers, row.logical, &ids)).count);
+    try g.recovery.requestBatch(&g.peers, &row.io.tx, &g.sessions.control_scratch, &ids, row.logical, row.conn, g.overlay.rng.random(), 12_000, 12_002);
+    try std.testing.expect(row.io.tx.pending());
+    try std.testing.expectEqual(@as(u16, 1), g.peers.pinned);
 }

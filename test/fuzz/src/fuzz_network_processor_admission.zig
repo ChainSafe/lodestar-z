@@ -187,7 +187,7 @@ var processor_consumer: Consumer = undefined;
 
 /// Snapshot mode: this runs once before the fork server, so every input starts from this state.
 pub export fn zig_fuzz_init() callconv(.c) void {
-    harness.init(std.heap.c_allocator, .{ .peers = 6, .retained = 8, .validation = 64 }) catch @panic("gossip harness initialization failed");
+    harness.init(std.heap.c_allocator, .{ .peers = 6, .retained = 13, .validation = 64 }) catch @panic("gossip harness initialization failed");
     processor_table = Table.init(std.heap.c_allocator, .{ .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, .random_seed = 7 }) catch @panic("processor initialization failed");
     processor_consumer = .{ .table = &processor_table };
     processor_consumer.attach(&harness.g);

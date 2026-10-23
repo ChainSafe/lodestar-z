@@ -111,7 +111,7 @@ pub fn capture(g: *const Gossipsub, cursor: u16, now: Now, out: *Page) error{Inv
 test "gossip diagnostic pages bound peers preserve scores and include empty meshes" {
     const gossip_test = @import("test_support.zig");
     const a = std.testing.allocator;
-    var g = try gossip_test.init(a, .{ .random_seed = 1, .connected_capacity = 10, .retained_capacity = 16, .retained_outbound_reserve = 1 });
+    var g = try gossip_test.init(a, .{ .random_seed = 1, .connected_capacity = 10, .retained_capacity = 21, .retained_outbound_reserve = 1 });
     defer g.deinit();
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try gossip_test.subscribe(&g, name);
@@ -140,5 +140,5 @@ test "gossip diagnostic pages bound peers preserve scores and include empty mesh
     try std.testing.expectEqual(@as(?u16, null), page.next);
     try std.testing.expectEqual(calculations, g.peers.scores.calculations);
     try std.testing.expectEqualDeep(rows, g.peers.scores.rows);
-    try std.testing.expectError(error.InvalidDiagnosticsCursor, capture(&g, 17, Now.fromMilliseconds(.{ .mono_ms = 200, .unix_s = 1000 }), page));
+    try std.testing.expectError(error.InvalidDiagnosticsCursor, capture(&g, @intCast(g.peers.rows.len + 1), Now.fromMilliseconds(.{ .mono_ms = 200, .unix_s = 1000 }), page));
 }

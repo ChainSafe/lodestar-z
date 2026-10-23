@@ -18,6 +18,7 @@ pub const Verdict = enum { accept, reject, ignore };
 pub const Outcome = union(enum) { applied: Verdict, already_resolved, expired, stale_handle };
 pub const duplicates_max = 16;
 pub const Duplicate = struct { peer: PeerRef, eligible: bool };
+pub const DuplicateResult = enum { recorded, known, full, retention_full };
 pub const Entry = struct {
     available_link: lists.Link = .{},
     deadline_link: lists.Link = .{},
@@ -141,7 +142,7 @@ pub const Validation = struct {
         return self.available_entries.len > 0;
     }
 
-    /// Requires an available entry and no pending validation for this payload's ID.
+    /// Requires an available entry, peer retention allowance, and no pending validation for this payload's ID.
     pub fn admit(self: *Validation, store: *storage.Store, peers: *Peers, message: storage.Handle, source: PeerRef, topic: u16, now: u64) Handle {
         const payload = store.get(message).?;
         const id = payload.id;
@@ -167,7 +168,8 @@ pub const Validation = struct {
             self.releaseAttribution(record, peers);
         }
         const handle: Handle = .{ .index = selected, .generation = entry.generation + 1 };
-        peers.retain(source);
+        const retained = peers.retain(source);
+        assert(retained);
         self.pending_per_peer[source.index] += 1;
         self.pending_per_peer_kind[source.index][@intFromEnum(payload.kind)] += 1;
         self.bytes_per_peer_kind[source.index][@intFromEnum(payload.kind)] += chargedBytes(payload.len);
@@ -225,15 +227,15 @@ pub const Validation = struct {
         return record;
     }
 
-    pub fn duplicate(e: *Attribution, peers: *Peers, peer: PeerRef, eligible: bool) bool {
+    pub fn duplicate(e: *Attribution, peers: *Peers, peer: PeerRef, eligible: bool) DuplicateResult {
         assert(e.state != .free);
-        if (std.meta.eql(e.source, peer)) return false;
-        for (e.duplicates[0..e.duplicate_len]) |d| if (std.meta.eql(d.peer, peer)) return false;
-        if (e.duplicate_len == duplicates_max) return false;
-        if (e.state == .pending) peers.retain(peer);
+        if (std.meta.eql(e.source, peer)) return .known;
+        for (e.duplicates[0..e.duplicate_len]) |d| if (std.meta.eql(d.peer, peer)) return .known;
+        if (e.duplicate_len == duplicates_max) return .full;
+        if (e.state == .pending and !peers.retain(peer)) return .retention_full;
         e.duplicates[e.duplicate_len] = .{ .peer = peer, .eligible = eligible };
         e.duplicate_len += 1;
-        return true;
+        return .recorded;
     }
 
     pub fn inspect(self: *Validation, store: *storage.Store, peers: *Peers, h: Handle, now: u64) ?Outcome {

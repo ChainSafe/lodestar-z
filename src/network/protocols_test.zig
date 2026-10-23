@@ -134,7 +134,7 @@ test "protocol stack handles native stream events past empty request capacity" {
     try std.testing.expectEqualSlices(u8, &ping, requests[0].chunk.bytes);
 }
 
-test "protocol stack gossip capacity refusal preserves reqresp and explicit host retry" {
+test "protocol stack pinned identity churn preserves gossip and reqresp admission" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
@@ -146,18 +146,19 @@ test "protocol stack gossip capacity refusal preserves reqresp and explicit host
     defer server.control_reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const handles = try support.connectPair(&pair);
     const peers = @import("gossipsub/peer_book.zig");
-    var retained: [peers.capacity - peers.outbound_reserve]peers.Ref = undefined;
-    for (0..peers.capacity - peers.outbound_reserve) |i| {
+    var retained: [peers.pinned_capacity]peers.Ref = undefined;
+    for (0..server.gossipsub.peers.pin_limit) |i| {
         var metadata: peers.Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** peer_id.length }, .address = .unspecified, .direction = .inbound };
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
+        metadata.address = .{ .ip4 = .{ .octets = .{ 192, 0, @intCast(i / 16), @intCast(i % 16) }, .port = 1 } };
         const ref = server.gossipsub.peers.admit(.{ .index = 0, .generation = 1 }, &metadata, pair.now.millis()).admitted.peer;
         retained[i] = ref;
-        server.gossipsub.peers.retain(ref);
+        try std.testing.expect(server.gossipsub.peers.retain(ref));
         server.gossipsub.peers.scores.penalize(ref.index, 20);
         server.gossipsub.peers.disconnect(ref, pair.now.millis());
     }
-    try std.testing.expectEqual(gs.Gossipsub.ConnectionAdmission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, false, pair.now));
-    try std.testing.expect(!server.gossipsub.admitted(handles.server));
+    try std.testing.expectEqual(gs.Gossipsub.ConnectionAdmission.admitted, server.gossipsub.peerConnected(&pair.server, handles.server, false, pair.now));
+    try std.testing.expect(server.gossipsub.admitted(handles.server));
     const ping = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;
     _ = try client.control_reqresp.request(&pair.client, &client.router, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
@@ -181,10 +182,8 @@ test "protocol stack gossip capacity refusal preserves reqresp and explicit host
         if (pong) break;
     }
     try std.testing.expect(pong);
-    try std.testing.expect(!server.gossipsub.admitted(handles.server));
-    for (retained) |ref| server.gossipsub.peers.release(ref);
-    try std.testing.expectEqual(gs.Gossipsub.ConnectionAdmission.admitted, server.gossipsub.peerConnected(&pair.server, handles.server, false, pair.now));
     try std.testing.expect(server.gossipsub.admitted(handles.server));
+    for (retained) |ref| server.gossipsub.peers.release(ref);
 }
 
 test "protocol stack capabilities disabled outbound preserves stream and request owners" {

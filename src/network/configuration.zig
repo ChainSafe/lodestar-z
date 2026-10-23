@@ -156,7 +156,7 @@ pub fn resolve(options: Options) !Resolved {
     gossip_options.random_seed = options.seed;
     gossip_options.connected_capacity = peer_options.max_peers;
     gossip_options.connection_slots = limits.connections_max;
-    gossip_options.retained_capacity = peer_options.capacity;
+    gossip_options.retained_capacity = @max(peer_options.capacity, try @import("gossipsub/peer_book.zig").PeerBook.retainedCapacity(peer_options.max_peers, peer_options.outbound_reserve));
     gossip_options.retained_outbound_reserve = peer_options.outbound_reserve;
     const result: Resolved = .{
         .limits = limits,

@@ -33,7 +33,7 @@ pub fn run(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     std.debug.print("case=recovery_resolve preset={s} optimize={s} promises_cap={} batch_ids={} backing_bytes={} miss_calls={} hit_calls={}\n", .{ @tagName(preset.active_preset), @tagName(@import("builtin").mode), promises_cap, batch_ids, Recovery.backingBytes(), miss_calls, hit_rounds * batch_ids });
-    var peers = try PeerBook.init(allocator, &.{ .retained_score_ms = 10_000, .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
+    var peers = try PeerBook.init(allocator, &.{ .retained_score_ms = 10_000, .connected_capacity = 1, .retained_capacity = 3, .retained_outbound_reserve = 1 }, 512);
     defer peers.deinit(allocator);
     const connection: network.Handle = .{ .index = 0, .generation = 1 };
     const peer = peers.admit(connection, &.{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound }, 0).admitted.peer;
@@ -51,7 +51,7 @@ pub fn run(init: std.process.Init) !void {
     var batches: usize = 0;
     for (levels) |level| {
         for (batches..level / batch_ids) |batch| {
-            recovery.addBatch(&peers, requested[batch * batch_ids ..][0..batch_ids], peer, connection, batch, 0, std.math.maxInt(u64));
+            try recovery.addBatch(&peers, requested[batch * batch_ids ..][0..batch_ids], peer, connection, batch, 0, std.math.maxInt(u64));
         }
         batches = level / batch_ids;
         assert(recovery.len == level);
@@ -68,7 +68,7 @@ pub fn run(init: std.process.Init) !void {
             for (ids) |id| _ = recovery.resolve(&peers, id);
             hit_ns += timestamp(io) - hit_start;
             assert(recovery.len == level - batch_ids);
-            recovery.addBatch(&peers, ids, peer, connection, round, 0, std.math.maxInt(u64));
+            try recovery.addBatch(&peers, ids, peer, connection, round, 0, std.math.maxInt(u64));
         };
         const hit_calls: usize = if (batches > 0) hit_rounds * batch_ids else 1;
         std.debug.print("case=recovery_resolve requests={} batches={} miss_ns={d:.1} hit_ns={d:.1}\n", .{ level, recovery.batch_len, perCall(miss_ns, miss_calls), perCall(hit_ns, hit_calls) });

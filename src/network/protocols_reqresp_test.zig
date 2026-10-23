@@ -536,9 +536,9 @@ test "protocol stack reqresp retains request and chunk bytes through control pro
     const handles = try support.connectPair(&pair);
     var options = try applicationOptions();
     options.forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }};
-    var client = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .control_reqresp = try control_fixture.controlOptions(), .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.client);
+    var client = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .control_reqresp = try control_fixture.controlOptions(), .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 9, .retained_outbound_reserve = 1 } }, &pair.client);
     defer client.deinit();
-    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .control_reqresp = try control_fixture.controlOptions(), .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
+    var server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .reqresp = options, .control_reqresp = try control_fixture.controlOptions(), .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 9, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
     defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const sink = try std.testing.allocator.alloc(

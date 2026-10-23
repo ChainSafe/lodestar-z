@@ -14,7 +14,7 @@ const test_topic = "/eth2/01020304/beacon_block/ssz_snappy";
 test "message knowledge separates unfinished work from verdicts for receipt and publication" {
     const End = enum { cancel, expire, accept, reject, ignore };
     for (std.enums.values(End)) |end| {
-        var g = try support.init(t.allocator, .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .validation_capacity = 1, .validation_timeout_ms = 10, .validation_tombstone_ms = 5, .seen_capacity = 2, .seen_ttl_ms = 20 });
+        var g = try support.init(t.allocator, .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 9, .retained_outbound_reserve = 1, .validation_capacity = 1, .validation_timeout_ms = 10, .validation_tombstone_ms = 5, .seen_capacity = 2, .seen_ttl_ms = 20 });
         defer g.deinit();
         var inbox: support.Inbox = .{};
         defer inbox.deinit();
@@ -65,7 +65,7 @@ test "message knowledge separates unfinished work from verdicts for receipt and 
 }
 
 test "message knowledge retains decisions across seen eviction and orders TTL by resolution" {
-    var g = try support.init(t.allocator, .{ .random_seed = 1, .connected_capacity = 1, .retained_capacity = 2, .retained_outbound_reserve = 1, .validation_capacity = 4, .validation_timeout_ms = 100, .validation_tombstone_ms = 5, .seen_capacity = 2, .seen_ttl_ms = 20 });
+    var g = try support.init(t.allocator, .{ .random_seed = 1, .connected_capacity = 1, .retained_capacity = 5, .retained_outbound_reserve = 1, .validation_capacity = 4, .validation_timeout_ms = 100, .validation_tombstone_ms = 5, .seen_capacity = 2, .seen_ttl_ms = 20 });
     defer g.deinit();
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
@@ -114,7 +114,7 @@ test "message admission retains canonical topic bounds" {
         const name = "/eth2/01020304/beacon_block/ssz_snappy";
         var boundary: topic_policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
         boundary.rules[0] = .{ .count = 1, .ssz_min = 4, .ssz_max = 6000 };
-        var options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8 };
+        var options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 9, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8 };
         options.topic_policy = &.{boundary};
         var g = try Gossipsub.init(t.allocator, options);
         defer g.deinit();
@@ -140,5 +140,53 @@ test "message admission retains canonical topic bounds" {
         const maximum = constants.maxCompressedLen(6000);
         try t.expectEqual(maximum, sink.maximum);
         try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(sink.handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
+    }
+}
+
+test "gossip retention pressure preserves delayed verdicts and permits refused message retries" {
+    for ([_]Gossipsub.Verdict{ .accept, .reject }) |verdict| {
+        var g = try support.init(t.allocator, .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 5, .retained_outbound_reserve = 1 });
+        defer g.deinit();
+        var inbox: support.Inbox = .{};
+        defer inbox.deinit();
+        inbox.attach(&g);
+        try support.subscribe(&g, test_topic);
+        const first_conn: @import("../quic/Engine.zig").Handle = .{ .index = 0, .generation = 1 };
+        const second_conn: @import("../quic/Engine.zig").Handle = .{ .index = 1, .generation = 1 };
+        const first = support.addPeer(&g, first_conn, .v1_2).?;
+        const second = support.addPeer(&g, second_conn, .v1_2).?;
+        const original = g.logical(first.index);
+        const duplicate = g.logical(second.index);
+        try t.expectEqual(@as(?usize, 1), try support.message(&g, first.index, "A", 1));
+        const message = inbox.last();
+        try t.expectEqual(@as(?usize, 0), try support.message(&g, second.index, "A", 2));
+        try t.expectEqual(@as(u16, 2), g.peers.pinned);
+        g.connectionClosed(first_conn);
+        g.connectionClosed(second_conn);
+        const fresh = support.addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
+        const logical = g.logical(fresh.index);
+        const index = g.overlay.findTopic(test_topic).?;
+        g.overlay.rows[index].mesh.set(fresh.index);
+        g.peers.scores.graft(logical.index, index, 0);
+        try t.expectEqual(@as(?usize, 0), try support.message(&g, fresh.index, "A", 3));
+        try t.expectEqual(@as(u8, 1), g.messages.validation.find(message.id, 3).?.duplicate_len);
+        try t.expectEqual(@as(?usize, 0), try support.message(&g, fresh.index, "B", 4));
+        try t.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.peer_retention)]);
+        const counters = &g.peers.scores.topics[@as(usize, logical.index) * g.peers.scores.topic_params.len + index];
+        try t.expectEqual(@as(f64, 0), counters.mesh_deliveries);
+        try t.expectEqual(@as(u64, 4), counters.delivery_restart_ms);
+        var wanted = [_]Gossipsub.MessageId{@splat(9)};
+        try t.expectError(error.PeerCapacity, g.recovery.filterPending(&g.peers, logical, &wanted));
+        try t.expectEqual(@as(u32, 0), g.peers.rows[logical.index].pins);
+        try t.expectEqual(Gossipsub.ReportOutcome{ .applied = verdict }, g.report(message.handle, verdict, Now.fromMilliseconds(.{ .mono_ms = 5, .unix_s = 0 })));
+        try t.expectEqual(@as(u16, 0), g.peers.pinned);
+        for ([_]@import("peer_book.zig").Ref{ original, duplicate }) |ref| {
+            try t.expect(g.peers.matches(ref));
+            const held = g.peers.scores.topics[@as(usize, ref.index) * g.peers.scores.topic_params.len + index];
+            try t.expectEqual(@as(f64, if (verdict == .reject) 1 else 0), held.invalid);
+        }
+        try t.expectEqual(@as(f64, 0), counters.invalid);
+        try t.expectEqual(@as(?usize, 1), try support.message(&g, fresh.index, "B", 6));
+        try t.expectEqual(@as(u16, 1), g.peers.pinned);
     }
 }

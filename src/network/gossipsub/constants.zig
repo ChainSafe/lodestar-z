@@ -66,7 +66,7 @@ pub fn seenTtlMs(slots_per_epoch: u64, seconds_per_slot: u64) u64 {
 
 /// Connected peers, retained peer identities, and simultaneously requested local topics.
 pub const peers_cap: usize = 256;
-pub const retained_peers_cap: u16 = 512;
+pub const retained_peers_cap: u16 = 576;
 pub const topics_cap: usize = 512;
 /// Message ids a single peer may suppress at once through IDONTWANT.
 pub const dont_send_cap: usize = 512;

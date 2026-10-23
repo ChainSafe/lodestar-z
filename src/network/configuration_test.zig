@@ -345,3 +345,18 @@ fn resolve(options: configuration.Options) !configuration.Resolved {
     if (configured.gossip.topic_policy.len == 0) configured.gossip.topic_policy = comptime &.{topic_fixture.bytes(@splat(0))};
     return configuration.resolve(configured);
 }
+
+test "configuration preserves live gossip admission at hosted peer capacities" {
+    for ([_]u16{ 210, 256 }) |peers| {
+        const resolved = try resolve(.{
+            .limits = .{ .connections_max = 256 },
+            .peers = .{ .capacity = 2 * peers, .target_peers = peers - 10, .max_peers = peers, .outbound_reserve = 32 },
+            .seed = 1,
+            .forks = &.{},
+            .admission_policy = policy_fixture.config(),
+        });
+        const options = resolved.core.protocols.gossipsub;
+        try std.testing.expectEqual(peers * 2 + 64, options.retained_capacity);
+        try std.testing.expectEqual(peers + 32, try @import("gossipsub/peer_book.zig").PeerBook.pinLimit(options.retained_capacity, peers, options.retained_outbound_reserve));
+    }
+}

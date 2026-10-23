@@ -72,7 +72,7 @@ test "gossipsub completed frame expiry releases pages without blaming the peer" 
     try std.testing.expectEqual(@as(u32, 1), peer.io.overflow.pages);
     const began = peer.io.frame_since.?;
     try std.testing.expectEqual(@as(?u64, began + 100), peer.io.deadlines(&g.options).values[@intFromEnum(TimeoutReason.receive_frame)]);
-    g.recovery.add(&g.peers, @splat(1), peer.logical, peer.conn, 1, began + 1000);
+    try g.recovery.add(&g.peers, @splat(1), peer.logical, peer.conn, 1, began + 1000);
     setup.shared.pair.advance(100);
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(u64, 0), g.counters.local_pressure_resets);

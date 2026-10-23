@@ -17,7 +17,7 @@ const message_store = @import("message_store.zig");
 const now: Now = Now.fromMilliseconds(.{ .mono_ms = 100, .unix_s = 0 });
 
 fn options() Gossipsub.Options {
-    return .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8, .topic_policy = &boundaries };
+    return .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 9, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8, .topic_policy = &boundaries };
 }
 
 fn apply(g: *Gossipsub, w: *local.Workspace, desired: []const []const u8) !bool {

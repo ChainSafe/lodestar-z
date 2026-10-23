@@ -28,7 +28,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     var memory: [2 * 1024 * 1024]u8 = undefined;
     var arena = std.heap.FixedBufferAllocator.init(&memory);
     const a = arena.allocator();
-    var peers = Peers.init(a, &.{ .retained_score_ms = 20, .retained_capacity = 4, .retained_outbound_reserve = 1 }, 1) catch unreachable;
+    var peers = Peers.init(a, &.{ .retained_score_ms = 20, .connected_capacity = 4, .retained_capacity = 9, .retained_outbound_reserve = 1 }, 1) catch unreachable;
     defer peers.deinit(a);
     var boundary: gossip.topic_policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
     boundary.rules[@intFromEnum(gossip.topic.Kind.beacon_block)] = .{ .count = 1, .ssz_max = payload_max };
@@ -39,7 +39,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
         .mcache_capacity = 4,
         .validation_capacity = 2,
         .seen_capacity = 8,
-        .retained_capacity = 4,
+        .retained_capacity = 9,
         .mcache_arena_bytes = 2 * payload_max,
         .validation_timeout_ms = 10,
         .validation_tombstone_ms = 20,
@@ -130,7 +130,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
         var entries: usize = 0;
         var history: usize = 0;
         var pending: usize = 0;
-        var pins: [4]u32 = @splat(0);
+        var pins: [9]u32 = @splat(0);
         @memset(senders, 0);
         for (&outboxes) |*outbox| if (outbox.active == .data and outbox.active.data == .shared) {
             const message = outbox.active.data.shared.message;

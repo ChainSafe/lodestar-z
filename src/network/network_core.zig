@@ -739,7 +739,8 @@ pub const NetworkCore = struct {
                     self.releaseConnection(.{ .peer = admission.peer, .conn = old }, now);
                 }
                 self.protocols.connectionOpened(connected.conn, &endpoint, now);
-                _ = self.protocols.gossipsub.peerConnected(quic, connected.conn, admission.direct, now);
+                const gossip_admission = self.protocols.gossipsub.peerConnected(quic, connected.conn, admission.direct, now);
+                if (gossip_admission != .admitted) self.closeConnection(admission.peer, connected.conn, .capacity, now);
             },
             .closed => |*closed| {
                 const goodbye = if (pm.catalog.findConnection(closed.conn) != null)

@@ -196,7 +196,7 @@ test "gossip retention forwards fresh messages while slow recipients queue the o
         var g = try support.init(std.testing.allocator, .{
             .random_seed = 1,
             .connected_capacity = 6,
-            .retained_capacity = 12,
+            .retained_capacity = 13,
             .retained_outbound_reserve = 1,
             .topic_policy = &.{boundary},
             .validation_capacity = gossip_limits.items(&limits),
@@ -274,7 +274,7 @@ test "gossipsub cache eviction skips pending frames and preserves active frames"
                 }
                 if (stage == .partial) {
                     try std.testing.expect(peer.io.tx.active.data.sent() > 0);
-                    g.recovery.add(&g.peers, @splat(9), peer.logical, peer.conn, 1, setup.shared.pair.now.millis() + 30_000);
+                    try g.recovery.add(&g.peers, @splat(9), peer.logical, peer.conn, 1, setup.shared.pair.now.millis() + 30_000);
                     g.recovery.controlSent(peer.conn, 1, 12_000, setup.shared.pair.now.millis());
                 } else try std.testing.expectEqual(@as(usize, 0), peer.io.tx.data.count);
             }

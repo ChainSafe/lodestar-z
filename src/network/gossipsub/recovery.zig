@@ -11,7 +11,7 @@ const bucket_count = mcache.indexCapacity(constants.promises_cap);
 const outbox_mod = @import("outbox.zig");
 const mcache = @import("mcache.zig");
 
-/// Every retained identity keeps room for recovery even when other identities borrow the rest.
+/// Every identity within the pin allowance keeps recovery room while others borrow the rest.
 pub const promises_reserved_per_peer = 8;
 
 pub const promises_per_peer = constants.max_ihave_per_heartbeat * constants.gossip_ids_max;
@@ -47,7 +47,7 @@ pub const Recovery = struct {
 
     pub fn init(allocator: std.mem.Allocator) !Recovery {
         comptime assert(promises_per_peer < constants.promises_cap and constants.promises_cap < none and
-            promises_reserved_per_peer * constants.retained_peers_cap <= constants.promises_cap / 2);
+            promises_reserved_per_peer * @import("peer_book.zig").pinned_capacity <= constants.promises_cap / 2);
         const requests = try allocator.alloc(Request, constants.promises_cap);
         errdefer allocator.free(requests);
         const batches = try allocator.alloc(Batch, constants.promises_cap);
@@ -90,6 +90,7 @@ pub const Recovery = struct {
     pub const Selection = struct { count: usize, capacity: usize };
 
     pub fn filterPending(self: *const Recovery, peers: *const Peers, peer: PeerRef, ids: []MessageId) error{PeerCapacity}!Selection {
+        if (!peers.canRetain(peer)) return error.PeerCapacity;
         assert(ids.len <= constants.max_ihave_ids_per_heartbeat);
         std.sort.heap(MessageId, ids, {}, lessThan);
         var unique: usize = 0;
@@ -112,9 +113,10 @@ pub const Recovery = struct {
             }
             assert(slot == none);
         }
-        var protected: usize = 0;
+        const newly_pinned: u16 = @intFromBool(peers.rows[peer.index].pins == 0);
+        var protected: usize = @as(usize, peers.pin_limit - peers.pinned - newly_pinned) * promises_reserved_per_peer;
         for (pending[0..peers.rows.len], 0..) |used, index| {
-            if (index != peer.index) protected += promises_reserved_per_peer -| used;
+            if (index != peer.index and peers.rows[index].pins > 0) protected += promises_reserved_per_peer -| used;
         }
         const capacity = @min(self.available() -| protected, promises_per_peer -| pending[peer.index]);
         if (capacity == 0) return error.PeerCapacity;
@@ -151,10 +153,10 @@ pub const Recovery = struct {
     }
 
     /// Commit a nonempty subset admitted by filterPending, without intervening recovery mutation.
-    pub fn requestBatch(self: *Recovery, peers: *Peers, outbox: *outbox_mod.Outbox, scratch: *outbox_mod.ControlScratch, ids: []const MessageId, peer: PeerRef, connection: Handle, random: std.Random, followup_ms: u64, now: u64) error{OutboxFull}!void {
+    pub fn requestBatch(self: *Recovery, peers: *Peers, outbox: *outbox_mod.Outbox, scratch: *outbox_mod.ControlScratch, ids: []const MessageId, peer: PeerRef, connection: Handle, random: std.Random, followup_ms: u64, now: u64) error{ OutboxFull, PeerCapacity }!void {
         assert(ids.len > 0 and ids.len <= constants.gossip_ids_max and ids.len <= self.available());
         const index = self.batch_len;
-        self.addBatch(peers, ids, peer, connection, 0, random.uintLessThan(usize, ids.len), now +| followup_ms);
+        try self.addBatch(peers, ids, peer, connection, 0, random.uintLessThan(usize, ids.len), now +| followup_ms);
         const token = outbox.submit(&.{ .iwant = ids }, scratch, now) orelse {
             self.remove(peers, index);
             return error.OutboxFull;
@@ -162,12 +164,13 @@ pub const Recovery = struct {
         self.batches[index].token = token;
     }
 
-    pub fn add(self: *Recovery, peers: *Peers, id: MessageId, peer: PeerRef, connection: Handle, token: u64, expiry: u64) void {
-        self.addBatch(peers, &.{id}, peer, connection, token, 0, expiry);
+    pub fn add(self: *Recovery, peers: *Peers, id: MessageId, peer: PeerRef, connection: Handle, token: u64, expiry: u64) error{PeerCapacity}!void {
+        try self.addBatch(peers, &.{id}, peer, connection, token, 0, expiry);
     }
 
-    pub fn addBatch(self: *Recovery, peers: *Peers, ids: []const MessageId, peer: PeerRef, connection: Handle, token: u64, sample: usize, expiry: u64) void {
+    pub fn addBatch(self: *Recovery, peers: *Peers, ids: []const MessageId, peer: PeerRef, connection: Handle, token: u64, sample: usize, expiry: u64) error{PeerCapacity}!void {
         assert(ids.len > 0 and ids.len <= constants.gossip_ids_max and ids.len <= self.available() and sample < ids.len);
+        if (!peers.retain(peer)) return error.PeerCapacity;
         const index: u16 = @intCast(self.batch_len);
         const batch = &self.batches[index];
         batch.* = .{ .peer = peer, .connection = connection, .token = token, .expiry = expiry, .count = @intCast(ids.len) };
@@ -182,7 +185,6 @@ pub const Recovery = struct {
             batch.head = slot;
             if (i == sample) batch.sample = slot;
         }
-        peers.retain(peer);
         self.len += ids.len;
         self.batch_len += 1;
     }

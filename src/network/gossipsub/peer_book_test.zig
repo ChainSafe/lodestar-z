@@ -5,7 +5,7 @@ const PeerBook = @import("peer_book.zig").PeerBook;
 const Ref = @import("peer_book.zig").Ref;
 const peer_id = @import("../wire/peer_id.zig");
 fn allocateBook(a: std.mem.Allocator) !void {
-    var book = try PeerBook.init(a, &.{ .retained_score_ms = 10, .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
+    var book = try PeerBook.init(a, &.{ .retained_score_ms = 10, .connected_capacity = 2, .retained_capacity = 5, .retained_outbound_reserve = 1 }, 512);
     defer book.deinit(a);
 }
 const capacity = @import("peer_book.zig").capacity;
@@ -42,7 +42,7 @@ test "gossip policy peers retain identity and reserve outbound recovery under ne
     peers.disconnect(inbound.peer, 1000);
     metadata.identity.bytes[2] = 2;
     const pinned: Ref = .{ .index = 0, .generation = peers.rows[0].generation };
-    peers.retain(pinned);
+    try std.testing.expect(peers.retain(pinned));
     metadata.direction = .outbound;
     const fallback = peers.admit(.{ .index = 0, .generation = 1 }, &metadata, 1000).admitted;
     try std.testing.expectEqual(@as(usize, capacity - 2), penalized(&peers, 1000));
@@ -106,7 +106,7 @@ test "gossip pinned backoff survives identity churn" {
     }
     const original: Ref = .{ .index = 0, .generation = peers.rows[0].generation };
     metadata.identity.bytes[2] = 1;
-    peers.retain(original);
+    try std.testing.expect(peers.retain(original));
     defer peers.release(original);
     const retained = penalized(&peers, 1000);
     const churn = peers.admit(connection, &metadata, 1000).admitted;
@@ -137,12 +137,12 @@ test "gossip pinned backoff survives identity churn" {
 }
 
 test "peer book retains reputation across pinned reconnect and clears it on expiry" {
-    var book = try PeerBook.init(std.testing.allocator, &.{ .retained_score_ms = 10, .retained_capacity = 2, .retained_outbound_reserve = 1 }, 512);
+    var book = try PeerBook.init(std.testing.allocator, &.{ .retained_score_ms = 10, .connected_capacity = 2, .retained_capacity = 5, .retained_outbound_reserve = 1 }, 512);
     defer book.deinit(std.testing.allocator);
     const metadata: Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound };
     const first = book.admit(.{ .index = 0, .generation = 1 }, &metadata, 0).admitted.peer;
     book.invalid(first, 0);
-    book.retain(first);
+    try std.testing.expect(book.retain(first));
     book.disconnect(first, 1);
     const score = book.snapshot(first, 1);
     try std.testing.expect(score < 0);
@@ -169,7 +169,7 @@ test "peer book releases identity and reputation allocations on partial initiali
 }
 
 test "gossip score snapshots follow population migration and identity reuse without policy reads" {
-    var book = try PeerBook.init(std.testing.allocator, &.{ .retained_capacity = 2, .retained_outbound_reserve = 0, .retained_score_ms = 10, .score_params = .{ .ip_colocation_weight = -5, .ip_colocation_threshold = 1 } }, 512);
+    var book = try PeerBook.init(std.testing.allocator, &.{ .connected_capacity = 2, .retained_capacity = 5, .retained_outbound_reserve = 0, .retained_score_ms = 10, .score_params = .{ .ip_colocation_weight = -5, .ip_colocation_threshold = 1 } }, 512);
     defer book.deinit(std.testing.allocator);
     var metadata: Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } }, .direction = .inbound };
     const conn: Handle = .{ .index = 0, .generation = 1 };
@@ -196,7 +196,8 @@ test "gossip reconnect resets positive scores and retains nonpositive evidence w
     const TopicCounters = @import("score.zig").TopicCounters;
     for ([_]u8{ 7, 6, 5 }) |credits| {
         var book = try PeerBook.init(std.testing.allocator, &.{
-            .retained_capacity = 2,
+            .connected_capacity = 2,
+            .retained_capacity = 5,
             .retained_outbound_reserve = 0,
             .retained_score_ms = 100,
             .score_params = .{
@@ -226,7 +227,7 @@ test "gossip reconnect resets positive scores and retains nonpositive evidence w
         book.invalid(first, 0);
         book.scores.penalize(first.index, 1);
         book.addBackoff(first, 0, 1, 50);
-        book.retain(first);
+        try std.testing.expect(book.retain(first));
         defer book.release(first);
         try std.testing.expectEqual(@as(f64, @floatFromInt(credits)) - 6, book.score(first, 1));
         book.disconnect(first, 2);
@@ -256,7 +257,8 @@ test "gossip reconnect resets positive scores and retains nonpositive evidence w
 
 test "gossip disconnect classifies score before removing IP contribution" {
     var book = try PeerBook.init(std.testing.allocator, &.{
-        .retained_capacity = 2,
+        .connected_capacity = 2,
+        .retained_capacity = 5,
         .retained_outbound_reserve = 0,
         .score_params = .{ .ip_colocation_weight = -2, .ip_colocation_threshold = 1, .topic = .{ .invalid_weight = -1 } },
     }, 512);
@@ -275,4 +277,102 @@ test "gossip disconnect classifies score before removing IP contribution" {
     const reconnected = book.admit(.{ .index = 0, .generation = 2 }, &metadata, 2).admitted;
     try std.testing.expectEqual(first, reconnected.peer);
     try std.testing.expectEqual(@as(f64, -3), book.score(first, 2));
+}
+
+fn retentionMetadata(identity: u16) Metadata {
+    var metadata: Metadata = .{
+        .identity = .{ .bytes = @splat(0) },
+        .address = .{ .ip4 = .{ .octets = .{ 198, @truncate(identity >> 8), @truncate(identity), 1 }, .port = 1 } },
+        .direction = .inbound,
+    };
+    std.mem.writeInt(u16, metadata.identity.bytes[0..2], identity, .little);
+    return metadata;
+}
+
+test "peer retention budget preserves full inbound capacity after pinned identity churn" {
+    for ([_]u16{ 1, 3, 210, 256 }) |connected| {
+        const reserved = @min(connected, outbound_reserve);
+        const count = try PeerBook.retainedCapacity(connected, reserved);
+        var book = try PeerBook.init(std.testing.allocator, &.{ .connected_capacity = connected, .retained_capacity = count, .retained_outbound_reserve = reserved }, 1);
+        defer book.deinit(std.testing.allocator);
+        var pinned: [@import("peer_book.zig").pinned_capacity]Ref = undefined;
+        for (0..book.pin_limit) |i| {
+            const conn: Handle = .{ .index = @intCast(i % connected), .generation = @intCast(i / connected + 1) };
+            const ref = book.admit(conn, &retentionMetadata(@intCast(i)), 0).admitted.peer;
+            try std.testing.expect(book.retain(ref));
+            pinned[i] = ref;
+            if (i >= connected) book.disconnect(ref, 1);
+            if (i + 1 == connected) for (pinned[0..connected]) |live| book.disconnect(live, 1);
+        }
+        try std.testing.expectEqual(book.pin_limit, book.pinned);
+        for (0..connected) |i| {
+            const ref = book.admit(.{ .index = @intCast(i), .generation = 3 }, &retentionMetadata(@intCast(book.pin_limit + i)), 2).admitted.peer;
+            try std.testing.expect(ref.index < count - reserved);
+            try std.testing.expect(!book.retain(ref));
+            try std.testing.expectEqual(@as(u32, 0), book.rows[ref.index].pins);
+        }
+        try std.testing.expect(book.retain(pinned[0]));
+        try std.testing.expectEqual(book.pin_limit, book.pinned);
+        book.release(pinned[0]);
+        for (pinned[0..book.pin_limit]) |ref| book.release(ref);
+        try std.testing.expectEqual(@as(u16, 0), book.pinned);
+    }
+}
+
+test "peer retention groups normalize addresses and remain stable through migration and pinned reconnect" {
+    for ([_]bool{ false, true }) |ipv6| {
+        var book = try PeerBook.init(std.testing.allocator, &.{ .connected_capacity = 20, .retained_capacity = 61, .retained_outbound_reserve = 1 }, 1);
+        defer book.deinit(std.testing.allocator);
+        var pinned: [16]Ref = undefined;
+        for (&pinned, 0..) |*ref, i| {
+            var metadata = retentionMetadata(@intCast(i));
+            metadata.address = if (ipv6)
+                .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, 1, @intCast(i), 0, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = @intCast(i) } }
+            else
+                .{ .ip4 = .{ .octets = .{ 192, 0, 2, @intCast(i) }, .port = @intCast(i) } };
+            if (!ipv6 and i % 2 == 1) {
+                const mapped = normalize(metadata.address);
+                metadata.address = .{ .ip6 = .{ .octets = mapped, .port = @intCast(i), .interface = 2 } };
+            }
+            ref.* = book.admit(.{ .index = 0, .generation = @intCast(i + 1) }, &metadata, 0).admitted.peer;
+            try std.testing.expect(book.retain(ref.*));
+            book.disconnect(ref.*, 1);
+        }
+        var metadata = retentionMetadata(16);
+        metadata.address = if (ipv6)
+            .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, 1, 99, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = 99 } }
+        else
+            .{ .ip4 = .{ .octets = .{ 192, 0, 2, 99 }, .port = 99 } };
+        const conn: Handle = .{ .index = 0, .generation = 17 };
+        try std.testing.expectEqual(@as(u16, 16), book.pinned);
+        const refused = book.admit(conn, &metadata, 2).admitted.peer;
+        try std.testing.expect(!book.retain(refused));
+        book.migrate(conn, retentionMetadata(99).address);
+        try std.testing.expect(!book.retain(refused));
+        var reconnect = retentionMetadata(0);
+        reconnect.address = retentionMetadata(99).address;
+        const original = book.admit(.{ .index = 1, .generation = 1 }, &reconnect, 2).admitted.peer;
+        try std.testing.expectEqual(pinned[0], original);
+        try std.testing.expect(book.retain(original));
+        book.release(original);
+        try std.testing.expect(!book.retain(refused));
+        book.release(original);
+        try std.testing.expect(book.retain(refused));
+        try std.testing.expect(book.retain(original));
+        try std.testing.expectEqual(@as(u16, 17), book.pinned);
+        book.release(original);
+        book.release(refused);
+        for (pinned[1..]) |ref| book.release(ref);
+        try std.testing.expectEqual(@as(u16, 0), book.pinned);
+    }
+}
+
+test "peer retention sizing rejects profiles without room for live and pending identities" {
+    try std.testing.expectError(error.InvalidLimits, PeerBook.pinLimit(420, 210, 32));
+    try std.testing.expectError(error.InvalidLimits, PeerBook.pinLimit(5, 3, 0));
+    try std.testing.expectEqual(@as(u16, 3), try PeerBook.pinLimit(7, 3, 1));
+    try std.testing.expectEqual(@as(u16, 242), try PeerBook.pinLimit(484, 210, 32));
+    try std.testing.expectError(error.InvalidLimits, PeerBook.retainedCapacity(0, 1));
+    try std.testing.expectError(error.InvalidLimits, PeerBook.retainedCapacity(257, 1));
+    try std.testing.expectError(error.InvalidLimits, PeerBook.retainedCapacity(256, 33));
 }

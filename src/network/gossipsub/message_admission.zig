@@ -33,6 +33,7 @@ pub const Admission = struct {
     /// Check before considering victims: replacing one's own work must not renew
     /// a source's full share.
     pub fn sourceRoom(self: *Admission) bool {
+        if (!self.context.peers.canRetain(self.source.peer)) return self.refuse(.peer_retention);
         const pending = &self.messages.validation;
         const source = self.source.peer.index;
         const k = @intFromEnum(self.kind());
@@ -87,6 +88,7 @@ pub const Admission = struct {
 
     /// Checks the incoming payload against a preflight's room. Call `sourceRoom` first.
     pub fn fits(self: *Admission, resources: *const Room) bool {
+        if (!self.context.peers.canRetain(self.source.peer)) return self.refuse(.peer_retention);
         if (self.context.options.payload_limits) |limits| {
             const limit = limits[@intFromEnum(self.kind())];
             if (resources.kind_entries >= limit.items) return self.refuse(.kind_validations);

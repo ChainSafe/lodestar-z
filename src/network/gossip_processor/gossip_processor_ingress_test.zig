@@ -22,7 +22,7 @@ const options: Gossipsub.Options = .{
     .topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })},
     .random_seed = 1,
     .connected_capacity = 4,
-    .retained_capacity = 8,
+    .retained_capacity = 9,
     .retained_outbound_reserve = 1,
     .body_buffer_bytes = 64,
 };
@@ -57,7 +57,7 @@ fn receive(g: *Gossipsub, source: u16, topic: []const u8, payload: []const u8) !
 test "gossip fatal reports preserve unrelated validation through direct processor admission" {
     var opts = options;
     opts.connected_capacity = 18;
-    opts.retained_capacity = 32;
+    opts.retained_capacity = 37;
     var g = try support.init(t.allocator, opts);
     defer g.deinit();
     const limits: processor.limits.Limits = @splat(.{ .items = 32, .bytes = 8192 });
@@ -72,6 +72,7 @@ test "gossip fatal reports preserve unrelated validation through direct processo
     var tokens: [18]processor.GossipProcessor.Token = undefined;
     for (&tokens, 0..) |*token, i| {
         const peer = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+        g.peers.rows[g.logical(peer.index).index].admission_group = .{ .ip4 = .{ 192, 0, @intCast(i / 16) } };
         var payload: [108]u8 = @splat(0);
         payload[0] = @intCast(i);
         std.mem.writeInt(u64, payload[100..108], 1, .little);

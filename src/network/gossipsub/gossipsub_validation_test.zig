@@ -18,7 +18,7 @@ const frame = @import("frame.zig");
 
 test "gossip resolved attribution releases peer rows and scores late duplicates once after reuse" {
     for ([_]Gossipsub.Verdict{ .accept, .reject, .ignore }) |verdict| {
-        var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 1, .retained_capacity = 2, .retained_outbound_reserve = 1 });
+        var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 1, .retained_capacity = 5, .retained_outbound_reserve = 1 });
         defer g.deinit();
         var inbox: support.Inbox = .{};
         defer inbox.deinit();
@@ -37,6 +37,11 @@ test "gossip resolved attribution releases peer rows and scores late duplicates 
         const topic = g.overlay.findTopic(test_topic).?;
         try std.testing.expect(g.messages.validation.retainsTopic(topic));
         g.connectionClosed(conn);
+        for (1..g.peers.rows.len - g.peers.reserved) |i| {
+            const retained = g.peers.admit(.{ .index = 0, .generation = @intCast(i + 10) }, &.{ .identity = .{ .bytes = @splat(@intCast(i)) }, .address = .unspecified, .direction = .inbound }, g.last_now_ms).admitted.peer;
+            g.peers.scores.penalize(retained.index, 20);
+            g.peers.disconnect(retained, g.last_now_ms);
+        }
         const next = support.addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
         const current = g.logical(next.index);
         try std.testing.expectEqual(old, g.messages.validation.find(inbox.last().id, 2).?.source);

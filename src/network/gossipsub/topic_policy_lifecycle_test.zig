@@ -23,7 +23,7 @@ fn boundary() p.Boundary {
     return b;
 }
 fn options(boundaries: []const p.Boundary) Gossipsub.Options {
-    var out: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8 };
+    var out: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 9, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8 };
     out.topic_policy = boundaries;
     return out;
 }

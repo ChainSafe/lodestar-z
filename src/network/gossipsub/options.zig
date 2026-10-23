@@ -21,6 +21,8 @@ pub const Options = struct {
     connected_capacity: u16 = constants.peers_cap,
     /// Engine connection slots; a session is found by its connection's index.
     connection_slots: u16 = quic_limits.connections_max_ceiling,
+    /// At least twice connected_capacity plus retained_outbound_reserve, so pending
+    /// identities cannot consume the rows reserved for live connections.
     retained_capacity: u16 = peer_book.capacity,
     retained_outbound_reserve: u16 = peer_book.outbound_reserve,
     message_id_policy: topic_mod.MessageIdPolicy = .{},
@@ -122,6 +124,7 @@ pub const Options = struct {
         try range(o.connection_slots, 1, quic_limits.connections_max_ceiling);
         try range(o.retained_capacity, o.connected_capacity, peer_book.capacity);
         try range(o.retained_outbound_reserve, 1, o.retained_capacity - 1);
+        _ = try peer_book.PeerBook.pinLimit(o.retained_capacity, o.connected_capacity, o.retained_outbound_reserve);
         try range(o.validation_capacity, 1, 65535);
         if (o.payload_limits) |limits| {
             gossip_limits.validate(&limits) catch return error.InvalidLimits;

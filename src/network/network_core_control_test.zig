@@ -1438,3 +1438,30 @@ test "core control replacement applies a pending fault to the new connection's p
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(@as(f64, -20), pm.catalog.get(peer).?.score);
 }
+
+test "core closes a gossip admission refusal and releases request connection reservations" {
+    for ([_]bool{ false, true }) |inbound| {
+        var setup: Setup = .{};
+        try setup.initOwners(&.{});
+        defer setup.deinit();
+        const node = if (inbound) &setup.server else &setup.client;
+        for (node.protocols.gossipsub.peers.rows) |*row| row.generation = std.math.maxInt(u64);
+        _ = try setup.pair.dial();
+        var closed = false;
+        for (0..80) |_| {
+            try setup.pair.pump();
+            var events: [4]t.Event = undefined;
+            const result = try setup.turn(node, .{ .peers = &events });
+            for (events[0..result.counts.peers]) |event| if (event == .closed) {
+                try std.testing.expectEqual(t.DisconnectReason.capacity, event.closed.reason);
+                closed = true;
+            };
+            _ = try setup.turn(if (inbound) &setup.client else &setup.server, .{});
+        }
+        try std.testing.expect(closed);
+        try std.testing.expectEqual(@as(u16, 0), node.peer_manager.catalog.connectedCount());
+        inline for (.{ "reqresp", "control_reqresp" }) |field| {
+            try std.testing.expectEqual(@as(u16, 0), @field(node.protocols, field).admission.limiter.connections);
+        }
+    }
+}

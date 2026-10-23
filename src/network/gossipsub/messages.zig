@@ -57,7 +57,7 @@ pub const InvalidReason = enum { signed, compressed_size, ssz_size, snappy };
 /// Identified receipt proves the valid-domain ID, not successful gossip validation.
 pub const Refusal = union(enum) { identified: MessageId, unidentified };
 pub const Received = union(enum) { ignored, invalid: InvalidReason, duplicate: MessageId, admitted: struct { id: MessageId, topic_index: u16 }, refused: Refusal, deferred };
-pub const StorageRefusal = enum { kind_validations, kind_payload, peer_validations, validation_capacity, payload_capacity, processor_capacity };
+pub const StorageRefusal = enum { kind_validations, kind_payload, peer_validations, validation_capacity, payload_capacity, processor_capacity, peer_retention };
 pub const StorageRefusals = [std.meta.fields(StorageRefusal).len]u64;
 pub const Applied = struct {
     verdict: Verdict,
@@ -282,6 +282,7 @@ pub const Messages = struct {
         const sink = workspace.sink.?;
         if (!sink.admit(sink.context, &candidate)) {
             assert(!candidate.committed);
+            if (candidate.refusal == .peer_retention) context.peers.scores.localPressure(source.peer.index, topic, now);
             return self.refuseStorage(candidate.refusal, id);
         }
         assert(candidate.committed);
@@ -372,7 +373,14 @@ pub const Messages = struct {
 fn recordDuplicate(context: *const Context, entry: *Attribution, source: *const Source, topic: u16, now: u64) void {
     const ref = source.peer;
     const eligible = context.overlay.inMesh(topic, source.session.index) and now -| entry.admitted_ms <= context.peers.scores.topic_params[topic].mesh_delivery_window_ms;
-    if (!Validation.duplicate(entry, context.peers, ref, eligible)) return;
+    switch (Validation.duplicate(entry, context.peers, ref, eligible)) {
+        .recorded => {},
+        .known, .full => return,
+        .retention_full => {
+            if (eligible) context.peers.scores.localPressure(ref.index, topic, now);
+            return;
+        },
+    }
     if (entry.state != .resolved) return;
     if (entry.verdict == .reject) {
         context.peers.invalid(ref, topic);
