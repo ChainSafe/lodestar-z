@@ -65,8 +65,8 @@ pub const Options = struct {
         policy: request_policy.Config,
         limits: quotas.Options,
 
-        pub fn defaults(configuration: *const request_policy.Config, identities: u16, global_scale: u16) error{InvalidPolicy}!Admission {
-            return .{ .policy = configuration.*, .limits = try quotas.Options.defaults(configuration, identities, global_scale) };
+        pub fn defaults(configuration: *const request_policy.Config, global_scale: u16) error{InvalidPolicy}!Admission {
+            return .{ .policy = configuration.*, .limits = try quotas.Options.defaults(configuration, global_scale) };
         }
     };
 
@@ -74,7 +74,7 @@ pub const Options = struct {
         if (options.protocols.len() == 0) return error.InvalidOptions;
         if (!std.meta.eql(options.routes, Routes.application) and !std.meta.eql(options.routes, Routes.control)) return error.InvalidOptions;
         _ = try request_policy.Policy.init(&options.admission.policy);
-        try admission_mod.Limiter.validate(&options.admission.limits);
+        _ = try admission_mod.Limiter.capacity(&options.admission.limits, options.protocols, options.connections);
         if (options.outbound_max == 0 or options.outbound_max > constants.slots_ceiling) {
             return error.InvalidOptions;
         }

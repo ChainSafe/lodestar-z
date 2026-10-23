@@ -16,7 +16,18 @@ const InboundPhase = @import("reqresp/metrics.zig").InboundPhase;
 const capabilities_mod = @import("capabilities.zig");
 const time = @import("time.zig");
 
-test "core peer admission protects idle control identities from limiter churn" {
+fn fillStartHistory(limiter: *@import("reqresp/admission.zig").Limiter, now: u64) void {
+    for (0..limiter.options.global_starts.tokens) |index| {
+        const group: @import("udp").AddressGroup = .{ .ip4 = .{ 198, @truncate(index >> 8), @truncate(index) } };
+        const row = limiter.retain(group, now);
+        const result = limiter.start(row, now);
+        limiter.release(row);
+        if (result == .global_quota) break;
+        std.debug.assert(result == .allowed);
+    }
+}
+
+test "core peer admission keeps idle peers through group history churn" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -24,15 +35,8 @@ test "core peer admission protects idle control identities from limiter churn" {
     setup.pair.advance(16_000);
     inline for (.{ "reqresp", "control_reqresp" }) |field| {
         const limiter = &@field(setup.client.protocols, field).admission.limiter;
-        const now = setup.pair.now.millis();
-        for (0..limiter.rows.len - 1) |index| {
-            const identity: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 10))) };
-            try std.testing.expectEqual(.allowed, limiter.start(&identity, now));
-        }
-        const excess: t.PeerId = .{ .bytes = @splat(200) };
-        try std.testing.expectEqual(.identity_capacity, limiter.start(&excess, now));
-        const remote = setup.server.peerId();
-        try std.testing.expectEqual(.allowed, limiter.start(&remote, now));
+        fillStartHistory(limiter, setup.pair.now.millis());
+        try std.testing.expectEqual(@as(u16, 1), limiter.connections);
     }
     for (0..80) |_| try setup.step(1);
     var snapshots: [4]t.Snapshot = undefined;
@@ -40,76 +44,27 @@ test "core peer admission protects idle control identities from limiter churn" {
     try std.testing.expect(snapshots[0].relevant);
 }
 
-test "core peer admission refuses new identities while limiter debt fills the table" {
-    inline for (.{ "reqresp", "control_reqresp" }) |field| {
+test "core peer admission survives exhausted group history and global starts in both directions" {
+    for ([_]bool{ false, true }) |inbound| {
         var setup: Setup = .{};
         try setup.initOwners(&.{});
         defer setup.deinit();
-        const limiter = &@field(setup.client.protocols, field).admission.limiter;
-        const now = setup.pair.now.millis();
-        for (0..limiter.rows.len) |index| {
-            const identity: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 10))) };
-            try std.testing.expectEqual(.allowed, limiter.start(&identity, now));
+        const node = if (inbound) &setup.server else &setup.client;
+        inline for (.{ "reqresp", "control_reqresp" }) |field| {
+            fillStartHistory(&@field(node.protocols, field).admission.limiter, setup.pair.now.millis());
         }
         _ = try setup.pair.dial();
         for (0..80) |_| try setup.step(0);
-        const catalog = &setup.client.peer_manager.catalog;
-        try std.testing.expectEqual(@as(u16, 0), catalog.connectedCount());
-        const remote = setup.server.peerId();
-        const refused = catalog.get(catalog.find(&remote).?).?;
-        var closed: [1]t.Event = undefined;
-        try std.testing.expectEqual(@as(usize, 1), catalog.pollEvents(&closed));
-        try std.testing.expectEqual(t.DisconnectReason.capacity, closed[0].closed.reason);
-        try std.testing.expectEqual(@as(u64, 0), refused.ban_until_ms);
-        try std.testing.expect(!limiter.tracks(&remote, now));
-        for (limiter.rows, 0..) |*row, index| {
-            const identity: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 10))) };
-            try std.testing.expect(row.identity.eql(&identity));
-            try std.testing.expectEqual(@as(u16, 0), row.connections);
+        try std.testing.expectEqual(@as(u16, 1), node.peer_manager.catalog.connectedCount());
+        inline for (.{ "reqresp", "control_reqresp" }) |field| {
+            try std.testing.expectEqual(@as(u16, 1), @field(node.protocols, field).admission.limiter.connections);
         }
-        inline for (.{ "reqresp", "control_reqresp" }) |instance| {
-            for (@field(setup.client.protocols, instance).admission.limiter.rows) |row| try std.testing.expectEqual(@as(u16, 0), row.connections);
-        }
+        setup.pair.advance(1000);
+        for (0..80) |_| try setup.step(1);
+        var snapshots: [4]t.Snapshot = undefined;
+        try std.testing.expectEqual(@as(usize, 1), node.peer_manager.snapshots(&snapshots));
+        try std.testing.expect(snapshots[0].relevant);
     }
-}
-
-test "core control identity refusal rolls back application admission and closes the connection" {
-    var setup: Setup = .{};
-    try setup.initOwners(&.{});
-    defer setup.deinit();
-    const application = &setup.client.protocols.reqresp.admission.limiter;
-    const control = &setup.client.protocols.control_reqresp.admission.limiter;
-    const remote = setup.server.peerId();
-    const now = setup.pair.now.millis();
-    for (0..control.rows.len) |index| {
-        const identity: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 10))) };
-        try std.testing.expectEqual(.allowed, control.start(&identity, now));
-    }
-    try std.testing.expect(application.tracks(&remote, now));
-    try std.testing.expect(!control.tracks(&remote, now));
-    for (application.rows) |row| try std.testing.expect(!row.occupied);
-    _ = try setup.pair.dial();
-    try setup.pair.pump();
-    _ = try setup.turn(&setup.client, .{});
-    const accepted = for (application.rows) |row| {
-        if (row.occupied and row.identity.eql(&remote)) break row;
-    } else return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u16, 0), accepted.connections);
-    try std.testing.expectEqual(@as(u128, 0), accepted.expires_ns);
-    inline for (.{ "reqresp", "control_reqresp" }) |field| {
-        const admission = &@field(setup.client.protocols, field).admission;
-        for (admission.connection_cursors) |cursor| try std.testing.expect(cursor.identity == null);
-        for (admission.limiter.rows) |row| try std.testing.expectEqual(@as(u16, 0), row.connections);
-    }
-    for (0..80) |_| try setup.step(0);
-    const catalog = &setup.client.peer_manager.catalog;
-    try std.testing.expectEqual(@as(u16, 0), catalog.connectedCount());
-    try std.testing.expectEqual(@as(usize, 0), setup.pair.client.registry.activeIndices().len);
-    var events: [2]t.Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), catalog.pollEvents(&events));
-    try std.testing.expectEqual(t.DisconnectReason.capacity, events[0].closed.reason);
-    const refused = catalog.get(catalog.find(&remote).?).?;
-    try std.testing.expectEqual(@as(u64, 0), refused.ban_until_ms);
 }
 
 fn reply(node: *NetworkCore, event: rr.ReqResp.Event, now: Now) void {
@@ -427,7 +382,7 @@ test "core stale metadata finishes one refresh while periodic Status and later c
         try std.testing.expectEqual(statuses + 1, setup.client.protocols.control_reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
         try std.testing.expectEqual(started + 1, setup.client.protocols.control_reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
         const requests = &setup.server.protocols.control_reqresp;
-        setup.pair.advance(requests.admission.limiter.options.peer.get(.metadata_v1, requests.request_fork).period_ms);
+        setup.pair.advance(requests.admission.limiter.options.group.get(.metadata_v1, requests.request_fork).period_ms);
         remoteSequence(&setup.server, 12);
         setup.client.peer_manager.control.connections[peer.index].ping_due_ms = setup.pair.now.millis();
         setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);

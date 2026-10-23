@@ -115,11 +115,9 @@ pub const Protocols = struct {
         );
     }
 
-    pub fn connectionOpened(self: *Protocols, conn: Engine.Handle, identity: *const PeerId, now: types.Now) bool {
-        if (!self.reqresp.connectionOpened(conn, identity, now)) return false;
-        if (self.control_reqresp.connectionOpened(conn, identity, now)) return true;
-        self.reqresp.admission.disconnected(conn);
-        return false;
+    pub fn connectionOpened(self: *Protocols, conn: Engine.Handle, endpoint: *const @import("udp").Address, now: types.Now) void {
+        self.reqresp.connectionOpened(conn, endpoint, now);
+        self.control_reqresp.connectionOpened(conn, endpoint, now);
     }
 
     pub fn schedule(self: *const Protocols, capacities: Capacities) types.Schedule {

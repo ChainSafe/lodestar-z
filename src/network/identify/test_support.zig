@@ -20,5 +20,5 @@ pub fn step(pair: *support.Pair, protocols: *Protocols, server: bool, results: [
 }
 
 pub fn protocolsOptions(agent: []const u8) !Protocols.Options {
-    return .{ .control_reqresp = try control_fixture.controlOptions(), .reqresp = .{ .protocols = .application, .forks = &.{}, .admission = try ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 16) }, .gossipsub = .{ .random_seed = 1 }, .identify = .{ .agent = agent, .inbound_max = 1, .outbound_max = 1 } };
+    return .{ .control_reqresp = try control_fixture.controlOptions(), .reqresp = .{ .protocols = .application, .forks = &.{}, .admission = try ReqResp.Options.Admission.defaults(&policy_fixture.config(), 16) }, .gossipsub = .{ .random_seed = 1 }, .identify = .{ .agent = agent, .inbound_max = 1, .outbound_max = 1 } };
 }

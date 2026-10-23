@@ -91,7 +91,7 @@ test "reqresp caller cardinality rejects invalid bounds before opening a stream"
 
 test "reqresp validates transport capacity and copies its fork table" {
     var forks = [_]ForkEntry{.{ .digest = deneb_digest, .fork = .deneb }};
-    var rr = try reqresp.init(std.testing.allocator, .{ .connections = 1, .forks = &forks, .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1, 16) });
+    var rr = try reqresp.init(std.testing.allocator, .{ .connections = 1, .forks = &forks, .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 16) });
     defer rr.deinit();
     forks[0].digest = fulu_digest;
     try std.testing.expectEqual(@as(?ForkSeq, .deneb), rr.forkFor(deneb_digest));
@@ -100,7 +100,7 @@ test "reqresp validates transport capacity and copies its fork table" {
     try setup.init(.{}, .{});
     defer setup.deinit();
     try std.testing.expectError(error.InvalidCapacity, rr.validateTransportCapacity(&setup.shared.pair.client));
-    try std.testing.expectError(error.InvalidOptions, reqresp.init(std.testing.allocator, .{ .connections = 1025, .forks = &.{}, .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1, 16) }));
+    try std.testing.expectError(error.InvalidOptions, reqresp.init(std.testing.allocator, .{ .connections = 1025, .forks = &.{}, .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 16) }));
     const plan = rr.memoryPlan();
     try std.testing.expectEqual(plan.total_bytes, plan.facade_bytes + plan.slot_bytes + plan.io_bytes + plan.admission_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes);
     try std.testing.expect(plan.io_bytes > 0 and plan.slot_bytes > 0);
@@ -162,7 +162,7 @@ test "reqresp rejects duplicate digests before allocating" {
     for ([_]ForkSeq{ .fulu, .deneb }) |fork| {
         try std.testing.expectError(error.InvalidOptions, reqresp.init(failing.allocator(), .{
             .forks = &.{ first, .{ .digest = first.digest, .fork = fork } },
-            .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1, 1),
+            .admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 1),
         }));
     }
 }

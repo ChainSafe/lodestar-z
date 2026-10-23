@@ -175,7 +175,7 @@ fn readRequest(owner: *ReqResp, engine: *Engine, router: *Router, slot: *Server,
                 &.{};
             const inspected = owner.inspectRequest(request.protocol, payload, slot.request_fork) catch |err| {
                 if (err == error.MalformedSsz or err == error.InvalidRequest) request.peer_fault = .protocol;
-                owner.admission.chargeRejected(owner, engine, slot, now);
+                owner.admission.chargeRejected(owner, slot, now);
                 Server.rejectRequest(owner, slot, index, err, now);
                 return;
             };

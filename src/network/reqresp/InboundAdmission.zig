@@ -16,6 +16,8 @@ const Now = types.Now;
 const protocol = @import("protocol.zig");
 const Protocol = protocol.Protocol;
 const PeerId = @import("../wire/peer_id.zig").PeerId;
+const Address = @import("udp").Address;
+const AddressGroup = @import("udp").AddressGroup;
 const Router = @import("../router.zig").Router;
 const assert = std.debug.assert;
 
@@ -67,7 +69,7 @@ ready: index_list.List = .{},
 pending: bool = false,
 
 pub fn init(allocator: std.mem.Allocator, options: quotas.Options, connections: u16, protocols: Protocol.Set, slots_per_connection: u8) admission.InitError!InboundAdmission {
-    var limiter = try admission.Limiter.init(allocator, protocols, options);
+    var limiter = try admission.Limiter.init(allocator, protocols, options, connections);
     errdefer limiter.deinit(allocator);
     const cursors = try allocator.alloc(ConnectionCursor, connections);
     @memset(cursors, .{});
@@ -84,28 +86,29 @@ pub fn schedulerBytes(self: *const InboundAdmission) usize {
     return self.connection_cursors.len * @sizeOf(ConnectionCursor);
 }
 
-pub fn connected(self: *InboundAdmission, conn: Handle, identity: *const PeerId, now_ms: u64) bool {
+pub fn connected(self: *InboundAdmission, conn: Handle, endpoint: *const Address, now_ms: u64) void {
     assert(conn.index < self.connection_cursors.len);
     const cursor = &self.connection_cursors[conn.index];
-    if (cursor.identity) |held| {
-        if (held.generation == conn.generation) {
-            assert(self.limiter.rows[held.row].identity.eql(identity));
-            return true;
-        }
+    if (cursor.group) |held| {
+        if (held.generation == conn.generation) return;
         self.limiter.release(held.row);
-        cursor.identity = null;
     }
-    const row = self.limiter.retain(identity, now_ms) orelse return false;
-    cursor.identity = .{ .row = row, .generation = conn.generation };
-    return true;
+    const row = self.limiter.retain(AddressGroup.fromAddress(endpoint), now_ms);
+    cursor.group = .{ .row = row, .generation = conn.generation };
 }
 
 pub fn disconnected(self: *InboundAdmission, conn: Handle) void {
     const cursor = &self.connection_cursors[conn.index];
-    const held = cursor.identity orelse return;
+    const held = cursor.group orelse return;
     if (held.generation != conn.generation) return;
     self.limiter.release(held.row);
-    cursor.identity = null;
+    cursor.group = null;
+}
+
+pub fn group(self: *const InboundAdmission, conn: Handle) u16 {
+    const held = self.connection_cursors[conn.index].group.?;
+    assert(held.generation == conn.generation);
+    return held.row;
 }
 
 pub fn due(self: *const InboundAdmission) bool {
@@ -138,10 +141,8 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
         return error.ProtocolConcurrency;
     }
     const limiter = &self.limiter;
-    if (!self.connected(stream.conn, &identity, now.millis())) {
-        owner.recordAdmissionRefusal(stream, which, .identity_capacity, 1);
-        return error.TooManyRequests;
-    }
+    const endpoint = engine.peerAddress(stream.conn) orelse return error.StaleHandle;
+    self.connected(stream.conn, &endpoint, now.millis());
     if (owner.inboundPendingCount(stream.conn) >= owner.options.inbound_per_connection_max) {
         owner.recordAdmissionRefusal(stream, which, .connection_capacity, 0);
         return error.ConnectionSlotsExhausted;
@@ -158,13 +159,13 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
     // A responder rate-limits by withholding its response, never by closing the stream, so a
     // request past the starts limiter waits in `.ready` for its start. One arriving behind a
     // request still owed its start waits too, uncharged, so it cannot take the refill that one
-    // awaits; it still needs a limiter row for its identity.
+    // awaits. A connection retains its original group even when its QUIC path changes.
+    const source = self.group(stream.conn);
     const start_due: ?u64 = if (self.startsPending(owner.inbound, stream.conn))
-        limiter.startAt(&identity, now.millis())
-    else switch (limiter.start(&identity, now.millis())) {
+        limiter.startAt(source, now.millis())
+    else switch (limiter.start(source, now.millis())) {
         .allowed => null,
-        .identity_capacity => unreachable,
-        else => limiter.startAt(&identity, now.millis()),
+        else => limiter.startAt(source, now.millis()),
     };
     return .{
         .index = index,
@@ -265,11 +266,12 @@ pub fn promote(self: *InboundAdmission, owner: *ReqResp, index: u16, now: Now) P
     };
     const cost = self.limiter.requestCost(request.protocol, state.cost, slot.request_fork);
     if (state.paid < cost) {
-        const granted = self.limiter.grant(&slot.identity, request.protocol, cost - state.paid, slot.request_fork, now.millis());
+        const source = self.group(request.conn);
+        const granted = self.limiter.grant(source, request.protocol, cost - state.paid, slot.request_fork, now.millis());
         state.paid += granted;
         if (granted > 0) progress = .charged;
         if (state.paid < cost) {
-            state.eligible_ms = self.limiter.eligibleAt(&slot.identity, request.protocol, 1, slot.request_fork, now.millis()).?;
+            state.eligible_ms = self.limiter.eligibleAt(source, request.protocol, 1, slot.request_fork, now.millis()).?;
             state.wait = .tokens;
             return progress;
         }
@@ -286,56 +288,61 @@ fn chargeStart(self: *InboundAdmission, slots: []Server, index: u16, now: Now) b
     const slot = &slots[index];
     const state = &slot.admission;
     const limiter = &self.limiter;
-    if (!self.startQueued(slots, index) and limiter.start(&slot.identity, now.millis()) == .allowed) {
+    const source = self.group(slot.request.conn);
+    if (!self.startQueued(slots, index) and limiter.start(source, now.millis()) == .allowed) {
         state.start_pending = false;
         return true;
     }
-    state.eligible_ms = limiter.startAt(&slot.identity, now.millis());
+    state.eligible_ms = limiter.startAt(source, now.millis());
     // A start due now goes to the longer waiter, so this one stays due an admission attempt.
     state.wait = if (state.eligible_ms > now.millis()) .start else .none;
     return false;
 }
 
-/// Whether a running request on the connection is still owed its start.
+/// Fresh streams cannot spend a refill already awaited by a request in the same group.
 fn startsPending(self: *const InboundAdmission, slots: []const Server, conn: Handle) bool {
-    for (slots[@as(usize, conn.index) * self.slots_per_connection ..][0..self.slots_per_connection]) |*slot| {
-        if (!slot.admission.start_pending or !slot.request.running()) continue;
-        if (std.meta.eql(slot.request.conn, conn)) return true;
+    const source = self.group(conn);
+    for (self.connection_cursors, 0..) |cursor, index| {
+        const held = cursor.group orelse continue;
+        if (held.row != source) continue;
+        const first = index * self.slots_per_connection;
+        for (slots[first..][0..self.slots_per_connection]) |*slot| {
+            if (slot.admission.start_pending and slot.request.running()) return true;
+        }
     }
     return false;
 }
 
-/// Whether another `.ready` request on its connection has waited longer
-/// for its start, by accept time and then slot order. Starts go to the longest waiter, so
-/// while its identity keeps a limiter row and no other connection spends its starts, a
-/// waiter is charged its start within one refill per request ahead of it.
 fn startQueued(self: *const InboundAdmission, slots: []const Server, index: u16) bool {
     const slot = &slots[index];
-    const conn = index / self.slots_per_connection;
-    const first = @as(usize, conn) * self.slots_per_connection;
-    var mask = self.connection_cursors[conn].ready_mask;
-    for (0..self.slots_per_connection) |_| {
-        if (mask == 0) break;
-        const other = first + @ctz(mask);
-        mask &= mask - 1;
-        const waiter = &slots[other];
-        if (other == index or !waiter.admission.start_pending) continue;
-        if (waiter.request.started_ms < slot.request.started_ms) return true;
-        if (waiter.request.started_ms == slot.request.started_ms and other < index) return true;
+    const source = self.group(slot.request.conn);
+    for (self.connection_cursors, 0..) |cursor, connection| {
+        const held = cursor.group orelse continue;
+        if (held.row != source) continue;
+        const first = connection * self.slots_per_connection;
+        var mask = cursor.ready_mask;
+        for (0..self.slots_per_connection) |_| {
+            if (mask == 0) break;
+            const other = first + @ctz(mask);
+            mask &= mask - 1;
+            const waiter = &slots[other];
+            if (other == index or !waiter.admission.start_pending) continue;
+            if (waiter.request.started_ms < slot.request.started_ms) return true;
+            if (waiter.request.started_ms == slot.request.started_ms and other < index) return true;
+        }
     }
     return false;
 }
 
-pub fn chargeRejected(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, slot: *const Server, now: Now) void {
+pub fn chargeRejected(self: *InboundAdmission, owner: *ReqResp, slot: *const Server, now: Now) void {
+    if (slot.admission.start_pending) return;
     const request = &slot.request;
-    const identity = engine.peerId(request.conn) orelse return;
-    const decision = self.limiter.take(&identity, request.protocol, 1, slot.request_fork, now.millis());
+    const decision = self.limiter.take(self.group(request.conn), request.protocol, 1, slot.request_fork, now.millis());
     if (decision == .allowed) return;
     owner.recordAdmissionRefusal(request.stream, request.protocol, switch (decision) {
         .allowed => unreachable,
-        .peer_quota => .peer_quota,
+        .group_quota => .group_quota,
         .global_quota => .global_quota,
-        .identity_capacity => .identity_capacity,
     }, 1);
 }
 
@@ -348,9 +355,9 @@ pub fn checkSlot(self: *const InboundAdmission, slot: *const Server, index: u16)
     if (waiting and slot.admission.wait == .none) assert(self.pending);
 }
 
-/// Per-connection identity reservation and admission cursors, ready slots and list links.
+/// Per-connection group reservation and admission cursors, ready slots and list links.
 const ConnectionCursor = struct {
-    identity: ?struct { row: u16, generation: u32 } = null,
+    group: ?struct { row: u16, generation: u32 } = null,
     admission: u8 = 0,
     ready_mask: u64 = 0,
     ready_link: index_list.Link = .{},

@@ -10,14 +10,13 @@ const quotas = @import("admission_fixture.zig").quotas;
 const StreamHandle = @import("../types.zig").StreamHandle;
 const multistream = @import("../wire/multistream.zig");
 
-/// Two starts per second for each identity and class, so each start past a burst of two waits
+/// Two starts per second for each address group and class, so each start past a burst of two waits
 /// for a 500 ms refill. Protocol quotas stay out of the way.
 const refill_ms = 500;
 
-fn limits(identities: u16) rr.Options.Admission {
+fn limits() rr.Options.Admission {
     return .{ .policy = policy(), .limits = .{
-        .identities = identities,
-        .peer = quotas(100, 1000),
+        .group = quotas(100, 1000),
         .global = quotas(100, 1000),
         .starts = .{ .tokens = 2, .period_ms = 1000 },
     } };
@@ -100,7 +99,7 @@ fn waiterAt(owner: *const rr, now_ms: u64) !u16 {
 
 test "reqresp request start sequential requests past the quota negotiate, wait for their start, then complete" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .admission = limits(4) });
+    try setup.init(.{}, .{ .admission = limits() });
     defer setup.deinit();
     var exchange: Exchange = .{ .setup = &setup };
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
@@ -132,7 +131,7 @@ test "reqresp request start sequential requests past the quota negotiate, wait f
 
 test "reqresp request start waiters take one refill each in arrival order, not slot order" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .admission = limits(4) });
+    try setup.init(.{}, .{ .admission = limits() });
     defer setup.deinit();
     var exchange: Exchange = .{ .setup = &setup };
     const owner = &setup.shared.server.reqresp;
@@ -173,7 +172,7 @@ test "reqresp request start waiters take one refill each in arrival order, not s
 
 test "reqresp request start a request arriving as a refill falls due cannot take it from the waiter" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .admission = limits(4) });
+    try setup.init(.{}, .{ .admission = limits() });
     defer setup.deinit();
     var exchange: Exchange = .{ .setup = &setup };
     const owner = &setup.shared.server.reqresp;
@@ -214,7 +213,7 @@ test "reqresp request start a request arriving as a refill falls due cannot take
 
 test "reqresp request start control requests keep their own starts while application requests wait" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .admission = limits(4) });
+    try setup.init(.{}, .{ .admission = limits() });
     defer setup.deinit();
     var exchange: Exchange = .{ .setup = &setup };
     const owner = &setup.shared.server.reqresp;
@@ -248,17 +247,16 @@ test "reqresp request start control requests keep their own starts while applica
 
 test "reqresp request start a cancelled waiter leaves no start reserved" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .admission = limits(4) });
+    try setup.init(.{}, .{ .admission = limits() });
     defer setup.deinit();
     var exchange: Exchange = .{ .setup = &setup };
     const owner = &setup.shared.server.reqresp;
-    const identity = setup.shared.pair.server.peerId(setup.shared.handles.server).?;
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
     const start = setup.shared.pair.now.millis();
     for (0..2) |_| _ = try request(&setup, .blocks_by_root_v2, sink);
     try exchange.pumps(20);
-    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(&identity, start));
+    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(owner.admission.group(setup.shared.handles.server), start));
     var cancelled: [2]rr.RequestHandle = undefined;
     for (&cancelled) |*handle| handle.* = try request(&setup, .blocks_by_root_v2, sink);
     try exchange.pumps(20);
@@ -268,7 +266,7 @@ test "reqresp request start a cancelled waiter leaves no start reserved" {
     try std.testing.expectEqual(@as(usize, 2), exchange.server_failures);
     try std.testing.expectEqual(@as(u16, 0), owner.pendingCounts().inbound);
     try std.testing.expectEqual(@as(usize, 2), exchange.delivered_len);
-    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(&identity, start));
+    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(owner.admission.group(setup.shared.handles.server), start));
     setup.shared.pair.advance(refill_ms);
     _ = try request(&setup, .blocks_by_root_v2, sink);
     try exchange.pumps(20);
@@ -279,12 +277,11 @@ test "reqresp request start a cancelled waiter leaves no start reserved" {
 
 test "reqresp request start shutdown cancels its waiters without charging them" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .admission = limits(4) });
+    try setup.init(.{}, .{ .admission = limits() });
     defer setup.deinit();
     var exchange: Exchange = .{ .setup = &setup };
     const owner = &setup.shared.server.reqresp;
     const controls = &setup.shared.server.control_reqresp;
-    const identity = setup.shared.pair.server.peerId(setup.shared.handles.server).?;
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
     var pongs: [3][8]u8 = undefined;
@@ -313,29 +310,19 @@ test "reqresp request start shutdown cancels its waiters without charging them" 
     try std.testing.expectEqual(@as(u16, 0), owner.pendingCounts().inbound);
     try std.testing.expectEqual(@as(usize, 0), waitingStarts(owner) + waitingStarts(controls));
     try std.testing.expectEqual(@as(usize, 4), exchange.delivered_len);
-    for ([_]*rr{ owner, controls }) |instance| try std.testing.expectEqual(start + refill_ms, instance.admission.limiter.startAt(&identity, start));
+    for ([_]*rr{ owner, controls }) |instance| try std.testing.expectEqual(start + refill_ms, instance.admission.limiter.startAt(instance.admission.group(setup.shared.handles.server), start));
 }
 
-test "reqresp request start preserves distinct protocol connection and identity capacity limits" {
+test "reqresp request start preserves distinct protocol and connection capacity limits" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .inbound_per_connection_max = 3, .admission = limits(1) });
+    try setup.init(.{}, .{ .inbound_per_connection_max = 3, .admission = limits() });
     defer setup.deinit();
     var exchange: Exchange = .{ .setup = &setup };
     const owner = &setup.shared.server.reqresp;
-    const identity = setup.shared.pair.server.peerId(setup.shared.handles.server).?;
     const blocks = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(blocks);
     const blobs = try std.testing.allocator.alloc(u8, Protocol.blob_sidecars_by_root_v1.info().response_max);
     defer std.testing.allocator.free(blobs);
-    // Another identity holds the only limiter row until its start expires.
-    const stranger: PeerId = .{ .bytes = @splat(9) };
-    try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&stranger, setup.shared.pair.now.millis()));
-    _ = try request(&setup, .blocks_by_root_v2, blocks);
-    try exchange.pumps(20);
-    try std.testing.expectEqual(rr.Failure{ .peer_error = .{ .code = 139, .message_len = "Rate limited: identity capacity exhausted".len } }, exchange.client_failure.?);
-    try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_root_v2, .identity_capacity));
-    exchange.client_failure = null;
-    setup.shared.pair.advance(refill_ms);
     const start = setup.shared.pair.now.millis();
     for (0..2) |_| _ = try request(&setup, .blocks_by_root_v2, blocks);
     try exchange.pumps(20);
@@ -343,7 +330,7 @@ test "reqresp request start preserves distinct protocol connection and identity 
     for (0..2) |_| _ = try request(&setup, .blocks_by_root_v2, blocks);
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(usize, 2), waitingStarts(owner));
-    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(&identity, start));
+    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(owner.admission.group(setup.shared.handles.server), start));
     _ = try setup.openRaw(.blocks_by_root_v2);
     try exchange.pumps(10);
     try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_root_v2, .protocol_concurrency));
@@ -353,15 +340,15 @@ test "reqresp request start preserves distinct protocol connection and identity 
     _ = try setup.openRaw(.blocks_by_range_v2);
     try exchange.pumps(10);
     try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_range_v2, .connection_capacity));
-    try std.testing.expectEqual(@as(u64, 3), allRefusals(owner));
-    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(&identity, start));
+    try std.testing.expectEqual(@as(u64, 2), allRefusals(owner));
+    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(owner.admission.group(setup.shared.handles.server), start));
     try std.testing.expectEqual(@as(?rr.Failure, null), exchange.client_failure);
     try std.testing.expectEqual(@as(u16, 3), owner.pendingCounts().inbound);
 }
 
-test "reqresp request start a slow waiter retains identity accounting after debt expiry" {
+test "reqresp request start a slow waiter retains group accounting after debt expiry" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .admission = limits(1) });
+    try setup.init(.{}, .{ .admission = limits() });
     defer setup.deinit();
     var exchange: Exchange = .{ .setup = &setup };
     const owner = &setup.shared.server.reqresp;
@@ -378,12 +365,12 @@ test "reqresp request start a slow waiter retains identity accounting after debt
     try exchange.pumps(10);
     const waiter = try waiterAt(owner, start);
     setup.shared.pair.advance(2 * refill_ms);
-    const stranger: PeerId = .{ .bytes = @splat(9) };
-    try std.testing.expectEqual(.identity_capacity, owner.admission.limiter.start(&stranger, setup.shared.pair.now.millis()));
+    const stranger = owner.admission.limiter.retain(.{ .ip4 = .{ 192, 0, 2 } }, setup.shared.pair.now.millis());
+    try std.testing.expectEqual(.allowed, owner.admission.limiter.start(stranger, setup.shared.pair.now.millis()));
+    owner.admission.limiter.release(stranger);
     _ = try request(&setup, .blob_sidecars_by_root_v1, blobs);
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(?rr.Failure, null), exchange.client_failure);
-    try std.testing.expectEqual(@as(u64, 0), refusals(owner, .blob_sidecars_by_root_v1, .identity_capacity));
     try std.testing.expectEqual(@as(usize, 3), exchange.delivered_len);
     try std.testing.expectEqual(@as(u16, 1), owner.pendingCounts().inbound);
     try std.testing.expect(owner.inbound[waiter].request.running());
@@ -397,6 +384,13 @@ test "reqresp request start a slow waiter retains identity accounting after debt
     try std.testing.expectEqual(start + 2 * refill_ms, exchange.delivered[3].at_ms);
 }
 
+fn connectSource(owner: *rr, connection: u16, identity: *const PeerId, now_ms: u64) u16 {
+    const conn: Handle = .{ .index = connection, .generation = std.math.maxInt(u32) };
+    const endpoint: @import("udp").Address = .{ .ip4 = .{ .octets = .{ 192, 0, identity.bytes[0], 1 }, .port = 1 } };
+    owner.admission.connected(conn, &endpoint, now_ms);
+    return owner.admission.group(conn);
+}
+
 /// A `.ready` request on connection index `connection` whose start accept deferred.
 fn deferredSlot(owner: *rr, connection: u16, which: Protocol, identity: *const PeerId, now_ms: u64) u16 {
     const index: u16 = @intCast(owner.receive_layout.first(connection, which));
@@ -406,7 +400,7 @@ fn deferredSlot(owner: *rr, connection: u16, which: Protocol, identity: *const P
     slot.state = .ready;
     slot.progress_ms = now_ms;
     slot.admission.start_pending = true;
-    slot.admission.eligible_ms = owner.admission.limiter.startAt(identity, now_ms);
+    slot.admission.eligible_ms = owner.admission.limiter.startAt(connectSource(owner, connection, identity, now_ms), now_ms);
     slot.admission.wait = if (slot.admission.eligible_ms > now_ms) .start else .none;
     slot.request = .{
         .direction = .inbound,
@@ -425,42 +419,45 @@ fn pumpOwner(setup: *harness.Pair, events: []rr.Event) usize {
     return setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, events);
 }
 
-test "reqresp request start another identity progresses while one waits" {
+test "reqresp request start another address group progresses while one waits" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .admission = limits(4) });
+    try setup.init(.{}, .{ .admission = limits() });
     defer setup.deinit();
     const owner = &setup.shared.server.reqresp;
     const limiter = &owner.admission.limiter;
     const waiting: PeerId = .{ .bytes = @splat(1) };
     const other: PeerId = .{ .bytes = @splat(2) };
     const start = setup.shared.pair.now.millis();
-    for (0..2) |_| try std.testing.expectEqual(.allowed, limiter.start(&waiting, start));
+    const waiting_group = connectSource(owner, 1, &waiting, start);
+    const other_group = connectSource(owner, 2, &other, start);
+    for (0..2) |_| try std.testing.expectEqual(.allowed, limiter.start(waiting_group, start));
     const held = deferredSlot(owner, 1, .blocks_by_root_v2, &waiting, start);
     const free = deferredSlot(owner, 2, .blocks_by_root_v2, &other, start);
     var events: [4]rr.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), pumpOwner(&setup, &events));
     try std.testing.expectEqual(free, events[0].request.request.index);
     try std.testing.expectEqual(start + refill_ms, owner.inbound[held].admission.eligible_ms);
-    // The other identity was charged one start, so one of its two remains.
-    try std.testing.expectEqual(.allowed, limiter.start(&other, start));
-    try std.testing.expectEqual(start + refill_ms, limiter.startAt(&other, start));
+    // The other group was charged one start, so one of its two remains.
+    try std.testing.expectEqual(.allowed, limiter.start(other_group, start));
+    try std.testing.expectEqual(start + refill_ms, limiter.startAt(other_group, start));
     setup.shared.pair.advance(refill_ms - 1);
     try std.testing.expectEqual(@as(usize, 0), pumpOwner(&setup, &events));
     setup.shared.pair.advance(1);
     try std.testing.expectEqual(@as(usize, 1), pumpOwner(&setup, &events));
     try std.testing.expectEqual(held, events[0].request.request.index);
-    try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(&waiting, setup.shared.pair.now.millis()));
+    try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(waiting_group, setup.shared.pair.now.millis()));
 }
 
 test "reqresp request start a waiter that then waits for serving is charged its start once" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .serving_per_peer_max = 1, .admission = limits(4) });
+    try setup.init(.{}, .{ .serving_per_peer_max = 1, .admission = limits() });
     defer setup.deinit();
     const owner = &setup.shared.server.reqresp;
     const limiter = &owner.admission.limiter;
     const identity: PeerId = .{ .bytes = @splat(1) };
     const start = setup.shared.pair.now.millis();
-    for (0..2) |_| try std.testing.expectEqual(.allowed, limiter.start(&identity, start));
+    const source = connectSource(owner, 1, &identity, start);
+    for (0..2) |_| try std.testing.expectEqual(.allowed, limiter.start(source, start));
     // Retired but retained host work holds the identity's only serving entry.
     const holder: rr.RequestHandle = .{ .index = 0, .generation = 1, .direction = .inbound };
     const entry = owner.serving.available(&identity).?;
@@ -472,12 +469,12 @@ test "reqresp request start a waiter that then waits for serving is charged its 
     try std.testing.expectEqual(@as(usize, 0), pumpOwner(&setup, &events));
     setup.shared.pair.advance(refill_ms);
     for (0..3) |_| try std.testing.expectEqual(@as(usize, 0), pumpOwner(&setup, &events));
-    try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(&identity, setup.shared.pair.now.millis()));
+    try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(source, setup.shared.pair.now.millis()));
     setup.shared.pair.advance(refill_ms);
     try std.testing.expect(owner.releaseServing(serving));
     try std.testing.expectEqual(@as(usize, 1), pumpOwner(&setup, &events));
     try std.testing.expectEqual(index, events[0].request.request.index);
-    try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(&identity, setup.shared.pair.now.millis()));
+    try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(source, setup.shared.pair.now.millis()));
 }
 
 test "reqresp protocol concurrency refusal preserves selection and returns a complete rate-limit response" {
@@ -534,7 +531,7 @@ fn expectRateLimitResponse(setup: *harness.Pair, stream: StreamHandle, message: 
 test "reqresp request start hard capacity refusal preserves an available start without a waiter" {
     {
         var setup: harness.Pair = .{};
-        try setup.init(.{}, .{ .serving_max = 1, .inbound_per_connection_max = 1, .admission = limits(4) });
+        try setup.init(.{}, .{ .serving_max = 1, .inbound_per_connection_max = 1, .admission = limits() });
         defer setup.deinit();
         const owner = &setup.shared.server.reqresp;
         const now_ms = setup.shared.pair.now.millis();
@@ -565,26 +562,16 @@ test "reqresp request start hard capacity refusal preserves an available start w
     }
 }
 
-test "reqresp capacity refusals preserve selection and finish the error response" {
-    for ([_]enum { connection, identity }{ .connection, .identity }) |capacity| {
-        var setup: harness.Pair = .{};
-        try setup.init(.{}, .{ .inbound_per_connection_max = if (capacity == .connection) 1 else 8, .admission = limits(1) });
-        defer setup.deinit();
-        const owner = &setup.shared.server.reqresp;
-        if (capacity == .identity) {
-            const other: PeerId = .{ .bytes = @splat(1) };
-            try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&other, setup.shared.pair.now.millis()));
-        } else {
-            const held = try setup.openRaw(.blob_sidecars_by_root_v1);
-            try setup.awaitRawSelection(held, .blob_sidecars_by_root_v1);
-        }
-        const refused = try setup.openRaw(.blocks_by_root_v2);
-        try expectRateLimitResponse(&setup, refused, if (capacity == .identity)
-            "Rate limited: identity capacity exhausted"
-        else
-            "Rate limited: connection receive capacity exhausted");
-        try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_root_v2, if (capacity == .identity) .identity_capacity else .connection_capacity));
-        try std.testing.expectEqual(@as(u64, 1), allRefusals(owner));
-        try std.testing.expectEqual(@as(u16, if (capacity == .identity) 0 else 1), owner.pendingCounts().inbound);
-    }
+test "reqresp connection capacity refusal preserves selection and finishes the error response" {
+    var setup: harness.Pair = .{};
+    try setup.init(.{}, .{ .inbound_per_connection_max = 1, .admission = limits() });
+    defer setup.deinit();
+    const owner = &setup.shared.server.reqresp;
+    const held = try setup.openRaw(.blob_sidecars_by_root_v1);
+    try setup.awaitRawSelection(held, .blob_sidecars_by_root_v1);
+    const refused = try setup.openRaw(.blocks_by_root_v2);
+    try expectRateLimitResponse(&setup, refused, "Rate limited: connection receive capacity exhausted");
+    try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_root_v2, .connection_capacity));
+    try std.testing.expectEqual(@as(u64, 1), allRefusals(owner));
+    try std.testing.expectEqual(@as(u16, 1), owner.pendingCounts().inbound);
 }

@@ -25,7 +25,7 @@ fn rrOptions() !protocols_mod.Protocols.Options {
         .serving_max = 4,
         .inbound_per_connection_max = 4,
         .forks = &.{},
-        .admission = try rr.ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 1),
+        .admission = try rr.ReqResp.Options.Admission.defaults(&policy_fixture.config(), 1),
     } };
 }
 
@@ -97,7 +97,7 @@ test "protocol stack handles native stream events past empty request capacity" {
         .outbound_max = 64,
         .serving_max = 64,
         .work_per_pump_max = 1,
-        .admission = try rr.ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 16),
+        .admission = try rr.ReqResp.Options.Admission.defaults(&policy_fixture.config(), 16),
     } }, &pair.client);
     defer client.deinit();
     defer client.control_reqresp.cancelAll(&pair.client, &client.router, pair.now);
@@ -221,7 +221,7 @@ test "protocol stack capabilities activation preserves negotiated response conte
     const options: harness.Overrides = .{
         .forks = &.{context},
 
-        .admission = .{ .policy = policy_fixture.config(), .limits = .{ .identities = 2, .peer = limits, .global = limits } },
+        .admission = .{ .policy = policy_fixture.config(), .limits = .{ .group = limits, .global = limits } },
     };
     try setup.init(options, options);
     defer setup.deinit();

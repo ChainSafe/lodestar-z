@@ -181,7 +181,7 @@ test "reqresp bounds application requests per connection across protocols" {
     const handles = try support.connectPair(&pair);
     var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var options: rr.Options = .{ .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 8, 1), .outbound_max = 4, .serving_max = 4, .forks = &.{} };
+    var options: rr.Options = .{ .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 1), .outbound_max = 4, .serving_max = 4, .forks = &.{} };
     options.outbound_per_connection_max = 2;
     var requests = try rr.init(std.testing.allocator, options);
     defer requests.deinit();
@@ -335,7 +335,7 @@ test "reqresp admission refusals distinguish capacity and concurrency without fa
             .serving_max = case.slots,
             .inbound_per_connection_max = case.connection_limit,
             .forks = &.{},
-            .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 8, @max(1, (case.slots) / 4)),
+            .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), @max(1, (case.slots) / 4)),
         });
         defer requests.deinit();
         defer requests.cancelAll(&pair.server, &router, pair.now);
@@ -395,7 +395,7 @@ test "reqresp available slots preserve admission rollback" {
     const handles = try support.connectPair(&pair);
     var requests = try rr.init(
         std.testing.allocator,
-        .{ .outbound_max = 4, .serving_max = 4, .forks = &.{}, .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 8, 1) },
+        .{ .outbound_max = 4, .serving_max = 4, .forks = &.{}, .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 1) },
     );
     defer requests.deinit();
     var router = try Router.init(std.testing.allocator, .{ .negotiations_max = 4 });

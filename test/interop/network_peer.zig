@@ -320,9 +320,9 @@ pub fn main(init: std.process.Init) !void {
     const application = args.len == 2 and std.mem.eql(u8, args[1], "--application");
     var blob_schedule: [network.reqresp.request_policy.schedule_max]network.reqresp.request_policy.BlobLimit = undefined;
     const policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&config.mainnet.config, &blob_schedule);
-    const admission = try ReqResp.Options.Admission.defaults(&policy, 4, 1);
-    var control_admission = try ReqResp.Options.Admission.defaults(&policy, 4, 4);
-    control_admission.limits.peer.protocols[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 16, .period_ms = 30_000 };
+    const admission = try ReqResp.Options.Admission.defaults(&policy, 1);
+    var control_admission = try ReqResp.Options.Admission.defaults(&policy, 4);
+    control_admission.limits.group.protocols[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 16, .period_ms = 30_000 };
     control_admission.limits.global.protocols[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 4 * 16, .period_ms = 30_000 };
     var gossip_topics: [1]Gossip.topic_policy.Boundary = .{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 } }};
     gossip_topics[0].rules[@intFromEnum(Gossip.topic.Kind.beacon_block)] = .{ .count = 1, .ssz_min = 0, .ssz_max = max_payload };

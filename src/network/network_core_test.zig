@@ -409,8 +409,7 @@ test "core every allocation prefix cleans up and reservations count owned storag
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
 
     opts.resolved.core.protocols.reqresp.admission = .{ .policy = policy_fixture.config(), .limits = .{
-        .identities = opts.resolved.core.peers.capacity,
-        .peer = admission_fixture.quotas(100, 1000),
+        .group = admission_fixture.quotas(100, 1000),
         .global = admission_fixture.quotas(1000, 1000),
     } };
     var allocation = std.testing.FailingAllocator.init(std.testing.allocator, .{});

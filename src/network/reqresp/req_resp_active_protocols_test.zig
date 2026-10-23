@@ -444,30 +444,11 @@ fn waitExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.requests(which).pendingCounts().inbound);
 }
 
-fn refusedStart(setup: *harness.Pair, which: protocol.Protocol) !void {
-    const sink = try std.testing.allocator.alloc(u8, which.info().response_max);
-    defer std.testing.allocator.free(sink);
-    _ = try request(setup, which, &.{}, sink, .{});
-    var refused = false;
-    for (0..50) |_| {
-        try setup.pumpOnce();
-        try std.testing.expectEqual(@as(usize, 0), setup.serverEvents().len);
-        for (setup.clientEvents()) |event| {
-            try std.testing.expectEqual(.failed, std.meta.activeTag(event));
-            try std.testing.expectEqual(reqresp.Failure{ .peer_error = .{ .code = 139, .message_len = "Rate limited: identity capacity exhausted".len } }, event.failed.reason);
-            refused = true;
-        }
-        if (refused) break;
-    }
-    try std.testing.expect(refused);
-    try setup.pumpOnce();
-}
-
 test "reqresp request admission empty success quota waiting malformed attempts and control independence" {
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
         .request_fork = .fulu,
-        .admission = .{ .policy = policy_fixture(), .limits = .{ .identities = 2, .peer = admission_quotas(2, 86_400_000), .global = admission_quotas(100, 86_400_000) } },
+        .admission = .{ .policy = policy_fixture(), .limits = .{ .group = admission_quotas(2, 86_400_000), .global_starts = .{ .tokens = 40, .period_ms = 86_400_000 }, .global = admission_quotas(100, 86_400_000) } },
     });
     defer setup.deinit();
     try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
@@ -489,24 +470,58 @@ test "reqresp request admission empty success quota waiting malformed attempts a
     try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], true, 0);
     try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], true, 0);
     try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], false, 139);
-    try std.testing.expectEqual(@as(u64, 1), refusals(&setup.shared.server.reqresp, .peer_quota));
+    try std.testing.expectEqual(@as(u64, 1), refusals(&setup.shared.server.reqresp, .group_quota));
 }
 
 test "reqresp permits an empty contextual response below its payload minimum" {
     var policy = policy_fixture();
     policy.max_payload_size = 256;
     var setup: harness.Pair = .{};
-    const options: harness.Overrides = .{ .admission = .{ .policy = policy, .limits = .{ .identities = 2, .peer = admission_quotas(2, 1000), .global = admission_quotas(2, 1000) } } };
+    const options: harness.Overrides = .{ .admission = .{ .policy = policy, .limits = .{ .group = admission_quotas(2, 1000), .global = admission_quotas(2, 1000) } } };
     try setup.init(options, options);
     defer setup.deinit();
     try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{}, true, 0);
+}
+
+test "reqresp malformed requests without a paid group or global start cannot retain protocol debt" {
+    for ([_]bool{ false, true }) |global_only| {
+        var setup: harness.Pair = .{};
+        try setup.init(.{}, .{
+            .request_fork = .fulu,
+            .admission = .{ .policy = policy_fixture(), .limits = .{
+                .group = admission_quotas(1, 1000),
+                .global = admission_quotas(100, 1000),
+                .starts = .{ .tokens = 1, .period_ms = 100 },
+                .global_starts = .{ .tokens = if (global_only) 1 else 2, .period_ms = 100 },
+            } },
+        });
+        defer setup.deinit();
+        const owner = &setup.shared.server.reqresp;
+        const limiter = &owner.admission.limiter;
+        if (global_only) {
+            const stranger = limiter.retain(.{ .ip4 = .{ 192, 0, 2 } }, setup.shared.pair.now.millis());
+            try std.testing.expectEqual(.allowed, limiter.start(stranger, setup.shared.pair.now.millis()));
+            limiter.release(stranger);
+        } else try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
+        const source = owner.admission.group(setup.shared.handles.server);
+        const before = limiter.rows[source];
+        const global_before = limiter.global_starts_ns;
+        var bytes = [_]u8{0} ** 28;
+        std.mem.writeInt(u64, bytes[8..16], 1, .little);
+        try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], false, 1);
+        try std.testing.expectEqualDeep(before, limiter.rows[source]);
+        try std.testing.expectEqual(global_before, limiter.global_starts_ns);
+        setup.shared.pair.advance(100);
+        std.mem.writeInt(u32, bytes[16..20], 20, .little);
+        try emptyExchange(&setup, .data_column_sidecars_by_range_v1, &bytes, true, 0);
+    }
 }
 
 test "reqresp request admission outbound validation ceiling and owner fork snapshot" {
     var setup: harness.Pair = .{};
     const options: harness.Overrides = .{
         .request_fork = .phase0,
-        .admission = .{ .policy = policy_fixture(), .limits = .{ .identities = 2, .peer = admission_quotas(2048, 1000), .global = admission_quotas(2048, 1000) } },
+        .admission = .{ .policy = policy_fixture(), .limits = .{ .group = admission_quotas(2048, 1000), .global = admission_quotas(2048, 1000) } },
     };
     try setup.init(options, options);
     defer setup.deinit();
@@ -549,7 +564,7 @@ fn admissionAllocation(allocator: std.mem.Allocator) !void {
         .outbound_max = 1,
         .serving_max = 1,
 
-        .admission = .{ .policy = policy_fixture(), .limits = .{ .identities = 2, .peer = admission_quotas(2, 1000), .global = admission_quotas(100, 1000) } },
+        .admission = .{ .policy = policy_fixture(), .limits = .{ .group = admission_quotas(2, 1000), .global = admission_quotas(100, 1000) } },
     });
     defer owner.deinit();
     try std.testing.expectEqual(owner.admission.limiter.memoryPlan().allocated_bytes, owner.memoryPlan().admission_bytes);
@@ -563,7 +578,7 @@ test "reqresp request admission concurrent connections and reconnect retain full
     const support = @import("../quic/test_support.zig");
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
-        .admission = .{ .policy = policy_fixture(), .limits = .{ .identities = 2, .peer = admission_quotas(2, 86_400_000), .global = admission_quotas(100, 86_400_000) } },
+        .admission = .{ .policy = policy_fixture(), .limits = .{ .group = admission_quotas(2, 86_400_000), .global_starts = .{ .tokens = 40, .period_ms = 86_400_000 }, .global = admission_quotas(100, 86_400_000) } },
     });
     defer setup.deinit();
     try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
@@ -580,7 +595,7 @@ test "reqresp request admission concurrent connections and reconnect retain full
     const reconnected = try support.connectPair(&setup.shared.pair);
     setup.shared.handles = .{ .client = reconnected.client, .server = reconnected.server };
     try emptyExchange(&setup, .blocks_by_root_v2, &.{}, false, 139);
-    try std.testing.expectEqual(@as(u64, 0), refusals(&setup.shared.server.reqresp, .peer_quota));
+    try std.testing.expectEqual(@as(u64, 0), refusals(&setup.shared.server.reqresp, .group_quota));
 }
 
 fn changeClientIdentity(setup: *harness.Pair, seed: u8) !void {
@@ -608,28 +623,21 @@ fn changeClientIdentity(setup: *harness.Pair, seed: u8) !void {
     setup.shared.handles = .{ .client = connection.client, .server = connection.server };
 }
 
-test "reqresp request admission distinct identity peer aggregate and retained capacity decisions" {
-    for ([_]u16{ 1, 2 }) |identities| {
-        var setup: harness.Pair = .{};
-        var global = admission_quotas(100, 86_400_000);
-        global.protocols[@intFromEnum(protocol.Protocol.blob_sidecars_by_root_v1)].tokens = 1;
-        global.blobs_pre_electra.tokens = 1;
-        try setup.init(.{}, .{
-            .admission = .{ .policy = policy_fixture(), .limits = .{ .identities = identities, .peer = admission_quotas(1, 86_400_000), .global = global } },
-        });
-        defer setup.deinit();
-        try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
-        try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{}, true, 0);
-        try changeClientIdentity(&setup, 3);
-        if (identities == 1) {
-            try refusedStart(&setup, .blocks_by_root_v2);
-            try refusedStart(&setup, .blob_sidecars_by_root_v1);
-        } else {
-            try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
-            try waitExchange(&setup, .blob_sidecars_by_root_v1, &.{});
-        }
-        try std.testing.expectEqual(@as(u64, 0), refusals(&setup.shared.server.reqresp, .peer_quota));
-        try std.testing.expectEqual(@as(u64, if (identities == 1) 2 else 0), refusals(&setup.shared.server.reqresp, .identity_capacity));
-        try std.testing.expectEqual(@as(u64, 0), refusals(&setup.shared.server.reqresp, .global_quota));
-    }
+test "reqresp identity rotation preserves the address group's protocol usage" {
+    var setup: harness.Pair = .{};
+    try setup.init(.{}, .{
+        .admission = .{ .policy = policy_fixture(), .limits = .{
+            .group = admission_quotas(1, 86_400_000),
+            .global = admission_quotas(100, 86_400_000),
+            .global_starts = .{ .tokens = 40, .period_ms = 86_400_000 },
+        } },
+    });
+    defer setup.deinit();
+    try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
+    try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{}, true, 0);
+    try changeClientIdentity(&setup, 3);
+    try waitExchange(&setup, .blocks_by_root_v2, &.{});
+    try waitExchange(&setup, .blob_sidecars_by_root_v1, &.{});
+    try std.testing.expectEqual(@as(u64, 0), refusals(&setup.shared.server.reqresp, .group_quota));
+    try std.testing.expectEqual(@as(u64, 0), refusals(&setup.shared.server.reqresp, .global_quota));
 }

@@ -96,7 +96,6 @@ pub const RequestError = error{
 };
 
 pub const AcceptError = error{
-    TooManyRequests,
     ProtocolConcurrency,
     InvalidCapacity,
     StaleHandle,
@@ -401,7 +400,6 @@ pub fn negotiationResult(self: *ReqResp, router: *Router, engine: *Engine, outco
         .ready => |selection| _ = self.accept(engine, outcome.stream, selection, now) catch |err| {
             const refusal: ?[]const u8 = switch (err) {
                 error.ProtocolConcurrency => std.fmt.comptimePrint("Rate limited: already {d} active requests for this protocol", .{constants.MAX_CONCURRENT_REQUESTS}),
-                error.TooManyRequests => "Rate limited: identity capacity exhausted",
                 error.ConnectionSlotsExhausted, error.SlotsExhausted => "Rate limited: connection receive capacity exhausted",
                 else => null,
             };
@@ -410,7 +408,7 @@ pub fn negotiationResult(self: *ReqResp, router: *Router, engine: *Engine, outco
                 const response = codec.encodeChunk(constants.result_rate_limited, null, message, &wire) catch unreachable;
                 if (router.finishSelected(engine, outcome.stream, response, now)) return;
             }
-            engine.closeStream(outcome.stream, if (err == error.TooManyRequests) constants.app_error_over_limit else 0);
+            engine.closeStream(outcome.stream, 0);
         },
         else => {},
     }
@@ -557,14 +555,13 @@ pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *Router, conn: Ha
     return null;
 }
 
-/// Reserves identity bookkeeping until connectionClosed; false means no row is available.
-/// Call at peer admission to protect idle peers. Otherwise, the first inbound request reserves it.
-pub fn connectionOpened(self: *ReqResp, conn: Handle, identity: *const PeerId, now: Now) bool {
+/// Retains the observed transport endpoint's group until connectionClosed, including path changes.
+pub fn connectionOpened(self: *ReqResp, conn: Handle, endpoint: *const @import("udp").Address, now: Now) void {
     assert(conn.index < self.options.connections);
-    return self.admission.connected(conn, identity, now.millis());
+    self.admission.connected(conn, endpoint, now.millis());
 }
 
-/// Fails the connection's slots and releases its identity reservation, retaining quota debt.
+/// Fails the connection's slots and releases its group reservation, retaining quota usage.
 pub fn connectionClosed(self: *ReqResp, engine: *Engine, router: *Router, conn: Handle, now: Now) void {
     if (conn.index >= self.options.connections) return;
     defer self.admission.disconnected(conn);

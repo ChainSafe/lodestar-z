@@ -93,7 +93,7 @@ test "network chain activates Gloas and rejects the next unsupported fork" {
         try std.testing.expectEqual(@as(u32, 56 + 40 * 2096), boundary.rules[@intFromEnum(topics.Kind.data_column_sidecar)].ssz_max);
     }
     const request = derived.requestPolicy();
-    var requests = try rr.init(std.testing.allocator, .{ .forks = derived.forks[0..derived.boundary_count], .admission = try rr.Options.Admission.defaults(&request, 8, 1) });
+    var requests = try rr.init(std.testing.allocator, .{ .forks = derived.forks[0..derived.boundary_count], .admission = try rr.Options.Admission.defaults(&request, 1) });
     defer requests.deinit();
     try std.testing.expectEqual(@as(usize, 56 + 40 * 2096), (try requests.responseBounds(.data_column_sidecars_by_root_v1, .gloas)).max);
     try std.testing.expectError(error.InvalidResponseContext, requests.responseBounds(.execution_payload_envelopes_by_root_v1, .fulu));
@@ -108,7 +108,7 @@ test "network chain derives fixed request storage and historical blob limits ind
     const maximum = 128 * (40 + 8 * preset.NUMBER_OF_COLUMNS);
     try std.testing.expectEqual(@as(usize, maximum), chain_config.policy.requestMax());
     const policy = chain_config.requestPolicy();
-    var requests = try rr.init(std.testing.allocator, .{ .forks = chain_config.forks[0..chain_config.boundary_count], .admission = try rr.Options.Admission.defaults(&policy, 8, 1), .serving_max = 6, .inbound_per_connection_max = 8 });
+    var requests = try rr.init(std.testing.allocator, .{ .forks = chain_config.forks[0..chain_config.boundary_count], .admission = try rr.Options.Admission.defaults(&policy, 1), .serving_max = 6, .inbound_per_connection_max = 8 });
     defer requests.deinit();
     const bytes = requests.memoryPlan().total_bytes;
     for ([_]config.ForkSeq{ .deneb, .electra, .fulu }) |fork| {
@@ -159,7 +159,7 @@ test "network chain honors configured wire limits and requires complete metadata
     try std.testing.expectEqual(encoded.len, try wire.encodeMetadata(.metadata_v3, &update.local.metadata, update.local.fork, &encoded));
     try std.testing.expectEqualDeep(update.local.metadata, try wire.decodeMetadata(.metadata_v3, &encoded, update.local.fork));
     const policy = chain_config.requestPolicy();
-    var requests = try rr.init(std.testing.allocator, .{ .forks = chain_config.forks[0..chain_config.boundary_count], .admission = try rr.Options.Admission.defaults(&policy, 8, 16) });
+    var requests = try rr.init(std.testing.allocator, .{ .forks = chain_config.forks[0..chain_config.boundary_count], .admission = try rr.Options.Admission.defaults(&policy, 16) });
     defer requests.deinit();
     try std.testing.expectEqual(@as(usize, 1024 * 1024), (try requests.responseBounds(.blocks_by_root_v2, .deneb)).max);
     requests.setRequestFork(.deneb);

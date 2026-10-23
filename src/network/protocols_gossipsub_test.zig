@@ -149,7 +149,7 @@ test "gossipsub protocol stack negotiates with a v1.1-only peer" {
     try setup.init();
     defer setup.deinit();
     setup.shared.server.deinit();
-    setup.shared.server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .control_reqresp = try control_fixture.controlOptions(), .reqresp = .{ .protocols = .application, .forks = &.{}, .connections = 4, .outbound_max = 1, .serving_max = 1, .inbound_per_connection_max = 1, .admission = try ReqResp.Options.Admission.defaults(&policy_fixture.config(), 4, 1) }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } }, &setup.shared.pair.server);
+    setup.shared.server = try protocols_test_support.initProtocols(std.testing.allocator, .{ .control_reqresp = try control_fixture.controlOptions(), .reqresp = .{ .protocols = .application, .forks = &.{}, .connections = 4, .outbound_max = 1, .serving_max = 1, .inbound_per_connection_max = 1, .admission = try ReqResp.Options.Admission.defaults(&policy_fixture.config(), 1) }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } }, &setup.shared.pair.server);
     setup.shared.server_inbox.attach(setup.shared.server.gossipsub);
     _ = setup.shared.server.gossipsub.peerConnected(&setup.shared.pair.server, setup.shared.handles.server, false, setup.shared.pair.now);
     for (0..24) |_| try setup.pumpOnce();

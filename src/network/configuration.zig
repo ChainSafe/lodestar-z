@@ -124,7 +124,7 @@ pub fn resolve(options: Options) !Resolved {
         requests.serving_max = @min(maximum, requests.serving_max);
         requests.outbound_max = @min(maximum, requests.outbound_max);
     }
-    requests.admission = try rr.Options.Admission.defaults(&options.admission_policy, peer_options.capacity, @max(1, requests.serving_max / 4));
+    requests.admission = try rr.Options.Admission.defaults(&options.admission_policy, @max(1, requests.serving_max / 4));
     const control_requests: rr.Options = .{
         .forks = options.forks,
         .connections = limits.connections_max,
@@ -140,7 +140,7 @@ pub fn resolve(options: Options) !Resolved {
         .host_timeout_ms = requests.host_timeout_ms,
         .quota_timeout_ms = requests.quota_timeout_ms,
         .work_per_pump_max = 32,
-        .admission = try rr.Options.Admission.defaults(&options.admission_policy, peer_options.capacity, peer_options.max_peers),
+        .admission = try rr.Options.Admission.defaults(&options.admission_policy, peer_options.max_peers),
     };
     var identify: identify_mod.Handler.Options = .{ .inbound_max = 4, .outbound_max = 4 };
     applyOverrides(&identify, options.identify);

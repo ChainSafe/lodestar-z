@@ -22,7 +22,7 @@ pub const Pair = struct {
     /// As `initOpts`, with the server granting `stream_window` bytes of credit on each stream the
     /// client opens until it reads them.
     pub fn initWindow(self: *Pair, client: Gossipsub.Options, server: Gossipsub.Options, stream_window: ?u64) !void {
-        const reqresp: ReqResp.Options = .{ .protocols = .application, .forks = &.{}, .connections = 128, .outbound_max = 1, .serving_max = 1, .inbound_per_connection_max = 1, .admission = try ReqResp.Options.Admission.defaults(&policy_fixture.config(), 128, 1) };
+        const reqresp: ReqResp.Options = .{ .protocols = .application, .forks = &.{}, .connections = 128, .outbound_max = 1, .serving_max = 1, .inbound_per_connection_max = 1, .admission = try ReqResp.Options.Admission.defaults(&policy_fixture.config(), 1) };
         const topics = &.{ topic_fixture.bytes(.{ 1, 2, 3, 4 }), topic_fixture.bytes(.{ 0x6a, 0x95, 0xa1, 0xa9 }) };
         var client_options = client;
         client_options.topic_policy = if (client.topic_policy.len > 0) client.topic_policy else topics;

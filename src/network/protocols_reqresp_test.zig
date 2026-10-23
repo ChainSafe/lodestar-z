@@ -119,8 +119,7 @@ test "protocol stack stream capture contains application framing exactly once" {
 
 test "protocol stack reclaims inbound sinks across more requests than it has slots" {
     const admission: reqresp.Options.Admission = .{ .policy = policy_fixture.config(), .limits = .{
-        .identities = 2,
-        .peer = admission_fixture.quotas(1_000, 1_000),
+        .group = admission_fixture.quotas(1_000, 1_000),
         .global = admission_fixture.quotas(1_000, 1_000),
     } };
     var setup: Pair = .{};
@@ -341,7 +340,7 @@ test "protocol stack reqresp slot is serviced only after a stream event or its d
 
 test "protocol stack reqresp deadline fires on time while more slots than the pump budget stay ready" {
     // One client identity opens every stream, so its request starts need a larger burst.
-    var admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 128, 2);
+    var admission = try reqresp.Options.Admission.defaults(&policy_fixture.config(), 2);
     admission.limits.starts.tokens = 64;
     var setup: Pair = .{};
     try setup.init(.{}, .{ .progress_timeout_ms = 1_000, .admission = admission });

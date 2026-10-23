@@ -134,6 +134,12 @@ const TransportPair = struct {
         errdefer self.server.deinit();
         const handles = try support.connectPair(&self.pair);
         self.handles = .{ .client = handles.client, .server = handles.server };
+        const client_endpoint = self.pair.client.peerAddress(handles.client).?;
+        const server_endpoint = self.pair.server.peerAddress(handles.server).?;
+        self.client.reqresp.connectionOpened(handles.client, &client_endpoint, self.pair.now);
+        self.client.control_reqresp.connectionOpened(handles.client, &client_endpoint, self.pair.now);
+        self.server.reqresp.connectionOpened(handles.server, &server_endpoint, self.pair.now);
+        self.server.control_reqresp.connectionOpened(handles.server, &server_endpoint, self.pair.now);
     }
 
     fn deinit(self: *TransportPair) void {
@@ -207,7 +213,7 @@ pub const Pair = struct {
             .progress_timeout_ms = overrides.progress_timeout_ms,
             .forks = overrides.forks orelse forks,
             .request_fork = overrides.request_fork,
-            .admission = overrides.admission orelse try reqresp.Options.Admission.defaults(&policy_fixture.config(), connections, @max(1, (overrides.serving_max) / 4)),
+            .admission = overrides.admission orelse try reqresp.Options.Admission.defaults(&policy_fixture.config(), @max(1, (overrides.serving_max) / 4)),
             .host_timeout_ms = overrides.host_timeout_ms,
             .quota_timeout_ms = overrides.quota_timeout_ms,
         };
@@ -221,7 +227,7 @@ pub const Pair = struct {
         result.outbound_max = overrides.control_outbound_max;
         result.serving_max = overrides.control_serving_max;
         result.serving_per_peer_max = overrides.control_serving_per_peer_max;
-        result.admission = overrides.admission orelse try reqresp.Options.Admission.defaults(&policy_fixture.config(), result.connections, result.connections);
+        result.admission = overrides.admission orelse try reqresp.Options.Admission.defaults(&policy_fixture.config(), result.connections);
         return result;
     }
 
