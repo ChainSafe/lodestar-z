@@ -16,6 +16,7 @@ const seed_utils = @import("../utils/seed.zig");
 const getSeed = seed_utils.getSeed;
 const computeProposers = seed_utils.computeProposers;
 const Node = @import("persistent_merkle_tree").Node;
+const FLAG_UNSLASHED = @import("../utils/attester_status.zig").FLAG_UNSLASHED;
 
 /// Updates `proposer_lookahead` during epoch processing.
 /// Shifts out the oldest epoch and appends the new epoch at the end.
@@ -68,9 +69,9 @@ pub fn processProposerLookahead(
         if (epoch_transition_cache.shuffling_job != null) {
             break :blk try epoch_transition_cache.joinShuffling();
         }
-        const shuffling_active_indices = try epoch_cache.allocator.alloc(ValidatorIndex, active_indices.len);
+        const shuffling_active_indices = try epoch_cache.allocator.alloc(u32, active_indices.len);
         errdefer epoch_cache.allocator.free(shuffling_active_indices);
-        std.mem.copyForwards(ValidatorIndex, shuffling_active_indices, active_indices);
+        std.mem.copyForwards(u32, shuffling_active_indices, active_indices);
         break :blk try computeEpochShufflingForFork(
             fork,
             epoch_cache.allocator,
@@ -88,12 +89,21 @@ pub fn processProposerLookahead(
     var seed: [32]u8 = undefined;
     try getSeed(fork, state, new_epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
 
+    var eligible_proposers: std.ArrayList(u32) = .empty;
+    defer eligible_proposers.deinit(allocator);
+    if (comptime fork.gte(.gloas)) {
+        try eligible_proposers.ensureTotalCapacity(allocator, next_shuffling_rc.get().active_indices.len);
+        for (next_shuffling_rc.get().active_indices) |index| {
+            if (epoch_transition_cache.flags[index] & FLAG_UNSLASHED != 0) eligible_proposers.appendAssumeCapacity(index);
+        }
+    }
+
     try computeProposers(
         fork,
         allocator,
         seed,
         new_epoch,
-        next_shuffling_rc.get().active_indices,
+        if (comptime fork.gte(.gloas)) eligible_proposers.items else next_shuffling_rc.get().active_indices,
         effective_balance_increments,
         proposer_lookahead[last_epoch_start..],
     );
@@ -126,7 +136,7 @@ test "memory_safety: proposer lookahead shuffling belongs to the epoch cache all
         const new_epoch = current_epoch + preset.MIN_SEED_LOOKAHEAD + 1;
         const fulu = test_state.cached_state.state.castToFork(.fulu);
         const expected_shuffling = blk: {
-            const expected_indices = try allocator.dupe(ValidatorIndex, test_state.epoch_transition_cache.next_shuffling_active_indices);
+            const expected_indices = try allocator.dupe(u32, test_state.epoch_transition_cache.next_shuffling_active_indices);
             errdefer allocator.free(expected_indices);
             break :blk try computeEpochShufflingForFork(.fulu, allocator, fulu, expected_indices, new_epoch);
         };
@@ -158,7 +168,7 @@ test "memory_safety: proposer lookahead shuffling belongs to the epoch cache all
 
         const actual_shuffling = next_shuffling.get();
         try std.testing.expectEqual(allocator.ptr, actual_shuffling.allocator.ptr);
-        try std.testing.expectEqualSlices(ValidatorIndex, expected_shuffling.active_indices, actual_shuffling.active_indices);
-        try std.testing.expectEqualSlices(ValidatorIndex, expected_shuffling.shuffling, actual_shuffling.shuffling);
+        try std.testing.expectEqualSlices(u32, expected_shuffling.active_indices, actual_shuffling.active_indices);
+        try std.testing.expectEqualSlices(u32, expected_shuffling.shuffling, actual_shuffling.shuffling);
     }
 }

@@ -14,6 +14,7 @@ const getAttestationParticipationStatus = @import("../block//process_attestation
 
 pub fn upgradeStateToAltair(
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     phase0_state: *BeaconState(.phase0),
@@ -42,7 +43,16 @@ pub fn upgradeStateToAltair(
     const active_indices = epoch_cache.next_shuffling.get().active_indices;
 
     var sync_committee_info: SyncCommitteeInfo = undefined;
-    try getNextSyncCommittee(.altair, allocator, &altair_state, active_indices, epoch_cache.getEffectiveBalanceIncrements(), &sync_committee_info);
+    try getNextSyncCommittee(
+        .altair,
+        allocator,
+        io,
+        epoch_cache.pubkey_cache,
+        &altair_state,
+        active_indices,
+        epoch_cache.getEffectiveBalanceIncrements(),
+        &sync_committee_info,
+    );
 
     try altair_state.setCurrentSyncCommittee(&sync_committee_info.sync_committee);
     try altair_state.setNextSyncCommittee(&sync_committee_info.sync_committee);
@@ -109,9 +119,9 @@ fn translateParticipation(
 
     for (pending_attestations) |*attestation| {
         const data = &attestation.data;
-        const attestation_flag = try getAttestationParticipationStatus(.phase0, data, attestation.inclusion_delay, epoch_cache.epoch, root_cache);
+        const attestation_flag = try getAttestationParticipationStatus(.phase0, data, attestation.inclusion_delay, epoch_cache.epoch, root_cache, null);
         const committee_indices = try epoch_cache.getBeaconCommittee(data.slot, data.index);
-        var attesting_indices = try attestation.aggregation_bits.intersectValues(ValidatorIndex, allocator, committee_indices);
+        var attesting_indices = try attestation.aggregation_bits.intersectValues(ValidatorIndex, u32, allocator, committee_indices);
         defer attesting_indices.deinit(allocator);
         for (attesting_indices.items) |validator_index| {
             epoch_participation.items[validator_index] |= attestation_flag;
@@ -161,7 +171,7 @@ test "memory_safety: translateParticipation should release participation on allo
     try state.commit();
 
     try std.testing.checkAllAllocationFailures(allocator, struct {
-        fn run(failing_allocator: Allocator, cache: *EpochCache, source: *AnyBeaconState, count: usize, participants: []const ValidatorIndex) !void {
+        fn run(failing_allocator: Allocator, cache: *EpochCache, source: *AnyBeaconState, count: usize, participants: []const u32) !void {
             const roots = try RootCache(.phase0).init(failing_allocator, source.castToFork(.phase0));
             defer roots.deinit();
 
@@ -170,7 +180,7 @@ test "memory_safety: translateParticipation should release participation on allo
 
             try std.testing.expectEqual(count, participation.items.len);
             for (participation.items, 0..) |flags, i| {
-                const expected: u8 = if (std.mem.findScalar(ValidatorIndex, participants, i) != null)
+                const expected: u8 = if (std.mem.findScalar(u32, participants, @intCast(i)) != null)
                     (1 << constants.TIMELY_SOURCE_FLAG_INDEX) | (1 << constants.TIMELY_TARGET_FLAG_INDEX) | (1 << constants.TIMELY_HEAD_FLAG_INDEX)
                 else
                     0;

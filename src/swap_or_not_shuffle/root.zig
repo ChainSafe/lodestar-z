@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Sha256 = std.crypto.hash.sha2.Sha256;
+const sha256 = @import("sha256.zig");
 
 pub const SHUFFLE_ROUNDS_MINIMAL: u32 = 10;
 pub const SHUFFLE_ROUNDS_MAINNET: u32 = 90;
@@ -40,8 +40,8 @@ const ShufflingManager = struct {
     /// Returns the new pivot. It is "raw" because it has not modulo the list
     /// size (this must be done by the caller).
     fn rawPivot(self: *const ShufflingManager) u64 {
-        var digest: [Sha256.digest_length]u8 = undefined;
-        Sha256.hash(self.buf[0..PIVOT_VIEW_SIZE], &digest, .{});
+        var digest: [sha256.digest_length]u8 = undefined;
+        sha256.hash(self.buf[0..PIVOT_VIEW_SIZE], &digest);
         return std.mem.readInt(u64, digest[0..@sizeOf(u64)], .little);
     }
 
@@ -51,9 +51,9 @@ const ShufflingManager = struct {
     }
 
     /// Hash the entire buffer.
-    fn hash(self: *const ShufflingManager) [Sha256.digest_length]u8 {
-        var digest: [Sha256.digest_length]u8 = undefined;
-        Sha256.hash(self.buf[0..TOTAL_SIZE], &digest, .{});
+    fn hash(self: *const ShufflingManager) [sha256.digest_length]u8 {
+        var digest: [sha256.digest_length]u8 = undefined;
+        sha256.hash(self.buf[0..TOTAL_SIZE], &digest);
         return digest;
     }
 };
@@ -283,8 +283,8 @@ pub const ComputeShuffledIndex = struct {
         for (0..self.rounds) |round| {
             const pivot: u32 = self.pivot_by_round[round] orelse blk: {
                 self.pivot_buffer[SEED_SIZE] = @intCast(round % 256);
-                var digest: [Sha256.digest_length]u8 = undefined;
-                Sha256.hash(&self.pivot_buffer, &digest, .{});
+                var digest: [sha256.digest_length]u8 = undefined;
+                sha256.hash(&self.pivot_buffer, &digest);
                 const pivot: u32 = @intCast(std.mem.readInt(u64, digest[0..8], .little) % index_count);
                 self.pivot_by_round[round] = pivot;
                 break :blk pivot;
@@ -298,7 +298,7 @@ pub const ComputeShuffledIndex = struct {
             if (!source.found_existing) {
                 self.source_buffer[SEED_SIZE] = @intCast(round % 256);
                 std.mem.writeInt(u32, self.source_buffer[PIVOT_VIEW_SIZE..][0..POSITION_WINDOW_SIZE], position_div, .little);
-                Sha256.hash(&self.source_buffer, source.value_ptr, .{});
+                sha256.hash(&self.source_buffer, source.value_ptr);
             }
 
             const byte = source.value_ptr[@intCast(position % 256 / 8)];
@@ -316,11 +316,10 @@ pub const ByteCount = enum(u8) {
     two = 2,
 };
 
-/// Draws `committee_size` indices from `active_indices` weighted by effective
-/// balance. Caller owns the returned slice.
+/// Fills caller-owned `out` with indices weighted by effective balance.
+/// `out` must not alias the inputs. An error may leave it partially written.
 pub fn getCommitteeIndices(
     allocator: Allocator,
-    committee_size: u32,
     seed: []const u8,
     active_indices: []const u32,
     effective_balance_increments: []const u16,
@@ -328,7 +327,8 @@ pub fn getCommitteeIndices(
     max_effective_balance: i64,
     effective_balance_increment: i64,
     rounds: u32,
-) ![]u32 {
+    out: []u32,
+) !void {
     // reference divergence: error instead of risking invoking unchecked arithmetic
     if (active_indices.len == 0) {
         return error.EmptyActiveIndices;
@@ -336,9 +336,6 @@ pub fn getCommitteeIndices(
     if (effective_balance_increment == 0) {
         return error.InvalidEffectiveBalanceIncrement;
     }
-
-    var committee_indices = try std.ArrayList(u32).initCapacity(allocator, committee_size);
-    errdefer committee_indices.deinit(allocator);
 
     const max_random_value: i64 = switch (rand_byte_count) {
         .one => 0xff,
@@ -357,14 +354,15 @@ pub fn getCommitteeIndices(
     defer shuffled_result.deinit();
 
     var i: u32 = 0;
+    var count: usize = 0;
     // seed + 8 bytes of little-endian counter; only the low 4 bytes are ever
     // written, matching the reference which hashes the full 40-byte buffer.
     var cached_hash_input = [_]u8{0} ** (SEED_SIZE + 8);
     // seed length was validated by ComputeShuffledIndex.init
     @memcpy(cached_hash_input[0..SEED_SIZE], seed);
-    var cached_hash: [Sha256.digest_length]u8 = undefined;
+    var cached_hash: [sha256.digest_length]u8 = undefined;
 
-    while (committee_indices.items.len < committee_size) {
+    while (count < out.len) {
         const index: u32 = @intCast(i % active_indices.len);
         const shuffled = try shuffled_result.getOrPut(index);
         if (!shuffled.found_existing) {
@@ -375,7 +373,7 @@ pub fn getCommitteeIndices(
 
         if (i % hash_increment == 0) {
             std.mem.writeInt(u32, cached_hash_input[SEED_SIZE..][0..4], i / hash_increment, .little);
-            Sha256.hash(&cached_hash_input, &cached_hash, .{});
+            sha256.hash(&cached_hash_input, &cached_hash);
         }
 
         const random_value: i64 = switch (rand_byte_count) {
@@ -393,14 +391,13 @@ pub fn getCommitteeIndices(
         // absurd (but JS-reachable) maxEffectiveBalanceElectra values; valid
         // inputs never approach overflow so their results are unaffected
         if (candidate_effective_balance_increment *% max_random_value >= max_effective_balance_increment *% random_value) {
-            committee_indices.appendAssumeCapacity(candidate_index);
+            out[count] = candidate_index;
+            count += 1;
         }
 
         // wrapping add matches the reference release-mode behavior
         i +%= 1;
     }
-
-    return committee_indices.toOwnedSlice(allocator);
 }
 
 pub fn computeProposerIndex(
@@ -413,9 +410,9 @@ pub fn computeProposerIndex(
     effective_balance_increment: i64,
     rounds: u32,
 ) !u32 {
-    const indices = try getCommitteeIndices(
+    var indices: [1]u32 = undefined;
+    try getCommitteeIndices(
         allocator,
-        1,
         seed,
         active_indices,
         effective_balance_increments,
@@ -423,8 +420,8 @@ pub fn computeProposerIndex(
         max_effective_balance,
         effective_balance_increment,
         rounds,
+        &indices,
     );
-    defer allocator.free(indices);
     return indices[0];
 }
 
@@ -449,20 +446,85 @@ pub fn computeProposerIndexElectra(
     );
 }
 
-pub fn computeSyncCommitteeIndices(
+fn getCommitteeIndicesFromListShuffle(
+    allocator: Allocator,
+    seed: []const u8,
+    active_indices: []const u32,
+    effective_balance_increments: []const u16,
+    max_effective_balance: i64,
+    effective_balance_increment: i64,
+    rounds: u32,
+    out: []u32,
+) !void {
+    if (active_indices.len == 0) return error.EmptyActiveIndices;
+    if (effective_balance_increment == 0) return error.InvalidEffectiveBalanceIncrement;
+    if (seed.len != SEED_SIZE) return error.InvalidSeedLength;
+
+    const shuffled_indices = try allocator.dupe(u32, active_indices);
+    defer allocator.free(shuffled_indices);
+
+    try unshuffleList(u32, shuffled_indices, seed, @intCast(rounds));
+
+    const max_random_value: i64 = 0xffff;
+    const max_increments = @divTrunc(max_effective_balance, effective_balance_increment);
+
+    var cached_hash_input = [_]u8{0} ** (SEED_SIZE + 8);
+    @memcpy(cached_hash_input[0..SEED_SIZE], seed);
+    var cached_hash: [sha256.digest_length]u8 = undefined;
+
+    var i: u32 = 0;
+    var count: usize = 0;
+    while (count < out.len) {
+        const candidate_index = shuffled_indices[i % shuffled_indices.len];
+
+        if (i % 16 == 0) {
+            std.mem.writeInt(u32, cached_hash_input[SEED_SIZE..][0..4], i / 16, .little);
+            sha256.hash(&cached_hash_input, &cached_hash);
+        }
+        const random_value: i64 = std.mem.readInt(u16, cached_hash[(i % 16) * 2 ..][0..2], .little);
+        if (candidate_index >= effective_balance_increments.len) {
+            return error.EffectiveBalanceIncrementsOutOfBounds;
+        }
+        const candidate_increments: i64 = effective_balance_increments[candidate_index];
+
+        // `getCommitteeIndices` wraps on overflow here and in the counter, so this does too.
+        if (candidate_increments *% max_random_value >= max_increments *% random_value) {
+            out[count] = candidate_index;
+            count += 1;
+        }
+        i +%= 1;
+    }
+}
+
+/// Fills caller-owned `out`, which must not alias the inputs. An error may leave it partially written.
+pub fn computeSyncCommitteeIndicesInto(
     allocator: Allocator,
     seed: []const u8,
     active_indices: []const u32,
     effective_balance_increments: []const u16,
     rand_byte_count: ByteCount,
-    sync_committee_size: u32,
     max_effective_balance: i64,
     effective_balance_increment: i64,
     rounds: u32,
-) ![]u32 {
+    out: []u32,
+) !void {
+    // Preserve the per-candidate sampler's round-count behavior outside the list shuffle's range.
+    if (rand_byte_count == .two and rounds > 0 and rounds <= std.math.maxInt(u8) and
+        active_indices.len <= std.math.maxInt(u32))
+    {
+        return getCommitteeIndicesFromListShuffle(
+            allocator,
+            seed,
+            active_indices,
+            effective_balance_increments,
+            max_effective_balance,
+            effective_balance_increment,
+            rounds,
+            out,
+        );
+    }
     return getCommitteeIndices(
         allocator,
-        sync_committee_size,
         seed,
         active_indices,
         effective_balance_increments,
@@ -470,29 +532,7 @@ pub fn computeSyncCommitteeIndices(
         max_effective_balance,
         effective_balance_increment,
         rounds,
-    );
-}
-
-pub fn computeSyncCommitteeIndicesElectra(
-    allocator: Allocator,
-    seed: []const u8,
-    active_indices: []const u32,
-    effective_balance_increments: []const u16,
-    sync_committee_size: u32,
-    max_effective_balance_electra: i64,
-    effective_balance_increment: i64,
-    rounds: u32,
-) ![]u32 {
-    return computeSyncCommitteeIndices(
-        allocator,
-        seed,
-        active_indices,
-        effective_balance_increments,
-        .two,
-        sync_committee_size,
-        max_effective_balance_electra,
-        effective_balance_increment,
-        rounds,
+        out,
     );
 }
 
@@ -512,7 +552,7 @@ fn computePtcIndicesInner(
     var hash_input = [_]u8{0} ** (SEED_SIZE + 8);
     @memcpy(hash_input[0..SEED_SIZE], seed);
 
-    var digest: [Sha256.digest_length]u8 = undefined;
+    var digest: [sha256.digest_length]u8 = undefined;
     var count: usize = 0;
 
     var i: usize = 0;
@@ -521,7 +561,7 @@ fn computePtcIndicesInner(
     outer: while (count < out.len) : (i += 16) {
         // one SHA-256 per 16 candidates; encode block index in bytes 32..40
         std.mem.writeInt(u64, hash_input[SEED_SIZE..][0..8], i / 16, .little);
-        Sha256.hash(&hash_input, &digest, .{});
+        sha256.hash(&hash_input, &digest);
 
         // consume all 16 u16 random values from this hash block
         for (0..16) |j| {
@@ -616,7 +656,7 @@ pub fn computePtcIndicesForEpochInto(
         // per-slot seed: sha256(epoch_seed ++ u64le(start_slot + i))
         std.mem.writeInt(u64, slot_seed_input[SEED_SIZE..][0..8], @as(u64, start_slot) + i, .little);
         var slot_seed: [SEED_SIZE]u8 = undefined;
-        Sha256.hash(&slot_seed_input, &slot_seed, .{});
+        sha256.hash(&slot_seed_input, &slot_seed);
 
         const start = slot_offsets[i];
         const end = slot_offsets[i + 1];

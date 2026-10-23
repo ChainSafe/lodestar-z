@@ -233,7 +233,7 @@ test "memory_safety: afterProcessEpoch releases copied indices when RC allocatio
             epoch_cache.afterProcessEpoch(test_state.cached_state.state, transition_cache),
         );
         try std.testing.expect(failing.has_induced_failure);
-        const copied_bytes = transition_cache.next_shuffling_active_indices.len * @sizeOf(ct.primitive.ValidatorIndex.Type);
+        const copied_bytes = transition_cache.next_shuffling_active_indices.len * @sizeOf(u32);
         try std.testing.expectEqual(copied_bytes, failing.allocated_bytes - allocated_bytes);
         try std.testing.expectEqual(copied_bytes, failing.freed_bytes - freed_bytes);
         try std.testing.expectEqual(previous_shuffling, epoch_cache.previous_shuffling);
@@ -348,10 +348,10 @@ test "memory_safety: attesting indices belong to the caller's allocator, not the
     try electra_attestation.aggregation_bits.set(caller_allocator, 0, true);
     try electra_attestation.committee_bits.set(0, true);
 
-    var phase0_indices = try epoch_cache.getAttestingIndicesPhase0(caller_allocator, &phase0_attestation);
+    var phase0_indices = try epoch_cache.getAttestingIndices(.phase0, caller_allocator, &phase0_attestation);
     phase0_indices.deinit(caller_allocator);
 
-    var electra_indices = try epoch_cache.getAttestingIndicesElectra(caller_allocator, &electra_attestation);
+    var electra_indices = try epoch_cache.getAttestingIndices(.electra, caller_allocator, &electra_attestation);
     electra_indices.deinit(caller_allocator);
 
     var indexed: ct.phase0.IndexedAttestation.Type = undefined;
