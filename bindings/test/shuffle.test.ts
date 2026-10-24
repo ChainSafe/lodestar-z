@@ -240,6 +240,29 @@ describe("committee indices", () => {
   });
 });
 
+describe("adaptive sync committee sampling", () => {
+  it.each([32, 2048])("matches the reference with %i ETH balances", {timeout: 30_000}, (balance) => {
+    const seed = new Uint8Array(SEED_SIZE).fill(0x5a);
+    const indices = getInputArray(1_000_000);
+    const balances = new Uint16Array(indices.length).fill(balance);
+    const expected = shuffleReference.naiveComputeSyncCommitteeIndicesElectra(seed, indices, balances);
+    const actual = shuffle.computeSyncCommitteeIndices(
+      seed,
+      indices,
+      balances,
+      2,
+      shuffleReference.SYNC_COMMITTEE_SIZE,
+      shuffleReference.MAX_EFFECTIVE_BALANCE_ELECTRA,
+      shuffleReference.EFFECTIVE_BALANCE_INCREMENT,
+      shuffleReference.SHUFFLE_ROUND_COUNT
+    );
+    expect(Array.from(actual)).toEqual(expected);
+    expect(seed.every((value) => value === 0x5a)).toBe(true);
+    expect(indices.every((index, position) => index === position)).toBe(true);
+    expect(balances.every((value) => value === balance)).toBe(true);
+  });
+});
+
 describe("ptc indices", () => {
   const vc = 1000;
   const activeIndices = getInputArray(vc);

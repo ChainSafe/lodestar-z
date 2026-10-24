@@ -616,6 +616,127 @@ test "computeSyncCommitteeIndicesInto uses only shuffle scratch for low and high
     }
 }
 
+test "computeSyncCommitteeIndicesInto avoids a full-list copy for large high-balance sets" {
+    const allocator = std.testing.allocator;
+    const seed = [_]u8{0x5a} ** SEED_SIZE;
+    const active_indices = try allocator.alloc(u32, 1_000_000);
+    defer allocator.free(active_indices);
+    const balances = try allocator.alloc(u16, active_indices.len);
+    defer allocator.free(balances);
+    for (active_indices, balances, 0..) |*index, *balance, i| {
+        index.* = @intCast(i);
+        balance.* = @intCast(32 + 32 * (i % 64));
+    }
+
+    var expected: [16]u32 = undefined;
+    try shuffle.getCommitteeIndices(
+        allocator,
+        &seed,
+        active_indices,
+        balances,
+        .two,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+        90,
+        &expected,
+    );
+    var actual: [expected.len]u32 = undefined;
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    try shuffle.computeSyncCommitteeIndicesInto(
+        counting.allocator(),
+        &seed,
+        active_indices,
+        balances,
+        .two,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+        90,
+        &actual,
+    );
+    try std.testing.expectEqualSlices(u32, &expected, &actual);
+    try std.testing.expect(counting.allocated_bytes < active_indices.len * @sizeOf(u32));
+    try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+}
+
+test "computeSyncCommitteeIndicesInto selects by active balances and output size" {
+    const allocator = std.testing.allocator;
+    const seed = [_]u8{0x5a} ** SEED_SIZE;
+    const active_indices = try allocator.alloc(u32, 65_536);
+    defer allocator.free(active_indices);
+    const balances = try allocator.alloc(u16, 2 * active_indices.len);
+    defer allocator.free(balances);
+    for (active_indices, 0..) |*index, i| index.* = @intCast(2 * i + 1);
+
+    const Case = struct { active: u16, inactive: u16, size: usize, list_shuffle: bool };
+    for ([_]Case{
+        .{ .active = 32, .inactive = 2048, .size = 32, .list_shuffle = true },
+        .{ .active = 2048, .inactive = 32, .size = 32, .list_shuffle = false },
+        .{ .active = 511, .inactive = 32, .size = 32, .list_shuffle = true },
+        .{ .active = 512, .inactive = 32, .size = 32, .list_shuffle = false },
+        .{ .active = 2048, .inactive = 32, .size = 512, .list_shuffle = true },
+        .{ .active = 8192, .inactive = 32, .size = 512, .list_shuffle = true },
+    }) |case| {
+        @memset(balances, case.inactive);
+        for (active_indices) |index| balances[index] = case.active;
+        var expected: [512]u32 = undefined;
+        try shuffle.getCommitteeIndices(
+            allocator,
+            &seed,
+            active_indices,
+            balances,
+            .two,
+            MAX_EFFECTIVE_BALANCE_ELECTRA,
+            EFFECTIVE_BALANCE_INCREMENT,
+            90,
+            expected[0..case.size],
+        );
+        var actual: [512]u32 = undefined;
+        var counting = std.testing.FailingAllocator.init(allocator, .{});
+        try shuffle.computeSyncCommitteeIndicesInto(
+            counting.allocator(),
+            &seed,
+            active_indices,
+            balances,
+            .two,
+            MAX_EFFECTIVE_BALANCE_ELECTRA,
+            EFFECTIVE_BALANCE_INCREMENT,
+            90,
+            actual[0..case.size],
+        );
+        try std.testing.expectEqualSlices(u32, expected[0..case.size], actual[0..case.size]);
+        try std.testing.expectEqual(case.list_shuffle, counting.allocations == 1);
+        try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+        for (active_indices, 0..) |index, i| {
+            try std.testing.expectEqual(2 * i + 1, index);
+            try std.testing.expectEqual(case.active, balances[index]);
+            try std.testing.expectEqual(case.inactive, balances[2 * i]);
+        }
+    }
+}
+
+fn sampleHighBalanceSyncCommittee(allocator: std.mem.Allocator) !void {
+    const seed = [_]u8{0x5a} ** SEED_SIZE;
+    var active_indices: [4097]u32 = undefined;
+    for (&active_indices, 0..) |*index, i| index.* = @intCast(i);
+    const balances = [_]u16{2048} ** active_indices.len;
+    var out: [1]u32 = undefined;
+    try shuffle.computeSyncCommitteeIndicesInto(
+        allocator,
+        &seed,
+        &active_indices,
+        &balances,
+        .two,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+        90,
+        &out,
+    );
+}
+
+test "memory_safety: high-balance sync committee frees sampling caches on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, sampleHighBalanceSyncCommittee, .{});
+}
+
 test "getCommitteeIndices rejects empty active indices" {
     const allocator = std.testing.allocator;
     var out: [1]u32 = undefined;

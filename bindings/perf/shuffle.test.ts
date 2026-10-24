@@ -31,7 +31,8 @@ for (const listSize of [16_384, 250_000, 1_000_000]) {
 }
 
 describe("committee indices", () => {
-  for (const listSize of [16_384, 250_000, 1_000_000]) {
+  // Keep a case where an aggressive per-candidate cutoff regresses.
+  for (const listSize of [16_384, 250_000, 262_144, 1_000_000]) {
     const seed = deterministicBenchmarkSeed(`committee-indices:${listSize}`);
     const activeIndices = getInputArray(listSize);
     const effectiveBalanceIncrements = new Uint16Array(listSize);
@@ -77,6 +78,23 @@ describe("committee indices", () => {
         );
       },
       id: `zig - computeProposerIndex - ${listSize} indices`,
+    });
+
+    const lowBalanceIncrements = new Uint16Array(listSize).fill(32);
+    bench({
+      fn: () => {
+        shuffle.computeSyncCommitteeIndices(
+          seed,
+          activeIndices,
+          lowBalanceIncrements,
+          2,
+          SYNC_COMMITTEE_SIZE,
+          MAX_EFFECTIVE_BALANCE_ELECTRA,
+          EFFECTIVE_BALANCE_INCREMENT,
+          SHUFFLE_ROUND_COUNT
+        );
+      },
+      id: `zig - computeSyncCommitteeIndices - ${listSize} indices - 32 ETH`,
     });
   }
 });
