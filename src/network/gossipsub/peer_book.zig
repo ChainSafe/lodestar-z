@@ -6,12 +6,12 @@ const PeerId = @import("../wire/peer_id.zig").PeerId;
 const assert = std.debug.assert;
 const score_mod = @import("score.zig");
 const options_mod = @import("options.zig");
-const AddressGroup = @import("udp").AddressGroup;
+const Source = @import("udp").AddressPrefix(.{ .ip4 = 32, .ip6 = 64 });
 
 pub const capacity = constants.retained_peers_cap;
 pub const outbound_reserve = 32;
 pub const retention_headroom = 32;
-pub const pinned_per_group_max = 16;
+pub const pinned_per_source_max = 16;
 pub const pinned_capacity = constants.peers_cap + retention_headroom;
 pub const Ref = struct { index: u16, generation: u64 };
 pub const Backoff = struct { until: u64 = 0 };
@@ -30,8 +30,9 @@ pub const Row = struct {
     address: Ip = [_]u8{0} ** 16,
     direction: types.Direction = .inbound,
     pins: u32 = 0,
-    admission_group: AddressGroup = undefined,
-    pin_group: AddressGroup = undefined,
+    admission_source: Source = undefined,
+    // The first pin keeps its source charge through reconnects until the final release.
+    pin_source: Source = undefined,
     ip_peers: u16 = 0,
     retain_until: u64 = 0,
     large_frame_denied_until: u64 = 0,
@@ -139,7 +140,7 @@ pub const PeerBook = struct {
         const row = &self.rows[index];
         self.scores.setConnected(index, true, now);
         row.connection = conn;
-        row.admission_group = AddressGroup.fromAddress(&metadata.address);
+        row.admission_source = Source.fromAddress(&metadata.address);
         row.address = normalize(metadata.address);
         row.direction = metadata.direction;
         row.direct = metadata.direct;
@@ -239,11 +240,11 @@ pub const PeerBook = struct {
         const row = &self.rows[ref.index];
         if (row.pins > 0) return true;
         if (self.pinned == self.pin_limit) return false;
-        var grouped: u16 = 0;
+        var pinned_from_source: u16 = 0;
         for (self.rows) |*other| {
-            if (other.pins > 0 and other.pin_group.eql(row.admission_group)) grouped += 1;
+            if (other.pins > 0 and other.pin_source.eql(row.admission_source)) pinned_from_source += 1;
         }
-        return grouped < pinned_per_group_max;
+        return pinned_from_source < pinned_per_source_max;
     }
 
     pub fn retain(self: *PeerBook, ref: Ref) bool {
@@ -251,7 +252,7 @@ pub const PeerBook = struct {
         assert(self.rows[ref.index].pins < std.math.maxInt(u32));
         if (!self.canRetain(ref)) return false;
         if (self.rows[ref.index].pins == 0) {
-            self.rows[ref.index].pin_group = self.rows[ref.index].admission_group;
+            self.rows[ref.index].pin_source = self.rows[ref.index].admission_source;
             self.pinned += 1;
             assert(self.pinned <= self.pin_limit);
         }

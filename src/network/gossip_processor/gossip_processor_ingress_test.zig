@@ -72,7 +72,7 @@ test "gossip fatal reports preserve unrelated validation through direct processo
     var tokens: [18]processor.GossipProcessor.Token = undefined;
     for (&tokens, 0..) |*token, i| {
         const peer = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
-        g.peers.rows[g.logical(peer.index).index].admission_group = .{ .ip4 = .{ 192, 0, @intCast(i / 16) } };
+        g.peers.rows[g.logical(peer.index).index].admission_source = .{ .ip4 = .{ 192, 0, 2, @intCast(i / 16) } };
         var payload: [108]u8 = @splat(0);
         payload[0] = @intCast(i);
         std.mem.writeInt(u64, payload[100..108], 1, .little);

@@ -319,30 +319,75 @@ test "peer retention budget preserves full inbound capacity after pinned identit
     }
 }
 
-test "peer retention groups normalize addresses and remain stable through migration and pinned reconnect" {
+fn sourceRetentionMetadata(identity: u8, ipv6: bool) Metadata {
+    var metadata = retentionMetadata(identity);
+    metadata.address = if (ipv6)
+        .{ .ip6 = .{
+            .octets = .{ 0x20, 1, 0xd, 0xb8, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, identity },
+            .port = identity,
+            .interface = identity,
+        } }
+    else
+        .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = identity } };
+    if (!ipv6 and identity % 2 == 1) {
+        const mapped = normalize(metadata.address);
+        metadata.address = .{ .ip6 = .{
+            .octets = mapped,
+            .port = identity,
+            .interface = identity,
+        } };
+    }
+    return metadata;
+}
+
+test "peer retention sources share port and address aliases while admitting neighbors" {
+    for ([_]bool{ false, true }) |ipv6| {
+        var book = try PeerBook.init(std.testing.allocator, &.{
+            .connected_capacity = 20,
+            .retained_capacity = 61,
+            .retained_outbound_reserve = 1,
+        }, 1);
+        defer book.deinit(std.testing.allocator);
+        var pinned: [16]Ref = undefined;
+        for (&pinned, 0..) |*ref, i| {
+            const metadata = sourceRetentionMetadata(@intCast(i), ipv6);
+            const conn: Handle = .{ .index = @intCast(i), .generation = 1 };
+            ref.* = book.admit(conn, &metadata, 0).admitted.peer;
+            try std.testing.expect(book.retain(ref.*));
+            if (i % 2 == 0) book.disconnect(ref.*, 1);
+        }
+        const metadata = sourceRetentionMetadata(16, ipv6);
+        const refused = book.admit(.{ .index = 16, .generation = 1 }, &metadata, 2).admitted.peer;
+        try std.testing.expect(!book.retain(refused));
+        try std.testing.expectEqual(@as(u32, 0), book.rows[refused.index].pins);
+        try std.testing.expectEqual(@as(u16, 16), book.pinned);
+
+        var neighbor = sourceRetentionMetadata(18, ipv6);
+        switch (neighbor.address) {
+            .ip4 => |*ip| ip.octets[3] = 2,
+            .ip6 => |*ip| ip.octets[7] = 3,
+        }
+        const admitted = book.admit(.{ .index = 17, .generation = 1 }, &neighbor, 2).admitted.peer;
+        try std.testing.expect(book.retain(admitted));
+        try std.testing.expectEqual(@as(u16, 17), book.pinned);
+        book.release(admitted);
+        for (pinned) |ref| book.release(ref);
+        try std.testing.expectEqual(@as(u16, 0), book.pinned);
+    }
+}
+
+test "peer retention source charges survive migration and pinned reconnect until final release" {
     for ([_]bool{ false, true }) |ipv6| {
         var book = try PeerBook.init(std.testing.allocator, &.{ .connected_capacity = 20, .retained_capacity = 61, .retained_outbound_reserve = 1 }, 1);
         defer book.deinit(std.testing.allocator);
         var pinned: [16]Ref = undefined;
         for (&pinned, 0..) |*ref, i| {
-            var metadata = retentionMetadata(@intCast(i));
-            metadata.address = if (ipv6)
-                .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, 1, @intCast(i), 0, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = @intCast(i) } }
-            else
-                .{ .ip4 = .{ .octets = .{ 192, 0, 2, @intCast(i) }, .port = @intCast(i) } };
-            if (!ipv6 and i % 2 == 1) {
-                const mapped = normalize(metadata.address);
-                metadata.address = .{ .ip6 = .{ .octets = mapped, .port = @intCast(i), .interface = 2 } };
-            }
+            const metadata = sourceRetentionMetadata(@intCast(i), ipv6);
             ref.* = book.admit(.{ .index = 0, .generation = @intCast(i + 1) }, &metadata, 0).admitted.peer;
             try std.testing.expect(book.retain(ref.*));
             book.disconnect(ref.*, 1);
         }
-        var metadata = retentionMetadata(16);
-        metadata.address = if (ipv6)
-            .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, 1, 99, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = 99 } }
-        else
-            .{ .ip4 = .{ .octets = .{ 192, 0, 2, 99 }, .port = 99 } };
+        const metadata = sourceRetentionMetadata(16, ipv6);
         const conn: Handle = .{ .index = 0, .generation = 17 };
         try std.testing.expectEqual(@as(u16, 16), book.pinned);
         const refused = book.admit(conn, &metadata, 2).admitted.peer;
