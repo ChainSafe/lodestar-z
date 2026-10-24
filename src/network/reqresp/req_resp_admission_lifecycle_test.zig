@@ -83,7 +83,7 @@ test "reqresp admission lifecycle incomplete requests cannot consume another con
 
 test "reqresp admission lifecycle cancellation retains execution until host retirement" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .serving_max = 1, .serving_per_group_max = 1 });
+    try setup.init(.{}, .{ .serving_max = 1, .serving_per_source_max = 1 });
     defer setup.deinit();
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
@@ -364,7 +364,7 @@ test "reqresp request admission host capacity cancellation and queued cancellati
         }
     }
     try std.testing.expect(waiting);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.blocks_by_root_v2)].admission_refusals[@intFromEnum(rr.metrics.AdmissionRefusal.group_quota)]);
+    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.blocks_by_root_v2)].admission_refusals[@intFromEnum(rr.metrics.AdmissionRefusal.address_quota)]);
     const replacement = &setup.shared.server.reqresp.inbound[slot];
     try std.testing.expect(replacement.request.generation > incoming.generation);
     try std.testing.expectEqual(@as(usize, 0), replacement.request.io.payload.len);

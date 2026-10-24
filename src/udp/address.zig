@@ -54,16 +54,20 @@ pub const Address = union(enum) {
         return std.mem.allEqual(u8, ip[0..10], 0) and ip[10] == 0xff and ip[11] == 0xff;
     }
 
+    pub fn normalized(self: *const Address) Address {
+        if (self.* == .ip6 and isIp4Mapped(self.ip6.octets))
+            return .{ .ip4 = .{ .octets = self.ip6.octets[12..16].*, .port = self.ip6.port } };
+        return self.*;
+    }
+
     /// Normalizes socket input: mapped IPv6 becomes IPv4 and IPv6 flow information is discarded.
     /// ENR and multiaddr consumers instead reject mapped IPv6 as an advertised IPv6 endpoint.
     pub fn fromNetwork(address: std.Io.net.IpAddress) Address {
-        return switch (address) {
+        const endpoint: Address = switch (address) {
             .ip4 => |ip| .{ .ip4 = .{ .octets = ip.bytes, .port = ip.port } },
-            .ip6 => |ip| if (isIp4Mapped(ip.bytes))
-                .{ .ip4 = .{ .octets = ip.bytes[12..16].*, .port = ip.port } }
-            else
-                .{ .ip6 = .{ .octets = ip.bytes, .port = ip.port, .interface = ip.interface.index } },
+            .ip6 => |ip| .{ .ip6 = .{ .octets = ip.bytes, .port = ip.port, .interface = ip.interface.index } },
         };
+        return endpoint.normalized();
     }
 
     pub fn toNetwork(self: Address) std.Io.net.IpAddress {

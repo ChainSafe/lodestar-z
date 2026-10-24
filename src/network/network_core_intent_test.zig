@@ -421,7 +421,7 @@ test "core capabilities activation commits fork BPO and copied directional value
     try node.init(backing_node.allocator(), std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const admission = &node.protocols.reqresp.admission.limiter;
-    const source = admission.retain(&.{ .address_group = .{ .ip4 = .{ 192, 0, 2 } } }, node.last_now.millis());
+    const source = admission.retain(&.{ .address = .{ .ip4 = .{ 192, 0, 2, 1 } } }, node.last_now.millis());
     defer admission.release(source);
     try std.testing.expectEqual(.allowed, admission.start(source, node.last_now.millis()));
     try std.testing.expectEqual(.allowed, admission.take(source, .blocks_by_root_v2, 1, .phase0, node.last_now.millis()));

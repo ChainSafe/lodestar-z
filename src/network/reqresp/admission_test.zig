@@ -1,41 +1,41 @@
 const std = @import("std");
 const a = @import("admission.zig");
-const Group = @import("udp").AddressGroup;
+const Source = a.Source;
 const Options = @import("quotas.zig").Options;
 const quotas = @import("admission_fixture.zig").quotas;
 const Protocol = @import("protocol.zig").Protocol;
-const first: Group = .{ .ip4 = .{ 192, 0, 2 } };
-const second: Group = .{ .ip4 = .{ 192, 0, 3 } };
+const first: Source = .{ .ip4 = .{ 192, 0, 2, 1 } };
+const second: Source = .{ .ip4 = .{ 192, 0, 2, 2 } };
 const method: Protocol = .blocks_by_root_v2;
 
 fn options(tokens: u32, global: u32) Options {
     return .{ .source = quotas(tokens, 1000), .global = quotas(global, 1000), .starts = .{ .tokens = 2, .period_ms = 1000 }, .global_starts = .{ .tokens = 8, .period_ms = 1000 } };
 }
 
-fn started(owner: *a.Limiter, group: Group, now: u64) !u16 {
-    const row = owner.retain(&.{ .address_group = group }, now);
+fn started(owner: *a.Limiter, source: Source, now: u64) !u16 {
+    const row = owner.retain(&.{ .address = source }, now);
     try std.testing.expectEqual(a.Decision.allowed, owner.start(row, now));
     return row;
 }
 
-test "reqresp groups keep usage through reconnects and overlapping connections" {
+test "reqresp sources keep usage through reconnects and overlapping connections" {
     var owner = try a.Limiter.init(std.testing.allocator, .all, options(2, 100), 2);
     defer owner.deinit(std.testing.allocator);
     const old = try started(&owner, first, 0);
-    const replacement = owner.retain(&.{ .address_group = first }, 0);
+    const replacement = owner.retain(&.{ .address = first }, 0);
     try std.testing.expectEqual(old, replacement);
     try std.testing.expectEqual(a.Decision.allowed, owner.take(old, method, 2, .fulu, 0));
     owner.release(old);
     try std.testing.expectEqual(@as(u16, 1), owner.rows[replacement].connections);
     owner.release(replacement);
-    const reconnected = owner.retain(&.{ .address_group = first }, 1);
+    const reconnected = owner.retain(&.{ .address = first }, 1);
     try std.testing.expectEqual(old, reconnected);
     try std.testing.expectEqual(a.Decision.source_quota, owner.take(reconnected, method, 1, .fulu, 1));
     try std.testing.expectEqual(a.Decision.allowed, owner.take(reconnected, method, 1, .fulu, 500));
     owner.release(reconnected);
 }
 
-test "reqresp start hints and refusals preserve group and global allowances atomically" {
+test "reqresp start hints and refusals preserve source and global allowances atomically" {
     var limits = options(10, 20);
     limits.global_starts.tokens = 2;
     var owner = try a.Limiter.init(std.testing.allocator, .all, limits, 2);
@@ -65,13 +65,13 @@ test "reqresp starts isolate control and application while retaining their own d
     try std.testing.expectEqual(a.Decision.allowed, control.start(independent, 499));
     control.release(independent);
     application.release(row);
-    const reconnect = application.retain(&.{ .address_group = first }, 499);
+    const reconnect = application.retain(&.{ .address = first }, 499);
     try std.testing.expectEqual(@as(u64, 500), application.startAt(reconnect, 499));
     try std.testing.expectEqual(a.Decision.allowed, application.start(reconnect, 500));
     application.release(reconnect);
 }
 
-test "reqresp group protocol eligibility and aggregate refusal never refund usage" {
+test "reqresp source protocol eligibility and aggregate refusal never refund usage" {
     var owner = try a.Limiter.init(std.testing.allocator, .all, options(2, 2), 2);
     defer owner.deinit(std.testing.allocator);
     const one = try started(&owner, first, 0);
@@ -89,7 +89,7 @@ test "reqresp group protocol eligibility and aggregate refusal never refund usag
     owner.release(two);
 }
 
-test "reqresp group admission accumulates expensive request credit alongside small requests" {
+test "reqresp source admission accumulates expensive request credit alongside small requests" {
     var owner = try a.Limiter.init(std.testing.allocator, .all, options(4, 4), 2);
     defer owner.deinit(std.testing.allocator);
     const one = try started(&owner, first, 0);
@@ -111,7 +111,7 @@ test "reqresp group admission accumulates expensive request credit alongside sma
     owner.release(two);
 }
 
-test "reqresp capacity admits idle peers and groups through sustained retained-usage churn" {
+test "reqresp capacity admits idle peers and sources through sustained retained-usage churn" {
     try retainedChurn(false);
     try retainedChurn(true);
 }
@@ -122,15 +122,15 @@ fn retainedChurn(peer_keys: bool) !void {
     var owner = try a.Limiter.init(std.testing.allocator, .all, limits, 2);
     defer owner.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 12), owner.rows.len);
-    const idle_key: a.Key = if (peer_keys) .{ .peer = .{ .bytes = @splat(0) } } else .{ .address_group = first };
+    const idle_key: a.Key = if (peer_keys) .{ .peer = .{ .bytes = @splat(0) } } else .{ .address = first };
     const idle = owner.retain(&idle_key, 0);
     var sequence: u16 = 0;
     for (0..40) |tick| {
         const now: u64 = @intCast(tick * 250);
         for (0..5) |_| {
             sequence += 1;
-            const group: Group = .{ .ip4 = .{ 198, @truncate(sequence >> 8), @truncate(sequence) } };
-            var key: a.Key = if (peer_keys) .{ .peer = .{ .bytes = @splat(0) } } else .{ .address_group = group };
+            const source: Source = .{ .ip4 = .{ 198, 51, @truncate(sequence >> 8), @truncate(sequence) } };
+            var key: a.Key = if (peer_keys) .{ .peer = .{ .bytes = @splat(0) } } else .{ .address = source };
             if (peer_keys) std.mem.writeInt(u16, key.peer.bytes[0..2], sequence, .little);
             const row = owner.retain(&key, now);
             const decision = owner.start(row, now);
@@ -153,22 +153,22 @@ test "reqresp capacity includes delayed protocol charges from connections predat
     defer owner.deinit(std.testing.allocator);
     const delayed = try started(&owner, first, 0);
     for (0..2) |index| {
-        const group: Group = .{ .ip4 = .{ 198, 51, @intCast(index) } };
-        const row = try started(&owner, group, 2000);
+        const source: Source = .{ .ip4 = .{ 198, 51, 100, @intCast(index) } };
+        const row = try started(&owner, source, 2000);
         try std.testing.expectEqual(a.Decision.allowed, owner.take(row, method, 2, .fulu, 2000));
         owner.release(row);
     }
     try std.testing.expectEqual(a.Decision.allowed, owner.take(delayed, method, 2, .fulu, 2000));
     owner.release(delayed);
-    const fresh = owner.retain(&.{ .address_group = second }, 2000);
+    const fresh = owner.retain(&.{ .address = second }, 2000);
     try std.testing.expectEqual(a.Decision.global_quota, owner.start(fresh, 2000));
     owner.release(fresh);
-    const reconnect = owner.retain(&.{ .address_group = first }, 2001);
+    const reconnect = owner.retain(&.{ .address = first }, 2001);
     try std.testing.expectEqual(a.Decision.source_quota, owner.take(reconnect, method, 1, .fulu, 2001));
     owner.release(reconnect);
 }
 
-test "reqresp group fork quota changes and integer rounding retain nanosecond debt" {
+test "reqresp source fork quota changes and integer rounding retain nanosecond debt" {
     var limits = options(4, 100);
     limits.source.blocks_pre_deneb.tokens = 2;
     limits.starts.tokens = 3;
@@ -194,7 +194,7 @@ fn allocation(allocator: std.mem.Allocator) !void {
     owner.release(row);
 }
 
-test "reqresp group allocation prefixes and invalid numeric bounds" {
+test "reqresp source allocation prefixes and invalid numeric bounds" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocation, .{});
     try std.testing.expectError(error.InvalidOptions, a.Limiter.init(std.testing.allocator, .all, options(2, 100), 0));
     try std.testing.expectError(error.InvalidOptions, a.Limiter.init(std.testing.allocator, .{}, options(2, 100), 2));

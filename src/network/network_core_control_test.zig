@@ -18,13 +18,13 @@ const time = @import("time.zig");
 
 fn fillStartHistory(limiter: *@import("reqresp/admission.zig").Limiter, now: u64) void {
     for (0..limiter.options.global_starts.tokens) |index| {
-        const group: @import("udp").AddressGroup = .{ .ip4 = .{ 198, @truncate(index >> 8), @truncate(index) } };
+        const source: @import("reqresp/admission.zig").Source = .{ .ip4 = .{ 198, 51, @truncate(index >> 8), @truncate(index) } };
         var identity: @import("wire/peer_id.zig").PeerId = .{ .bytes = @splat(0) };
         std.mem.writeInt(u32, identity.bytes[0..4], @intCast(index), .little);
         const key: @import("reqresp/admission.zig").Key = if (limiter.protocols.bits == rr.Protocol.Set.control.bits)
             .{ .peer = identity }
         else
-            .{ .address_group = group };
+            .{ .address = source };
         const row = limiter.retain(&key, now);
         const result = limiter.start(row, now);
         limiter.release(row);

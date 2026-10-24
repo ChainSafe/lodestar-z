@@ -62,7 +62,13 @@ test("metrics are available while open and reject after close", async () => {
     expect(metrics.get("lodestar_network_step_seconds_count")).toBeGreaterThan(0);
     expect(metrics.get("lodestar_gossip_validation_expired_executing_count")).toBe(0);
     expect(metrics.get('lodestar_gossip_validation_queue_length{topic="beacon_block"}')).toBe(0);
-    for (const reason of ["connection_capacity", "protocol_concurrency", "peer_quota", "group_quota", "global_quota"]) {
+    for (const reason of [
+      "connection_capacity",
+      "protocol_concurrency",
+      "peer_quota",
+      "address_quota",
+      "global_quota",
+    ]) {
       expect(metrics.get(`beacon_reqresp_admission_refusals_total{method="status",reason="${reason}"}`)).toBe(0);
     }
     for (const phase of ["receiving_request", "waiting_start", "waiting_host", "writing_response", "terminal"]) {

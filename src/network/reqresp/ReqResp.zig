@@ -257,7 +257,7 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
     assert(cursor == arena.len);
 
     var serving: ?ServingPool = if (options.protocols.bits & Protocol.Set.application.bits != 0)
-        try ServingPool.init(allocator, options.serving_max, options.serving_per_group_max, outbound_sizes.scratch)
+        try ServingPool.init(allocator, options.serving_max, options.serving_per_source_max, outbound_sizes.scratch)
     else
         null;
     errdefer if (serving) |*pool| pool.deinit(allocator);
@@ -564,7 +564,7 @@ pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *Router, conn: Ha
     return null;
 }
 
-/// Retains the configured peer or address-group account until connectionClosed, including path changes.
+/// Retains the configured peer or source-address account until connectionClosed, including path changes.
 pub fn connectionOpened(self: *ReqResp, conn: Handle, identity: *const PeerId, endpoint: *const @import("udp").Address, now: Now) void {
     assert(conn.index < self.options.connections);
     self.admission.connected(conn, identity, endpoint, now.millis());

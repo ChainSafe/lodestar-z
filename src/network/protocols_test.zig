@@ -33,7 +33,7 @@ test "protocol stack requires independent control peer quotas" {
     var options = try rrOptions();
     options.gossipsub.topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })};
     try protocols_mod.Protocols.validateOptions(options);
-    options.control_reqresp.admission.scope = .address_group;
+    options.control_reqresp.admission.scope = .address;
     try std.testing.expectError(error.InvalidOptions, protocols_mod.Protocols.validateOptions(options));
 }
 

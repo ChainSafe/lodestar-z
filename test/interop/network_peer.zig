@@ -354,7 +354,7 @@ pub fn main(init: std.process.Init) !void {
             .connections = 4,
             .outbound_max = 1,
             .serving_max = 0,
-            .serving_per_group_max = 0,
+            .serving_per_source_max = 0,
             .inbound_per_connection_max = 8,
             .forks = forks,
             .progress_timeout_ms = 5000,

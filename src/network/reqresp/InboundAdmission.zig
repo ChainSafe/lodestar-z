@@ -17,7 +17,6 @@ const protocol = @import("protocol.zig");
 const Protocol = protocol.Protocol;
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const Address = @import("udp").Address;
-const AddressGroup = @import("udp").AddressGroup;
 const Router = @import("../router.zig").Router;
 const assert = std.debug.assert;
 
@@ -96,7 +95,7 @@ pub fn connected(self: *InboundAdmission, conn: Handle, identity: *const PeerId,
     }
     const key: admission.Key = switch (self.scope) {
         .peer => .{ .peer = identity.* },
-        .address_group => .{ .address_group = AddressGroup.fromAddress(endpoint) },
+        .address => .{ .address = admission.Source.fromAddress(endpoint) },
     };
     const row = self.limiter.retain(&key, now_ms);
     cursor.source = .{ .row = row, .generation = conn.generation };
@@ -266,7 +265,8 @@ pub fn promote(self: *InboundAdmission, owner: *ReqResp, index: u16, now: Now) P
         progress = .charged;
     }
     const source = self.sourceRow(request.conn);
-    const execution: ?u16 = if (request.protocol.isControl()) null else owner.serving.?.available(self.limiter.rows[source].key.address_group) orelse {
+    const account = self.limiter.accountKey(source);
+    const execution: ?u16 = if (request.protocol.isControl()) null else owner.serving.?.available(account.address) orelse {
         state.wait = .serving;
         return progress;
     };
@@ -284,7 +284,7 @@ pub fn promote(self: *InboundAdmission, owner: *ReqResp, index: u16, now: Now) P
     state.wait = .none;
     const storage: Storage = .{
         .execution = execution,
-        .scratch = if (execution) |entry| owner.serving.?.acquire(entry, request.handle(index), self.limiter.rows[source].key.address_group) else slot.receive.scratch,
+        .scratch = if (execution) |entry| owner.serving.?.acquire(entry, request.handle(index), account.address) else slot.receive.scratch,
     };
     slot.admit(index, &storage, now);
     return .admitted;
@@ -307,7 +307,7 @@ fn chargeStart(self: *InboundAdmission, slots: []Server, index: u16, now: Now) b
     return false;
 }
 
-/// Fresh streams cannot spend a refill already awaited by a request in the same group.
+/// Fresh streams cannot spend a refill already awaited by a request on the same account.
 fn startsPending(self: *const InboundAdmission, slots: []const Server, conn: Handle) bool {
     const source = self.sourceRow(conn);
     for (self.connection_cursors, 0..) |cursor, index| {
@@ -349,7 +349,7 @@ pub fn chargeRejected(self: *InboundAdmission, owner: *ReqResp, slot: *const Ser
     if (decision == .allowed) return;
     owner.recordAdmissionRefusal(request.stream, request.protocol, switch (decision) {
         .allowed => unreachable,
-        .source_quota => if (self.scope == .peer) .peer_quota else .group_quota,
+        .source_quota => if (self.scope == .peer) .peer_quota else .address_quota,
         .global_quota => .global_quota,
     }, 1);
 }

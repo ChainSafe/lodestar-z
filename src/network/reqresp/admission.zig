@@ -1,6 +1,7 @@
 const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
-const Group = @import("udp").AddressGroup;
+/// Application accounts share IPv4 addresses and IPv6 /64s across identities and ports.
+pub const Source = @import("udp").AddressPrefix(.{ .ip4 = 32, .ip6 = 64 });
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const Protocol = @import("protocol.zig").Protocol;
 const quota_config = @import("quotas.zig");
@@ -12,7 +13,7 @@ const assert = std.debug.assert;
 
 pub const Key = union(enum) {
     peer: PeerId,
-    address_group: Group,
+    address: Source,
 
     pub fn eql(self: *const Key, other: *const Key) bool {
         return std.meta.eql(self.*, other.*);
@@ -114,6 +115,12 @@ pub const Limiter = struct {
         assert(self.connections > 0);
         row.connections -= 1;
         self.connections -= 1;
+    }
+
+    pub fn accountKey(self: *const Limiter, index: u16) *const Key {
+        const row = &self.rows[index];
+        assert(row.occupied and row.connections > 0);
+        return &row.key;
     }
 
     pub fn start(self: *Limiter, index: u16, now_ms: u64) Decision {

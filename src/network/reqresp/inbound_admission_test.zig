@@ -12,7 +12,7 @@ const policy_fixture = @import("policy_fixture.zig");
 const Engine = @import("../quic/Engine.zig");
 const constants = @import("constants.zig");
 
-test "reqresp group connection replacement ignores stale retirement and keeps its admission group" {
+test "reqresp source connection replacement ignores stale retirement and keeps its admission source" {
     var owner = try rr.init(std.testing.allocator, options(1));
     defer owner.deinit();
     const endpoint: @import("udp").Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } };
@@ -48,6 +48,61 @@ fn options(connections: u16) rr.Options {
             .starts = .{ .tokens = 2, .period_ms = 1000 },
         } },
     };
+}
+
+test "inbound application quotas isolate neighboring sources and retain debt across identity changes" {
+    for ([_]bool{ false, true }) |ipv6| {
+        var opts = options(3);
+        opts.admission.limits.global = quotas(8, 1000);
+        var owner = try rr.init(std.testing.allocator, opts);
+        defer owner.deinit();
+        const endpoint: types.Address = if (ipv6)
+            .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = 1 } }
+        else
+            .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } };
+        var neighbor = endpoint;
+        if (ipv6) neighbor.ip6.octets[7] = 2 else neighbor.ip4.octets[3] = 2;
+        var alias: types.Address = if (ipv6) endpoint else .{ .ip6 = .{ .octets = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 192, 0, 2, 1 }, .port = 2 } };
+        if (ipv6) {
+            alias.ip6.octets[15] = 2;
+            alias.ip6.port = 2;
+        }
+        const now = Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 });
+        const original: types.Handle = .{ .index = 0, .generation = 1 };
+        const independent: types.Handle = .{ .index = 1, .generation = 1 };
+        const colocated: types.Handle = .{ .index = 2, .generation = 1 };
+        const reconnect: types.Handle = .{ .index = 0, .generation = 2 };
+        const limiter = &owner.admission.limiter;
+        owner.connectionOpened(original, &.{ .bytes = @splat(1) }, &endpoint, now);
+        const row = owner.admission.sourceRow(original);
+        for (0..2) |_| try std.testing.expectEqual(.allowed, limiter.start(row, 0));
+        try std.testing.expectEqual(.allowed, limiter.take(row, .blocks_by_root_v2, 4, .fulu, 0));
+        owner.connectionOpened(original, &.{ .bytes = @splat(1) }, &neighbor, now);
+        try std.testing.expectEqual(row, owner.admission.sourceRow(original));
+
+        owner.connectionOpened(independent, &.{ .bytes = @splat(1) }, &neighbor, now);
+        const other_row = owner.admission.sourceRow(independent);
+        try std.testing.expect(other_row != row);
+        try std.testing.expectEqual(.allowed, limiter.start(other_row, 0));
+        try std.testing.expectEqual(.allowed, limiter.take(other_row, .blocks_by_root_v2, 4, .fulu, 0));
+        owner.connectionOpened(colocated, &.{ .bytes = @splat(2) }, &alias, now);
+        try std.testing.expectEqual(row, owner.admission.sourceRow(colocated));
+        try std.testing.expectEqual(.source_quota, limiter.start(row, 0));
+        try std.testing.expectEqual(.source_quota, limiter.take(row, .blocks_by_root_v2, 1, .fulu, 0));
+        owner.admission.disconnected(original);
+        owner.admission.disconnected(colocated);
+        owner.connectionOpened(reconnect, &.{ .bytes = @splat(3) }, &endpoint, now);
+        owner.admission.disconnected(original);
+        try std.testing.expectEqual(@as(u16, 2), limiter.connections);
+        try std.testing.expectEqual(row, owner.admission.sourceRow(reconnect));
+        try std.testing.expectEqual(.source_quota, limiter.take(row, .blocks_by_root_v2, 1, .fulu, 249));
+        try std.testing.expectEqual(.allowed, limiter.take(row, .blocks_by_root_v2, 1, .fulu, 250));
+        try std.testing.expectEqual(.source_quota, limiter.start(row, 499));
+        try std.testing.expectEqual(.allowed, limiter.start(row, 500));
+        owner.admission.disconnected(reconnect);
+        owner.admission.disconnected(independent);
+        try std.testing.expectEqual(@as(u16, 0), limiter.connections);
+    }
 }
 
 fn inboundStream(pair: *support.Pair, conn: types.Handle) !types.StreamHandle {
@@ -208,7 +263,7 @@ test "inbound control quotas follow peer identity across overlapping connections
     try std.testing.expectEqual(@as(u16, 0), limiter.connections);
 }
 
-test "inbound admission shares serving capacity across identities in an address group" {
+test "inbound admission shares serving capacity across identities at one source" {
     for ([_]bool{ false, true }) |ipv6| {
         var opts = options(6);
         opts.serving_max = 8;
@@ -219,11 +274,11 @@ test "inbound admission shares serving capacity across identities in an address 
         defer owner.deinit();
         const now = Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 });
         for (0..6) |peer| {
-            const prefix: u8 = if (peer == 5) 2 else 1;
+            const source: u8 = if (peer == 5) 2 else 1;
             const endpoint: @import("udp").Address = if (ipv6)
-                .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, prefix, @intCast(peer), 0, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = @intCast(peer + 1) } }
+                .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, 1, 0, source, 0, 0, 0, 0, 0, 0, 0, @intCast(peer + 1) }, .port = @intCast(peer + 1) } }
             else
-                .{ .ip4 = .{ .octets = .{ 192, 0, prefix, @intCast(peer + 1) }, .port = @intCast(peer + 1) } };
+                .{ .ip4 = .{ .octets = .{ 192, 0, 2, source }, .port = @intCast(peer + 1) } };
             owner.connectionOpened(.{ .index = @intCast(peer), .generation = 1 }, &.{ .bytes = @splat(1) }, &endpoint, now);
             const index = readySlot(&owner, @intCast(peer), .blocks_by_root_v2, 0, .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) }, 0);
             owner.inbound[index].admission.decoded(1, now.millis());
@@ -243,9 +298,9 @@ test "inbound admission shares serving capacity across identities in an address 
     }
 }
 
-test "inbound admission retains serving group through migration disconnect and quota row reuse" {
+test "inbound admission retains serving source through migration disconnect and quota row reuse" {
     var opts = options(2);
-    opts.serving_per_group_max = 1;
+    opts.serving_per_source_max = 1;
     var owner = try rr.init(std.testing.allocator, opts);
     defer owner.deinit();
     var pair: support.Pair = .{};
@@ -255,8 +310,8 @@ test "inbound admission retains serving group through migration disconnect and q
     defer router.deinit();
     const endpoint: @import("udp").Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } };
     const other: @import("udp").Address = .{ .ip4 = .{ .octets = .{ 198, 51, 100, 1 }, .port = 2 } };
-    const group = @import("udp").AddressGroup.fromAddress(&endpoint);
-    const other_group = @import("udp").AddressGroup.fromAddress(&other);
+    const source = @import("admission.zig").Source.fromAddress(&endpoint);
+    const other_source = @import("admission.zig").Source.fromAddress(&other);
     const conn: types.Handle = .{ .index = 0, .generation = 1 };
     var now = Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 });
     owner.connectionOpened(conn, &.{ .bytes = @splat(1) }, &endpoint, now);
@@ -265,8 +320,8 @@ test "inbound admission retains serving group through migration disconnect and q
     owner.connectionOpened(conn, &.{ .bytes = @splat(1) }, &other, now);
     try std.testing.expectEqual(.admitted, owner.admission.promote(&owner, index, now));
     const retained = owner.retainServing(owner.inbound[index].request.handle(index)).?;
-    try std.testing.expect(owner.serving.?.available(group) == null);
-    try std.testing.expect(owner.serving.?.available(other_group) != null);
+    try std.testing.expect(owner.serving.?.available(source) == null);
+    try std.testing.expect(owner.serving.?.available(other_source) != null);
 
     owner.connectionClosed(&pair.server, &router, conn, now);
     var events: [1]rr.Event = undefined;
@@ -277,9 +332,9 @@ test "inbound admission retains serving group through migration disconnect and q
     const replacement: types.Handle = .{ .index = 0, .generation = 2 };
     owner.connectionOpened(replacement, &.{ .bytes = @splat(1) }, &other, now);
     try std.testing.expectEqual(original_row, owner.admission.sourceRow(replacement));
-    try std.testing.expectEqual(other_group, owner.admission.limiter.rows[original_row].key.address_group);
-    try std.testing.expect(owner.serving.?.available(group) == null);
-    try std.testing.expect(owner.serving.?.available(other_group) != null);
+    try std.testing.expectEqual(other_source, owner.admission.limiter.rows[original_row].key.address);
+    try std.testing.expect(owner.serving.?.available(source) == null);
+    try std.testing.expect(owner.serving.?.available(other_source) != null);
 
     owner.connectionOpened(.{ .index = 1, .generation = 1 }, &.{ .bytes = @splat(1) }, &endpoint, now);
     const waiting = readySlot(&owner, 1, .blocks_by_root_v2, 0, .{ .bytes = @splat(2) }, now.millis());
@@ -290,7 +345,7 @@ test "inbound admission retains serving group through migration disconnect and q
     owner.admission.promoteReady(&owner, now);
     try std.testing.expectEqual(.serving, owner.inbound[waiting].state);
     try std.testing.expect(!owner.releaseServing(retained));
-    try std.testing.expect(owner.serving.?.available(group) == null);
+    try std.testing.expect(owner.serving.?.available(source) == null);
     try std.testing.expectEqual(@as(usize, 0), owner.resourceSnapshot().retiring);
 }
 
@@ -337,7 +392,7 @@ test "inbound admission keeps an incomplete older request out of the ready start
     try std.testing.expect(owner.inbound[early].admission.start_pending);
 }
 
-test "inbound admission wide costs keep incremental credit and share group quota across connections" {
+test "inbound admission wide costs keep incremental credit and share source quota across connections" {
     var owner = try rr.init(std.testing.allocator, options(2));
     defer owner.deinit();
     const identity: PeerId = .{ .bytes = @splat(3) };
@@ -395,10 +450,10 @@ test "inbound admission cancellation removes each wait without refunding or spin
                 try std.testing.expectEqual(.allowed, owner.admission.limiter.take(owner.admission.sourceRow(.{ .index = 0, .generation = 1 }), .blocks_by_root_v2, 3, .phase0, 0));
             },
             .serving => {
-                owner.serving.?.per_group_max = 1;
-                const group = owner.admission.limiter.rows[owner.admission.sourceRow(slot.request.conn)].key.address_group;
-                const execution = owner.serving.?.available(group).?;
-                _ = owner.serving.?.acquire(execution, holder, group);
+                owner.serving.?.per_source_max = 1;
+                const source = owner.admission.limiter.rows[owner.admission.sourceRow(slot.request.conn)].key.address;
+                const execution = owner.serving.?.available(source).?;
+                _ = owner.serving.?.acquire(execution, holder, source);
                 serving = owner.retainServing(holder) orelse return error.TestUnexpectedResult;
                 owner.serving.?.retire(execution);
             },
@@ -452,17 +507,17 @@ test "inbound admission fair dispatch advances to the next peer before another r
     try std.testing.expect(!owner.admission.due());
 }
 
-test "inbound admission connection and port churn share one IPv4 or IPv6 group record" {
+test "inbound admission connection and port churn share one IPv4 or IPv6 source record" {
     for ([_]bool{ false, true }) |ipv6| {
         var owner = try rr.init(std.testing.allocator, options(1));
         defer owner.deinit();
         for (1..501) |generation| {
             const conn: types.Handle = .{ .index = 0, .generation = @intCast(generation) };
             const endpoint: @import("udp").Address = if (ipv6)
-                .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, 1, @truncate(generation), 0, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = @intCast(generation) } }
+                .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, @truncate(generation >> 8), @truncate(generation) }, .port = @intCast(generation) } }
             else
-                .{ .ip4 = .{ .octets = .{ 192, 0, 2, @truncate(generation) }, .port = @intCast(generation) } };
-            owner.admission.connected(conn, &.{ .bytes = @splat(1) }, &endpoint, 0);
+                .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = @intCast(generation) } };
+            owner.admission.connected(conn, &.{ .bytes = @splat(@as(u8, @truncate(generation))) }, &endpoint, 0);
             const row = owner.admission.sourceRow(conn);
             try std.testing.expectEqual(@as(u16, 0), row);
             try std.testing.expectEqual(if (generation <= 2) .allowed else @as(@import("admission.zig").Decision, .source_quota), owner.admission.limiter.start(row, 0));
@@ -475,7 +530,7 @@ test "inbound admission connection and port churn share one IPv4 or IPv6 group r
     }
 }
 
-test "inbound admission shares start ordering across identities in one address group" {
+test "inbound admission shares start ordering across identities in one source" {
     var owner = try rr.init(std.testing.allocator, options(2));
     defer owner.deinit();
     const endpoint: @import("udp").Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } };

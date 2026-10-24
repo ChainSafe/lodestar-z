@@ -44,7 +44,7 @@ pub const AdmissionRefusal = enum {
     connection_capacity,
     protocol_concurrency,
     peer_quota,
-    group_quota,
+    address_quota,
     global_quota,
 };
 pub const admission_refusal_count = @typeInfo(AdmissionRefusal).@"enum".fields.len;

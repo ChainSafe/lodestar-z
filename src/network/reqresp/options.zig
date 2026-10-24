@@ -32,9 +32,9 @@ pub const Options = struct {
     outbound_max: u16 = constants.outbound_max_default,
     /// Concurrent application executions. Control responses use their request storage.
     serving_max: u16 = constants.serving_max_default,
-    /// Shared by IPv4 /24 or IPv6 /48, including host-retained executions after disconnect.
+    /// Shared by IPv4 /32 or IPv6 /64, including host-retained executions after disconnect.
     /// Two concurrent sync batches can each request blocks and sidecars.
-    serving_per_group_max: u8 = 2 * constants.MAX_CONCURRENT_REQUESTS,
+    serving_per_source_max: u8 = 2 * constants.MAX_CONCURRENT_REQUESTS,
     /// Zero disables the aggregate outbound limit.
     outbound_per_connection_max: u8 = 0,
     inbound_per_connection_max: u8 = constants.inbound_per_connection_max_default,
@@ -64,7 +64,7 @@ pub const Options = struct {
 
     pub const Admission = struct {
         /// Control peers need independent maintenance allowances even when colocated.
-        scope: std.meta.Tag(admission_mod.Key) = .address_group,
+        scope: std.meta.Tag(admission_mod.Key) = .address,
         policy: request_policy.Config,
         limits: quotas.Options,
 
@@ -84,7 +84,7 @@ pub const Options = struct {
         }
         if (options.serving_max > constants.slots_ceiling) return error.InvalidOptions;
         if (options.protocols.bits & Protocol.Set.application.bits != 0 and
-            (options.serving_max == 0 or options.serving_per_group_max == 0)) return error.InvalidOptions;
+            (options.serving_max == 0 or options.serving_per_source_max == 0)) return error.InvalidOptions;
         if (options.outbound_per_connection_max > limits.peer_streams_bidi - outbound_stream_headroom or
             options.outbound_per_connection_max > options.outbound_max) return error.InvalidOptions;
         if (options.inbound_per_connection_max == 0 or options.connections == 0) return error.InvalidOptions;

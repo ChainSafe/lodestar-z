@@ -16,7 +16,7 @@ const request_policy = @import("reqresp/request_policy.zig");
 pub const ReqRespOverrides = struct {
     outbound_max: ?u16 = null,
     serving_max: ?u16 = null,
-    serving_per_group_max: ?u8 = null,
+    serving_per_source_max: ?u8 = null,
     outbound_per_connection_max: ?u8 = null,
     inbound_per_connection_max: ?u8 = null,
     progress_timeout_ms: ?u64 = null,
@@ -133,7 +133,7 @@ pub fn resolve(options: Options) !Resolved {
         .report_non_completion = false,
         .outbound_max = peer_options.max_peers,
         .serving_max = 0,
-        .serving_per_group_max = 0,
+        .serving_per_source_max = 0,
         .outbound_per_connection_max = 1,
         .inbound_per_connection_max = 8,
         .progress_timeout_ms = requests.progress_timeout_ms,

@@ -6,7 +6,7 @@ pub fn applicationOptions() !rr.Options {
 }
 
 pub fn controlOptions() !rr.Options {
-    var result: rr.Options = .{ .protocols = .control, .routes = .control, .report_non_completion = false, .outbound_max = 2, .serving_max = 0, .serving_per_group_max = 0, .inbound_per_connection_max = 8, .forks = &.{}, .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 2) };
+    var result: rr.Options = .{ .protocols = .control, .routes = .control, .report_non_completion = false, .outbound_max = 2, .serving_max = 0, .serving_per_source_max = 0, .inbound_per_connection_max = 8, .forks = &.{}, .admission = try rr.Options.Admission.defaults(&policy_fixture.config(), 2) };
     result.admission.scope = .peer;
     return result;
 }

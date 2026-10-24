@@ -147,8 +147,8 @@ test "configuration resolves shared capacities from their owners" {
     try std.testing.expectEqual(@as(u8, 8), beacon.core.protocols.reqresp.inbound_per_connection_max);
     try std.testing.expectEqual(@as(u16, 20), beacon.core.protocols.router.inbound_per_connection_max);
     try std.testing.expectEqual(@as(u8, 1), control.outbound_per_connection_max);
-    try std.testing.expectEqual(@as(u8, 0), control.serving_per_group_max);
-    try std.testing.expectEqual(@as(u8, 4), beacon.core.protocols.reqresp.serving_per_group_max);
+    try std.testing.expectEqual(@as(u8, 0), control.serving_per_source_max);
+    try std.testing.expectEqual(@as(u8, 4), beacon.core.protocols.reqresp.serving_per_source_max);
     try std.testing.expectEqual(beacon.limits.connections_max, control.connections);
     inline for (.{ "reqresp", "control_reqresp" }) |field| {
         const starts = @field(beacon.core.protocols, field).admission.limits.starts;
