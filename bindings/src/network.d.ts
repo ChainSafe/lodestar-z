@@ -299,7 +299,12 @@ export interface NativeRequestOptions {
   negotiationTimeoutMs?: number;
   /** Integer milliseconds, 1..60000. Default: 5000. */
   requestTimeoutMs?: number;
-  /** Integer milliseconds, 1..60000. Default: 10000. */
+  /**
+   * Absolute response lifetime including host holds. Integer milliseconds, 1..60000. Default: 60000.
+   * Transfer starts with 10000 ms of credit. Each completed successful chunk earns 1000 ms per MiB
+   * of decoded payload, capped at 10000 ms of remaining credit and this absolute limit.
+   * Host holds pause transfer credit; partial chunks earn nothing.
+   */
   responseTimeoutMs?: number;
 }
 export interface NativeResponseChunk {

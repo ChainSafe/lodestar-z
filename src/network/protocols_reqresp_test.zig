@@ -617,7 +617,7 @@ test "protocol stack reqresp retains request and chunk bytes through control pro
     try std.testing.expect(client.reqresp.outbound[app.index].request.pendingEvent() != null);
     try std.testing.expectEqualSlices(u8, &block, sink[0..block.len]);
     try std.testing.expectEqual(
-        pair.now.millis() + 10_000,
+        pair.now.millis() + 60_000,
         schedule_test_support.wakeupMilliseconds(client.reqresp.schedule(0), pair.now.millis()),
     );
     try std.testing.expectEqual(

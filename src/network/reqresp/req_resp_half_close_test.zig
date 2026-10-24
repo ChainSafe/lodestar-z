@@ -316,7 +316,7 @@ test "reqresp half close still reports peer errors malformed responses and respo
     }
 }
 
-test "reqresp half close without a response retains the absolute response deadline" {
+test "reqresp half close without a response retains the transfer deadline" {
     for ([_]u64{ 100, 10_000 }) |duration| {
         var pair: Pair = .{};
         try pair.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});

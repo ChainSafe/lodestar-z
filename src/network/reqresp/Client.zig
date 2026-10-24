@@ -15,6 +15,7 @@ const RequestOptions = ReqResp.RequestOptions;
 const RequestState = @import("RequestState.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const index_list = @import("../index_list.zig");
+const ResponseBudget = @import("response_budget.zig").Budget;
 
 const Event = ReqResp.Event;
 const Failure = ReqResp.Failure;
@@ -26,6 +27,7 @@ request: RequestState = .{},
 phase: ReqResp.RequestPhase = .negotiation,
 timeouts: ReqResp.RequestOptions.Timeouts = .{},
 phase_deadline_ms: u64 = 0,
+response_budget: ResponseBudget = undefined,
 identity: PeerId = undefined,
 protocol_chunks_max: u32 = 1,
 host_hold_started_ms: ?u64 = null,
@@ -46,7 +48,12 @@ fn failStream(self: *Client, owner: *ReqResp, engine: *Engine, router: *Router, 
 }
 
 pub fn deadline(self: *const Client) ?u64 {
-    return if (self.request.running()) self.phase_deadline_ms else null;
+    if (!self.request.running()) return null;
+    if (self.phase != .response) return self.phase_deadline_ms;
+    return if (self.request.waitingHost())
+        self.response_budget.limit_ms
+    else
+        self.response_budget.deadline_ms;
 }
 
 pub fn advance(self: *Client, ctx: *ReqResp, engine: *Engine, router: *Router, index: u16, now: Now) void {
@@ -57,7 +64,9 @@ pub fn advance(self: *Client, ctx: *ReqResp, engine: *Engine, router: *Router, i
             .host_timeout
         else
             .timeout;
+        // Completed progress reaching the absolute limit is local capacity policy.
         if (reason == .timeout and self.phase == .response and ctx.options.report_non_completion and
+            (request.chunks == 0 or now.millis() < self.response_budget.limit_ms) and
             self.host_held_ms == 0 and !request.io.unread(engine, request.stream))
             request.peer_fault = .non_completion;
         self.fail(ctx, engine, router, index, reason, now);
@@ -92,7 +101,7 @@ fn sendRequest(owner: *ReqResp, engine: *Engine, router: *Router, slot: *Client,
     request.io.payload = &.{};
     request.io.writer = undefined;
     slot.phase = .response;
-    slot.phase_deadline_ms = now.deadlineMilliseconds(slot.timeouts.response);
+    slot.response_budget = ResponseBudget.init(&now, slot.timeouts.response);
     slot.resetResponseDecoder(owner);
     // Response bytes may have arrived while the request was still being written.
     owner.markReady(.outbound, index);
@@ -201,6 +210,7 @@ fn completeChunk(
         };
     }
     request.chunks += 1;
+    slot.response_budget.credit(payload.len, &now);
     slot.host_hold_started_ms = now.millis();
     request.queue(.{ .chunk = .{
         .request = request.handle(index),
@@ -292,13 +302,20 @@ pub fn negotiated(slot: *Client, owner: *ReqResp, engine: *Engine, router: *Rout
 pub fn consume(slot: *Client, owner: *ReqResp, engine: *Engine, router: *Router, index: u16, now: Now) bool {
     const request = &slot.request;
     if (!request.consume()) return false;
+    var held_ms: u64 = 0;
     if (slot.host_hold_started_ms) |since| {
         assert(now.millis() >= since);
-        slot.host_held_ms +|= now.millis() - since;
+        held_ms = now.millis() - since;
+        slot.host_held_ms +|= held_ms;
         slot.host_hold_started_ms = null;
     }
     if (!request.running()) return true;
     assert(slot.phase == .response);
+    if (now.millis() >= slot.response_budget.limit_ms) {
+        slot.fail(owner, engine, router, index, .host_timeout, now);
+        return true;
+    }
+    slot.response_budget.excludeHostTime(held_ms);
     if (request.chunks >= request.chunks_max) {
         const done = Event{ .done = .{ .request = request.handle(index), .chunks = request.chunks } };
         slot.complete(owner, engine, router, index, done, now);

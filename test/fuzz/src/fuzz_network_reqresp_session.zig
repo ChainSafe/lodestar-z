@@ -107,7 +107,10 @@ const State = struct {
         const timeouts: ReqResp.RequestOptions.Timeouts = .{
             .negotiation = .fromMilliseconds(100 + @as(i64, arg) * 4),
             .request = .fromMilliseconds(100 + @as(i64, arg) * 4),
-            .response = .fromMilliseconds(200 + @as(i64, arg) * 8),
+            .response = if (arg & 0x80 != 0)
+                (ReqResp.RequestOptions.Timeouts{}).response
+            else
+                .fromMilliseconds(200 + @as(i64, arg) * 8),
         };
         const handle = try owner(.client, which).request(engineOf(.client), &endpoint(.client).router, pair.shared.handles.client, which, bytes, sink(sink_index), .{ .timeouts = timeouts }, pair.shared.pair.now);
         self.outstanding[self.outstanding_len] = .{ .handle = handle, .which = which, .sink = sink_index };

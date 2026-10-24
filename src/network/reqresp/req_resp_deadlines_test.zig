@@ -362,7 +362,7 @@ test "reqresp absolute response includes paused host time without renewing at ch
     }
 }
 
-test "reqresp absolute response expires despite continuous wire progress" {
+test "reqresp partial response bytes cannot renew the completion deadline" {
     for ([_]u64{ 100, 10_000 }) |duration| {
         var setup: Pair = .{};
         try setup.init(.{}, .{});
@@ -459,4 +459,246 @@ test "reqresp serving expires across progressing chunks without blaming host wor
     try std.testing.expect(setup.serverEvents()[0].peerFault() == null);
     for (0..3) |_| try setup.pumpOnce();
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
+}
+
+fn receiveResponseChunk(setup: *Pair) !void {
+    for (0..256) |_| {
+        try setup.pumpOnce();
+        for (setup.clientEvents()) |event| if (event == .chunk) return;
+    }
+    return error.MissingChunk;
+}
+
+test "reqresp completed chunks extend credit but partial responses cannot renew it" {
+    var setup: Pair = .{};
+    try setup.init(.{}, .{});
+    defer setup.deinit();
+    const which = Protocol.blocks_by_root_v2;
+    const sink = try std.testing.allocator.alloc(u8, which.info().response_max);
+    defer std.testing.allocator.free(sink);
+    const roots: [64]u8 = @splat(0);
+    const handle = try setup.shared.client.reqresp.request(
+        &setup.shared.pair.client,
+        &setup.shared.client.router,
+        setup.shared.handles.client,
+        which,
+        &roots,
+        sink,
+        .{},
+        setup.shared.pair.now,
+    );
+    try waitForRequest(&setup);
+    const incoming = setup.serverEvents()[0].request.request;
+    const stream = setup.shared.server.reqresp.inbound[incoming.index].request.stream;
+    const client = &setup.shared.client.reqresp.outbound[handle.index];
+    const initial = client.deadline().?;
+    const payload: [128 * 1024]u8 = @splat(7);
+    const wire = try std.testing.allocator.alloc(u8, codec.encodedLengthMax(payload.len));
+    defer std.testing.allocator.free(wire);
+    const encoded = try codec.encodeChunk(0, deneb_digest, &payload, wire);
+    setup.shared.pair.now.monotonic = time.milliseconds(initial - 2_000);
+    const partial = encoded[0 .. encoded.len - 1];
+    try std.testing.expectEqual(partial.len, try setup.shared.pair.server.write(stream, partial, false));
+    for (0..4) |_| try setup.pumpOnce();
+    try std.testing.expectEqual(@as(u32, 0), client.request.chunks);
+    try std.testing.expectEqual(@as(?u64, initial), client.deadline());
+    try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.server.write(
+        stream,
+        encoded[encoded.len - 1 ..],
+        false,
+    ));
+    try receiveResponseChunk(&setup);
+    try std.testing.expectEqual(initial + 125, client.response_budget.deadline_ms);
+    try std.testing.expect(setup.shared.client.reqresp.consume(
+        &setup.shared.pair.client,
+        &setup.shared.client.router,
+        handle,
+        setup.shared.pair.now,
+    ));
+    try std.testing.expectEqual(@as(?u64, initial + 125), client.deadline());
+    var events: [1]Event = undefined;
+    setup.shared.pair.now.monotonic = time.milliseconds(initial + 1);
+    try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(
+        &setup.shared.pair.client,
+        &setup.shared.client.router,
+        setup.shared.pair.now,
+        &events,
+    ));
+    setup.shared.pair.now.monotonic = time.milliseconds(initial + 125);
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(
+        &setup.shared.pair.client,
+        &setup.shared.client.router,
+        setup.shared.pair.now,
+        &events,
+    ));
+    try std.testing.expectEqual(.timeout, events[0].failed.reason);
+    try std.testing.expectEqual(.non_completion, events[0].peerFault().?.kind);
+}
+
+test "reqresp host holds pause chunk credit and late consumption cannot revive a request" {
+    for ([_]bool{ false, true }) |late| {
+        var setup: Pair = .{};
+        try setup.init(.{}, .{});
+        defer setup.deinit();
+        const which = Protocol.blocks_by_root_v2;
+        const sink = try std.testing.allocator.alloc(u8, which.info().response_max);
+        defer std.testing.allocator.free(sink);
+        const roots: [64]u8 = @splat(0);
+        const handle = try setup.shared.client.reqresp.request(
+            &setup.shared.pair.client,
+            &setup.shared.client.router,
+            setup.shared.handles.client,
+            which,
+            &roots,
+            sink,
+            .{},
+            setup.shared.pair.now,
+        );
+        try waitForRequest(&setup);
+        const incoming = setup.serverEvents()[0].request.request;
+        try setup.shared.server.reqresp.respond(
+            incoming,
+            &(@as([4000]u8, @splat(7))),
+            .{ .digest = deneb_digest, .fork = .deneb },
+            setup.shared.pair.now,
+        );
+        try receiveResponseChunk(&setup);
+        const client = &setup.shared.client.reqresp.outbound[handle.index];
+        const due = client.response_budget.deadline_ms;
+        const held_at = client.host_hold_started_ms.?;
+        const limit = client.response_budget.limit_ms;
+        try std.testing.expectEqual(@as(?u64, limit), client.deadline());
+        setup.shared.pair.now.monotonic = time.milliseconds(if (late) limit else held_at + 15_000);
+        try std.testing.expect(setup.shared.client.reqresp.consume(
+            &setup.shared.pair.client,
+            &setup.shared.client.router,
+            handle,
+            setup.shared.pair.now,
+        ));
+        if (!late) {
+            try std.testing.expectEqual(@as(?u64, due + 15_000), client.deadline());
+            try std.testing.expectEqual(limit, client.response_budget.limit_ms);
+            setup.shared.pair.now.monotonic = time.milliseconds(due + 15_000);
+        }
+        var events: [1]Event = undefined;
+        try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(
+            &setup.shared.pair.client,
+            &setup.shared.client.router,
+            setup.shared.pair.now,
+            &events,
+        ));
+        try std.testing.expectEqual(if (late) std.meta.Tag(reqresp.Failure).host_timeout else .timeout, std.meta.activeTag(events[0].failed.reason));
+        try std.testing.expect(events[0].peerFault() == null);
+    }
+}
+
+test "reqresp progressing chunks reach the absolute limit without a peer fault" {
+    var setup: Pair = .{};
+    try setup.init(.{}, .{});
+    defer setup.deinit();
+    const which = Protocol.blocks_by_root_v2;
+    const sink = try std.testing.allocator.alloc(u8, which.info().response_max);
+    defer std.testing.allocator.free(sink);
+    const payload = try std.testing.allocator.alloc(u8, 9 * 1024 * 1024);
+    defer std.testing.allocator.free(payload);
+    @memset(payload, 7);
+    const roots: [96]u8 = @splat(0);
+    const handle = try setup.shared.client.reqresp.request(
+        &setup.shared.pair.client,
+        &setup.shared.client.router,
+        setup.shared.handles.client,
+        which,
+        &roots,
+        sink,
+        .{ .timeouts = .{ .response = .fromSeconds(20) } },
+        setup.shared.pair.now,
+    );
+    try waitForRequest(&setup);
+    const incoming = setup.serverEvents()[0].request.request;
+    const client = &setup.shared.client.reqresp.outbound[handle.index];
+    const limit = client.response_budget.limit_ms;
+    for ([_]u64{ limit - 11_000, limit - 2_000 }) |at| {
+        setup.shared.pair.now.monotonic = time.milliseconds(at);
+        try setup.shared.server.reqresp.respond(
+            incoming,
+            payload,
+            .{ .digest = deneb_digest, .fork = .deneb },
+            setup.shared.pair.now,
+        );
+        try receiveResponseChunk(&setup);
+        try std.testing.expect(setup.shared.client.reqresp.consume(
+            &setup.shared.pair.client,
+            &setup.shared.client.router,
+            handle,
+            setup.shared.pair.now,
+        ));
+    }
+    try std.testing.expectEqual(@as(u32, 2), client.request.chunks);
+    try std.testing.expectEqual(@as(u64, 0), client.host_held_ms);
+    try std.testing.expectEqual(@as(?u64, limit), client.deadline());
+    setup.shared.pair.now.monotonic = time.milliseconds(limit);
+    var events: [1]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(
+        &setup.shared.pair.client,
+        &setup.shared.client.router,
+        setup.shared.pair.now,
+        &events,
+    ));
+    try std.testing.expectEqual(.timeout, events[0].failed.reason);
+    try std.testing.expect(events[0].peerFault() == null);
+}
+
+test "reqresp rejected response chunks cannot earn time credit" {
+    const Case = enum { peer_error, excess_chunk, corrupt };
+    for (std.enums.values(Case)) |case| {
+        var setup: Pair = .{};
+        try setup.init(.{}, .{});
+        defer setup.deinit();
+        const which = Protocol.blocks_by_root_v2;
+        const sink = try std.testing.allocator.alloc(u8, which.info().response_max);
+        defer std.testing.allocator.free(sink);
+        const roots: [32]u8 = @splat(0);
+        const handle = try setup.shared.client.reqresp.request(
+            &setup.shared.pair.client,
+            &setup.shared.client.router,
+            setup.shared.handles.client,
+            which,
+            &roots,
+            sink,
+            .{ .expected_chunks = if (case == .excess_chunk) 0 else null },
+            setup.shared.pair.now,
+        );
+        try waitForRequest(&setup);
+        const incoming = setup.serverEvents()[0].request.request;
+        const stream = setup.shared.server.reqresp.inbound[incoming.index].request.stream;
+        const client = &setup.shared.client.reqresp.outbound[handle.index];
+        const before = client.response_budget;
+        setup.shared.pair.now.monotonic = time.milliseconds(before.deadline_ms - 100);
+        const payload: [4000]u8 = @splat(7);
+        var wire: [codec.frame_scratch_max]u8 = undefined;
+        const encoded = try codec.encodeChunk(
+            if (case == .peer_error) 2 else 0,
+            if (case == .peer_error) null else deneb_digest,
+            if (case == .peer_error) "oops" else &payload,
+            &wire,
+        );
+        if (case == .corrupt) {
+            const identifier = std.mem.find(u8, encoded, &codec.identifier).?;
+            wire[identifier + codec.identifier.len + codec.frame_header_length] ^= 1;
+        }
+        try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
+        var failure: ?reqresp.Failure = null;
+        for (0..40) |_| {
+            try setup.pumpOnce();
+            failure = firstFailure(setup.clientEvents());
+            if (failure != null) break;
+        }
+        const expected: std.meta.Tag(reqresp.Failure) = switch (case) {
+            .peer_error => .peer_error,
+            .excess_chunk => .too_many_chunks,
+            .corrupt => .invalid_response,
+        };
+        try std.testing.expectEqual(expected, std.meta.activeTag(failure orelse return error.MissingFailure));
+        try std.testing.expectEqualDeep(before, client.response_budget);
+    }
 }

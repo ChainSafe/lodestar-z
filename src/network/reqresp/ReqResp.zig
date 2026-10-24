@@ -66,7 +66,8 @@ pub const RequestOptions = struct {
     pub const Timeouts = struct {
         negotiation: std.Io.Duration = .fromMilliseconds(5_000),
         request: std.Io.Duration = .fromMilliseconds(5_000),
-        response: std.Io.Duration = .fromMilliseconds(10_000),
+        /// Absolute response lifetime, including chunk credit and host holds.
+        response: std.Io.Duration = .fromMilliseconds(60_000),
     };
 };
 
