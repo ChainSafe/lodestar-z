@@ -36,6 +36,10 @@ const responses_max: usize = types.findnode_response_packets_max + 1;
 const packet_max = constants.packet_size_max;
 const payload_max = 1_200;
 const time_start: u64 = 1_000;
+/// Signature verifications and handshakes dominate an input's cost, several milliseconds each
+/// under coverage instrumentation, so an input ends once it has caused this many. The slowest
+/// recorded input then runs in about 1.5 s against a 5 s campaign timeout.
+const crypto_budget = 128;
 const allocator = std.heap.page_allocator;
 
 /// Engine 0 is the node under test; the others are real peers that complete handshakes with it.
@@ -66,6 +70,7 @@ var pool: [pool_max]enr.Record = undefined;
 var pattern: [payload_max]u8 = undefined;
 var now: u64 = time_start;
 var seed_counter: u32 = 0;
+var crypto_used: usize = 0;
 
 const Datagram = struct {
     to: u8,
@@ -254,6 +259,7 @@ fn deliver(datagram: *const Datagram, seed: u8) void {
         .rejected => return,
     };
     if (accepted.packet_length > 0) {
+        crypto_used += 3;
         const sent = if (engineAt(datagram.from)) |to| link.push(to, address(index), out[0..accepted.packet_length]) else false;
         if (!sent) if (accepted.call) |handle| {
             const failed = engines[index].failCall(handle, error.HandshakeUnsent);
@@ -263,8 +269,12 @@ fn deliver(datagram: *const Datagram, seed: u8) void {
     }
     switch (accepted.event) {
         .none => {},
-        .request => |*request| respond(index, request, seed),
+        .request => |*request| {
+            if (request.record != null) crypto_used += 3;
+            respond(index, request, seed);
+        },
         .response => |response| {
+            crypto_used += response.node_records.len;
             if (response.matched.terminal) removeHandle(index, response.matched.handle);
             for (response.node_records) |*record| {
                 const peer = poolEndpoint(record) orelse continue;
@@ -321,6 +331,7 @@ fn setup() !void {
     for (&pattern, 0..) |*byte, i| byte.* = @truncate(i *% 29);
     now = time_start;
     seed_counter = 0;
+    crypto_used = 0;
     link = .{};
     held = @splat(.{});
     pending_talk = @splat(null);
@@ -373,10 +384,11 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
 }
 
 fn run(input: []const u8) void {
+    crypto_used = 0;
     var cursor = Cursor{ .bytes = input };
     var steps: usize = 0;
     while (cursor.next()) |op| : (steps += 1) {
-        if (steps == steps_max) break;
+        if (steps == steps_max or crypto_used >= crypto_budget) break;
         const arg = cursor.byte();
         trace = .{ .step = steps, .op = op % 14, .arg = arg };
         const remote: u8 = 1 + arg % remotes_max;
@@ -432,6 +444,7 @@ fn run(input: []const u8) void {
                 var raw: [responses_max][]const u8 = undefined;
                 const count = @as(usize, cursor.byte()) % raw.len;
                 for (raw[0..count], 0..) |*bytes, i| bytes.* = pool[(arg + i) % pool_max].slice();
+                if (arg & 8 == 8) crypto_used += count;
                 const response: message.Message = if (arg & 8 == 8)
                     .{ .nodes = .{ .request_id = talk.request_id, .total = cursor.byte(), .enrs = raw[0..count] } }
                 else
