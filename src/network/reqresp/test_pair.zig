@@ -134,10 +134,10 @@ const TransportPair = struct {
         self.handles = .{ .client = handles.client, .server = handles.server };
         const client_endpoint = self.pair.client.peerAddress(handles.client).?;
         const server_endpoint = self.pair.server.peerAddress(handles.server).?;
-        self.client.reqresp.connectionOpened(handles.client, &client_endpoint, self.pair.now);
-        self.client.control_reqresp.connectionOpened(handles.client, &client_endpoint, self.pair.now);
-        self.server.reqresp.connectionOpened(handles.server, &server_endpoint, self.pair.now);
-        self.server.control_reqresp.connectionOpened(handles.server, &server_endpoint, self.pair.now);
+        self.client.reqresp.connectionOpened(handles.client, &self.pair.client.peerId(handles.client).?, &client_endpoint, self.pair.now);
+        self.client.control_reqresp.connectionOpened(handles.client, &self.pair.client.peerId(handles.client).?, &client_endpoint, self.pair.now);
+        self.server.reqresp.connectionOpened(handles.server, &self.pair.server.peerId(handles.server).?, &server_endpoint, self.pair.now);
+        self.server.control_reqresp.connectionOpened(handles.server, &self.pair.server.peerId(handles.server).?, &server_endpoint, self.pair.now);
     }
 
     fn deinit(self: *TransportPair) void {
@@ -226,6 +226,7 @@ pub const Pair = struct {
         result.serving_max = 0;
         result.serving_per_group_max = 0;
         result.admission = overrides.admission orelse try reqresp.Options.Admission.defaults(&policy_fixture.config(), result.connections);
+        result.admission.scope = .peer;
         return result;
     }
 

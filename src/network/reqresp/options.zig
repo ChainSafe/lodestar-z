@@ -63,6 +63,8 @@ pub const Options = struct {
     };
 
     pub const Admission = struct {
+        /// Control peers need independent maintenance allowances even when colocated.
+        scope: std.meta.Tag(admission_mod.Key) = .address_group,
         policy: request_policy.Config,
         limits: quotas.Options,
 
@@ -72,6 +74,7 @@ pub const Options = struct {
     };
 
     pub fn validate(options: Options) Error!void {
+        if (options.admission.scope == .peer and options.protocols.bits & Protocol.Set.application.bits != 0) return error.InvalidOptions;
         if (options.protocols.len() == 0) return error.InvalidOptions;
         if (!std.meta.eql(options.routes, Routes.application) and !std.meta.eql(options.routes, Routes.control)) return error.InvalidOptions;
         _ = try request_policy.Policy.init(&options.admission.policy);

@@ -119,7 +119,7 @@ test "protocol stack stream capture contains application framing exactly once" {
 
 test "protocol stack reclaims inbound sinks across more requests than it has slots" {
     const admission: reqresp.Options.Admission = .{ .policy = policy_fixture.config(), .limits = .{
-        .group = admission_fixture.quotas(1_000, 1_000),
+        .source = admission_fixture.quotas(1_000, 1_000),
         .global = admission_fixture.quotas(1_000, 1_000),
     } };
     var setup: Pair = .{};

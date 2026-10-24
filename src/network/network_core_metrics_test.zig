@@ -305,7 +305,7 @@ test "metrics read owner counters exactly without consuming them" {
     node.protocols.control_reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing_closed = 1;
     node.protocols.reqresp.outgoing_error_reasons[@intFromEnum(ErrorReason.REQUEST_ERROR_DIAL_ERROR)] = 2;
     node.protocols.control_reqresp.outgoing_error_reasons[@intFromEnum(ErrorReason.REQUEST_ERROR_DIAL_TIMEOUT)] = 3;
-    node.protocols.control_reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].admission_refusals[@intFromEnum(AdmissionRefusal.group_quota)] = 2;
+    node.protocols.control_reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].admission_refusals[@intFromEnum(AdmissionRefusal.peer_quota)] = 2;
     node.protocols.control_reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].admission_refusals[@intFromEnum(AdmissionRefusal.global_quota)] = 3;
     node.protocols.control_reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].admission_refusals[@intFromEnum(AdmissionRefusal.connection_capacity)] = 7;
     node.protocols.control_reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing_time.observe(100);

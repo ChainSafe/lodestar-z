@@ -30,6 +30,7 @@ pub const Pair = struct {
         server_options.topic_policy = if (server.topic_policy.len > 0) server.topic_policy else topics;
         var control = reqresp;
         control.protocols = .control;
+        control.admission.scope = .peer;
         control.routes = .control;
         control.report_non_completion = false;
         try self.shared.initWindow(.{ .reqresp = reqresp, .control_reqresp = control, .gossipsub = client_options, .router = .{ .negotiations_max = 8 } }, .{ .reqresp = reqresp, .control_reqresp = control, .gossipsub = server_options, .router = .{ .negotiations_max = 8 } }, stream_window);

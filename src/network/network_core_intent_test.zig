@@ -408,7 +408,7 @@ test "core capabilities activation commits fork BPO and copied directional value
     opts.startup.local.metadata.custody_group_count = 1;
     const quotas = admission_fixture.quotas(2048, 1000);
 
-    opts.resolved.core.protocols.reqresp.admission = .{ .policy = policy_fixture.config(), .limits = .{ .group = quotas, .global = quotas } };
+    opts.resolved.core.protocols.reqresp.admission = .{ .policy = policy_fixture.config(), .limits = .{ .source = quotas, .global = quotas } };
     opts.resolved.core.protocols.router.capabilities = try caps.forFork(.phase0, true, &.{ .v1_2, .v1_1 });
     opts.resolved.core.protocols.reqresp.forks = &.{
         .{ .digest = @splat(0), .fork = .phase0 },
@@ -421,7 +421,7 @@ test "core capabilities activation commits fork BPO and copied directional value
     try node.init(backing_node.allocator(), std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const admission = &node.protocols.reqresp.admission.limiter;
-    const source = admission.retain(.{ .ip4 = .{ 192, 0, 2 } }, node.last_now.millis());
+    const source = admission.retain(&.{ .address_group = .{ .ip4 = .{ 192, 0, 2 } } }, node.last_now.millis());
     defer admission.release(source);
     try std.testing.expectEqual(.allowed, admission.start(source, node.last_now.millis()));
     try std.testing.expectEqual(.allowed, admission.take(source, .blocks_by_root_v2, 1, .phase0, node.last_now.millis()));

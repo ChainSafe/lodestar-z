@@ -50,7 +50,7 @@ fn quiescenceRequest(mode: enum { fin, selection, delivered }) !void {
     var opts = resolvedOptions();
 
     const quotas = admission_fixture.quotas(1000, 1000);
-    opts.core.protocols.reqresp.admission = .{ .policy = policy_fixture.config(), .limits = .{ .group = quotas, .global = quotas } };
+    opts.core.protocols.reqresp.admission = .{ .policy = policy_fixture.config(), .limits = .{ .source = quotas, .global = quotas } };
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();
     _ = try setup.pair.dial();

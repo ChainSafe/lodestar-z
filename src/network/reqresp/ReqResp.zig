@@ -229,7 +229,7 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
     try options.validate();
     const policy = try request_policy.Policy.init(&options.admission.policy);
     const receive = ReceiveLayout.init(&policy, options.protocols);
-    var admission = try InboundAdmission.init(allocator, options.admission.limits, options.connections, options.protocols, receive.slots_per_connection);
+    var admission = try InboundAdmission.init(allocator, options.admission.limits, options.connections, options.protocols, receive.slots_per_connection, options.admission.scope);
     errdefer admission.deinit(allocator);
 
     const outbound = try allocator.alloc(Client, options.outbound_max);
@@ -564,13 +564,13 @@ pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *Router, conn: Ha
     return null;
 }
 
-/// Retains the observed transport endpoint's group until connectionClosed, including path changes.
-pub fn connectionOpened(self: *ReqResp, conn: Handle, endpoint: *const @import("udp").Address, now: Now) void {
+/// Retains the configured peer or address-group account until connectionClosed, including path changes.
+pub fn connectionOpened(self: *ReqResp, conn: Handle, identity: *const PeerId, endpoint: *const @import("udp").Address, now: Now) void {
     assert(conn.index < self.options.connections);
-    self.admission.connected(conn, endpoint, now.millis());
+    self.admission.connected(conn, identity, endpoint, now.millis());
 }
 
-/// Fails the connection's slots and releases its group reservation, retaining quota usage.
+/// Fails the connection's slots and releases its source reservation, retaining quota usage.
 pub fn connectionClosed(self: *ReqResp, engine: *Engine, router: *Router, conn: Handle, now: Now) void {
     if (conn.index >= self.options.connections) return;
     defer self.admission.disconnected(conn);

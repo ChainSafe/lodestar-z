@@ -29,6 +29,14 @@ fn rrOptions() !protocols_mod.Protocols.Options {
     } };
 }
 
+test "protocol stack requires independent control peer quotas" {
+    var options = try rrOptions();
+    options.gossipsub.topic_policy = &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })};
+    try protocols_mod.Protocols.validateOptions(options);
+    options.control_reqresp.admission.scope = .address_group;
+    try std.testing.expectError(error.InvalidOptions, protocols_mod.Protocols.validateOptions(options));
+}
+
 test "protocol stack composes simultaneous ping and meshsub on one connection" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
@@ -220,7 +228,7 @@ test "protocol stack capabilities activation preserves negotiated response conte
     const options: harness.Overrides = .{
         .forks = &.{context},
 
-        .admission = .{ .policy = policy_fixture.config(), .limits = .{ .group = limits, .global = limits } },
+        .admission = .{ .policy = policy_fixture.config(), .limits = .{ .source = limits, .global = limits } },
     };
     try setup.init(options, options);
     defer setup.deinit();

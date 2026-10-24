@@ -143,7 +143,7 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
         .serving_max = 2,
-        .admission = .{ .policy = policy(), .limits = .{ .group = quotas, .global = quotas } },
+        .admission = .{ .policy = policy(), .limits = .{ .source = quotas, .global = quotas } },
     });
     defer setup.deinit();
     for ([_]Protocol{ .blocks_by_root_v2, .blocks_by_root_v2, .ping_v1 }, 0..) |which, peer| {
@@ -157,8 +157,8 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
         slot.progress_ms = setup.shared.pair.now.millis();
         const conn: types.Handle = .{ .index = @intCast(peer), .generation = std.math.maxInt(u32) };
         const endpoint: @import("udp").Address = .{ .ip4 = .{ .octets = .{ 192, 0, @intCast(peer), 1 }, .port = 1 } };
-        owner.admission.connected(conn, &endpoint, setup.shared.pair.now.millis());
-        try std.testing.expectEqual(.allowed, owner.admission.limiter.start(owner.admission.group(conn), setup.shared.pair.now.millis()));
+        owner.admission.connected(conn, &.{ .bytes = @splat(1) }, &endpoint, setup.shared.pair.now.millis());
+        try std.testing.expectEqual(.allowed, owner.admission.limiter.start(owner.admission.sourceRow(conn), setup.shared.pair.now.millis()));
         slot.request = .{
             .direction = .inbound,
             .generation = 1,
@@ -171,7 +171,7 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
     const owner = &setup.shared.server.reqresp;
     const controls = &setup.shared.server.control_reqresp;
     const heavy = &owner.inbound[owner.receive_layout.first(0, .blocks_by_root_v2)];
-    try std.testing.expectEqual(.allowed, owner.admission.limiter.take(owner.admission.group(heavy.request.conn), .blocks_by_root_v2, 4, .fulu, setup.shared.pair.now.millis()));
+    try std.testing.expectEqual(.allowed, owner.admission.limiter.take(owner.admission.sourceRow(heavy.request.conn), .blocks_by_root_v2, 4, .fulu, setup.shared.pair.now.millis()));
     var application_events: [4]rr.Event = undefined;
     var control_events: [4]rr.Event = undefined;
     setup.shared.pair.advance(250);
@@ -197,7 +197,7 @@ test "reqresp admission lifecycle a fresh burst starts full requests before spli
     try setup.init(.{}, .{
         .serving_max = 2,
         .admission = .{ .policy = policy(), .limits = .{
-            .group = admission_fixture.quotas(4, 1000),
+            .source = admission_fixture.quotas(4, 1000),
             .global = admission_fixture.quotas(8, 1000),
         } },
     });
@@ -213,8 +213,8 @@ test "reqresp admission lifecycle a fresh burst starts full requests before spli
         slot.progress_ms = setup.shared.pair.now.millis();
         const conn: types.Handle = .{ .index = @intCast(peer), .generation = std.math.maxInt(u32) };
         const endpoint: @import("udp").Address = .{ .ip4 = .{ .octets = .{ 192, 0, @intCast(peer), 1 }, .port = 1 } };
-        owner.admission.connected(conn, &endpoint, setup.shared.pair.now.millis());
-        try std.testing.expectEqual(.allowed, owner.admission.limiter.start(owner.admission.group(conn), setup.shared.pair.now.millis()));
+        owner.admission.connected(conn, &.{ .bytes = @splat(1) }, &endpoint, setup.shared.pair.now.millis());
+        try std.testing.expectEqual(.allowed, owner.admission.limiter.start(owner.admission.sourceRow(conn), setup.shared.pair.now.millis()));
         slot.request = .{
             .direction = .inbound,
             .generation = 1,
@@ -327,7 +327,7 @@ test "reqresp exhausts outbound slots and per-connection inbound slots" {
 test "reqresp request admission host capacity cancellation and queued cancellation retain debt" {
     var setup: Pair = .{};
     try setup.init(.{}, .{
-        .admission = .{ .policy = policy(), .limits = .{ .group = admission_fixture.quotas(1, 86_400_000), .global_starts = .{ .tokens = 40, .period_ms = 86_400_000 }, .global = admission_fixture.quotas(100, 86_400_000) } },
+        .admission = .{ .policy = policy(), .limits = .{ .source = admission_fixture.quotas(1, 86_400_000), .global_starts = .{ .tokens = 40, .period_ms = 86_400_000 }, .global = admission_fixture.quotas(100, 86_400_000) } },
     });
     defer setup.deinit();
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);

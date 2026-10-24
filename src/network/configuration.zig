@@ -125,7 +125,7 @@ pub fn resolve(options: Options) !Resolved {
         requests.outbound_max = @min(maximum, requests.outbound_max);
     }
     requests.admission = try rr.Options.Admission.defaults(&options.admission_policy, @max(1, requests.serving_max / 4));
-    const control_requests: rr.Options = .{
+    var control_requests: rr.Options = .{
         .forks = options.forks,
         .connections = limits.connections_max,
         .protocols = .control,
@@ -142,6 +142,7 @@ pub fn resolve(options: Options) !Resolved {
         .work_per_pump_max = 32,
         .admission = try rr.Options.Admission.defaults(&options.admission_policy, peer_options.max_peers),
     };
+    control_requests.admission.scope = .peer;
     var identify: identify_mod.Handler.Options = .{ .inbound_max = 4, .outbound_max = 4 };
     applyOverrides(&identify, options.identify);
     var router_options: Router.Options = .{

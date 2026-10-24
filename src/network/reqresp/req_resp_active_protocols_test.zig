@@ -448,7 +448,7 @@ test "reqresp request admission empty success quota waiting malformed attempts a
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
         .request_fork = .fulu,
-        .admission = .{ .policy = policy_fixture(), .limits = .{ .group = admission_quotas(2, 86_400_000), .global_starts = .{ .tokens = 40, .period_ms = 86_400_000 }, .global = admission_quotas(100, 86_400_000) } },
+        .admission = .{ .policy = policy_fixture(), .limits = .{ .source = admission_quotas(2, 86_400_000), .global_starts = .{ .tokens = 40, .period_ms = 86_400_000 }, .global = admission_quotas(100, 86_400_000) } },
     });
     defer setup.deinit();
     try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
@@ -477,7 +477,7 @@ test "reqresp permits an empty contextual response below its payload minimum" {
     var policy = policy_fixture();
     policy.max_payload_size = 256;
     var setup: harness.Pair = .{};
-    const options: harness.Overrides = .{ .admission = .{ .policy = policy, .limits = .{ .group = admission_quotas(2, 1000), .global = admission_quotas(2, 1000) } } };
+    const options: harness.Overrides = .{ .admission = .{ .policy = policy, .limits = .{ .source = admission_quotas(2, 1000), .global = admission_quotas(2, 1000) } } };
     try setup.init(options, options);
     defer setup.deinit();
     try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{}, true, 0);
@@ -489,7 +489,7 @@ test "reqresp malformed requests without a paid group or global start cannot ret
         try setup.init(.{}, .{
             .request_fork = .fulu,
             .admission = .{ .policy = policy_fixture(), .limits = .{
-                .group = admission_quotas(1, 1000),
+                .source = admission_quotas(1, 1000),
                 .global = admission_quotas(100, 1000),
                 .starts = .{ .tokens = 1, .period_ms = 100 },
                 .global_starts = .{ .tokens = if (global_only) 1 else 2, .period_ms = 100 },
@@ -499,11 +499,11 @@ test "reqresp malformed requests without a paid group or global start cannot ret
         const owner = &setup.shared.server.reqresp;
         const limiter = &owner.admission.limiter;
         if (global_only) {
-            const stranger = limiter.retain(.{ .ip4 = .{ 192, 0, 2 } }, setup.shared.pair.now.millis());
+            const stranger = limiter.retain(&.{ .address_group = .{ .ip4 = .{ 192, 0, 2 } } }, setup.shared.pair.now.millis());
             try std.testing.expectEqual(.allowed, limiter.start(stranger, setup.shared.pair.now.millis()));
             limiter.release(stranger);
         } else try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
-        const source = owner.admission.group(setup.shared.handles.server);
+        const source = owner.admission.sourceRow(setup.shared.handles.server);
         const before = limiter.rows[source];
         const global_before = limiter.global_starts_ns;
         var bytes = [_]u8{0} ** 28;
@@ -521,7 +521,7 @@ test "reqresp request admission outbound validation ceiling and owner fork snaps
     var setup: harness.Pair = .{};
     const options: harness.Overrides = .{
         .request_fork = .phase0,
-        .admission = .{ .policy = policy_fixture(), .limits = .{ .group = admission_quotas(2048, 1000), .global = admission_quotas(2048, 1000) } },
+        .admission = .{ .policy = policy_fixture(), .limits = .{ .source = admission_quotas(2048, 1000), .global = admission_quotas(2048, 1000) } },
     };
     try setup.init(options, options);
     defer setup.deinit();
@@ -564,7 +564,7 @@ fn admissionAllocation(allocator: std.mem.Allocator) !void {
         .outbound_max = 1,
         .serving_max = 1,
 
-        .admission = .{ .policy = policy_fixture(), .limits = .{ .group = admission_quotas(2, 1000), .global = admission_quotas(100, 1000) } },
+        .admission = .{ .policy = policy_fixture(), .limits = .{ .source = admission_quotas(2, 1000), .global = admission_quotas(100, 1000) } },
     });
     defer owner.deinit();
     try std.testing.expectEqual(owner.admission.limiter.memoryPlan().allocated_bytes, owner.memoryPlan().admission_bytes);
@@ -578,7 +578,7 @@ test "reqresp request admission concurrent connections and reconnect retain full
     const support = @import("../quic/test_support.zig");
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
-        .admission = .{ .policy = policy_fixture(), .limits = .{ .group = admission_quotas(2, 86_400_000), .global_starts = .{ .tokens = 40, .period_ms = 86_400_000 }, .global = admission_quotas(100, 86_400_000) } },
+        .admission = .{ .policy = policy_fixture(), .limits = .{ .source = admission_quotas(2, 86_400_000), .global_starts = .{ .tokens = 40, .period_ms = 86_400_000 }, .global = admission_quotas(100, 86_400_000) } },
     });
     defer setup.deinit();
     try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
@@ -627,7 +627,7 @@ test "reqresp identity rotation preserves the address group's protocol usage" {
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
         .admission = .{ .policy = policy_fixture(), .limits = .{
-            .group = admission_quotas(1, 86_400_000),
+            .source = admission_quotas(1, 86_400_000),
             .global = admission_quotas(100, 86_400_000),
             .global_starts = .{ .tokens = 40, .period_ms = 86_400_000 },
         } },

@@ -106,7 +106,7 @@ test "reqresp recovers only complete Goodbye bytes retained by a closed authenti
     for ([_]bool{ false, true }) |truncated| for ([_]bool{ false, true }) |fin| {
         var pair: Pair = .{};
         const quotas = admission_fixture.quotas(100, 1000);
-        try pair.init(.{}, .{ .admission = .{ .policy = policy_fixture.config(), .limits = .{ .group = quotas, .global = quotas } } });
+        try pair.init(.{}, .{ .admission = .{ .policy = policy_fixture.config(), .limits = .{ .source = quotas, .global = quotas } } });
         defer pair.deinit();
         var payload: [8]u8 = undefined;
         std.mem.writeInt(u64, &payload, 129, .little);

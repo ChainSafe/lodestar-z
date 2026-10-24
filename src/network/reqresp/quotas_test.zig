@@ -41,7 +41,7 @@ test "reqresp quotas preserve every protocol rate across chain configurations an
             const era: usize = if (fork.gte(.electra)) 2 else if (fork.gte(.deneb)) 1 else 0;
             for (cases, 0..) |case, index| {
                 try std.testing.expectEqual(index, @intFromEnum(case.protocol));
-                const group = limits.group.get(case.protocol, fork);
+                const group = limits.source.get(case.protocol, fork);
                 const global = limits.global.get(case.protocol, fork);
                 try std.testing.expectEqual(case.tokens[era], group.tokens);
                 try std.testing.expectEqual(case.period_ms, group.period_ms);
@@ -62,9 +62,9 @@ test "reqresp quotas follow configured request bounds and scale the instance glo
     for ([_]u16{ 1, 2, 3, 8, 210 }) |scale| {
         const limits = try Options.defaults(&policy, scale);
         for (std.enums.values(config.ForkSeq)) |fork| {
-            try std.testing.expectEqual(@as(u32, if (fork.gte(.deneb)) 8 else 16), limits.group.get(.blocks_by_root_v2, fork).tokens);
-            try std.testing.expectEqual(@as(u32, 8), limits.group.get(.blocks_by_head_v1, fork).tokens);
-            try std.testing.expectEqual(@as(u32, if (fork.gte(.electra)) 48 else 24), limits.group.get(.blob_sidecars_by_root_v1, fork).tokens);
+            try std.testing.expectEqual(@as(u32, if (fork.gte(.deneb)) 8 else 16), limits.source.get(.blocks_by_root_v2, fork).tokens);
+            try std.testing.expectEqual(@as(u32, 8), limits.source.get(.blocks_by_head_v1, fork).tokens);
+            try std.testing.expectEqual(@as(u32, if (fork.gte(.electra)) 48 else 24), limits.source.get(.blob_sidecars_by_root_v1, fork).tokens);
             try std.testing.expectEqual(@as(u32, 96 * scale), limits.global.get(.data_column_sidecars_by_range_v1, fork).tokens);
             try std.testing.expectEqual(@as(u32, 2) * scale, limits.global.get(.ping_v1, fork).tokens);
         }

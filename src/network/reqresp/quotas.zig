@@ -29,7 +29,7 @@ pub const Rates = struct {
 };
 
 pub const Options = struct {
-    group: Rates,
+    source: Rates,
     global: Rates,
     /// Limits fixed per-request overhead independently of the requested blocks or columns.
     starts: Quota = .{ .tokens = Protocol.count * constants.MAX_CONCURRENT_REQUESTS, .period_ms = ten_seconds_ms },
@@ -38,16 +38,16 @@ pub const Options = struct {
     pub fn defaults(configuration: *const request_policy.Config, global_scale: u16) error{InvalidPolicy}!Options {
         if (global_scale == 0) return error.InvalidPolicy;
         const policy = try request_policy.Policy.init(configuration);
-        var result: Options = .{ .group = undefined, .global = undefined };
+        var result: Options = .{ .source = undefined, .global = undefined };
         result.global_starts = scaled(result.starts, global_scale);
-        for (&result.group.protocols, &result.global.protocols, 0..) |*group, *global, index| {
-            group.* = groupQuota(&policy, @enumFromInt(index), .fulu);
-            global.* = scaled(group.*, global_scale);
+        for (&result.source.protocols, &result.global.protocols, 0..) |*source, *global, index| {
+            source.* = sourceQuota(&policy, @enumFromInt(index), .fulu);
+            global.* = scaled(source.*, global_scale);
         }
-        result.group.blocks_pre_deneb = groupQuota(&policy, .blocks_by_root_v2, .phase0);
-        result.group.blobs_pre_electra = groupQuota(&policy, .blob_sidecars_by_root_v1, .deneb);
-        result.global.blocks_pre_deneb = scaled(result.group.blocks_pre_deneb, global_scale);
-        result.global.blobs_pre_electra = scaled(result.group.blobs_pre_electra, global_scale);
+        result.source.blocks_pre_deneb = sourceQuota(&policy, .blocks_by_root_v2, .phase0);
+        result.source.blobs_pre_electra = sourceQuota(&policy, .blob_sidecars_by_root_v1, .deneb);
+        result.global.blocks_pre_deneb = scaled(result.source.blocks_pre_deneb, global_scale);
+        result.global.blobs_pre_electra = scaled(result.source.blobs_pre_electra, global_scale);
         return result;
     }
 };
@@ -56,7 +56,7 @@ fn scaled(quota: Quota, scale: u16) Quota {
     return .{ .tokens = quota.tokens * @as(u32, scale), .period_ms = quota.period_ms };
 }
 
-fn groupQuota(policy: *const request_policy.Policy, which: Protocol, fork: ForkSeq) Quota {
+fn sourceQuota(policy: *const request_policy.Policy, which: Protocol, fork: ForkSeq) Quota {
     return switch (which) {
         .status_v1, .status_v2, .light_client_bootstrap_v1 => .{ .tokens = 5, .period_ms = 15_000 },
         .goodbye_v1 => .{ .tokens = 1, .period_ms = ten_seconds_ms },

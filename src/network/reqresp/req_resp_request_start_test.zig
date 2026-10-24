@@ -16,7 +16,7 @@ const refill_ms = 500;
 
 fn limits() rr.Options.Admission {
     return .{ .policy = policy(), .limits = .{
-        .group = quotas(100, 1000),
+        .source = quotas(100, 1000),
         .global = quotas(100, 1000),
         .starts = .{ .tokens = 2, .period_ms = 1000 },
     } };
@@ -256,7 +256,7 @@ test "reqresp request start a cancelled waiter leaves no start reserved" {
     const start = setup.shared.pair.now.millis();
     for (0..2) |_| _ = try request(&setup, .blocks_by_root_v2, sink);
     try exchange.pumps(20);
-    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(owner.admission.group(setup.shared.handles.server), start));
+    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(owner.admission.sourceRow(setup.shared.handles.server), start));
     var cancelled: [2]rr.RequestHandle = undefined;
     for (&cancelled) |*handle| handle.* = try request(&setup, .blocks_by_root_v2, sink);
     try exchange.pumps(20);
@@ -266,7 +266,7 @@ test "reqresp request start a cancelled waiter leaves no start reserved" {
     try std.testing.expectEqual(@as(usize, 2), exchange.server_failures);
     try std.testing.expectEqual(@as(u16, 0), owner.pendingCounts().inbound);
     try std.testing.expectEqual(@as(usize, 2), exchange.delivered_len);
-    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(owner.admission.group(setup.shared.handles.server), start));
+    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(owner.admission.sourceRow(setup.shared.handles.server), start));
     setup.shared.pair.advance(refill_ms);
     _ = try request(&setup, .blocks_by_root_v2, sink);
     try exchange.pumps(20);
@@ -310,7 +310,7 @@ test "reqresp request start shutdown cancels its waiters without charging them" 
     try std.testing.expectEqual(@as(u16, 0), owner.pendingCounts().inbound);
     try std.testing.expectEqual(@as(usize, 0), waitingStarts(owner) + waitingStarts(controls));
     try std.testing.expectEqual(@as(usize, 4), exchange.delivered_len);
-    for ([_]*rr{ owner, controls }) |instance| try std.testing.expectEqual(start + refill_ms, instance.admission.limiter.startAt(instance.admission.group(setup.shared.handles.server), start));
+    for ([_]*rr{ owner, controls }) |instance| try std.testing.expectEqual(start + refill_ms, instance.admission.limiter.startAt(instance.admission.sourceRow(setup.shared.handles.server), start));
 }
 
 test "reqresp request start preserves distinct protocol and connection capacity limits" {
@@ -330,7 +330,7 @@ test "reqresp request start preserves distinct protocol and connection capacity 
     for (0..2) |_| _ = try request(&setup, .blocks_by_root_v2, blocks);
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(usize, 2), waitingStarts(owner));
-    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(owner.admission.group(setup.shared.handles.server), start));
+    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(owner.admission.sourceRow(setup.shared.handles.server), start));
     _ = try setup.openRaw(.blocks_by_root_v2);
     try exchange.pumps(10);
     try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_root_v2, .protocol_concurrency));
@@ -341,7 +341,7 @@ test "reqresp request start preserves distinct protocol and connection capacity 
     try exchange.pumps(10);
     try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_range_v2, .connection_capacity));
     try std.testing.expectEqual(@as(u64, 2), allRefusals(owner));
-    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(owner.admission.group(setup.shared.handles.server), start));
+    try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(owner.admission.sourceRow(setup.shared.handles.server), start));
     try std.testing.expectEqual(@as(?rr.Failure, null), exchange.client_failure);
     try std.testing.expectEqual(@as(u16, 3), owner.pendingCounts().inbound);
 }
@@ -365,7 +365,7 @@ test "reqresp request start a slow waiter retains group accounting after debt ex
     try exchange.pumps(10);
     const waiter = try waiterAt(owner, start);
     setup.shared.pair.advance(2 * refill_ms);
-    const stranger = owner.admission.limiter.retain(.{ .ip4 = .{ 192, 0, 2 } }, setup.shared.pair.now.millis());
+    const stranger = owner.admission.limiter.retain(&.{ .address_group = .{ .ip4 = .{ 192, 0, 2 } } }, setup.shared.pair.now.millis());
     try std.testing.expectEqual(.allowed, owner.admission.limiter.start(stranger, setup.shared.pair.now.millis()));
     owner.admission.limiter.release(stranger);
     _ = try request(&setup, .blob_sidecars_by_root_v1, blobs);
@@ -387,8 +387,8 @@ test "reqresp request start a slow waiter retains group accounting after debt ex
 fn connectSource(owner: *rr, connection: u16, identity: *const PeerId, now_ms: u64) u16 {
     const conn: Handle = .{ .index = connection, .generation = std.math.maxInt(u32) };
     const endpoint: @import("udp").Address = .{ .ip4 = .{ .octets = .{ 192, 0, identity.bytes[0], 1 }, .port = 1 } };
-    owner.admission.connected(conn, &endpoint, now_ms);
-    return owner.admission.group(conn);
+    owner.admission.connected(conn, identity, &endpoint, now_ms);
+    return owner.admission.sourceRow(conn);
 }
 
 /// A `.ready` request on connection index `connection` whose start accept deferred.
@@ -460,7 +460,7 @@ test "reqresp request start a waiter that then waits for serving is charged its 
     for (0..2) |_| try std.testing.expectEqual(.allowed, limiter.start(source, start));
     // Retired but retained host work holds the group's only serving entry.
     const holder: rr.RequestHandle = .{ .index = 0, .generation = 1, .direction = .inbound };
-    const group = limiter.rows[source].group;
+    const group = limiter.rows[source].key.address_group;
     const entry = owner.serving.?.available(group).?;
     _ = owner.serving.?.acquire(entry, holder, group);
     const serving = owner.retainServing(holder) orelse return error.TestUnexpectedResult;

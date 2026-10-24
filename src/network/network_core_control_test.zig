@@ -19,7 +19,13 @@ const time = @import("time.zig");
 fn fillStartHistory(limiter: *@import("reqresp/admission.zig").Limiter, now: u64) void {
     for (0..limiter.options.global_starts.tokens) |index| {
         const group: @import("udp").AddressGroup = .{ .ip4 = .{ 198, @truncate(index >> 8), @truncate(index) } };
-        const row = limiter.retain(group, now);
+        var identity: @import("wire/peer_id.zig").PeerId = .{ .bytes = @splat(0) };
+        std.mem.writeInt(u32, identity.bytes[0..4], @intCast(index), .little);
+        const key: @import("reqresp/admission.zig").Key = if (limiter.protocols.bits == rr.Protocol.Set.control.bits)
+            .{ .peer = identity }
+        else
+            .{ .address_group = group };
+        const row = limiter.retain(&key, now);
         const result = limiter.start(row, now);
         limiter.release(row);
         if (result == .global_quota) break;
@@ -27,7 +33,7 @@ fn fillStartHistory(limiter: *@import("reqresp/admission.zig").Limiter, now: u64
     }
 }
 
-test "core peer admission keeps idle peers through group history churn" {
+test "core peer admission keeps idle peers through quota history churn" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -44,7 +50,7 @@ test "core peer admission keeps idle peers through group history churn" {
     try std.testing.expect(snapshots[0].relevant);
 }
 
-test "core peer admission survives exhausted group history and global starts in both directions" {
+test "core peer admission survives exhausted quota history and global starts in both directions" {
     for ([_]bool{ false, true }) |inbound| {
         var setup: Setup = .{};
         try setup.initOwners(&.{});
@@ -382,7 +388,7 @@ test "core stale metadata finishes one refresh while periodic Status and later c
         try std.testing.expectEqual(statuses + 1, setup.client.protocols.control_reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
         try std.testing.expectEqual(started + 1, setup.client.protocols.control_reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
         const requests = &setup.server.protocols.control_reqresp;
-        setup.pair.advance(requests.admission.limiter.options.group.get(.metadata_v1, requests.request_fork).period_ms);
+        setup.pair.advance(requests.admission.limiter.options.source.get(.metadata_v1, requests.request_fork).period_ms);
         remoteSequence(&setup.server, 12);
         setup.client.peer_manager.control.connections[peer.index].ping_due_ms = setup.pair.now.millis();
         setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);

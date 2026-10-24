@@ -38,6 +38,7 @@ pub const Protocols = struct {
         try options.reqresp.validate();
         try options.control_reqresp.validate();
         if (options.reqresp.protocols.bits != reqresp_mod.Protocol.Set.application.bits or
+            options.control_reqresp.admission.scope != .peer or
             options.control_reqresp.protocols.bits != reqresp_mod.Protocol.Set.control.bits or
             !std.meta.eql(options.reqresp.routes, reqresp_mod.ReqResp.Options.Routes.application) or
             !std.meta.eql(options.control_reqresp.routes, reqresp_mod.ReqResp.Options.Routes.control)) return error.InvalidOptions;
@@ -115,9 +116,9 @@ pub const Protocols = struct {
         );
     }
 
-    pub fn connectionOpened(self: *Protocols, conn: Engine.Handle, endpoint: *const @import("udp").Address, now: types.Now) void {
-        self.reqresp.connectionOpened(conn, endpoint, now);
-        self.control_reqresp.connectionOpened(conn, endpoint, now);
+    pub fn connectionOpened(self: *Protocols, conn: Engine.Handle, identity: *const PeerId, endpoint: *const @import("udp").Address, now: types.Now) void {
+        self.reqresp.connectionOpened(conn, identity, endpoint, now);
+        self.control_reqresp.connectionOpened(conn, identity, endpoint, now);
     }
 
     pub fn schedule(self: *const Protocols, capacities: Capacities) types.Schedule {

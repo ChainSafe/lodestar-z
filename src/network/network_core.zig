@@ -738,7 +738,7 @@ pub const NetworkCore = struct {
                 if (admission.displaced) |old| {
                     self.releaseConnection(.{ .peer = admission.peer, .conn = old }, now);
                 }
-                self.protocols.connectionOpened(connected.conn, &endpoint, now);
+                self.protocols.connectionOpened(connected.conn, &connected.peer_id, &endpoint, now);
                 const gossip_admission = self.protocols.gossipsub.peerConnected(quic, connected.conn, admission.direct, now);
                 if (gossip_admission != .admitted) self.closeConnection(admission.peer, connected.conn, .capacity, now);
             },

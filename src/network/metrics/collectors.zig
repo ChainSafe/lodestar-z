@@ -225,7 +225,7 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
                 }
             }
             try refusals.sample(.{ method, reason.name }, count);
-            if (comptime reason.value == @intFromEnum(rr.ReqResp.metrics.AdmissionRefusal.group_quota) or reason.value == @intFromEnum(rr.ReqResp.metrics.AdmissionRefusal.global_quota)) rate_limited +|= count;
+            if (comptime reason.value == @intFromEnum(rr.ReqResp.metrics.AdmissionRefusal.peer_quota) or reason.value == @intFromEnum(rr.ReqResp.metrics.AdmissionRefusal.group_quota) or reason.value == @intFromEnum(rr.ReqResp.metrics.AdmissionRefusal.global_quota)) rate_limited +|= count;
         }
         try rate_limits.sample(.{method}, rate_limited);
     }
