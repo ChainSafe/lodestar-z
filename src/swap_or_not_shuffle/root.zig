@@ -496,39 +496,6 @@ fn getCommitteeIndicesFromListShuffle(
     }
 }
 
-fn perCandidateShuffleBalanceThreshold(active_count: usize, max_increments: u64, committee_size: usize) ?u128 {
-    // Above 2^31, ComputeShuffledIndex's wrapping u32 flip can differ from the list shuffle.
-    if (active_count > 1 << 31) return null;
-    // Compare expected draws (committee_size * max_increments / mean_balance)
-    // with list length / 512. This conservative cost ratio keeps the list
-    // shuffle around the measured crossover; it is not a consensus rule.
-    // Multiplying through cancels list length and permits an early decision.
-    return @as(u128, committee_size) * max_increments * 512;
-}
-
-fn preferPerCandidateShuffle(
-    active_indices: []const u32,
-    effective_balance_increments: []const u16,
-    max_effective_balance: i64,
-    effective_balance_increment: i64,
-    committee_size: usize,
-) bool {
-    if (committee_size == 0 or max_effective_balance <= 0 or effective_balance_increment <= 0) return false;
-    const max_increments: u64 = @intCast(@divTrunc(max_effective_balance, effective_balance_increment));
-    // The wrapping acceptance rule for nonstandard balances is not a probability estimate.
-    if (max_increments == 0 or max_increments > std.math.maxInt(i64) / 0xffff) return false;
-
-    const balance_threshold = perCandidateShuffleBalanceThreshold(active_indices.len, max_increments, committee_size) orelse return false;
-    var active_balance: u64 = 0;
-    for (active_indices) |index| {
-        // Leave candidate validation and its error ordering to the sampler.
-        if (index >= effective_balance_increments.len) return false;
-        active_balance += @min(max_increments, effective_balance_increments[index]);
-        if (active_balance >= balance_threshold) return true;
-    }
-    return false;
-}
-
 /// Fills caller-owned `out`, which must not alias the inputs. An error may leave it partially written.
 pub fn computeSyncCommitteeIndicesInto(
     allocator: Allocator,
@@ -543,14 +510,7 @@ pub fn computeSyncCommitteeIndicesInto(
 ) !void {
     // Preserve the per-candidate sampler's round-count behavior outside the list shuffle's range.
     if (rand_byte_count == .two and rounds > 0 and rounds <= std.math.maxInt(u8) and
-        active_indices.len <= std.math.maxInt(u32) and
-        (seed.len != SEED_SIZE or !preferPerCandidateShuffle(
-            active_indices,
-            effective_balance_increments,
-            max_effective_balance,
-            effective_balance_increment,
-            out.len,
-        )))
+        active_indices.len <= std.math.maxInt(u32))
     {
         return getCommitteeIndicesFromListShuffle(
             allocator,
@@ -722,12 +682,4 @@ pub fn computePtcIndicesForEpochInto(
 
 test {
     _ = @import("root_test.zig");
-
-    const balance_threshold: u128 = 32 * 2048 * 512;
-    for ([_]usize{ (1 << 31) - 1, 1 << 31 }) |active_count| {
-        try std.testing.expectEqual(@as(?u128, balance_threshold), perCandidateShuffleBalanceThreshold(active_count, 2048, 32));
-    }
-    for ([_]usize{ (1 << 31) + 1, 3_221_225_472, std.math.maxInt(u32) }) |active_count| {
-        try std.testing.expectEqual(@as(?u128, null), perCandidateShuffleBalanceThreshold(active_count, 2048, 32));
-    }
 }
