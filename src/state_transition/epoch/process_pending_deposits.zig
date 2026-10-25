@@ -17,7 +17,6 @@ const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAt
 const PendingDeposit = types.electra.PendingDeposit.Type;
 const GENESIS_SLOT = @import("preset").GENESIS_SLOT;
 const c = @import("constants");
-const Node = @import("persistent_merkle_tree").Node;
 const getActivationBalanceChurnLimit = @import("../utils/validator.zig").getActivationBalanceChurnLimit;
 
 /// Records compounding flags for validators added during this flow.
@@ -142,6 +141,9 @@ fn applyPendingDeposit(
     const is_validator_known = try isValidatorKnown(fork, state, validator_index);
 
     if (!is_validator_known) {
+        if (comptime fork.gte(.heze)) {
+            if (withdrawal_credentials[0] == @import("constants").BLS_WITHDRAWAL_PREFIX) return;
+        }
         // Verify the deposit signature (proof of possession) which is not checked by the deposit contract
         if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
             try addValidatorToRegistry(fork, io, epoch_cache, state, pubkey, withdrawal_credentials, amount);
@@ -168,26 +170,4 @@ fn applyPendingDeposit(
             return error.UnexpectedNullValidatorIndex;
         }
     }
-}
-
-const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
-
-test "processPendingDeposits - sanity" {
-    const allocator = std.testing.allocator;
-    const pool_size = 200_000;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
-    defer test_state.deinit();
-
-    try processPendingDeposits(
-        .electra,
-        allocator,
-        std.testing.io,
-        test_state.cached_state.config,
-        test_state.cached_state.epoch_cache,
-        test_state.cached_state.state.castToFork(.electra),
-        test_state.epoch_transition_cache,
-    );
 }

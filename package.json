@@ -91,6 +91,7 @@
     "@libp2p/gossipsub": "17.1.1",
     "@libp2p/identify": "4.1.14",
     "@libp2p/peer-id": "6.0.15",
+    "@chainsafe/ssz": "1.8.1",
     "@lodestar/config": "1.50.0",
     "@lodestar/era": "1.50.0",
     "@lodestar/reqresp": "1.46.0",
