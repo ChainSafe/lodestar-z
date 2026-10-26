@@ -25,6 +25,10 @@ const streams_max = 16;
 const extra_max = 1;
 const dials_max = 1;
 const write_max = 4096;
+/// Loss recovery under a hostile loss policy can make one input move tens of thousands of
+/// datagrams across the pair, several seconds under coverage instrumentation, so an input ends
+/// once the pair has delivered this many.
+const datagram_budget = 16_384;
 
 var pair: support.Pair = .{};
 var pattern: [write_max]u8 = undefined;
@@ -151,7 +155,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     var cursor = Cursor{ .bytes = input[0..len] };
     var steps: usize = 0;
     while (cursor.next()) |op| : (steps += 1) {
-        if (steps == steps_max) break;
+        if (steps == steps_max or pair.delivered >= datagram_budget) break;
         const arg = cursor.byte();
         trace = .{ .step = steps, .op = op % 19, .arg = arg };
         const side: Side = if (arg & 1 == 1) .server else .client;

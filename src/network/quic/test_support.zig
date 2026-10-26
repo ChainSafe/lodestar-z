@@ -30,6 +30,8 @@ pub const Pair = struct {
     drop_to_address: ?types.Address = null,
     /// Datagrams the client accepted from the server.
     client_accepted: u64 = 0,
+    /// Datagrams delivered in either direction, including dropped ones.
+    delivered: u64 = 0,
     batch: Batch = undefined,
     client_stash: Stash = .{},
     server_stash: Stash = .{},
@@ -143,6 +145,7 @@ pub const Pair = struct {
                     if (from == &self.client and self.first_initial_len == 0) {
                         @memcpy(self.first_initial[0..datagram.len], datagram);
                     }
+                    self.delivered += 1;
                     if (drop) continue;
                     if (self.drop_to_address) |blocked| if (sent.to.eql(blocked)) continue;
                     var response: [constants.datagram_size_max]u8 = undefined;
