@@ -386,6 +386,8 @@ export type NativeIncomingError = Error &
   );
 
 export interface NativeGossipPublishOptions {
+  /** Shortens the native queue lifetime. Integer milliseconds, 1..86400000. */
+  maxQueueMs?: number;
   allowZeroPeers?: boolean;
   ignoreDuplicate?: boolean;
   flood?: boolean;
@@ -402,19 +404,24 @@ export interface NativeGossipPublishResult {
   duplicate: boolean;
 }
 
-export type NetworkGossipPublishFailed = Error & {
-  code: "NetworkGossipPublishFailed";
-  reason:
-    | "unknown_topic"
-    | "payload_too_small"
-    | "payload_too_large"
-    | "compress_failed"
-    | "admission_full"
-    | "expired"
-    | "resource_exhausted"
-    | "duplicate"
-    | "no_peers_subscribed_to_topic";
-};
+export type NetworkGossipPublishFailed =
+  | (Error & {
+      code: "NetworkGossipPublishFailed";
+      reason:
+        | "unknown_topic"
+        | "payload_too_small"
+        | "payload_too_large"
+        | "compress_failed"
+        | "expired"
+        | "resource_exhausted"
+        | "duplicate"
+        | "no_peers_subscribed_to_topic";
+    })
+  | (Error & {
+      code: "NetworkGossipPublishFailed";
+      reason: "admission_full";
+      capacityToken: string;
+    });
 
 export interface NativeGossipTopicDiagnostic {
   index: number;
@@ -464,10 +471,12 @@ export type Verdict = "accept" | "reject" | "ignore";
  */
 export type CloseResult = {readonly reason: "requested"} | {readonly reason: "failed"; readonly error: Error};
 
-/** Resolved at initialization: peer records the network retains, and incoming requests it serves at once. */
+/** Resource limits and publication lifetime resolved at initialization. */
 export interface NativeResolvedLimits {
   readonly peerCapacity: number;
   readonly incomingCapacity: number;
+  /** Shortest configured slot duration, also the maximum lifetime of queued publications. */
+  readonly publicationMaxWaitMs: number;
 }
 
 export interface GossipMessage {
@@ -603,10 +612,17 @@ export interface NativeNetwork {
    */
   stopDelivery(): void;
   /**
-   * Copies input into a bounded native queue. A full queue rejects with admission_full before publication.
-   * Queued input expires after the shortest configured slot duration, with reason expired and no publication.
+   * Copies input into a bounded native queue. A full queue rejects with admission_full and a capacityToken,
+   * without retaining the input or publishing it. Queued input expires with reason expired before publication
+   * after publicationMaxWaitMs or the shorter maxQueueMs supplied by the caller.
    */
   publish(topic: string, data: Uint8Array, options?: NativeGossipPublishOptions): Promise<NativeGossipPublishResult>;
+  /**
+   * Resolves when the resource that refused publication changes, including before registration.
+   * Grants no reservation and retains no payload. timeoutMs is an integer in 1..86400000.
+   * Cancellation, timeout and close reject the wait; admitted publications are unaffected.
+   */
+  waitForPublicationCapacity(token: string, options: {signal: AbortSignal; timeoutMs: number}): Promise<void>;
   /** Throws synchronously for invalid input, admission refusal or a closed network; admitted failures reject next(). */
   request(
     peerId: PeerIdStr,

@@ -217,6 +217,7 @@ fn resolvedLimits(env: napi.Env, runtime: *const Runtime) !Value {
     const object = try env.createObject();
     try object.setNamedProperty("peerCapacity", try env.createUint32(runtime.peer_capacity));
     try object.setNamedProperty("incomingCapacity", try env.createUint32(@intCast(runtime.bridge.incoming.?.diag.capacity)));
+    try object.setNamedProperty("publicationMaxWaitMs", try env.createDouble(@floatFromInt(runtime.bridge.publications.?.max_wait_ms)));
     return object;
 }
 
@@ -293,6 +294,9 @@ pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, stat
 
 pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: js.Value) !js.Value {
     return .{ .val = try publication_js.publish(try self.owner(), topic.val, data.val, options.val) };
+}
+pub fn publicationCapacityWatch(self: *@This(), token: js.Value) !js.Value {
+    return .{ .val = try js.env().getBoolean(try publication_js.watchCapacity(try self.owner(), token.val)) };
 }
 
 test "a notification JavaScript cannot run stops locally" {

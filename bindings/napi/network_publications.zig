@@ -18,6 +18,7 @@ pub const Cell = struct {
     generation: u64 = 0,
     order: u64 = 0,
     queued_ms: u64 = 0,
+    max_wait_ms: ?u64 = null,
     kind: gossip.topic.Kind = .beacon_block,
     topic: [gossip.topic.topic_max_len]u8 = undefined,
     topic_len: u8 = 0,
@@ -50,6 +51,7 @@ pub const Diagnostics = struct {
 };
 pub const Table = struct {
     cells: []Cell,
+    release_revision: u64 = 0,
     max_wait_ms: u64,
     /// The terminal cells awaiting Promise settlement. `transition` keeps it current.
     terminal: std.StaticBitSet(capacity_max) = .empty,
@@ -127,7 +129,7 @@ pub const Table = struct {
         std.debug.assert(cell.state == .queued and now_ms >= cell.queued_ms);
         const waited = now_ms - cell.queued_ms;
         self.latency.observe(waited);
-        if (waited >= self.max_wait_ms) {
+        if (waited >= @min(self.max_wait_ms, cell.max_wait_ms orelse self.max_wait_ms)) {
             self.releasePayload(cell);
             cell.failure = error.PublicationExpired;
             self.transition(cell, .terminal);
@@ -149,6 +151,7 @@ pub const Table = struct {
         self.releasePayload(cell);
         self.ordinary -= @intFromBool(!n.gossip_processor.limits.urgent(cell.kind));
         self.diag.occupied -= 1;
+        self.release_revision += 1;
         self.transition(cell, .free);
         cell.promise.deinit();
         cell.* = .{ .generation = cell.generation };

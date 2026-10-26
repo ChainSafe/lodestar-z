@@ -8,7 +8,8 @@ const requests = @import("network_requests.zig");
 const Promise = @import("network_promise.zig");
 const Runtime = r.Runtime;
 const network_js = @import("network_js.zig");
-const capacity = @import("network_request_capacity.zig");
+const capacity = @import("network_capacity.zig");
+const capacity_js = @import("network_capacity_js.zig");
 
 const bytes = network_js.bytes;
 const errorValue = network_js.errorValue;
@@ -47,7 +48,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     }
     const token = runtime.bridge.requests.?.reserve(which, len) catch |err| {
         runtime.refreshBridgeCapacityLocked();
-        const blocked = runtime.bridge.request_capacity.token(if (err == error.NetworkRequestFull) .bridge_slots else .bridge_bytes);
+        const blocked = runtime.bridge.admission_capacity.token(if (err == error.NetworkRequestFull) .bridge_slots else .bridge_bytes);
         runtime.unlock();
         if (err == error.NetworkRequestFull or err == error.NetworkBridgeFull) return rejectAdmission(runtime.env, blocked);
         return err;
@@ -80,8 +81,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
 fn capacityError(env: napi.Env, token: capacity.Token) !Value {
     const value = try errorValue(env, "NetworkRequestRejected");
     try value.setNamedProperty("reason", try env.createStringUtf8("local_capacity"));
-    var buffer: [capacity.token_max]u8 = undefined;
-    try value.setNamedProperty("capacityToken", try env.createStringUtf8(token.format(&buffer)));
+    try capacity_js.attach(env, value, token);
     return value;
 }
 fn rejectAdmission(env: napi.Env, token: capacity.Token) anyerror {
@@ -90,14 +90,10 @@ fn rejectAdmission(env: napi.Env, token: capacity.Token) anyerror {
     return error.PendingException;
 }
 pub fn watchCapacity(runtime: *Runtime, value: Value) !bool {
-    var buffer: [capacity.token_max]u8 = undefined;
-    const len = try decode.text(value, &buffer);
-    const token = try capacity.Token.parse(buffer[0..len]);
-    runtime.lock();
-    defer runtime.unlock();
-    if (runtime.bridge.stop or runtime.bridge.quiescent) return error.NetworkClosed;
-    runtime.refreshBridgeCapacityLocked();
-    return runtime.bridge.request_capacity.watch(token);
+    return capacity_js.watch(runtime, value) catch |err| switch (err) {
+        error.InvalidNetworkCapacityToken => error.InvalidRequestCapacityToken,
+        else => err,
+    };
 }
 /// Arms a pull, whose chunk or terminal outcome an exchange delivers. The iterator allows one pull at a time, so a
 /// second one breaks its contract.

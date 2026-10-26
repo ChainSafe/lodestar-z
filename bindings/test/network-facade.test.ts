@@ -350,6 +350,33 @@ test("capacity release wakes a bounded facade wait without retrying its rejected
   }
 }, 15000);
 
+test("publication capacity release wakes the facade without retrying the refused payload", async () => {
+  const config = applicationConfig();
+  const network = createNativeNetwork(config, host());
+  try {
+    await network.applyIntent(localIntent(config));
+    const topic = topicName("sync_committee_0");
+    const data = new Uint8Array(144);
+    const options = {allowZeroPeers: true, ignoreDuplicate: true};
+    const publications = Array.from({length: 240}, () => network.publish(topic, data, options));
+    const completed = Promise.all(publications);
+    const refusal = await network.publish(topic, data, options).catch((error) => error);
+    expect(refusal).toMatchObject({
+      capacityToken: expect.any(String),
+      code: "NetworkGossipPublishFailed",
+      reason: "admission_full",
+    });
+    await network.waitForPublicationCapacity(refusal.capacityToken, {
+      signal: new AbortController().signal,
+      timeoutMs: 5000,
+    });
+    await completed;
+    await expect(network.publish(topic, data, options)).resolves.toMatchObject({duplicate: true});
+  } finally {
+    await network.close();
+  }
+});
+
 test("refuses an invalid peer report or imported root with an ordinary throw before queueing it", async () => {
   const config = applicationConfig();
   const network = createNativeNetwork(config, host());

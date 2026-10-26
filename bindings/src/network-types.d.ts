@@ -14,7 +14,7 @@ import type {
 
 /** One exchange's delivery, which the host owns. */
 export interface NativeExchange {
-  readonly requestCapacityChanged: boolean;
+  readonly capacityChanged: boolean;
   readonly identity: NativeIdentity | null;
   /** Updates replace the previous state of the same peer. */
   readonly peers: readonly NativePeerObservation[];

@@ -78,15 +78,42 @@ test "publication queue expiry releases copied bytes before publication and keep
         cell.payload = try std.testing.allocator.alloc(u8, 10);
         table.transition(cell, .queued);
     }
+    table.get(expired).?.max_wait_ms = 10;
     try std.testing.expect(table.begin(first, 1009));
     try std.testing.expectEqual(p.State.executing, table.get(first).?.state);
     table.releasePayload(table.get(first).?);
     table.transition(table.get(first).?, .terminal);
-    try std.testing.expect(!table.begin(expired, 1010));
+    try std.testing.expect(!table.begin(expired, 20));
     try std.testing.expectEqual(error.PublicationExpired, table.get(expired).?.failure.?);
     try std.testing.expectEqual(p.State.terminal, table.get(expired).?.state);
     try std.testing.expectEqual(@as(usize, 0), budget.used);
     table.close(error.NetworkClosed);
     try std.testing.expectEqual(error.PublicationExpired, table.get(expired).?.failure.?);
     try std.testing.expectEqual(@as(u64, 2), table.latency.count);
+}
+
+test "publication slots release after settlement independently of payload bytes" {
+    var budget: Budget = .{ .limit = 100 };
+    var table = try p.Table.init(std.testing.allocator, 2, &budget, 1000);
+    defer table.deinit();
+    const token = try table.reserve(.beacon_block, 10);
+    table.releasePayload(table.get(token).?);
+    try std.testing.expectEqual(@as(u64, 1), budget.release_revision);
+    try std.testing.expectEqual(@as(u64, 0), table.release_revision);
+    table.retire(token);
+    try std.testing.expectEqual(@as(u64, 1), table.release_revision);
+    try std.testing.expectEqual(@as(u64, 1), budget.release_revision);
+}
+
+test "a caller cannot extend the publication queue lifetime" {
+    var budget: Budget = .{ .limit = 100 };
+    var table = try p.Table.init(std.testing.allocator, 1, &budget, 1000);
+    defer table.deinit();
+    const token = try table.reserve(.beacon_block, 0);
+    defer table.retire(token);
+    const cell = table.get(token).?;
+    cell.max_wait_ms = 2000;
+    table.transition(cell, .queued);
+    try std.testing.expect(!table.begin(token, 1000));
+    try std.testing.expectEqual(error.PublicationExpired, cell.failure.?);
 }

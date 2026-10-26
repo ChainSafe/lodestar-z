@@ -58,7 +58,7 @@ pub fn prepareConfiguration(self: *Runtime) !void {
     const io = self.owner.?.threaded.io();
     var seed: u64 = undefined;
     try io.randomSecure(std.mem.asBytes(&seed));
-    try io.randomSecure(std.mem.asBytes(&self.bridge.request_capacity.instance));
+    try io.randomSecure(std.mem.asBytes(&self.bridge.admission_capacity.instance));
     const options = try self.owner.?.application.buildOptions(&self.owner.?.config, seed);
     self.owner.?.resolved = n.configuration.resolve(options) catch |err| switch (err) {
         error.InvalidLimits => return error.InvalidNetworkConfig,

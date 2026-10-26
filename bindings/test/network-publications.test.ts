@@ -59,6 +59,9 @@ test("publication pressure preserves urgent, control and request admission", asy
       await Promise.resolve();
     }
     expect(refusal).toMatchObject({code: "NetworkGossipPublishFailed", reason: "admission_full"});
+    const token = (refusal as {capacityToken: string}).capacityToken;
+    expect(token).toEqual(expect.any(String));
+    expect(runtime.publicationCapacityWatch(token)).toBe(false);
     const urgent = runtime.publishGossip(BLOCK, new Uint8Array(4000), options);
     const control = runtime.reStatusPeers([]);
     const request = runtime.request(runtime.identity.peerId, REQUEST, new Uint8Array(0));
@@ -70,12 +73,30 @@ test("publication pressure preserves urgent, control and request admission", asy
       expect(request.next()).rejects.toMatchObject({code: "NetworkRequestRejected", reason: "disconnected"}),
     ]);
     expect(results.some((result) => result.status === "fulfilled")).toBe(true);
+    expect(runtime.publicationCapacityWatch(token)).toBe(true);
     for (const result of results) {
       if (result.status === "rejected")
         expect(result.reason).toMatchObject({code: "NetworkGossipPublishFailed", reason: "admission_full"});
     }
 
     await expect(runtime.publishGossip(SYNC, new Uint8Array(144), options)).resolves.toMatchObject({duplicate: true});
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("publication queue deadlines reject invalid inputs before retaining a cell", async () => {
+  const runtime = startRuntime(applicationConfig());
+  try {
+    for (const maxQueueMs of [0, -1, 1.5, Infinity, 86_400_001]) {
+      await expect(runtime.publishGossip(BLOCK, new Uint8Array(4000), {maxQueueMs})).rejects.toThrow(
+        maxQueueMs === 0 ? "InvalidPublicationQueueTimeout" : "InvalidNetworkInteger"
+      );
+    }
+    expect(() => runtime.publicationCapacityWatch("invalid")).toThrow("InvalidPublicationCapacityToken");
+    await expect(
+      runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true, maxQueueMs: 86_400_000})
+    ).resolves.toMatchObject({queued: 0});
   } finally {
     await runtime.close();
   }

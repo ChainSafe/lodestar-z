@@ -43,6 +43,7 @@ export interface NetworkTestRuntime
   /** Prometheus text rendered on demand by the owner. Rejects with NetworkClosed once the owner stops. */
   getMetrics: NativeNetwork["metrics"];
   publishGossip: NativeNetwork["publish"];
+  publicationCapacityWatch(token: string): boolean;
   /** A failed runtime cannot restart. The host must shut down the beacon node on terminal failure. */
   readonly closed: Promise<NativeRuntimeCloseResult>;
   readonly identity: NativeIdentity;

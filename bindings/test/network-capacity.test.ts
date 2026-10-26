@@ -1,7 +1,37 @@
 import {afterEach, expect, test, vi} from "vitest";
-import {RequestCapacityWaiters} from "../src/network-capacity.js";
+import {PublicationCapacityWaiters, RequestCapacityWaiters} from "../src/network-capacity.js";
 
 afterEach(() => vi.useRealTimers());
+
+test("publication waits follow caller concurrency and clean up on cancellation, timeout and close", async () => {
+  vi.useFakeTimers();
+  const watch = vi.fn(() => false);
+  const waits = new PublicationCapacityWaiters({publicationCapacityWatch: watch});
+  const controllers = Array.from({length: 300}, () => new AbortController());
+  const pending = controllers.map((controller) =>
+    waits.wait("slots", {signal: controller.signal, timeoutMs: 1000}).catch((error) => error.code)
+  );
+  controllers[0].abort();
+  expect(await pending[0]).toBe("NetworkPublicationCapacityCancelled");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(await Promise.all(pending.slice(1))).toEqual(Array(299).fill("NetworkPublicationCapacityTimeout"));
+  const closing = waits.wait("slots", {signal: controllers[1].signal, timeoutMs: 1000}).catch((error) => error.code);
+  waits.close();
+  expect(await closing).toBe("NetworkClosed");
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test("publication waits observe releases both before and after registration", async () => {
+  const watch = vi.fn(() => false);
+  const waits = new PublicationCapacityWaiters({publicationCapacityWatch: watch});
+  const options = {signal: new AbortController().signal, timeoutMs: 1000};
+  const pending = waits.wait("slots", options);
+  watch.mockReturnValue(true);
+  waits.changed();
+  await pending;
+  await waits.wait("slots", options);
+  waits.close();
+});
 
 test("capacity waits recheck their own resource and observe releases before registration", async () => {
   const revisions = {bytes: 0, requests: 0};

@@ -80,7 +80,7 @@ fn schedule(env: napi.Env, result: Value, outcome: Outcome) !void {
 fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     const result = try env.createObject();
     try result.setNamedProperty("identity", if (selection.identity) |*value| try network_command_js.identity(env, value) else try env.getNull());
-    try result.setNamedProperty("requestCapacityChanged", try env.getBoolean(selection.request_capacity_changed));
+    try result.setNamedProperty("capacityChanged", try env.getBoolean(selection.admission_capacity_changed));
     const peers = try env.createArrayWithLength(selection.peer_count);
     for (selection.peers[0..selection.peer_count], 0..) |*entry, i| try peers.setElement(@intCast(i), try projection.observation(env, entry));
     try result.setNamedProperty("peers", peers);

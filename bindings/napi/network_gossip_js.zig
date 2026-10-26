@@ -32,7 +32,7 @@ pub fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell) !Value
 pub fn optionsFor(value: Value) !n.gossipsub.Gossipsub.PublishOptions {
     var result: n.gossipsub.Gossipsub.PublishOptions = .{};
     if (try value.typeof() == .undefined) return result;
-    try decode.object(value, &.{ "allowZeroPeers", "ignoreDuplicate", "flood" });
+    try decode.object(value, &.{ "allowZeroPeers", "ignoreDuplicate", "flood", "maxQueueMs" });
     inline for (.{ .{ "allowZeroPeers", "allow_zero_peers" }, .{ "ignoreDuplicate", "ignore_duplicate" }, .{ "flood", "flood" } }) |field| {
         const option = try decode.get(value, field[0]);
         if (try option.typeof() != .undefined) @field(result, field[1]) = try decode.boolean(option);

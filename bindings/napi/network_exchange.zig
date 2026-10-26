@@ -20,7 +20,7 @@ const CheckView = struct { kind: n.gossip_processor.limits.Kind, payload_present
 
 /// What one exchange pinned. Pinned cells stay in place: the owner never retires a copying cell.
 pub const Selection = struct {
-    request_capacity_changed: bool = false,
+    admission_capacity_changed: bool = false,
     identity: ?r.Identity = null,
     peers: [peers_max]projection.Entry = undefined,
     peer_count: usize = 0,
@@ -41,8 +41,8 @@ pub const Outcome = struct { needs_another_exchange: bool = false };
 pub const Failure = enum { stopped, contract };
 
 fn selectLocked(runtime: *Runtime, now: u64, selection: *Selection) void {
-    selection.request_capacity_changed = runtime.bridge.request_capacity.pending;
-    runtime.bridge.request_capacity.pending = false;
+    selection.admission_capacity_changed = runtime.bridge.admission_capacity.pending;
+    runtime.bridge.admission_capacity.pending = false;
     if (runtime.deliverableLocked(.identity)) {
         selection.identity = runtime.bridge.identity;
         runtime.bridge.identity = null;

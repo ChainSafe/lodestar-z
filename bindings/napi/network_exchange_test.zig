@@ -505,7 +505,7 @@ test "publication completions batch terminal cells while unfinished work stays a
     const table = &runtime.bridge.publications.?;
     const low = try completePublication(runtime);
     // Two cells stay admitted but unfinished, so only the lowest and the highest complete.
-    const unfinished = [_]publications.Token{ try runtime.reservePublication(.beacon_block, 0), try runtime.reservePublication(.beacon_block, 0) };
+    const unfinished = [_]publications.Token{ try runtime.reservePublication(.beacon_block, 0, null), try runtime.reservePublication(.beacon_block, 0, null) };
     const high = try completePublication(runtime);
     try std.testing.expectEqual(@as(u8, 3), high.index);
     var host: Host = .{ .runtime = runtime };
@@ -1060,7 +1060,7 @@ test "nonurgent gossip waits without polling until host capacity recovers" {
 }
 
 fn completePublication(runtime: *Runtime) !publications.Token {
-    const token = try runtime.reservePublication(.beacon_block, 0);
+    const token = try runtime.reservePublication(.beacon_block, 0, null);
     runtime.lock();
     defer runtime.unlock();
     runtime.bridge.publications.?.transition(runtime.bridge.publications.?.get(token).?, .terminal);

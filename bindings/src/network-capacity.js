@@ -1,27 +1,33 @@
 // @ts-check
 
-const WAITERS_MAX = 32;
-const TIMEOUT_MAX_MS = 60000;
-
 /** @param {string} code */
 function failure(code) {
   return Object.assign(new Error(code), {code});
 }
 
 /**
- * @typedef {{requestCapacityWatch(token: string): boolean}} Runtime
  * @typedef {{token: string, finish(error?: unknown): void}} Waiter
  */
-export class RequestCapacityWaiters {
-  /** @type {Runtime} */
-  #runtime;
+class CapacityWaiters {
+  #watch;
+  #prefix;
+  #timeoutMax;
+  #waitersMax;
   /** @type {Set<Waiter>} */
   #waiters = new Set();
   #closed = false;
 
-  /** @param {Runtime} runtime */
-  constructor(runtime) {
-    this.#runtime = runtime;
+  /**
+   * @param {(token: string) => boolean} watch
+   * @param {string} prefix
+   * @param {number} timeoutMax
+   * @param {number} [waitersMax]
+   */
+  constructor(watch, prefix, timeoutMax, waitersMax = Infinity) {
+    this.#watch = watch;
+    this.#prefix = prefix;
+    this.#timeoutMax = timeoutMax;
+    this.#waitersMax = waitersMax;
   }
 
   /**
@@ -30,16 +36,16 @@ export class RequestCapacityWaiters {
    * @returns {Promise<void>}
    */
   async wait(token, {signal, timeoutMs}) {
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > TIMEOUT_MAX_MS)
-      throw failure("InvalidRequestCapacityTimeout");
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > this.#timeoutMax)
+      throw failure(`Invalid${this.#prefix}CapacityTimeout`);
     if (typeof signal?.addEventListener !== "function" || typeof signal?.removeEventListener !== "function")
-      throw failure("InvalidRequestCapacitySignal");
+      throw failure(`Invalid${this.#prefix}CapacitySignal`);
     if (this.#closed) throw failure("NetworkClosed");
-    if (signal.aborted) throw failure("NetworkRequestCapacityCancelled");
-    if (this.#waiters.size === WAITERS_MAX) throw failure("NetworkRequestCapacityWaitersFull");
+    if (signal.aborted) throw failure(`Network${this.#prefix}CapacityCancelled`);
+    if (this.#waiters.size === this.#waitersMax) throw failure(`Network${this.#prefix}CapacityWaitersFull`);
     return new Promise((resolve, reject) => {
-      const abort = () => waiter.finish(failure("NetworkRequestCapacityCancelled"));
-      const timer = setTimeout(() => waiter.finish(failure("NetworkRequestCapacityTimeout")), timeoutMs);
+      const abort = () => waiter.finish(failure(`Network${this.#prefix}CapacityCancelled`));
+      const timer = setTimeout(() => waiter.finish(failure(`Network${this.#prefix}CapacityTimeout`)), timeoutMs);
       /** @type {Waiter} */
       const waiter = {
         finish: (error) => {
@@ -65,7 +71,7 @@ export class RequestCapacityWaiters {
   /** @param {Waiter} waiter */
   #check(waiter) {
     try {
-      if (this.#runtime.requestCapacityWatch(waiter.token)) waiter.finish();
+      if (this.#watch(waiter.token)) waiter.finish();
     } catch (error) {
       waiter.finish(error);
     }
@@ -74,5 +80,19 @@ export class RequestCapacityWaiters {
   close() {
     this.#closed = true;
     for (const waiter of this.#waiters) waiter.finish(failure("NetworkClosed"));
+  }
+}
+
+export class RequestCapacityWaiters extends CapacityWaiters {
+  /** @param {{requestCapacityWatch(token: string): boolean}} runtime */
+  constructor(runtime) {
+    super((token) => runtime.requestCapacityWatch(token), "Request", 60000, 32);
+  }
+}
+
+export class PublicationCapacityWaiters extends CapacityWaiters {
+  /** @param {{publicationCapacityWatch(token: string): boolean}} runtime */
+  constructor(runtime) {
+    super((token) => runtime.publicationCapacityWatch(token), "Publication", 86400000);
   }
 }

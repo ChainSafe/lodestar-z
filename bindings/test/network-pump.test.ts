@@ -34,12 +34,12 @@ vi.mock("../src/network-incoming.js", () => {
 const full = {gossipValidation: "ready", incomingRequestSlots: 32} as const;
 const control = null;
 const idle: NativeExchange = {
+  capacityChanged: false,
   checks: [],
   gossip: null,
   identity: null,
   needsAnotherExchange: false,
   peers: [],
-  requestCapacityChanged: false,
   serving: [],
 };
 const handle = (index: number, generation = 1n): NativeGossipHandle => ({generation, index});
@@ -165,21 +165,21 @@ function fixture() {
       (job: GossipJob): Promise<readonly Verdict[]> => Promise.resolve(job.messages.map(() => "accept" as const))
     ),
   };
-  const requestCapacityChanged = vi.fn();
-  const pump = new NativePump(host, undefined, requestCapacityChanged);
+  const capacityChanged = vi.fn();
+  const pump = new NativePump(host, undefined, capacityChanged);
   pump.attach(runtime, closed.promise);
   return {
     advance(ms: number) {
       now += ms;
     },
     capacities: () => runtime.setCapacity.mock.calls.map(([capacity]) => capacity),
+    capacityChanged,
     closed,
     host,
     get now() {
       return now;
     },
     pump,
-    requestCapacityChanged,
     runtime,
   };
 }
@@ -442,10 +442,10 @@ describe("binding pump delivery", () => {
   it("delivers request capacity notifications while host payload delivery is stopped", async () => {
     const node = fixture();
     node.pump.stopDelivery();
-    node.runtime.exchange.mockReturnValueOnce({...idle, requestCapacityChanged: true});
+    node.runtime.exchange.mockReturnValueOnce({...idle, capacityChanged: true});
     node.pump.request();
     await macrotask();
-    expect(node.requestCapacityChanged).toHaveBeenCalledOnce();
+    expect(node.capacityChanged).toHaveBeenCalledOnce();
     expect(node.host.validate).not.toHaveBeenCalled();
     await macrotask();
     expect(node.runtime.exchange).toHaveBeenCalledOnce();
@@ -454,14 +454,14 @@ describe("binding pump delivery", () => {
   it("retires delivered work if the request capacity listener throws", async () => {
     const node = fixture();
     const start = incoming();
-    node.requestCapacityChanged.mockImplementation(() => {
+    node.capacityChanged.mockImplementation(() => {
       throw new Error("capacity listener");
     });
     node.runtime.exchange.mockReturnValueOnce({
       ...idle,
+      capacityChanged: true,
       checks: [check(9)],
       gossip: gossip({messages: [1]}),
-      requestCapacityChanged: true,
       serving: [start],
     });
     node.pump.request();

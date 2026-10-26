@@ -1,5 +1,5 @@
 import bindings from "./bindings.js";
-import {RequestCapacityWaiters} from "./network-capacity.js";
+import {PublicationCapacityWaiters, RequestCapacityWaiters} from "./network-capacity.js";
 import {NativePump} from "./network-pump.js";
 import {NativeRequest} from "./network-request.js";
 
@@ -22,6 +22,7 @@ class NativeNetwork {
   #native;
   #pump;
   #requestCapacity;
+  #publicationCapacity;
   #metricsPending = null;
   #identity;
   #directPeers = new Set();
@@ -38,6 +39,7 @@ class NativeNetwork {
       },
       () => {
         this.#requestCapacity.changed();
+        this.#publicationCapacity.changed();
         host.requestCapacityChanged?.();
       }
     );
@@ -45,6 +47,7 @@ class NativeNetwork {
     const initialized = native.initialize(config, pump.request);
     this.#native = native;
     this.#requestCapacity = new RequestCapacityWaiters(native);
+    this.#publicationCapacity = new PublicationCapacityWaiters(native);
     this.#identity = initialized.identity;
     Object.defineProperty(this, NATIVE, {value: native});
     pump.attach(native, initialized.closed);
@@ -54,6 +57,7 @@ class NativeNetwork {
     openNetworks.add(this);
     void this.closed.then(() => {
       this.#requestCapacity.close();
+      this.#publicationCapacity.close();
       this.#closing = true;
       openNetworks.delete(this);
     });
@@ -79,6 +83,9 @@ class NativeNetwork {
   }
   async publish(topic, data, options) {
     return this.#native.publishGossip(topic, data, options);
+  }
+  waitForPublicationCapacity(token, options) {
+    return this.#publicationCapacity.wait(token, options);
   }
   request(peerId, protocol, data, options) {
     return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options));
@@ -153,6 +160,7 @@ class NativeNetwork {
   close() {
     this.#closing = true;
     this.#requestCapacity.close();
+    this.#publicationCapacity.close();
     this.#pump.stopDelivery();
     this.#native.close();
     return this.closed;
