@@ -186,6 +186,42 @@ test "reqresp source fork quota changes and integer rounding retain nanosecond d
     owner.release(row);
 }
 
+test "reqresp light client credit refills at the configured slot rate through reconnects" {
+    var policy = @import("policy_fixture.zig").config();
+    policy.slot_duration_ms = 5000;
+    policy.slot_duration_ms_heze = 24000;
+    const limits = try Options.defaults(&policy, 8);
+    var owner = try a.Limiter.init(std.testing.allocator, .application, limits, 1);
+    defer owner.deinit(std.testing.allocator);
+    const which: Protocol = .light_client_finality_update_v1;
+    const row = try started(&owner, first, 0);
+    try std.testing.expectEqual(a.Decision.allowed, owner.take(row, which, 2, .gloas, 0));
+    try std.testing.expectEqual(@as(?u64, 2500), owner.eligibleAt(row, which, 1, .gloas, 0));
+    owner.release(row);
+    const reconnected = owner.retain(&.{ .address = first }, 2499);
+    try std.testing.expectEqual(row, reconnected);
+    try std.testing.expectEqual(a.Decision.source_quota, owner.take(reconnected, which, 1, .gloas, 2499));
+    try std.testing.expectEqual(a.Decision.allowed, owner.take(reconnected, which, 1, .gloas, 2500));
+    try std.testing.expectEqual(a.Decision.allowed, owner.take(reconnected, which, 2, .heze, 24000));
+    try std.testing.expectEqual(@as(?u64, 36000), owner.eligibleAt(reconnected, which, 1, .heze, 24000));
+    owner.release(reconnected);
+}
+
+test "reqresp retained source capacity covers the longest fork quota period" {
+    var limits = options(2, 100);
+    limits.global_starts.tokens = 2;
+    limits.source.light_client_heze.period_ms = 24000;
+    try std.testing.expectEqual(@as(u16, 52), try a.Limiter.capacity(&limits, .application, 1));
+    for ([_]u64{ 0, 86_400_001, std.math.maxInt(u64) }) |period| {
+        var invalid = limits;
+        invalid.source.light_client_heze.period_ms = period;
+        try std.testing.expectError(error.InvalidQuota, a.Limiter.validate(&invalid));
+        invalid = limits;
+        invalid.global.light_client_heze.period_ms = period;
+        try std.testing.expectError(error.InvalidQuota, a.Limiter.validate(&invalid));
+    }
+}
+
 fn allocation(allocator: std.mem.Allocator) !void {
     var owner = try a.Limiter.init(allocator, .all, options(2, 100), 2);
     defer owner.deinit(allocator);

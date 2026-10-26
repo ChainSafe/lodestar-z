@@ -10,6 +10,8 @@ const protocol = @import("protocol.zig");
 
 pub const BlobLimit = struct { start_slot: u64, max_blobs: u32 };
 pub const Config = struct {
+    slot_duration_ms: u64 = @import("config").mainnet.chain_config.SLOT_DURATION_MS,
+    slot_duration_ms_heze: u64 = @import("config").mainnet.chain_config.SLOT_DURATION_MS_HEZE,
     deneb_start_slot: ?u64,
     fulu_start_slot: ?u64 = null,
     blocks_pre_deneb: u32,
@@ -47,6 +49,8 @@ pub const Config = struct {
             unique += 1;
         }
         const result: Config = .{
+            .slot_duration_ms = cfg.getSlotDurationMs(.fulu),
+            .slot_duration_ms_heze = cfg.getSlotDurationMs(.heze),
             .deneb_start_slot = if (chain.DENEB_FORK_EPOCH == constants.FAR_FUTURE_EPOCH) null else std.math.mul(u64, chain.DENEB_FORK_EPOCH, preset.preset.SLOTS_PER_EPOCH) catch return error.InvalidPolicy,
             .fulu_start_slot = if (chain.FULU_FORK_EPOCH == constants.FAR_FUTURE_EPOCH) null else std.math.mul(u64, chain.FULU_FORK_EPOCH, preset.preset.SLOTS_PER_EPOCH) catch return error.InvalidPolicy,
             .blocks_pre_deneb = std.math.cast(u32, chain.MAX_REQUEST_BLOCKS) orelse return error.InvalidPolicy,
@@ -84,6 +88,9 @@ pub const Policy = struct {
     point_count: u8,
 
     pub fn init(config: *const Config) error{InvalidPolicy}!Policy {
+        for ([_]u64{ config.slot_duration_ms, config.slot_duration_ms_heze }) |duration| {
+            if (duration == 0 or duration > 86_400_000) return error.InvalidPolicy;
+        }
         if (config.max_payload_size < protocol.payloadMaxControl() or config.max_payload_size > constants_mod.MAX_PAYLOAD_SIZE or
             config.payloads == 0 or config.payloads > constants.MAX_REQUEST_PAYLOADS or
             config.gloas_column_max < ct.gloas.DataColumnSidecar.min_size or

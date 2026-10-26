@@ -47,7 +47,9 @@ pub const Limiter = struct {
     pub fn validate(options: *const Options) error{ InvalidOptions, InvalidQuota }!void {
         for ([_]quota_config.Quota{ options.starts, options.global_starts }) |quota| try validateQuota(quota);
         for ([_]*const quota_config.Rates{ &options.source, &options.global }) |rates| {
-            for (rates.protocols ++ .{ rates.blocks_pre_deneb, rates.blobs_pre_electra }) |quota| try validateQuota(quota);
+            for (std.enums.values(Protocol)) |which| {
+                for (std.enums.values(ForkSeq)) |fork| try validateQuota(rates.get(which, fork));
+            }
         }
     }
 
@@ -57,7 +59,7 @@ pub const Limiter = struct {
         var retention_ms = options.starts.period_ms;
         for (std.enums.values(Protocol)) |which| {
             if (!protocols.contains(which)) continue;
-            for ([_]ForkSeq{ .phase0, .fulu }) |fork| retention_ms = @max(retention_ms, options.source.get(which, fork).period_ms);
+            for (std.enums.values(ForkSeq)) |fork| retention_ms = @max(retention_ms, options.source.get(which, fork).period_ms);
         }
         // Every retained debt was charged within retention_ms. Its request either already
         // occupied a connection at that window's beginning, or charged a start within it.

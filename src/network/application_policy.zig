@@ -33,7 +33,7 @@ pub fn gossip(chain: *const ChainConfig, validators: u64) !gossip_options.Option
     return .{
         .heartbeat_interval_ms = 700,
         .iwant_followup_ms = 12_000,
-        .idontwant_min_data_size = if (preset.active_preset == .mainnet) 16829 else 1462,
+        .idontwant_min_data_size = p.MAX_SIGNED_AGGREGATE_AND_PROOF_SIZE,
         .validation_timeout_ms = 30_000,
         .validation_tombstone_ms = 30_000,
         .pressure_timeout_ms = 30_000,

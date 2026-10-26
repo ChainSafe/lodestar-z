@@ -154,8 +154,27 @@ Do not assume minimal and mainnet constants are interchangeable.
 
 ### Network policy fixtures
 
-Regenerate `src/network/testdata/application_scores_{mainnet,minimal}.json` and
-`application_subnets_{mainnet,minimal}.json` from the adjacent Lodestar checkout; do not edit these fixtures manually. From that checkout's root:
+Protocol sizes and fork timing come from consensus types, presets, constants, and chain config.
+Lodestar owns the scoring and subnet formulas covered by parity fixtures. Native resource limits,
+accounting keys, and peer-selection choices remain native policy; matching Lodestar's backend is
+not their correctness criterion.
+
+`src/network/testdata/lodestar-revision` pins the Lodestar commit that owns the scoring and subnet
+parity fixtures. CI regenerates and compares them, then checks native policy under mainnet, minimal,
+and gnosis. Gnosis has direct preset and quota regressions; the pinned generator supports mainnet
+and minimal chain defaults only.
+
+To check the fixtures, use a clean Lodestar checkout at that revision, install its dependencies with
+`pnpm install --frozen-lockfile`, and build them with
+`pnpm --filter '@lodestar/beacon-node^...' build`. From this repository, run:
+
+```bash
+scripts/check-network-policy.sh ../lodestar-native-all
+```
+
+When updating the reference, change `lodestar-revision` to the reviewed commit and regenerate
+`application_scores_{mainnet,minimal}.json` and `application_subnets_{mainnet,minimal}.json` from
+that checkout. Do not edit these fixtures manually. From the Lodestar checkout's root:
 
 ```bash
 LODESTAR_PRESET=mainnet node --import tsx packages/beacon-node/test/utils/nativePolicyFixtures.ts ../lodestar-z-network-all/src/network/testdata

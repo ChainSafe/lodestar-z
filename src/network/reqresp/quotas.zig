@@ -18,11 +18,13 @@ pub const Rates = struct {
     protocols: [Protocol.count]Quota,
     blocks_pre_deneb: Quota,
     blobs_pre_electra: Quota,
+    light_client_heze: Quota,
 
     pub fn get(self: *const Rates, which: Protocol, fork: ForkSeq) Quota {
         return switch (which) {
             .blocks_by_range_v2, .blocks_by_root_v2 => if (fork.gte(.deneb)) self.protocols[@intFromEnum(which)] else self.blocks_pre_deneb,
             .blob_sidecars_by_range_v1, .blob_sidecars_by_root_v1 => if (fork.gte(.electra)) self.protocols[@intFromEnum(which)] else self.blobs_pre_electra,
+            .light_client_finality_update_v1, .light_client_optimistic_update_v1 => if (fork.gte(.heze)) self.light_client_heze else self.protocols[@intFromEnum(which)],
             else => self.protocols[@intFromEnum(which)],
         };
     }
@@ -46,8 +48,10 @@ pub const Options = struct {
         }
         result.source.blocks_pre_deneb = sourceQuota(&policy, .blocks_by_root_v2, .phase0);
         result.source.blobs_pre_electra = sourceQuota(&policy, .blob_sidecars_by_root_v1, .deneb);
+        result.source.light_client_heze = sourceQuota(&policy, .light_client_finality_update_v1, .heze);
         result.global.blocks_pre_deneb = scaled(result.source.blocks_pre_deneb, global_scale);
         result.global.blobs_pre_electra = scaled(result.source.blobs_pre_electra, global_scale);
+        result.global.light_client_heze = scaled(result.source.light_client_heze, global_scale);
         return result;
     }
 };
@@ -67,8 +71,11 @@ fn sourceQuota(policy: *const request_policy.Policy, which: Protocol, fork: Fork
         .blocks_by_head_v1 => .{ .tokens = policy.config.blocks_deneb, .period_ms = ten_seconds_ms },
         .blob_sidecars_by_range_v1, .blob_sidecars_by_root_v1 => .{ .tokens = policy.blobs(fork), .period_ms = ten_seconds_ms },
         .data_column_sidecars_by_range_v1, .data_column_sidecars_by_root_v1 => .{ .tokens = policy.config.column_chunks, .period_ms = ten_seconds_ms },
-        .light_client_updates_by_range_v1 => .{ .tokens = 128, .period_ms = ten_seconds_ms },
-        .light_client_finality_update_v1, .light_client_optimistic_update_v1 => .{ .tokens = 2, .period_ms = 12_000 },
+        .light_client_updates_by_range_v1 => .{ .tokens = @import("constants").MAX_REQUEST_LIGHT_CLIENT_UPDATES, .period_ms = ten_seconds_ms },
+        .light_client_finality_update_v1, .light_client_optimistic_update_v1 => .{
+            .tokens = 2,
+            .period_ms = if (fork.gte(.heze)) policy.config.slot_duration_ms_heze else policy.config.slot_duration_ms,
+        },
     };
 }
 

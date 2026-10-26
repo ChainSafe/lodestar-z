@@ -3,6 +3,14 @@ const policy = @import("application_policy.zig");
 const limits = @import("gossip_limits.zig");
 const p = @import("preset").preset;
 
+test "application IDONTWANT threshold follows the preset independently of chain timing" {
+    const expected: usize = if (preset.active_preset == .minimal) 1462 else 16829;
+    for ([_]*const config.BeaconConfig{ &config.mainnet.config, &config.minimal.config, &config.gnosis.config }) |beacon| {
+        const gossip = try policy.gossip(&beacon.chain, 16);
+        try std.testing.expectEqual(expected, gossip.idontwant_min_data_size);
+    }
+}
+
 test "application policy bounds validator-driven work and execution shares" {
     for ([_]u64{ 1, 16, 1_000_000, 3_000_000, 9007199254740991 }) |validators| {
         const processor = try policy.processor(&.{}, validators);
