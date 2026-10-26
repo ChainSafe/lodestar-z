@@ -36,6 +36,7 @@ interface NativeBridge {
   requestPull(handle: RequestHandle): Promise<IteratorResult<NativeResponseChunk>>;
   /** Cancels the request, whose terminal completion ends the retirement. */
   requestRetire(handle: RequestHandle, abandoned: boolean): void;
+  requestCapacityWatch(token: string): boolean;
 }
 
 interface NetworkTestBindings {

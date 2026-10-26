@@ -24,7 +24,13 @@ test("request capacity refusal is typed while control and publication admission 
     const streams: ReturnType<typeof runtime.request>[] = [];
     expect(() => {
       for (let i = 0; i < 1024; i++) streams.push(runtime.request(runtime.identity.peerId, REQUEST, new Uint8Array(0)));
-    }).toThrow(expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"}));
+    }).toThrow(
+      expect.objectContaining({
+        capacityToken: expect.any(String),
+        code: "NetworkRequestRejected",
+        reason: "local_capacity",
+      })
+    );
     await Promise.all([
       runtime.reStatusPeers([]),
       runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true}),

@@ -1,4 +1,5 @@
 import bindings from "./bindings.js";
+import {RequestCapacityWaiters} from "./network-capacity.js";
 import {NativePump} from "./network-pump.js";
 import {NativeRequest} from "./network-request.js";
 
@@ -20,6 +21,7 @@ const CONNECT_TIMEOUT_MS = 10000n;
 class NativeNetwork {
   #native;
   #pump;
+  #requestCapacity;
   #metricsPending = null;
   #identity;
   #directPeers = new Set();
@@ -29,12 +31,20 @@ class NativeNetwork {
   constructor(config, host) {
     for (const name of HOST_METHODS)
       if (typeof host?.[name] !== "function") throw new TypeError(`NativeHost.${name} must be a function`);
-    const pump = new NativePump(host, (identity) => {
-      this.#identity = identity;
-    });
+    const pump = new NativePump(
+      host,
+      (identity) => {
+        this.#identity = identity;
+      },
+      () => {
+        this.#requestCapacity.changed();
+        host.requestCapacityChanged?.();
+      }
+    );
     const native = new bindings.NativeNetworkRuntime();
     const initialized = native.initialize(config, pump.request);
     this.#native = native;
+    this.#requestCapacity = new RequestCapacityWaiters(native);
     this.#identity = initialized.identity;
     Object.defineProperty(this, NATIVE, {value: native});
     pump.attach(native, initialized.closed);
@@ -43,6 +53,7 @@ class NativeNetwork {
     this.closed = initialized.closed;
     openNetworks.add(this);
     void this.closed.then(() => {
+      this.#requestCapacity.close();
       this.#closing = true;
       openNetworks.delete(this);
     });
@@ -71,6 +82,12 @@ class NativeNetwork {
   }
   request(peerId, protocol, data, options) {
     return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options));
+  }
+  waitForRequestCapacity(token, options) {
+    return this.#requestCapacity.wait(token, options);
+  }
+  watchRequestCapacity(token) {
+    return this.#native.requestCapacityWatch(token);
   }
   async connect(peerId, endpoints, timeoutMs = CONNECT_TIMEOUT_MS) {
     return this.#native.connect(peerId, endpoints, timeoutMs);
@@ -135,6 +152,7 @@ class NativeNetwork {
   }
   close() {
     this.#closing = true;
+    this.#requestCapacity.close();
     this.#pump.stopDelivery();
     this.#native.close();
     return this.closed;

@@ -7,6 +7,7 @@ const network_metrics = @import("network_metrics.zig");
 const diagnostics = @import("network_diagnostics.zig");
 const network_peer_reports = @import("network_peer_reports.zig");
 const network_budget = @import("network_budget.zig");
+const request_capacity = @import("network_request_capacity.zig");
 pub const gossip_mod = @import("network_gossip.zig");
 pub const incoming_mod = @import("network_incoming.zig");
 pub const requests_mod = @import("network_requests.zig");
@@ -15,7 +16,7 @@ pub const commands = @import("network_commands.zig");
 pub const application_config = @import("network_application_config.zig");
 pub const projection = @import("network_peer_projection.zig");
 const Wake = @import("network_wake.zig").Wake;
-pub const DeliveryKind = enum { completions, identity, peers, checks, serving, gossip };
+pub const DeliveryKind = enum { completions, request_capacity, identity, peers, checks, serving, gossip };
 pub const Owner = @import("network_owner.zig").Owner;
 pub const allocator = std.heap.c_allocator;
 pub const Reason = enum { requested, failed };
@@ -60,6 +61,7 @@ const Bridge = struct {
     incoming: ?incoming_mod.Table = null,
     gossip: ?gossip_mod.Table = null,
     payload_budget: network_budget.Budget = .{},
+    request_capacity: request_capacity.Tracker = .{},
     wake: ?Wake = null,
     notify: Notify = undefined,
     notify_live: bool = true,
@@ -146,12 +148,24 @@ pub const Runtime = struct {
         std.Io.Threaded.mutexLock(&self.bridge.mutex);
     }
     pub fn unlock(self: *Runtime) void {
+        self.refreshBridgeCapacityLocked();
+        if (self.bridge.request_capacity.pending) self.notifyIfReadyLocked();
         // A payload release while the owner waits for budget wakes it to retry.
         if (self.bridge.payload_budget.released) {
             self.bridge.payload_budget.released = false;
             self.wakeOwnerLocked();
         }
         std.Io.Threaded.mutexUnlock(&self.bridge.mutex);
+    }
+    pub fn refreshBridgeCapacityLocked(self: *Runtime) void {
+        if (self.bridge.requests) |*table| self.bridge.request_capacity.update(.bridge_slots, table.release_revision);
+        self.bridge.request_capacity.update(.bridge_bytes, self.bridge.payload_budget.release_revision);
+    }
+    /// Owner thread only; core state is never read by JavaScript capacity watches.
+    pub fn refreshRequestCapacityLocked(self: *Runtime) void {
+        const protocols = &self.owner.?.core.protocols;
+        self.bridge.request_capacity.update(.requests, protocols.reqresp.outbound_release_revision);
+        self.bridge.request_capacity.update(.negotiations, protocols.router.negotiator.release_revision);
     }
     pub fn retain(self: *Runtime) void {
         _ = self.refs.fetchAdd(1, .monotonic);
@@ -200,6 +214,7 @@ pub const Runtime = struct {
         if (kind == .completions)
             return self.completionsReadyLocked() or (self.bridge.quiescent and self.closed.resolvers != null);
         if (self.bridge.quiescent and self.closed.resolvers == null) return false;
+        if (kind == .request_capacity) return self.bridge.request_capacity.pending and !self.bridge.stop;
         if (kind == .identity) return self.bridge.identity != null;
         if (kind == .peers) return self.bridge.peer_updates != null and self.bridge.peer_updates.?.len > 0;
         const capacity = self.bridge.capacity orelse return false;
@@ -211,7 +226,7 @@ pub const Runtime = struct {
                 const work = table.readiness();
                 break :blk work.urgent or (work.ordinary and capacity.gossip_validation == .ready);
             } else false,
-            .completions, .identity, .peers => unreachable,
+            .completions, .request_capacity, .identity, .peers => unreachable,
         };
     }
     pub fn hasDeliveryLocked(self: *Runtime) bool {

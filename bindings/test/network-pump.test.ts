@@ -39,6 +39,7 @@ const idle: NativeExchange = {
   identity: null,
   needsAnotherExchange: false,
   peers: [],
+  requestCapacityChanged: false,
   serving: [],
 };
 const handle = (index: number, generation = 1n): NativeGossipHandle => ({generation, index});
@@ -96,7 +97,16 @@ function gossip(...specs: JobSpec[]): NativeGossipBatch {
 }
 
 function check(index: number): NativeGossipDependencyCheck {
-  return {handle: handle(index), peerId: "peer", root: new Uint8Array(32).fill(index), slot: 3n, topic: "topic"};
+  return {
+    handle: handle(index),
+    kind: "beacon_block",
+    parentBlockHash: null,
+    payloadPresent: true,
+    peerId: "peer",
+    root: new Uint8Array(32).fill(index),
+    slot: 3n,
+    topic: "topic",
+  };
 }
 
 function incoming(name = "start") {
@@ -155,7 +165,8 @@ function fixture() {
       (job: GossipJob): Promise<readonly Verdict[]> => Promise.resolve(job.messages.map(() => "accept" as const))
     ),
   };
-  const pump = new NativePump(host);
+  const requestCapacityChanged = vi.fn();
+  const pump = new NativePump(host, undefined, requestCapacityChanged);
   pump.attach(runtime, closed.promise);
   return {
     advance(ms: number) {
@@ -168,6 +179,7 @@ function fixture() {
       return now;
     },
     pump,
+    requestCapacityChanged,
     runtime,
   };
 }
@@ -427,6 +439,40 @@ describe("binding pump delivery", () => {
     expect(node.host.peers).toHaveBeenCalledExactlyOnceWith([peerEvent]);
   });
 
+  it("delivers request capacity notifications while host payload delivery is stopped", async () => {
+    const node = fixture();
+    node.pump.stopDelivery();
+    node.runtime.exchange.mockReturnValueOnce({...idle, requestCapacityChanged: true});
+    node.pump.request();
+    await macrotask();
+    expect(node.requestCapacityChanged).toHaveBeenCalledOnce();
+    expect(node.host.validate).not.toHaveBeenCalled();
+    await macrotask();
+    expect(node.runtime.exchange).toHaveBeenCalledOnce();
+  });
+
+  it("retires delivered work if the request capacity listener throws", async () => {
+    const node = fixture();
+    const start = incoming();
+    node.requestCapacityChanged.mockImplementation(() => {
+      throw new Error("capacity listener");
+    });
+    node.runtime.exchange.mockReturnValueOnce({
+      ...idle,
+      checks: [check(9)],
+      gossip: gossip({messages: [1]}),
+      requestCapacityChanged: true,
+      serving: [start],
+    });
+    node.pump.request();
+    await macrotask();
+    expect(node.host.failed).toHaveBeenCalledOnce();
+    expect(start.cancel).toHaveBeenCalledOnce();
+    expect(node.runtime.classifyGossip).toHaveBeenCalledWith(handle(9), false);
+    expect(node.runtime.reportGossip).toHaveBeenCalledWith(handle(1), "ignore");
+    expect(node.host.validate).not.toHaveBeenCalled();
+  });
+
   it("hands the host records that physically omit native handles and dispatch fields", async () => {
     const node = fixture();
     const start = incoming();
@@ -454,7 +500,15 @@ describe("binding pump delivery", () => {
     ]);
     expect(job.messages[1].data).toEqual(new Uint8Array(4).fill(2));
     expect(node.host.checkDependencies.mock.calls[0][0]).toEqual([
-      {peerId: "peer", root: new Uint8Array(32).fill(9), slot: 3n, topic: "topic"},
+      {
+        kind: "beacon_block",
+        parentBlockHash: null,
+        payloadPresent: true,
+        peerId: "peer",
+        root: new Uint8Array(32).fill(9),
+        slot: 3n,
+        topic: "topic",
+      },
     ]);
     const request = node.host.serve.mock.calls[0][0];
     expect(Object.keys(request).sort()).toEqual(["closed", "connection", "data", "peerId", "protocol"]);

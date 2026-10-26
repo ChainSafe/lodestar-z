@@ -8,6 +8,7 @@ const requests = @import("network_requests.zig");
 const Promise = @import("network_promise.zig");
 const Runtime = r.Runtime;
 const network_js = @import("network_js.zig");
+const capacity = @import("network_request_capacity.zig");
 
 const bytes = network_js.bytes;
 const errorValue = network_js.errorValue;
@@ -45,8 +46,10 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
         return error.NetworkClosed;
     }
     const token = runtime.bridge.requests.?.reserve(which, len) catch |err| {
+        runtime.refreshBridgeCapacityLocked();
+        const blocked = runtime.bridge.request_capacity.token(if (err == error.NetworkRequestFull) .bridge_slots else .bridge_bytes);
         runtime.unlock();
-        if (err == error.NetworkRequestFull or err == error.NetworkBridgeFull) return rejectAdmission(runtime.env);
+        if (err == error.NetworkRequestFull or err == error.NetworkBridgeFull) return rejectAdmission(runtime.env, blocked);
         return err;
     };
     runtime.retain();
@@ -74,11 +77,27 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     runtime.wakeOwnerLocked();
     return value;
 }
-fn rejectAdmission(env: napi.Env) anyerror {
-    const value = errorValue(env, "NetworkRequestRejected") catch |err| return err;
-    value.setNamedProperty("reason", env.createStringUtf8("slots_exhausted") catch |err| return err) catch |err| return err;
+fn capacityError(env: napi.Env, token: capacity.Token) !Value {
+    const value = try errorValue(env, "NetworkRequestRejected");
+    try value.setNamedProperty("reason", try env.createStringUtf8("local_capacity"));
+    var buffer: [capacity.token_max]u8 = undefined;
+    try value.setNamedProperty("capacityToken", try env.createStringUtf8(token.format(&buffer)));
+    return value;
+}
+fn rejectAdmission(env: napi.Env, token: capacity.Token) anyerror {
+    const value = capacityError(env, token) catch |err| return err;
     env.throw(value) catch |err| return err;
     return error.PendingException;
+}
+pub fn watchCapacity(runtime: *Runtime, value: Value) !bool {
+    var buffer: [capacity.token_max]u8 = undefined;
+    const len = try decode.text(value, &buffer);
+    const token = try capacity.Token.parse(buffer[0..len]);
+    runtime.lock();
+    defer runtime.unlock();
+    if (runtime.bridge.stop or runtime.bridge.quiescent) return error.NetworkClosed;
+    runtime.refreshBridgeCapacityLocked();
+    return runtime.bridge.request_capacity.watch(token);
 }
 /// Arms a pull, whose chunk or terminal outcome an exchange delivers. The iterator allows one pull at a time, so a
 /// second one breaks its contract.
@@ -116,6 +135,7 @@ pub fn retire(runtime: *Runtime, handle: Value, abandoned: bool) !void {
 fn terminalError(env: napi.Env, terminal: requests.Terminal, cell: *const requests.Cell) !Value {
     switch (terminal) {
         .closed => return errorValue(env, "NetworkClosed"),
+        .local_capacity => |token| return capacityError(env, token),
         .rejected => |reason| {
             const object = try errorValue(env, "NetworkRequestRejected");
             try object.setNamedProperty("reason", try env.createStringUtf8(@tagName(reason)));

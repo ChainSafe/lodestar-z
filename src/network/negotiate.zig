@@ -14,6 +14,7 @@ const StreamHandle = Engine.StreamHandle;
 const StreamError = Engine.StreamError;
 
 pub const Negotiator = struct {
+    release_revision: u64 = 0,
     allocator: std.mem.Allocator,
     entries: []Entry,
     outbound_control_reserved: u16 = 0,
@@ -261,6 +262,7 @@ pub const Negotiator = struct {
 
     fn release(self: *Negotiator, index: usize) void {
         const entry = &self.entries[index];
+        if (entry.state != .free) self.release_revision += 1;
         if (entry.ready_link.linked) self.ready.remove(self.entries, "ready_link", @intCast(index));
         switch (entry.state) {
             .pending => self.pending.remove(self.entries, "outcome_link", @intCast(index)),

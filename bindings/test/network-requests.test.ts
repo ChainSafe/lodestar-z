@@ -313,7 +313,11 @@ stockTest(
       await peer.command("scenario", {scenario: "hold"});
       const streams = Array.from({length: 6}, () => runtime.request(id, BLOCKS, new Uint8Array(32)));
       expect(() => runtime.request(id, BLOCKS, new Uint8Array(32))).toThrow(
-        expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"})
+        expect.objectContaining({
+          capacityToken: expect.any(String),
+          code: "NetworkRequestRejected",
+          reason: "local_capacity",
+        })
       );
       await expect(streams[2].next()).rejects.toMatchObject({
         code: "NetworkRequestRejected",
@@ -770,14 +774,26 @@ test("a full request table delivers every outcome and reuses each cell with the 
     await drainUntil(native, native.applyIntent(localIntent(config)));
     for (const generation of [1n, 2n]) {
       const handles: ReturnType<typeof native.requestStart>[] = [];
-      expect(() => {
+      let refusal: unknown;
+      try {
         for (let i = 0; i < 1024; i++) handles.push(native.requestStart(self, BLOCKS, new Uint8Array(32), undefined));
-      }).toThrow(expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"}));
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toMatchObject({
+        capacityToken: expect.any(String),
+        code: "NetworkRequestRejected",
+        reason: "local_capacity",
+      });
+      const {capacityToken} = refusal as {capacityToken: string};
+      native.requestCapacityWatch(capacityToken);
       expect(handles.map(({handle}) => handle.generation)).toEqual(handles.map(() => generation));
       const outcomes = Promise.allSettled(handles.map(({handle}) => native.requestPull(handle)));
       expect(await drainUntil(native, outcomes)).toEqual(
         handles.map(() => ({reason: expect.objectContaining({reason: "disconnected"}), status: "rejected"}))
       );
+      expect(native.requestCapacityWatch(capacityToken)).toBe(true);
+      expect(() => native.requestCapacityWatch("invalid")).toThrow("InvalidRequestCapacityToken");
       for (const {handle} of handles) expect(() => native.requestPull(handle)).toThrow("InvalidRequestHandle");
     }
   } finally {

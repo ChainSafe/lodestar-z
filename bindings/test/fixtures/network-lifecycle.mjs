@@ -197,7 +197,7 @@ if (mode === "open") {
       const stream = right.request(identity.peerId, BLOCKS, new Uint8Array(32));
       settlements.watch(() => stream.next());
     }
-  }, {code: "NetworkRequestRejected", reason: "slots_exhausted"});
+  }, {code: "NetworkRequestRejected", reason: "local_capacity", capacityToken: /.+/});
   for (let i = 0; i < 16; i++) settlements.watch(() => right.reStatusPeers([]));
   for (let i = 0; i < 8; i++) settlements.watch(() => right.connect(...unreachableConnect()));
   for (let i = 0; i < 16; i++)

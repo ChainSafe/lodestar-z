@@ -5,6 +5,7 @@ const n = @import("network");
 const rr = n.reqresp;
 const Budget = @import("network_budget.zig").Budget;
 const network_incoming = @import("network_incoming.zig");
+const request_capacity = @import("network_request_capacity.zig");
 pub fn forkLabel(fork: ?@FieldType(n.types.ForkEntry, "fork")) ?[]const u8 {
     return if (fork) |value| @tagName(value) else null;
 }
@@ -15,9 +16,10 @@ pub const Terminal = union(enum) {
     done,
     closed,
     rejected: Rejection,
+    local_capacity: request_capacity.Token,
     failed: struct { reason: rr.ReqResp.Failure, phase: ?rr.ReqResp.RequestPhase, origin: ?n.types.PeerOrigin = null, peer_fault: ?@FieldType(rr.ReqResp.PeerFault, "kind") = null },
 };
-pub const Rejection = enum { disconnected, protocol_disabled, invalid_request, invalid_request_options, too_many_requests, slots_exhausted, negotiation_table_full, transport };
+pub const Rejection = enum { disconnected, protocol_disabled, invalid_request, invalid_request_options, too_many_requests, transport };
 pub const Chunk = struct { len: usize, fork: ?@FieldType(n.types.ForkEntry, "fork"), origin: n.types.PeerOrigin };
 pub const Cell = struct {
     pull_promise: Promise = .{},
@@ -70,6 +72,7 @@ pub const Diagnostics = struct {
 };
 pub const capacity_max = 32;
 pub const Table = struct {
+    release_revision: u64 = 0,
     cells: []Cell = &.{},
     /// The cells whose completion is due now, one set per combination of the runtime's stop and
     /// quiescent flags. `refresh` keeps them current after each change to a cell.
@@ -156,6 +159,7 @@ pub const Table = struct {
         cell.pull_promise.deinit();
         cell.closed_promise.deinit();
         cell.state = .free;
+        self.release_revision += 1;
         cell.pulling = false;
         cell.retirement_awaited = false;
         self.refresh(cell);
@@ -275,16 +279,16 @@ pub fn armRetirement(runtime: *Runtime, cell: *Cell, awaited: bool) void {
     runtime.notifyIfReadyLocked();
 }
 
-fn rejection(err: n.NetworkCore.RequestError) error{ InvalidCapacity, SinkTooSmall }!Rejection {
+fn rejection(err: n.NetworkCore.RequestError, tracker: *const request_capacity.Tracker) error{ InvalidCapacity, SinkTooSmall }!Terminal {
     return switch (err) {
-        error.StalePeer, error.StaleHandle, error.Disconnected => .disconnected,
-        error.ProtocolDisabled => .protocol_disabled,
-        error.InvalidRequest, error.RequestTooLarge, error.RequestTooSmall => .invalid_request,
-        error.InvalidRequestOptions => .invalid_request_options,
-        error.TooManyRequests => .too_many_requests,
-        error.SlotsExhausted => .slots_exhausted,
-        error.NegotiationTableFull => .negotiation_table_full,
-        error.Transport, error.StreamLimit, error.Stopped => .transport,
+        error.StalePeer, error.StaleHandle, error.Disconnected => .{ .rejected = .disconnected },
+        error.ProtocolDisabled => .{ .rejected = .protocol_disabled },
+        error.InvalidRequest, error.RequestTooLarge, error.RequestTooSmall => .{ .rejected = .invalid_request },
+        error.InvalidRequestOptions => .{ .rejected = .invalid_request_options },
+        error.TooManyRequests => .{ .rejected = .too_many_requests },
+        error.SlotsExhausted => .{ .local_capacity = tracker.token(.requests) },
+        error.NegotiationTableFull => .{ .local_capacity = tracker.token(.negotiations) },
+        error.Transport, error.StreamLimit, error.Stopped => .{ .rejected = .transport },
         error.InvalidCapacity => error.InvalidCapacity,
         error.SinkTooSmall => error.SinkTooSmall,
     };
@@ -302,7 +306,8 @@ pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
     } else {
         const core = &runtime.owner.?.core;
         cell.native = core.sendReqRespRequest(&cell.peer, cell.protocol, cell.input, cell.sink, cell.options, now) catch |err| blk: {
-            cell.terminal = .{ .rejected = try rejection(err) };
+            runtime.refreshRequestCapacityLocked();
+            cell.terminal = try rejection(err, &runtime.bridge.request_capacity);
             break :blk null;
         };
     }

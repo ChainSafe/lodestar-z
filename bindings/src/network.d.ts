@@ -321,8 +321,6 @@ export type NativeRequestRejection =
   | "invalid_request"
   | "invalid_request_options"
   | "too_many_requests"
-  | "slots_exhausted"
-  | "negotiation_table_full"
   | "transport";
 export type NativeRequestFailure =
   | "timeout"
@@ -342,6 +340,7 @@ export type NativeRequestFailure =
 export type NativeRequestError = Error &
   (
     | {code: "NetworkRequestRejected"; reason: NativeRequestRejection}
+    | {code: "NetworkRequestRejected"; reason: "local_capacity"; capacityToken: string}
     | {
         code: "NetworkRequestFailed";
         reason: NativeRequestFailure;
@@ -538,6 +537,8 @@ export interface HostCapacity {
  * asynchronous handlers. Keep synchronous handler work short so other event-loop work can run between batches.
  */
 export interface NativeHost {
+  /** Coalesced notice to recheck watched outbound admission tokens. Carries no reservation. A throw fails the host. */
+  requestCapacityChanged?(): void;
   /** A throw or an invalid value fails the host and stops payload delivery. */
   capacity(): HostCapacity;
   /**
@@ -613,6 +614,14 @@ export interface NativeNetwork {
     data: Uint8Array,
     options?: NativeRequestOptions
   ): AsyncIterableIterator<NativeResponseChunk>;
+  /**
+   * Resolves when the resource that refused admission changes, including a change before this call.
+   * The token belongs to this runtime and grants no reservation. No request is retained or retried.
+   * At most 32 waits may be pending. timeoutMs is an integer in 1..60000; cancellation, expiry and close reject locally.
+   */
+  waitForRequestCapacity(token: string, options: {signal: AbortSignal; timeoutMs: number}): Promise<void>;
+  /** Checks the token and arms requestCapacityChanged atomically when its resource has not changed. */
+  watchRequestCapacity(token: string): boolean;
   /** One-shot connection attempt, retired on success or timeout (10 s by default). */
   connect(peerId: PeerIdStr, endpoints: readonly IpEndpoint[], timeoutMs?: bigint): Promise<void>;
   /** Closes the connection and rejects pending connects with NetworkConnectCancelled. Direct membership remains. */

@@ -137,6 +137,7 @@ pub const MemoryPlan = struct {
 const ReqResp = @This();
 
 allocator: std.mem.Allocator,
+outbound_release_revision: u64 = 0,
 options: Settings,
 outbound: []Client,
 inbound: []Server,
@@ -897,6 +898,7 @@ fn retire(self: *ReqResp, id: u32) void {
     if (id < self.outbound.len) {
         const slot = &self.outbound[id];
         self.outbound_by_connection[slot.request.conn.index].remove(self.outbound, "conn_link", id);
+        self.outbound_release_revision += 1;
     } else {
         const slot = &self.inbound[id - self.outbound.len];
         if (slot.execution) |index| {

@@ -58,6 +58,7 @@ pub fn prepareConfiguration(self: *Runtime) !void {
     const io = self.owner.?.threaded.io();
     var seed: u64 = undefined;
     try io.randomSecure(std.mem.asBytes(&seed));
+    try io.randomSecure(std.mem.asBytes(&self.bridge.request_capacity.instance));
     const options = try self.owner.?.application.buildOptions(&self.owner.?.config, seed);
     self.owner.?.resolved = n.configuration.resolve(options) catch |err| switch (err) {
         error.InvalidLimits => return error.InvalidNetworkConfig,
@@ -386,6 +387,7 @@ pub fn publishIdentity(self: *Runtime) void {
 
 fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result) void {
     self.lock();
+    self.refreshRequestCapacityLocked();
     if (self.bridge.peer_updates) |lane| lane.publish(self.owner.?.outputs[0..result.counts.peers]);
     self.notifyIfReadyLocked();
     if (result.failure) |err| {

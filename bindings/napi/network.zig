@@ -268,6 +268,9 @@ pub fn removeDirectPeer(self: *@This(), peer: js.Value) !js.Value {
 pub fn requestStart(self: *@This(), peer: js.Value, protocol: js.Value, data: js.Value, options: js.Value) !js.Value {
     return .{ .val = try request_js.start(try self.owner(), peer.val, protocol.val, data.val, options.val) };
 }
+pub fn requestCapacityWatch(self: *@This(), token: js.Value) !js.Value {
+    return .{ .val = try js.env().getBoolean(try request_js.watchCapacity(try self.owner(), token.val)) };
+}
 pub fn requestPull(self: *@This(), handle: js.Value) !js.Value {
     return .{ .val = try request_js.pull(try self.owner(), handle.val) };
 }

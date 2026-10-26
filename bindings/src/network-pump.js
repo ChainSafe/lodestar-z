@@ -97,14 +97,18 @@ export class NativePump {
   #logs = null;
   /** @type {(identity: import("./network.js").NativeIdentity) => void} */
   #onIdentity;
+  /** @type {() => void} */
+  #onRequestCapacity;
 
   /**
    * @param {Host} host
    * @param {(identity: import("./network.js").NativeIdentity) => void} [onIdentity]
+   * @param {() => void} [onRequestCapacity]
    */
-  constructor(host, onIdentity = () => undefined) {
+  constructor(host, onIdentity = () => undefined, onRequestCapacity = () => undefined) {
     this.#host = host;
     this.#onIdentity = onIdentity;
+    this.#onRequestCapacity = onRequestCapacity;
   }
 
   /**
@@ -275,6 +279,7 @@ export class NativePump {
     const checks = result.checks;
     let checked = checks.length === 0;
     try {
+      if (result.requestCapacityChanged) this.#onRequestCapacity();
       // Host code may already have run within the exchange's settlements.
       if (this.#deliveryStopped) return;
       if (result.peers.length > 0) this.#host.peers(result.peers);

@@ -312,6 +312,44 @@ test.each([
   15000
 );
 
+test("capacity release wakes a bounded facade wait without retrying its rejected request", async () => {
+  const config = applicationConfig();
+  config.resources.bridgeBudgetBytes = 1024 * 1024 * 1024;
+  const changed = vi.fn();
+  const network = createNativeNetwork(config, host({requestCapacityChanged: changed}));
+  try {
+    await network.applyIntent(localIntent(config));
+    const self = (await network.getIdentity()).peerId;
+    const streams = Array.from({length: 32}, () => network.request(self, BLOCKS, new Uint8Array(32)));
+    let refusal: unknown;
+    try {
+      network.request(self, BLOCKS, new Uint8Array(32));
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toMatchObject({
+      capacityToken: expect.any(String),
+      code: "NetworkRequestRejected",
+      reason: "local_capacity",
+    });
+    const {capacityToken} = refusal as {capacityToken: string};
+    expect(network.watchRequestCapacity(capacityToken)).toBe(false);
+    network.stopDelivery();
+    const wait = network.waitForRequestCapacity(capacityToken, {signal: new AbortController().signal, timeoutMs: 5000});
+    const outcomes = await Promise.allSettled(streams.map((stream) => stream.next()));
+    await wait;
+    expect(changed).toHaveBeenCalled();
+    expect(outcomes).toEqual(
+      streams.map(() => ({reason: expect.objectContaining({reason: "disconnected"}), status: "rejected"}))
+    );
+    await expect(network.request(self, BLOCKS, new Uint8Array(32)).next()).rejects.toMatchObject({
+      reason: "disconnected",
+    });
+  } finally {
+    await network.close();
+  }
+}, 15000);
+
 test("refuses an invalid peer report or imported root with an ordinary throw before queueing it", async () => {
   const config = applicationConfig();
   const network = createNativeNetwork(config, host());

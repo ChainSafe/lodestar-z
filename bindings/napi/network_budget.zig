@@ -11,6 +11,7 @@ pub const Diagnostics = struct {
 };
 
 pub const Budget = struct {
+    release_revision: u64 = 0,
     limit: usize = 0,
     used: usize = 0,
     minimum: [count]usize = @splat(0),
@@ -52,6 +53,7 @@ pub const Budget = struct {
         std.debug.assert(amount <= self.used and amount <= self.owned[@intFromEnum(owner)]);
         self.used -= amount;
         self.owned[@intFromEnum(owner)] -= amount;
+        if (amount > 0) self.release_revision += 1;
         if (self.waiting and amount > 0) {
             self.waiting = false;
             self.released = true;
