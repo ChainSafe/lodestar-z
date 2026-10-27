@@ -726,12 +726,12 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
             value.deinit(allocator);
         }
 
-        /// The caller initializes `out` with `initValue(Self)`; this uses `cloneInto`'s contract.
+        /// The caller initializes `out` with `default_value`; this uses `cloneInto`'s contract.
         pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
             return cloneInto(@This(), allocator, value, out);
         }
 
-        /// The caller initializes `out` with `initValue(DestinationST)` and deinitializes it
+        /// The caller initializes `out` with `DestinationST.default_value` and deinitializes it
         /// after success or error. Errors leave `out` safe to deinitialize.
         pub fn cloneInto(
             comptime DestinationST: type,
@@ -797,8 +797,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
             try writer.endArray();
         }
 
-        /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success or
-        /// error.
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
             var elements = try VariableElementIterator(Self).init(data);
             const len = elements.len;

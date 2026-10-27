@@ -555,7 +555,7 @@ pub fn VariableContainerType(comptime ST: type) type {
             try merkleize(@ptrCast(&chunks), chunk_depth, out);
         }
 
-        /// The caller initializes `out` with `initValue(Self)`; this uses `cloneInto`'s contract.
+        /// The caller initializes `out` with `default_value`; this uses `cloneInto`'s contract.
         pub fn clone(
             allocator: std.mem.Allocator,
             value: *const Type,
@@ -564,7 +564,7 @@ pub fn VariableContainerType(comptime ST: type) type {
             return cloneInto(@This(), allocator, value, out);
         }
 
-        /// The caller initializes `out` with `initValue(DestinationST)` and deinitializes it
+        /// The caller initializes `out` with `DestinationST.default_value` and deinitializes it
         /// after success or error. Errors leave `out` safe to deinitialize.
         pub fn cloneInto(
             comptime DestinationST: type,
@@ -616,8 +616,7 @@ pub fn VariableContainerType(comptime ST: type) type {
             return variable_index;
         }
 
-        /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success or
-        /// error.
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
             if (data.len > max_size or data.len < min_size) {
                 return error.InvalidSize;
@@ -803,8 +802,7 @@ pub fn VariableContainerType(comptime ST: type) type {
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
 
-            /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success
-            /// or error.
+            /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var nodes: [chunk_count]Node.Id = undefined;
                 try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
@@ -879,8 +877,7 @@ pub fn VariableContainerType(comptime ST: type) type {
             try writer.endObject();
         }
 
-        /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success or
-        /// error.
+        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
         pub fn deserializeFromJson(allocator: std.mem.Allocator, source: *std.json.Scanner, out: *Type) !void {
             // start object token "{"
             switch (try source.next()) {
