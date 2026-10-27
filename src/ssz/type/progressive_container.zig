@@ -648,7 +648,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             hashOne(out, &content_root, &active_fields_packed);
         }
 
-        /// Initialize `out` with `default_value`; the caller deinitializes it after success or
+        /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success or
         /// error.
         pub fn clone(
             allocator: std.mem.Allocator,
@@ -658,7 +658,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             return cloneInto(@This(), allocator, value, out);
         }
 
-        /// Initialize `out` with `DestinationST.default_value`; the caller deinitializes it after
+        /// Initialize `out` with `initValue(DestinationST)`; the caller deinitializes it after
         /// success or error.
         pub fn cloneInto(
             comptime DestinationST: type,
@@ -713,7 +713,8 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             return variable_index;
         }
 
-        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
+        /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success or
+        /// error.
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
             if (data.len > max_size or data.len < min_size) {
                 return error.InvalidSize;
@@ -881,7 +882,8 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 return pool.createBranch(contents, active_fields_node);
             }
 
-            /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
+            /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success
+            /// or error.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
                 inline for (fields, 0..) |field, i| {
@@ -995,7 +997,8 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             try writer.endObject();
         }
 
-        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
+        /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success or
+        /// error.
         pub fn deserializeFromJson(allocator: std.mem.Allocator, source: *std.json.Scanner, out: *Type) !void {
             // start object token "{"
             switch (try source.next()) {

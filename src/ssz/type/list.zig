@@ -4,6 +4,7 @@ const isBasicType = @import("type_kind.zig").isBasicType;
 const isFixedType = @import("type_kind.zig").isFixedType;
 const canMemcpySsz = @import("type_kind.zig").canMemcpySsz;
 const VariableElementIterator = @import("variable_element_iterator.zig").VariableElementIterator;
+const initValue = @import("value_init.zig").initValue;
 const MerkleAccumulator = @import("hashing").MerkleAccumulator;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
@@ -725,12 +726,12 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
             value.deinit(allocator);
         }
 
-        /// The caller initializes `out` with `default_value`; this uses `cloneInto`'s contract.
+        /// The caller initializes `out` with `initValue(Self)`; this uses `cloneInto`'s contract.
         pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
             return cloneInto(@This(), allocator, value, out);
         }
 
-        /// The caller initializes `out` with `DestinationST.default_value` and deinitializes it
+        /// The caller initializes `out` with `initValue(DestinationST)` and deinitializes it
         /// after success or error. Errors leave `out` safe to deinitialize.
         pub fn cloneInto(
             comptime DestinationST: type,
@@ -741,7 +742,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
             try out.ensureTotalCapacity(allocator, value.items.len);
 
             for (value.items) |*element| {
-                out.appendAssumeCapacity(DestinationST.Element.default_value);
+                out.appendAssumeCapacity(initValue(DestinationST.Element));
                 try Element.cloneInto(
                     DestinationST.Element,
                     allocator,
@@ -796,13 +797,14 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
             try writer.endArray();
         }
 
-        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
+        /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success or
+        /// error.
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
             var elements = try VariableElementIterator(Self).init(data);
             const len = elements.len;
 
             try out.resize(allocator, len);
-            @memset(out.items[0..len], Element.default_value);
+            @memset(out.items[0..len], initValue(Element));
 
             var i: usize = 0;
             while (try elements.next()) |element_bytes| : (i += 1) {
@@ -913,7 +915,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                 var it = Node.DepthIterator.init(pool, node, chunk_depth + 1, 0);
 
                 try out.resize(allocator, len);
-                @memset(out.items, Element.default_value);
+                @memset(out.items, initValue(Element));
                 for (out.items) |*item| {
                     try Element.tree.toValue(allocator, try it.next(), pool, item);
                 }
@@ -997,7 +999,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                 }
 
                 _ = try out.addOne(allocator);
-                out.items[i] = Element.default_value;
+                out.items[i] = initValue(Element);
                 try Element.deserializeFromJson(allocator, source, &out.items[i]);
             }
             return error.invalidLength;

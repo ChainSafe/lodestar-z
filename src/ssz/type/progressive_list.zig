@@ -4,6 +4,7 @@ const isBasicType = @import("type_kind.zig").isBasicType;
 const isFixedType = @import("type_kind.zig").isFixedType;
 const canMemcpySsz = @import("type_kind.zig").canMemcpySsz;
 const VariableElementIterator = @import("variable_element_iterator.zig").VariableElementIterator;
+const initValue = @import("value_init.zig").initValue;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Depth = @import("hashing").Depth;
@@ -505,13 +506,13 @@ pub fn VariableProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) 
             value.deinit(allocator);
         }
 
-        /// Initialize `out` with `default_value`; the caller deinitializes it after success or
+        /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success or
         /// error.
         pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
             return cloneInto(@This(), allocator, value, out);
         }
 
-        /// Initialize `out` with `DestinationST.default_value`; the caller deinitializes it after
+        /// Initialize `out` with `initValue(DestinationST)`; the caller deinitializes it after
         /// success or error.
         pub fn cloneInto(
             comptime DestinationST: type,
@@ -521,7 +522,7 @@ pub fn VariableProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) 
         ) !void {
             try out.ensureTotalCapacity(allocator, value.items.len);
             for (value.items) |*element| {
-                out.appendAssumeCapacity(DestinationST.Element.default_value);
+                out.appendAssumeCapacity(initValue(DestinationST.Element));
                 try Element.cloneInto(
                     DestinationST.Element,
                     allocator,
@@ -563,13 +564,14 @@ pub fn VariableProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) 
             return variable_index;
         }
 
-        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
+        /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success or
+        /// error.
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
             var elements = try VariableElementIterator(Self).init(data);
             const len = elements.len;
 
             try out.resize(allocator, len);
-            @memset(out.items, Element.default_value);
+            @memset(out.items, initValue(Element));
 
             var i: usize = 0;
             while (try elements.next()) |element_bytes| : (i += 1) {
@@ -637,12 +639,13 @@ pub fn VariableProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) 
                 return len;
             }
 
-            /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
+            /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success
+            /// or error.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const len = try length(node, pool);
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), len);
                 try out.resize(allocator, len);
-                @memset(out.items, Element.default_value);
+                @memset(out.items, initValue(Element));
                 var index: usize = 0;
                 while (try it.next()) |chunk| {
                     try Element.tree.toValue(allocator, chunk, pool, &out.items[index]);
@@ -717,7 +720,8 @@ pub fn VariableProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) 
             try writer.endArray();
         }
 
-        /// Initialize `out` with `default_value`; the caller deinitializes it after success or error.
+        /// Initialize `out` with `initValue(Self)`; the caller deinitializes it after success or
+        /// error.
         pub fn deserializeFromJson(allocator: std.mem.Allocator, source: *std.json.Scanner, out: *Type) !void {
             switch (try source.next()) {
                 .array_begin => {},
@@ -726,7 +730,7 @@ pub fn VariableProgressiveListType(comptime ST: type, comptime _opts: TypeOpts) 
 
             while ((try source.peekNextTokenType()) != .array_end) {
                 if (out.items.len == limit) return error.LengthOverLimit;
-                try out.append(allocator, Element.default_value);
+                try out.append(allocator, initValue(Element));
                 try Element.deserializeFromJson(
                     allocator,
                     source,
