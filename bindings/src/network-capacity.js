@@ -12,7 +12,6 @@ class CapacityWaiters {
   #watch;
   #prefix;
   #timeoutMax;
-  #waitersMax;
   /** @type {Set<Waiter>} */
   #waiters = new Set();
   #closed = false;
@@ -21,13 +20,11 @@ class CapacityWaiters {
    * @param {(token: string) => boolean} watch
    * @param {string} prefix
    * @param {number} timeoutMax
-   * @param {number} [waitersMax]
    */
-  constructor(watch, prefix, timeoutMax, waitersMax = Infinity) {
+  constructor(watch, prefix, timeoutMax) {
     this.#watch = watch;
     this.#prefix = prefix;
     this.#timeoutMax = timeoutMax;
-    this.#waitersMax = waitersMax;
   }
 
   /**
@@ -42,7 +39,6 @@ class CapacityWaiters {
       throw failure(`Invalid${this.#prefix}CapacitySignal`);
     if (this.#closed) throw failure("NetworkClosed");
     if (signal.aborted) throw failure(`Network${this.#prefix}CapacityCancelled`);
-    if (this.#waiters.size === this.#waitersMax) throw failure(`Network${this.#prefix}CapacityWaitersFull`);
     return new Promise((resolve, reject) => {
       const abort = () => waiter.finish(failure(`Network${this.#prefix}CapacityCancelled`));
       const timer = setTimeout(() => waiter.finish(failure(`Network${this.#prefix}CapacityTimeout`)), timeoutMs);
@@ -86,7 +82,7 @@ class CapacityWaiters {
 export class RequestCapacityWaiters extends CapacityWaiters {
   /** @param {{requestCapacityWatch(token: string): boolean}} runtime */
   constructor(runtime) {
-    super((token) => runtime.requestCapacityWatch(token), "Request", 60000, 32);
+    super((token) => runtime.requestCapacityWatch(token), "Request", 60000);
   }
 }
 

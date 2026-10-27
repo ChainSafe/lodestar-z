@@ -54,18 +54,16 @@ test("capacity waits recheck their own resource and observe releases before regi
   waits.close();
 });
 
-test("capacity waits bound subscriptions and remove cancelled waits immediately", async () => {
+test("request waits follow caller concurrency and remove cancelled waits immediately", async () => {
   const runtime = {requestCapacityWatch: vi.fn(() => false)};
   const waits = new RequestCapacityWaiters(runtime);
-  const controllers = Array.from({length: 32}, () => new AbortController());
+  const controllers = Array.from({length: 300}, () => new AbortController());
   const pending = controllers.map((controller) =>
     waits.wait("requests", {signal: controller.signal, timeoutMs: 1000}).catch((error) => error.code)
   );
-  await expect(waits.wait("requests", {signal: new AbortController().signal, timeoutMs: 1000})).rejects.toMatchObject({
-    code: "NetworkRequestCapacityWaitersFull",
-  });
+  expect(runtime.requestCapacityWatch).toHaveBeenCalledTimes(300);
   for (const controller of controllers) controller.abort();
-  expect(await Promise.all(pending)).toEqual(Array(32).fill("NetworkRequestCapacityCancelled"));
+  expect(await Promise.all(pending)).toEqual(Array(300).fill("NetworkRequestCapacityCancelled"));
   runtime.requestCapacityWatch.mockReturnValue(true);
   await waits.wait("requests", {signal: new AbortController().signal, timeoutMs: 1000});
   waits.close();

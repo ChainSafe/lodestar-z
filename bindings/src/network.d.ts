@@ -633,7 +633,7 @@ export interface NativeNetwork {
   /**
    * Resolves when the resource that refused admission changes, including a change before this call.
    * The token belongs to this runtime and grants no reservation. No request is retained or retried.
-   * At most 32 waits may be pending. timeoutMs is an integer in 1..60000; cancellation, expiry and close reject locally.
+   * timeoutMs is an integer in 1..60000; cancellation, expiry and close reject locally.
    */
   waitForRequestCapacity(token: string, options: {signal: AbortSignal; timeoutMs: number}): Promise<void>;
   /** Checks the token and arms requestCapacityChanged atomically when its resource has not changed. */
