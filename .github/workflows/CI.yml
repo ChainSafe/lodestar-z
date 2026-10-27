@@ -625,9 +625,9 @@ jobs:
             llvm-config-18 --version
           fi
       - name: Build fuzz harnesses
-        # Build in ReleaseFast for fuzzing throughput.
+        # Keep assertions and Zig safety checks enabled in fuzz campaigns.
         run: |
-          cd test/fuzz && zig build -Doptimize=ReleaseFast
+          cd test/fuzz && zig build -Doptimize=ReleaseSafe
       - name: Replay and smoke bounded network parsers with safety checks
         run: |
           cd test/fuzz

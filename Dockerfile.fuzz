@@ -51,8 +51,9 @@ COPY . .
 # -Dcpu=baseline: Zig otherwise targets the build machine's CPU, so an image
 # built on a runner with AVX-512 dies with SIGILL on hosts without it, and
 # every such fault is recorded as a crash.
+ARG OPTIMIZE=ReleaseSafe
 RUN --mount=type=cache,target=/root/.cache/zig \
-    cd test/fuzz && zig build -Doptimize=ReleaseSafe -Dcpu=baseline --prefix /out
+    cd test/fuzz && zig build -Doptimize=${OPTIMIZE} -Dcpu=baseline --prefix /out
 
 # --- runtime: the instrumented binaries, afl-fuzz and the seed corpora only.
 # Ubuntu's afl++ package pulls in two clang toolchains (~1.2 GB) that running
@@ -64,11 +65,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libpython3.12t64 libc++1-18 libc++abi1-18 libunwind-18 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /usr/bin/afl-fuzz /usr/bin/afl-showmap /usr/bin/afl-tmin /usr/bin/afl-whatsup /usr/local/bin/
+# afl-cmin (a POSIX sh + awk script) drives afl-showmap for minimize.sh.
+COPY --from=build /usr/bin/afl-fuzz /usr/bin/afl-showmap /usr/bin/afl-tmin /usr/bin/afl-whatsup /usr/bin/afl-cmin /usr/local/bin/
 COPY --from=build /out/bin/ /opt/fuzz/bin/
 COPY --from=build /out/lib/libfuzz_clock.so /opt/fuzz/lib/libfuzz_clock.so
 COPY test/fuzz/corpus/ /opt/fuzz/corpus/
-COPY test/fuzz/docker/run-fuzz.sh /opt/fuzz/run-fuzz.sh
+COPY test/fuzz/docker/run-fuzz.sh test/fuzz/docker/minimize.sh test/fuzz/docker/lib.sh /opt/fuzz/
 
 # The harness starts AFL++'s fork server itself (deferred mode, pkg/afl++/afl.c).
 # afl-fuzz sets this for such targets; setting it here lets a target also run
@@ -81,6 +83,7 @@ ARG REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/ChainSafe/lodestar-z" \
       org.opencontainers.image.title="lodestar-z-fuzz" \
       org.opencontainers.image.description="AFL++ fuzz targets for lodestar-z" \
-      org.opencontainers.image.revision="${REVISION}"
+      org.opencontainers.image.revision="${REVISION}" \
+      org.chainsafe.fuzz.minimize="/opt/fuzz/minimize.sh"
 
 ENTRYPOINT ["/opt/fuzz/run-fuzz.sh"]
