@@ -44,7 +44,6 @@ pub const Identity = struct {
 };
 /// Standing host permissions, independent of one exchange's delivery allowance.
 pub const Capacity = struct {
-    incoming_request_slots: u32 = 0,
     gossip_validation: enum { ready, backpressured } = .backpressured,
 };
 
@@ -223,7 +222,7 @@ pub const Runtime = struct {
         if (self.bridge.stop or self.bridge.quiescent) return false;
         return switch (kind) {
             .checks => if (self.bridge.gossip) |*table| table.readiness().checks else false,
-            .serving => capacity.incoming_request_slots > 0 and self.bridge.incoming != null and self.bridge.incoming.?.oldest() != null,
+            .serving => self.bridge.incoming != null and self.bridge.incoming.?.oldest() != null,
             .gossip => if (self.bridge.gossip) |*table| blk: {
                 const work = table.readiness();
                 break :blk work.urgent or (work.ordinary and capacity.gossip_validation == .ready);

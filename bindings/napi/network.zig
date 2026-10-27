@@ -212,7 +212,7 @@ pub fn close(self: *@This()) void {
     }
 }
 
-/// The resolved limits a host sizes its own work by: retained peers and concurrently served requests.
+/// Resolved native capacities and publication lifetime.
 fn resolvedLimits(env: napi.Env, runtime: *const Runtime) !Value {
     const object = try env.createObject();
     try object.setNamedProperty("peerCapacity", try env.createUint32(runtime.peer_capacity));

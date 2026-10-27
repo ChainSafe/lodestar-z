@@ -24,8 +24,6 @@ import {TurnScheduler} from "./network-turn-scheduler.js";
  * }} Runtime
  */
 
-/** Serving capacity native accepts. */
-const SERVING_MAX = 32;
 export const BURST_NAME = "lodestar_network_drain_burst_seconds";
 export const BURST_BUCKETS = Object.freeze([0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2]);
 const VERDICTS = new Set(["accept", "reject", "ignore"]);
@@ -221,17 +219,9 @@ export class NativePump {
     }
     const capacity = this.#host.capacity();
     if (this.#deliveryStopped) return null;
-    const slots = capacity?.incomingRequestSlots;
-    if (
-      typeof slots !== "number" ||
-      !Number.isFinite(slots) ||
-      (capacity.gossipValidation !== "ready" && capacity.gossipValidation !== "backpressured")
-    )
+    if (capacity?.gossipValidation !== "ready" && capacity?.gossipValidation !== "backpressured")
       throw contractError("capacity");
-    return {
-      gossipValidation: capacity.gossipValidation,
-      incomingRequestSlots: Math.min(SERVING_MAX, Math.max(0, Math.floor(slots))),
-    };
+    return {gossipValidation: capacity.gossipValidation};
   }
 
   /**

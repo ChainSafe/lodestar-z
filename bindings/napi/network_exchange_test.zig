@@ -136,7 +136,7 @@ const Host = struct {
     }
 };
 
-const deployed: ?r.Capacity = .{ .incoming_request_slots = 32, .gossip_validation = .ready };
+const deployed: ?r.Capacity = .{ .gossip_validation = .ready };
 const control: ?r.Capacity = null;
 
 fn admit(runtime: *Runtime, kind: Kind, root: ?[32]u8, payload: []const u8) !g.Token {
@@ -326,62 +326,49 @@ test "paused payload delivery still drains observations and arms for new complet
     runtime.bridge.gossip.?.retire(exit);
 }
 
-test "blocked arrivals wait for host capacity while urgent arrivals still notify" {
+test "gossip pressure does not withhold native serving starts" {
     var fixture: Fixture = undefined;
     try fixture.init(true, 2);
     defer fixture.deinit();
     const runtime = &fixture.runtime;
     var host: Host = .{ .runtime = runtime };
-    var demand = deployed;
-    demand.? = .{};
-    try std.testing.expect(!(try host.turn(demand)).outcome.needs_another_exchange);
-    try std.testing.expect(runtime.bridge.notification_armed);
+    const pressure: ?r.Capacity = .{};
+    _ = try host.turn(pressure);
     const before = tsfn.notifications.load(.acquire);
     const request = try queueRequest(runtime);
     const second_request = try queueRequest(runtime);
     const exit = try admit(runtime, .voluntary_exit, null, "data");
-    try std.testing.expectEqual(before, tsfn.notifications.load(.acquire));
-    const parked = try host.turn(demand);
-    try std.testing.expect(!parked.outcome.needs_another_exchange);
-    try std.testing.expect(parked.serving_count == 0 and parked.gossip == null and runtime.bridge.notification_armed);
-    // An executable urgent admission notifies even while nonurgent work waits for capacity.
-    const column = try admit(runtime, .data_column_sidecar, null, "data");
     try std.testing.expectEqual(before + 1, tsfn.notifications.load(.acquire));
-    const urgent = try host.turn(demand);
+    const serving = try host.turn(pressure);
+    try std.testing.expectEqualSlices(incoming.Token, &.{ request, second_request }, serving.serving[0..serving.serving_count]);
+    try std.testing.expect(serving.gossip == null and !serving.outcome.needs_another_exchange);
+    retireServed(&runtime.bridge.incoming.?, request);
+    retireServed(&runtime.bridge.incoming.?, second_request);
+    const column = try admit(runtime, .data_column_sidecar, null, "data");
+    try std.testing.expectEqual(before + 2, tsfn.notifications.load(.acquire));
+    const urgent = try host.turn(pressure);
     try std.testing.expectEqualSlices(g.Token, &.{column}, urgent.gossip.?.tokens[0..urgent.gossip.?.len]);
     try std.testing.expect(!urgent.outcome.needs_another_exchange);
-    // Returning capacity delivers the parked work.
-    demand.? = .{ .incoming_request_slots = 1, .gossip_validation = .ready };
-    const delivered = try host.turn(demand);
-    try std.testing.expectEqualSlices(incoming.Token, &.{request}, delivered.serving[0..delivered.serving_count]);
+    const delivered = try host.turn(deployed);
     try std.testing.expectEqualSlices(g.Token, &.{exit}, delivered.gossip.?.tokens[0..delivered.gossip.?.len]);
     try std.testing.expect(!delivered.outcome.needs_another_exchange);
-    try std.testing.expectEqual(before + 1, tsfn.notifications.load(.acquire));
-    retireServed(&runtime.bridge.incoming.?, request);
-    const replenished = try host.turn(demand);
-    try std.testing.expectEqualSlices(incoming.Token, &.{second_request}, replenished.serving[0..replenished.serving_count]);
-    try std.testing.expect(!replenished.outcome.needs_another_exchange);
-    try std.testing.expectEqual(before + 1, tsfn.notifications.load(.acquire));
-    retireServed(&runtime.bridge.incoming.?, second_request);
     for ([_]g.Token{ exit, column }) |token| runtime.bridge.gossip.?.retire(token);
 }
 
-test "a serving capacity of 32 under a quota of 8 takes four immediate exchanges and never parks" {
+test "native serving starts drain in four bounded exchanges without host replenishment" {
     var fixture: Fixture = undefined;
     try fixture.init(false, incoming.capacity_max);
     defer fixture.deinit();
     const runtime = &fixture.runtime;
     for (0..incoming.capacity_max) |_| _ = try queueRequest(runtime);
     var host: Host = .{ .runtime = runtime };
-    var demand = deployed;
+    const demand = deployed;
     for (0..4) |i| {
         const result = try host.turn(demand);
-        demand.?.incoming_request_slots -= exchange.serving_max;
         try std.testing.expectEqual(@as(usize, exchange.serving_max), result.serving_count);
         try std.testing.expectEqual(i < 3, result.outcome.needs_another_exchange);
         for (result.serving[0..result.serving_count]) |token| retireServed(&runtime.bridge.incoming.?, token);
     }
-    try std.testing.expectEqual(@as(u32, 0), runtime.bridge.capacity.?.incoming_request_slots);
 }
 
 test "arrivals before selection, during copying and after rearming each reach an exchange" {
@@ -477,7 +464,7 @@ test "a 128-column burst reaches the host within two exchanges under saturated o
             retireServed(&runtime.bridge.incoming.?, token);
             _ = try queueRequest(&runtime);
         }
-        demand.? = .{ .incoming_request_slots = 32, .gossip_validation = .ready };
+        demand.? = .{ .gossip_validation = .ready };
         const batch = delivered.gossip.?;
         try std.testing.expectEqual(@as(usize, g.batch_max), batch.len);
         for (batch.tokens[0..batch.len]) |token| {

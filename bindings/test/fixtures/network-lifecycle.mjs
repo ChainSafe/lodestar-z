@@ -22,7 +22,7 @@ const noop = () => undefined;
 if (mode === "open") {
   let network = createNativeNetwork(applicationConfig(), {
     subscribeCapacity: () => () => {},
-    capacity: () => ({gossipValidation: "backpressured", incomingRequestSlots: 0}),
+    capacity: () => ({gossipValidation: "backpressured"}),
     validate: async () => [], checkDependencies: () => [], serve: (request) => request.cancel(),
     peers: noop, failed: noop, logs: noop,
   });
@@ -90,7 +90,7 @@ if (mode === "open") {
   let host = {
     network: null,
     subscribeCapacity: () => () => {},
-    capacity: () => ({gossipValidation: "ready", incomingRequestSlots: 32}),
+    capacity: () => ({gossipValidation: "ready"}),
     validate() {
       deliver();
       return validation;
@@ -147,7 +147,7 @@ if (mode === "open") {
   function closePending() {
     const network = createNativeNetwork(config, {
       subscribeCapacity: () => () => {},
-      capacity: () => ({gossipValidation: "backpressured", incomingRequestSlots: 0}),
+      capacity: () => ({gossipValidation: "backpressured"}),
       validate: async () => [],
       checkDependencies: (checks) => checks.map(() => false),
       serve: (request) => request.cancel(),

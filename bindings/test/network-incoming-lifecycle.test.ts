@@ -71,7 +71,7 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
         .poll(
           () => {
             // Peer events are taken too, so nothing waits.
-            native.setCapacity({...gossipAll, incomingRequestSlots: 1});
+            native.setCapacity(gossipAll);
             incoming = native.exchange().serving[0] ?? null;
             return incoming !== null;
           },

@@ -31,7 +31,7 @@ vi.mock("../src/network-incoming.js", () => {
   return {NativeIncoming};
 });
 
-const full = {gossipValidation: "ready", incomingRequestSlots: 32} as const;
+const full = {gossipValidation: "ready"} as const;
 const control = null;
 const idle: NativeExchange = {
   capacityChanged: false,
@@ -153,7 +153,7 @@ function fixture() {
     state: "running",
   };
   const host = {
-    capacity: vi.fn((): HostCapacity => ({gossipValidation: "ready", incomingRequestSlots: 32})),
+    capacity: vi.fn((): HostCapacity => ({gossipValidation: "ready"})),
     checkDependencies: vi.fn((checks: readonly DependencyCheck[]): readonly boolean[] => checks.map(() => true)),
     error: vi.fn((_error: unknown): void => undefined),
     failed: vi.fn((_error: Error): void => undefined),
@@ -207,16 +207,16 @@ describe("binding pump scheduling", () => {
     expect(node.runtime.exchange).toHaveBeenCalledOnce();
   });
 
-  it("bounds host capacity and stops payload delivery explicitly", async () => {
+  it("forwards host readiness and stops payload delivery explicitly", async () => {
     const node = fixture();
-    node.host.capacity.mockReturnValueOnce({gossipValidation: "backpressured", incomingRequestSlots: 40.5});
+    node.host.capacity.mockReturnValueOnce({gossipValidation: "backpressured"});
     node.pump.request();
     await macrotask();
     node.pump.stopDelivery();
     node.runtime.exchange.mockReturnValueOnce({...idle, checks: [check(1)], peers: [peerEvent]});
     node.pump.request();
     await macrotask();
-    expect(node.capacities()).toEqual([{gossipValidation: "backpressured", incomingRequestSlots: 32}, control]);
+    expect(node.capacities()).toEqual([{gossipValidation: "backpressured"}, control]);
     // Control-only draining hands the host nothing.
     expect(node.host.peers).not.toHaveBeenCalled();
     expect(node.host.checkDependencies).not.toHaveBeenCalled();
@@ -226,7 +226,7 @@ describe("binding pump scheduling", () => {
     const node = fixture();
     node.host.capacity.mockImplementationOnce(() => {
       node.advance(100);
-      return {gossipValidation: "ready", incomingRequestSlots: 32};
+      return {gossipValidation: "ready"};
     });
     node.host.validate.mockImplementation(() => {
       node.advance(100);
@@ -250,46 +250,22 @@ describe("binding pump scheduling", () => {
     expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
   });
 
-  it("serves 32 requests in four bounded turns, then waits for host capacity without polling", async () => {
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+  it("hands over serving batches without a separate JavaScript capacity limit", async () => {
     const node = fixture();
-    const starts = Array.from({length: 40}, (_, i) => {
-      const start = incoming();
-      start.data.fill(i);
-      return start;
-    });
+    const starts = Array.from({length: 40}, () => incoming());
     const queue = starts.slice();
-    node.host.capacity.mockImplementation(() => ({
-      gossipValidation: "ready",
-      incomingRequestSlots: 32 - node.host.serve.mock.calls.length,
-    }));
     node.host.serve.mockImplementation(() => new Promise(() => undefined));
     node.runtime.exchange.mockImplementation(() => {
-      const demand = node.capacities().at(-1);
-      if (!demand) return idle;
-      const serving = queue.splice(0, Math.min(8, 8, demand.incomingRequestSlots));
-      return {
-        ...idle,
-        needsAnotherExchange: queue.length > 0 && demand.incomingRequestSlots > serving.length,
-        serving,
-      };
+      const serving = queue.splice(0, 8);
+      return {...idle, needsAnotherExchange: queue.length > 0, serving};
     });
-    node.pump.request();
-    for (let turn = 0; turn < 4; turn++) {
+    for (let turn = 0; turn < 5; turn++) {
       await macrotask();
       expect(node.host.serve, `serving starts after turn ${turn}`).toHaveBeenCalledTimes((turn + 1) * 8);
-      expect(node.capacities()[turn]).toMatchObject({incomingRequestSlots: 32 - turn * 8});
     }
-    expect(node.host.serve.mock.calls.map(([request]) => request.data)).toEqual(
-      starts.slice(0, 32).map((start) => start.data)
-    );
-    for (const start of starts.slice(0, 32)) expect(start.retainUntil).toHaveBeenCalledOnce();
-    for (const start of starts.slice(32)) expect(start.retainUntil).not.toHaveBeenCalled();
-    expect(queue).toHaveLength(8);
-    vi.advanceTimersByTime(100);
+    for (const start of starts) expect(start.retainUntil).toHaveBeenCalledOnce();
     await macrotask();
-    expect(node.runtime.exchange).toHaveBeenCalledTimes(4);
-    expect(vi.getTimerCount()).toBe(LOG_TIMER);
+    expect(node.runtime.exchange).toHaveBeenCalledTimes(5);
   });
 
   it("uses readiness after payload delivery instead of scheduling an empty follow-up turn", async () => {
@@ -304,14 +280,14 @@ describe("binding pump scheduling", () => {
   it("waits for a capacity notification without polling", async () => {
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
     const node = fixture();
-    node.host.capacity.mockReturnValue({gossipValidation: "backpressured", incomingRequestSlots: 0});
+    node.host.capacity.mockReturnValue({gossipValidation: "backpressured"});
     await macrotask();
     expect(node.runtime.exchange).toHaveBeenCalledOnce();
     vi.advanceTimersByTime(100);
     await macrotask();
     expect(node.runtime.exchange).toHaveBeenCalledOnce();
     const wake = node.host.subscribeCapacity.mock.calls[0][0];
-    node.host.capacity.mockReturnValue({gossipValidation: "ready", incomingRequestSlots: 1});
+    node.host.capacity.mockReturnValue({gossipValidation: "ready"});
     wake();
     wake();
     await macrotask();
@@ -319,10 +295,7 @@ describe("binding pump scheduling", () => {
     wake();
     await macrotask();
     expect(node.runtime.exchange).toHaveBeenCalledTimes(3);
-    expect(node.capacities().slice(-2)).toEqual([
-      {gossipValidation: "ready", incomingRequestSlots: 1},
-      {gossipValidation: "ready", incomingRequestSlots: 1},
-    ]);
+    expect(node.capacities().slice(-2)).toEqual([{gossipValidation: "ready"}, {gossipValidation: "ready"}]);
     expect(vi.getTimerCount()).toBe(LOG_TIMER);
   });
 
@@ -349,7 +322,7 @@ describe("binding pump scheduling", () => {
       },
     ],
     ["returns null", () => null],
-    ["returns an invalid snapshot", () => ({gossipValidation: "yes", incomingRequestSlots: 1})],
+    ["returns an invalid snapshot", () => ({gossipValidation: "yes"})],
   ])("fails delivery when capacity %s while continuing settlement", async (_, read) => {
     const node = fixture();
     node.host.capacity.mockImplementation(read as () => HostCapacity);
@@ -783,7 +756,7 @@ describe("binding pump delivery", () => {
     };
     node.host.capacity.mockImplementation(() => {
       close("capacity read");
-      return {gossipValidation: "ready", incomingRequestSlots: 32};
+      return {gossipValidation: "ready"};
     });
     node.runtime.exchange.mockImplementationOnce(() => {
       const demand = node.capacities().at(-1);
@@ -932,7 +905,7 @@ it("subscribes before the initial snapshot and keeps recovery reported during th
   node.host.capacity.mockImplementationOnce(() => {
     expect(wake).toBeTypeOf("function");
     wake?.();
-    return {gossipValidation: "backpressured", incomingRequestSlots: 0};
+    return {gossipValidation: "backpressured"};
   });
   await macrotask();
   await macrotask();

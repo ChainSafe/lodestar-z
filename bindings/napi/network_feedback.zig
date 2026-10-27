@@ -5,13 +5,11 @@ const Value = napi.Value;
 const decode = @import("network_js_input.zig");
 const r = @import("network_runtime.zig");
 const g = @import("network_gossip.zig");
-const incoming = @import("network_incoming.zig");
 
 pub fn capacity(value: Value) !?r.Capacity {
     if (try value.typeof() == .null) return null;
-    try decode.object(value, &.{ "incomingRequestSlots", "gossipValidation" });
+    try decode.object(value, &.{"gossipValidation"});
     return .{
-        .incoming_request_slots = @intCast(try decode.integer(try decode.get(value, "incomingRequestSlots"), incoming.capacity_max)),
         .gossip_validation = try name(@FieldType(r.Capacity, "gossip_validation"), try decode.get(value, "gossipValidation"), error.InvalidNetworkConfig),
     };
 }

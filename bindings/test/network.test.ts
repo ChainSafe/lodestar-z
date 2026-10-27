@@ -217,8 +217,6 @@ it("joins immediately after initialization and closes idempotently", async () =>
 it("rejects invalid standing capacity without changing the running runtime", async () => {
   const runtime = startRuntime(applicationConfig());
   try {
-    for (const slots of [-1, 0.5, 33, Number.NaN, Number.POSITIVE_INFINITY])
-      expect(() => runtime.setCapacity({...gossipAll, incomingRequestSlots: slots})).toThrow("InvalidNetworkInteger");
     expect(() => runtime.setCapacity({...gossipAll, gossipValidation: "yes"} as unknown as HostCapacity)).toThrow(
       "InvalidNetworkConfig"
     );

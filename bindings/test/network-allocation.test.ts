@@ -27,7 +27,7 @@ test.skipIf(!glibc)(
         import {applicationConfig, topicName} from "./bindings/test/utils/network.ts";
         const host = {
           subscribeCapacity: () => () => {},
-          capacity: () => ({gossipValidation: "ready", incomingRequestSlots: 32}),
+          capacity: () => ({gossipValidation: "ready"}),
           validate: (job) => Promise.resolve(job.messages.map(() => "ignore")),
           checkDependencies: (checks) => checks.map(() => false),
           serve: (request) => request.cancel(),

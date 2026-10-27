@@ -530,15 +530,10 @@ export interface IncomingRequest {
   cancel(): Promise<void>;
 }
 
-/** Current additional host capacity. Native applies its own gossip priority and execution limits. */
+/** Host validation readiness. Native owns execution limits and retained serving leases. */
 export interface HostCapacity {
   /** Native still delivers urgent gossip while validation is backpressured. */
   gossipValidation: "ready" | "backpressured";
-  /**
-   * Additional host allowance, clamped to 0..32. Native also counts its occupied serving slots.
-   * May stay at limits.incomingCapacity when native leases are the host's only request limit.
-   */
-  incomingRequestSlots: number;
 }
 
 /**

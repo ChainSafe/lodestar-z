@@ -7,7 +7,7 @@ const deadline = setTimeout(() => {
 }, 5000);
 const network = createNativeNetwork(applicationConfig(), {
   subscribeCapacity: () => () => {},
-  capacity: () => ({gossipValidation: "backpressured", incomingRequestSlots: 0}),
+  capacity: () => ({gossipValidation: "backpressured"}),
   checkDependencies: (checks) => checks.map(() => false),
   failed: () => undefined,
   logs: () => undefined,

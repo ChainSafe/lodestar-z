@@ -36,7 +36,7 @@ import type {
 const MIB = 1024 * 1024;
 
 export const settleOnly = null;
-export const capacity = {gossipValidation: "ready", incomingRequestSlots: 32} as const;
+export const capacity = {gossipValidation: "ready"} as const;
 export const gossipAll = capacity;
 export const gossipUrgent = {...capacity, gossipValidation: "backpressured"} as const;
 
@@ -88,12 +88,16 @@ export function exchange(
   return result;
 }
 
+const incomingStarts = new WeakMap<ExchangeRuntime, NativeIncomingRequest[]>();
+
 /** For request-only fixtures; unrelated payload delivery fails instead of losing its obligations. */
 export function nextIncoming(runtime: ExchangeRuntime): NativeIncomingRequest | null {
-  const result = exchange(runtime, {...gossipAll, incomingRequestSlots: 1});
+  const queued = incomingStarts.get(runtime);
+  if (queued?.length) return queued.shift() ?? null;
+  const result = exchange(runtime, gossipAll);
   assert.equal(result.gossip, null, "Unexpected gossip while taking an incoming request");
   assert.equal(result.checks.length, 0, "Unexpected dependency checks while taking an incoming request");
-  assert(result.serving.length <= 1, "Exchange exceeded its serving allowance");
+  incomingStarts.set(runtime, result.serving.slice(1));
   return result.serving[0] ?? null;
 }
 

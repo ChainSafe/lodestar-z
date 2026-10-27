@@ -104,9 +104,8 @@ fn settleOperations(runtime: *Runtime, host: anytype) !void {
 
 fn selectServing(runtime: *Runtime, serving_starts: u8, selection: *Selection) void {
     const table = &runtime.bridge.incoming.?;
-    const limit = @min(serving_starts, runtime.bridge.capacity.?.incoming_request_slots);
     for (0..incoming.capacity_max) |_| {
-        if (selection.serving_count == limit) break;
+        if (selection.serving_count == serving_starts) break;
         const token = table.pinStart() orelse break;
         selection.serving[selection.serving_count] = token;
         selection.serving_count += 1;
@@ -122,7 +121,6 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) void {
     if (selection.serving_count > 0) {
         const table = &runtime.bridge.incoming.?;
         for (selection.serving[0..selection.serving_count]) |token| table.commitStart(token);
-        runtime.bridge.capacity.?.incoming_request_slots -|= @intCast(selection.serving_count);
         selection.wake = true;
     }
     if (selection.gossip) |*batch| {
