@@ -471,7 +471,7 @@ test "a command queued after wait planning executes in the turn whose poll obser
             // The native wait checks cancellation after planning and before polling.
             if (target) |pending| {
                 target = null;
-                token = pending.reserveCommand(.reStatusPeers) catch |err| {
+                token = pending.reserveCommand(.reStatusPeers, null) catch |err| {
                     failure = err;
                     return error.Canceled;
                 };

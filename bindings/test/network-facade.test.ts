@@ -494,6 +494,46 @@ test("concurrent metrics scrapes share one owner command and reject after close"
   }
 });
 
+test("command pressure waits for admission, copies queued input and preserves direct membership order", async () => {
+  const network = createNativeNetwork(applicationConfig(), host());
+  try {
+    const queries = Array.from({length: 80}, () => network.getPeerScores());
+    const [peer, endpoints] = unreachableConnect();
+    const added = network.setDirectPeer(peer, endpoints);
+    endpoints[0].port = 0;
+    const removed = network.setDirectPeer(peer, null);
+    await Promise.all(queries);
+    await added;
+    expect(await removed).toBe(true);
+    expect(await network.getDirectPeers()).toEqual([]);
+  } finally {
+    await network.close();
+  }
+});
+
+test("close rejects commands waiting outside native", async () => {
+  const network = createNativeNetwork(applicationConfig(), host());
+  const outcomes = Array.from({length: 80}, () => network.getPeerScores().catch((error) => error.code));
+  await network.close();
+  const results = await Promise.all(outcomes);
+  expect(results.slice(31)).toEqual(Array(49).fill("NetworkClosed"));
+});
+
+test("disconnect cancels a connect waiting behind native's dial allowance", async () => {
+  const network = createNativeNetwork(applicationConfig(), host());
+  const [peer, endpoints] = unreachableConnect();
+  try {
+    const admitted = Array.from({length: 16}, () => network.connect(peer, endpoints).catch(() => undefined));
+    const waiting = network.connect(peer, endpoints).catch((error) => error.code);
+    const disconnected = network.disconnect(peer);
+    expect(await waiting).toBe("NetworkConnectCancelled");
+    await disconnected;
+    await Promise.all(admitted);
+  } finally {
+    await network.close();
+  }
+});
+
 test("direct membership follows command order even when native settles reused cells out of order", async () => {
   const network = createNativeNetwork(applicationConfig(), host());
   try {

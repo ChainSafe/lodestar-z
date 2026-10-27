@@ -30,6 +30,7 @@ pub const Table = struct {
     connects: u8 = 0,
     occupied: u8 = 0,
     admission_sequence: u64 = 0,
+    release_revision: u64 = 0,
 
     pub fn nextOrder(self: *Table) !u64 {
         if (self.admission_sequence >= std.math.maxInt(u64) - 1) return error.NetworkSequenceExhausted;
@@ -75,6 +76,7 @@ pub const Table = struct {
         if (self.diagnostic == token.index) self.diagnostic = null;
         self.connects -= @intFromBool(cell.input == .connect);
         self.occupied -= 1;
+        self.release_revision = std.math.add(u64, self.release_revision, 1) catch unreachable;
         self.transition(cell, .free);
         cell.promise.deinit();
     }

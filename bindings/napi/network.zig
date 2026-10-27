@@ -266,6 +266,10 @@ pub fn removeDirectPeer(self: *@This(), peer: js.Value) !js.Value {
     return .{ .val = try command_js.submit(js.env(), try self.owner(), .removeDirectPeer, &.{peer.val}) };
 }
 
+pub fn commandCapacityWatch(self: *@This(), token: js.Value) !js.Value {
+    return .{ .val = try js.env().getBoolean(try @import("network_capacity_js.zig").watch(try self.owner(), token.val)) };
+}
+
 pub fn requestStart(self: *@This(), peer: js.Value, protocol: js.Value, data: js.Value, options: js.Value) !js.Value {
     return .{ .val = try request_js.start(try self.owner(), peer.val, protocol.val, data.val, options.val) };
 }

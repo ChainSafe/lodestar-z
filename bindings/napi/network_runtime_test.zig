@@ -39,7 +39,7 @@ test "terminal cleanup releases pending Promise references without running JavaS
     var runtime: Runtime = .{ .env = undefined, .refs = .init(2), .bridge = .{ .env_alive = false, .notify_live = false } };
     runtime.bridge.publications = try publications_mod.Table.init(std.testing.allocator, 1, &runtime.bridge.payload_budget, 12_000);
     defer runtime.bridge.publications.?.deinit();
-    const command = try runtime.reserveCommand(.disconnect);
+    const command = try runtime.reserveCommand(.disconnect, null);
     const publication = try runtime.reservePublication(.beacon_block, 0, null);
     const command_cell = runtime.bridge.commands.get(command);
     const publication_cell = runtime.bridge.publications.?.get(publication).?;

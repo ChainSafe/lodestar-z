@@ -39,7 +39,7 @@ test "publication watches distinguish entry retirement from shared byte releases
 }
 
 test "request capacity tokens reject malformed and oversized input" {
-    for ([_][]const u8{ "", "0", "0:0", "0:5:0", "0:0:0:0", "x:0:0", "1:0:10000000000000000", &([_]u8{'0'} ** 65) }) |text| {
+    for ([_][]const u8{ "", "0", "0:0", "0:255:0", "0:0:0:0", "x:0:0", "1:0:10000000000000000", &([_]u8{'0'} ** 65) }) |text| {
         try t.expectError(error.InvalidNetworkCapacityToken, capacity.Token.parse(text));
     }
 }

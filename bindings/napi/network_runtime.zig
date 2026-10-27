@@ -160,6 +160,7 @@ pub const Runtime = struct {
     pub fn refreshBridgeCapacityLocked(self: *Runtime) void {
         if (self.bridge.requests) |*table| self.bridge.admission_capacity.update(.bridge_slots, table.release_revision);
         if (self.bridge.publications) |*table| self.bridge.admission_capacity.update(.publication_slots, table.release_revision);
+        self.bridge.admission_capacity.update(.command_slots, self.bridge.commands.release_revision);
         self.bridge.admission_capacity.update(.bridge_bytes, self.bridge.payload_budget.release_revision);
     }
     /// Owner thread only; core state is never read by JavaScript capacity watches.
@@ -391,11 +392,15 @@ pub const Runtime = struct {
             self.retireCommand(.{ .index = @intCast(i), .generation = cell.generation });
         }
     }
-    pub fn reserveCommand(self: *Runtime, command: commands.Command) !commands.Token {
+    pub fn reserveCommand(self: *Runtime, command: commands.Command, blocked: ?*admission_capacity.Token) !commands.Token {
         self.lock();
         defer self.unlock();
         if (self.bridge.stop or self.bridge.quiescent) return error.NetworkClosed;
         const token = self.bridge.commands.reserve(command) catch |err| {
+            if (err == error.NetworkCommandFull) if (blocked) |into| {
+                self.refreshBridgeCapacityLocked();
+                into.* = self.bridge.admission_capacity.token(.command_slots);
+            };
             if (err == error.NetworkSequenceExhausted) {
                 self.failLocked(err);
                 self.wakeOwnerLocked();

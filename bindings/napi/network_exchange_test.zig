@@ -421,7 +421,7 @@ test "a stop ends new host work while quiescence preserves terminal delivery" {
     const request = try queueRequest(runtime);
     const checked = try admit(runtime, .beacon_attestation, @splat(3), "data");
     const exit = try admit(runtime, .voluntary_exit, null, "data");
-    const command = try runtime.reserveCommand(.getMetrics);
+    const command = try runtime.reserveCommand(.getMetrics, null);
     try runtime.queueCommand(command);
     runtime.bridge.stop = true;
     var host: Host = .{ .runtime = runtime };
@@ -549,7 +549,7 @@ test "a stopped environment during Promise settlement retires the borrowed publi
 
 /// A command the owner completed at the lowest free cell, as execution leaves it.
 fn completeCommand(runtime: *Runtime, command: commands.Command) !commands.Token {
-    const token = try runtime.reserveCommand(command);
+    const token = try runtime.reserveCommand(command, null);
     runtime.lock();
     defer runtime.unlock();
     runtime.bridge.commands.transition(runtime.bridge.commands.get(token), .executing);
@@ -564,7 +564,7 @@ test "command completions batch terminal cells while unfinished work stays admit
     defer fixture.deinit();
     const runtime = &fixture.runtime;
     const low = try completeCommand(runtime, .getPeerScores);
-    const unfinished = [_]commands.Token{ try runtime.reserveCommand(.getMetrics), try runtime.reserveCommand(.getMetrics) };
+    const unfinished = [_]commands.Token{ try runtime.reserveCommand(.getMetrics, null), try runtime.reserveCommand(.getMetrics, null) };
     const high = try completeCommand(runtime, .getMetrics);
     try std.testing.expectEqual(low.index + 3, high.index);
     var host: Host = .{ .runtime = runtime };

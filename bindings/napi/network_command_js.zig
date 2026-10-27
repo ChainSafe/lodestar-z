@@ -8,6 +8,8 @@ const commands = @import("network_commands.zig");
 const projection = @import("network_peer_projection.zig");
 const js = @import("network_js.zig");
 const Runtime = r.Runtime;
+const capacity = @import("network_capacity.zig");
+const capacity_js = @import("network_capacity_js.zig");
 const cfg = @import("network_config.zig");
 const application_cfg = @import("network_application_config.zig");
 const network_gossip_diagnostics = @import("network_gossip_diagnostics.zig");
@@ -82,7 +84,14 @@ fn parseAddresses(value: Value, input: *commands.Dial) !void {
     }
 }
 pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Command, args: []const Value) !Value {
-    const token = try runtime.reserveCommand(command);
+    var blocked: capacity.Token = undefined;
+    const token = runtime.reserveCommand(command, &blocked) catch |err| {
+        if (err != error.NetworkCommandFull) return err;
+        const value = try js.errorValue(env, @errorName(err));
+        try capacity_js.attach(env, value, blocked);
+        try env.throw(value);
+        return error.PendingException;
+    };
     errdefer runtime.retireCommand(token);
     const operation = &runtime.bridge.commands.cells[token.index];
     switch (command) {

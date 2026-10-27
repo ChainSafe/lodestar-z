@@ -44,6 +44,7 @@ export interface NetworkTestRuntime
   getMetrics: NativeNetwork["metrics"];
   publishGossip: NativeNetwork["publish"];
   publicationCapacityWatch(token: string): boolean;
+  commandCapacityWatch(token: string): boolean;
   /** A failed runtime cannot restart. The host must shut down the beacon node on terminal failure. */
   readonly closed: Promise<NativeRuntimeCloseResult>;
   readonly identity: NativeIdentity;

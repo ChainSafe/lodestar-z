@@ -1,5 +1,6 @@
 import bindings from "./bindings.js";
 import {PublicationCapacityWaiters, RequestCapacityWaiters} from "./network-capacity.js";
+import {CommandQueue} from "./network-commands.js";
 import {NativePump} from "./network-pump.js";
 import {NativeRequest} from "./network-request.js";
 
@@ -22,6 +23,7 @@ class NativeNetwork {
   #native;
   #pump;
   #requestCapacity;
+  #commands;
   #publicationCapacity;
   #metricsPending = null;
   #identity;
@@ -38,6 +40,7 @@ class NativeNetwork {
         this.#identity = identity;
       },
       () => {
+        this.#commands.changed();
         this.#requestCapacity.changed();
         this.#publicationCapacity.changed();
         host.requestCapacityChanged?.();
@@ -46,6 +49,7 @@ class NativeNetwork {
     const native = new bindings.NativeNetworkRuntime();
     const initialized = native.initialize(config, pump.request);
     this.#native = native;
+    this.#commands = new CommandQueue((token) => native.commandCapacityWatch(token));
     this.#requestCapacity = new RequestCapacityWaiters(native);
     this.#publicationCapacity = new PublicationCapacityWaiters(native);
     this.#identity = initialized.identity;
@@ -56,6 +60,7 @@ class NativeNetwork {
     this.closed = initialized.closed;
     openNetworks.add(this);
     void this.closed.then(() => {
+      this.#commands.close();
       this.#requestCapacity.close();
       this.#publicationCapacity.close();
       this.#closing = true;
@@ -64,10 +69,10 @@ class NativeNetwork {
   }
 
   async applyIntent(intent) {
-    return this.#native.applyIntent(intent);
+    return this.#command("applyIntent", [intent], "state");
   }
   async updateStatus(status) {
-    return this.#native.updateStatus(status);
+    return this.#command("updateStatus", [status], "state");
   }
   blockImported(root) {
     this.#native.notifyBlock(root);
@@ -97,14 +102,17 @@ class NativeNetwork {
     return this.#native.requestCapacityWatch(token);
   }
   async connect(peerId, endpoints, timeoutMs = CONNECT_TIMEOUT_MS) {
-    return this.#native.connect(peerId, endpoints, timeoutMs);
+    return this.#command("connect", [peerId, endpoints, timeoutMs], peerId);
   }
   async disconnect(peerId) {
-    return this.#native.disconnect(peerId);
+    this.#commands.cancelConnect(peerId);
+    return this.#command("disconnect", [peerId], peerId);
   }
   async setDirectPeer(peerId, endpoints) {
     const operation =
-      endpoints === null ? this.#native.removeDirectPeer(peerId) : this.#native.addDirectPeer(peerId, endpoints);
+      endpoints === null
+        ? this.#command("removeDirectPeer", [peerId], peerId)
+        : this.#command("addDirectPeer", [peerId, endpoints], peerId);
     // Native completions need not settle in submission order. Apply membership changes in that order.
     const outcome = operation.then(
       (value) => ({value}),
@@ -124,7 +132,7 @@ class NativeNetwork {
     return applied;
   }
   async reStatus(peerIds) {
-    return this.#native.reStatusPeers(peerIds);
+    return this.#command("reStatusPeers", [peerIds]);
   }
   async getIdentity() {
     this.#checkOpen();
@@ -135,10 +143,10 @@ class NativeNetwork {
     return [...this.#directPeers];
   }
   async getPeerScores() {
-    return this.#native.getPeerScores();
+    return this.#command("getPeerScores", []);
   }
   async getGossipDiagnostics(cursor = 0) {
-    return this.#native.getGossipDiagnostics(cursor);
+    return this.#command("getGossipDiagnostics", [cursor]);
   }
 
   metrics() {
@@ -149,16 +157,22 @@ class NativeNetwork {
   }
   async #collectMetrics() {
     this.#checkOpen();
-    return (await this.#native.getMetrics()) + this.#pump.metrics();
+    return (await this.#command("getMetrics", [])) + this.#pump.metrics();
   }
   setLogLevel(level) {
     this.#native.setLogLevel(level);
+  }
+  #command(name, args, key) {
+    this.#checkOpen();
+    const input = structuredClone(args);
+    return this.#commands.submit(() => this.#native[name](...input), key, name === "connect" ? input[0] : undefined);
   }
   #checkOpen() {
     if (this.#closing) throw Object.assign(new Error("NetworkClosed"), {code: "NetworkClosed"});
   }
   close() {
     this.#closing = true;
+    this.#commands.close();
     this.#requestCapacity.close();
     this.#publicationCapacity.close();
     this.#pump.stopDelivery();

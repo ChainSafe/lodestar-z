@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Resource = enum { bridge_slots, bridge_bytes, requests, negotiations, publication_slots };
+pub const Resource = enum { bridge_slots, bridge_bytes, requests, negotiations, publication_slots, command_slots };
 pub const count = @typeInfo(Resource).@"enum".fields.len;
 pub const token_max = 64;
 pub const Token = struct {

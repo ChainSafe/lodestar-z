@@ -588,6 +588,7 @@ export interface NativeHost {
 }
 
 /** Promise-returning operations reject both admission errors and admitted operation failures. */
+/** Promise-returning commands wait in JavaScript for native admission and reject on close. */
 export interface NativeNetwork {
   readonly limits: NativeResolvedLimits;
   /** Native shutdown and its promised completions finished. A failed network cannot restart. */
@@ -638,7 +639,7 @@ export interface NativeNetwork {
   waitForRequestCapacity(token: string, options: {signal: AbortSignal; timeoutMs: number}): Promise<void>;
   /** Checks the token and arms requestCapacityChanged atomically when its resource has not changed. */
   watchRequestCapacity(token: string): boolean;
-  /** One-shot connection attempt, retired on success or timeout (10 s by default). */
+  /** One-shot connection attempt. Its timeout starts at native admission (10 s by default). */
   connect(peerId: PeerIdStr, endpoints: readonly IpEndpoint[], timeoutMs?: bigint): Promise<void>;
   /** Closes the connection and rejects pending connects with NetworkConnectCancelled. Direct membership remains. */
   disconnect(peerId: PeerIdStr): Promise<void>;
