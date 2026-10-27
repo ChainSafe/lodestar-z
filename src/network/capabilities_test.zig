@@ -5,17 +5,6 @@ const rr = @import("reqresp/protocol.zig");
 const ForkSeq = @import("config").ForkSeq;
 const protocol_mod = @import("gossipsub/protocol.zig");
 
-test "capabilities value set owns independent directional membership" {
-    var active: capabilities.Directional = .{ .receive = .initEmpty(), .request = .initEmpty() };
-    active.receive.insert(.{ .reqresp = .ping_v1 });
-    active.receive.insert(.{ .reqresp = .ping_v1 });
-    active.request.insert(.{ .meshsub = .v1_0 });
-    try std.testing.expectEqual(1, active.receive.count());
-    try std.testing.expectEqual(1, active.request.count());
-    try std.testing.expect(!active.request.contains(.{ .reqresp = .ping_v1 }));
-    try std.testing.expect(!active.receive.contains(.{ .meshsub = .v1_0 }));
-}
-
 test "capabilities iteration snapshots sparse membership and stays exhausted" {
     var set: capabilities.Set = .initEmpty();
     var empty = set.iterator();

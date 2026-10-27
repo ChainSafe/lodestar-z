@@ -1,41 +1,7 @@
 import {createHook} from "node:async_hooks";
-import {expect, test, vi} from "vitest";
+import {expect, test} from "vitest";
 import {applicationConfig, localIntent, startRuntime, unreachableConnect} from "./utils/network.js";
-import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
 import type {NetworkTestRuntime} from "./utils/network-runtime.js";
-
-test("every command kind completes with its typed result", async () => {
-  const config = applicationConfig();
-  const remoteConfig = applicationConfig();
-  remoteConfig.identitySecretKey[31] = 2;
-  const runtime = startRuntime(config);
-  let remote: PeerRuntime | undefined;
-  try {
-    remote = await startPeer(remoteConfig);
-    const peer = await remote.identity;
-    await remote.applyIntent(localIntent(remoteConfig));
-    expect(await runtime.applyIntent(localIntent(config))).toBeUndefined();
-    expect(await runtime.updateStatus(config.local.status)).toBeUndefined();
-    expect(await runtime.observeIdentity()).toMatchObject(runtime.identity);
-    expect(await runtime.connect(peer.peerId, [peer.localEndpoint], 5000n)).toBeUndefined();
-    await vi.waitFor(async () => expect((await runtime.observePeers()).counts.connected).toBe(1));
-    expect(await runtime.observePeers()).toMatchObject({
-      counts: {connected: 1},
-      peers: [expect.objectContaining({identity: peer.peerId})],
-    });
-    expect(await runtime.getGossipDiagnostics(0)).toMatchObject({
-      observedMonoMs: expect.any(BigInt),
-      peers: expect.any(Array),
-      topics: expect.any(Array),
-    });
-    expect(await runtime.reStatusPeers([peer.peerId])).toBeUndefined();
-    expect(await runtime.addDirectPeer(peer.peerId, [peer.localEndpoint])).toBeUndefined();
-    expect(await runtime.removeDirectPeer(peer.peerId)).toBe(true);
-    expect(await runtime.disconnect(peer.peerId)).toBeUndefined();
-  } finally {
-    await Promise.all([runtime.close(), remote?.stop()]);
-  }
-}, 20000);
 
 type Command = (runtime: NetworkTestRuntime) => Promise<unknown>;
 

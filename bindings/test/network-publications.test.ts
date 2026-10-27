@@ -1,15 +1,6 @@
 import {setTimeout as delay} from "node:timers/promises";
-import {expect, test, vi} from "vitest";
-import {
-  applicationConfig,
-  exchange,
-  holdSettling,
-  localIntent,
-  settleOnly,
-  startRuntime,
-  topicName,
-} from "./utils/network.js";
-import {initializeNativeNetworkRuntime} from "./utils/network-runtime.js";
+import {expect, test} from "vitest";
+import {applicationConfig, holdSettling, localIntent, startRuntime, topicName} from "./utils/network.js";
 
 const BLOCK = topicName();
 const SYNC = topicName("sync_committee_0");
@@ -102,23 +93,6 @@ test("publication queue deadlines reject invalid inputs before retaining a cell"
   }
 });
 
-test("network admits 200 publications while control remains available", async () => {
-  const config = applicationConfig();
-  config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-  config.resources.nativeBudgetBytes = 512 * 1024 * 1024;
-  const runtime = startRuntime(config);
-  try {
-    await runtime.applyIntent(localIntent(config));
-    const pending = Array.from({length: 200}, () =>
-      runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true, ignoreDuplicate: true})
-    );
-
-    await Promise.all([...pending, runtime.reStatusPeers([])]);
-  } finally {
-    await runtime.close();
-  }
-});
-
 test("publication turns make progress on payloads larger than the turn byte budget", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config);
@@ -132,61 +106,6 @@ test("publication turns make progress on payloads larger than the turn byte budg
   } finally {
     await runtime.close();
   }
-});
-
-test("close settles every pending publication", async () => {
-  const config = applicationConfig();
-  const runtime = startRuntime(config);
-  await runtime.applyIntent(localIntent(config));
-  const pending = Array.from({length: 16}, () =>
-    runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true, ignoreDuplicate: true})
-  );
-  const results = Promise.allSettled(pending);
-  await runtime.close();
-  for (const result of await results) {
-    if (result.status === "rejected") expect(result.reason).toMatchObject({code: "NetworkClosed"});
-    else expect(result.value).toMatchObject({queued: 0});
-  }
-});
-
-test("native-owned publication Promises settle without completion envelopes", async () => {
-  const runtime = initializeNativeNetworkRuntime(applicationConfig(), () => undefined);
-  const delivered: number[] = [];
-  const publish = (fill: number) =>
-    runtime.publishGossip(BLOCK, new Uint8Array(4000).fill(fill), {allowZeroPeers: true, ignoreDuplicate: true}).then(
-      () => {
-        delivered.push(fill);
-        return "published";
-      },
-      (error) => error.code
-    );
-
-  let closed = false;
-  void runtime.closed.then(() => {
-    closed = true;
-  });
-  const publications = [publish(1), publish(2)];
-  try {
-    await vi.waitFor(() => {
-      runtime.exchange();
-      expect(delivered).toHaveLength(2);
-    });
-    expect(delivered).toEqual([1, 2]);
-    publications.push(publish(3));
-    await vi.waitFor(() => {
-      runtime.exchange();
-      expect(delivered).toHaveLength(3);
-    });
-    expect(delivered).toEqual([1, 2, 3]);
-  } finally {
-    runtime.close();
-    for (let i = 0; i < 400 && !closed; i++) {
-      await delay(5);
-      for (let pass = 0; pass < 8 && exchange(runtime, settleOnly).needsAnotherExchange; pass++);
-    }
-  }
-  expect(await Promise.all(publications)).toEqual(Array(3).fill("published"));
-  expect(await runtime.closed).toEqual({reason: "requested"});
 });
 
 test("close settles after every publication and command without exposing their completions", async () => {

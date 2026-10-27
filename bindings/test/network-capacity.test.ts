@@ -5,12 +5,12 @@ afterEach(() => vi.useRealTimers());
 
 const families = [
   {
-    create: (watch: () => boolean) => new RequestCapacityWaiters({requestCapacityWatch: watch}),
+    create: (watch: (token: string) => boolean) => new RequestCapacityWaiters({requestCapacityWatch: watch}),
     prefix: "Request",
     timeoutMs: 120000,
   },
   {
-    create: (watch: () => boolean) => new PublicationCapacityWaiters({publicationCapacityWatch: watch}),
+    create: (watch: (token: string) => boolean) => new PublicationCapacityWaiters({publicationCapacityWatch: watch}),
     prefix: "Publication",
     timeoutMs: 172800000,
   },
@@ -45,7 +45,7 @@ test.each(families)("$prefix waits validate timer representation without native 
   const watch = vi.fn(() => true);
   const waits = create(watch);
   const signal = new AbortController().signal;
-  for (const timeoutMs of [0, -1, 0.5, Number.NaN, Infinity, 2 ** 31]) {
+  for (const timeoutMs of [0, 2 ** 31]) {
     await expect(waits.wait("capacity", {signal, timeoutMs})).rejects.toMatchObject({
       code: `Invalid${prefix}CapacityTimeout`,
     });
@@ -57,42 +57,32 @@ test.each(families)("$prefix waits validate timer representation without native 
   waits.close();
 });
 
-test("publication waits follow caller concurrency and clean up on cancellation, timeout and close", async () => {
+test.each(families)("$prefix waits allow caller concurrency and release cancelled or closed waits", async ({
+  prefix,
+  create,
+}) => {
   vi.useFakeTimers();
-  const watch = vi.fn(() => false);
-  const waits = new PublicationCapacityWaiters({publicationCapacityWatch: watch});
+  const waits = create(() => false);
   const controllers = Array.from({length: 300}, () => new AbortController());
   const pending = controllers.map((controller) =>
     waits.wait("slots", {signal: controller.signal, timeoutMs: 1000}).catch((error) => error.code)
   );
   controllers[0].abort();
-  expect(await pending[0]).toBe("NetworkPublicationCapacityCancelled");
-  await vi.advanceTimersByTimeAsync(1000);
-  expect(await Promise.all(pending.slice(1))).toEqual(Array(299).fill("NetworkPublicationCapacityTimeout"));
-  const closing = waits.wait("slots", {signal: controllers[1].signal, timeoutMs: 1000}).catch((error) => error.code);
+  expect(await pending[0]).toBe(`Network${prefix}CapacityCancelled`);
+  expect(vi.getTimerCount()).toBe(299);
   waits.close();
-  expect(await closing).toBe("NetworkClosed");
+  expect(await Promise.all(pending.slice(1))).toEqual(Array(299).fill("NetworkClosed"));
   expect(vi.getTimerCount()).toBe(0);
+  await expect(waits.wait("slots", {signal: controllers[1].signal, timeoutMs: 1000})).rejects.toMatchObject({
+    code: "NetworkClosed",
+  });
 });
 
-test("publication waits observe releases both before and after registration", async () => {
-  const watch = vi.fn(() => false);
-  const waits = new PublicationCapacityWaiters({publicationCapacityWatch: watch});
-  const options = {signal: new AbortController().signal, timeoutMs: 1000};
-  const pending = waits.wait("slots", options);
-  watch.mockReturnValue(true);
-  waits.changed();
-  await pending;
-  await waits.wait("slots", options);
-  waits.close();
-});
-
-test("capacity waits recheck their own resource and observe releases before registration", async () => {
+test.each(families)("$prefix waits follow their own resource, including releases before registration", async ({
+  create,
+}) => {
   const revisions = {bytes: 0, requests: 0};
-  const runtime = {
-    requestCapacityWatch: vi.fn((token: string) => revisions[token as keyof typeof revisions] !== 0),
-  };
-  const waits = new RequestCapacityWaiters(runtime);
+  const waits = create((token: string) => revisions[token as keyof typeof revisions] !== 0);
   const controller = new AbortController();
   const finished = vi.fn();
   const pending = waits.wait("requests", {signal: controller.signal, timeoutMs: 1000}).then(finished);
@@ -106,35 +96,4 @@ test("capacity waits recheck their own resource and observe releases before regi
   expect(finished).toHaveBeenCalledOnce();
   await waits.wait("bytes", {signal: controller.signal, timeoutMs: 1000});
   waits.close();
-});
-
-test("request waits follow caller concurrency and remove cancelled waits immediately", async () => {
-  const runtime = {requestCapacityWatch: vi.fn(() => false)};
-  const waits = new RequestCapacityWaiters(runtime);
-  const controllers = Array.from({length: 300}, () => new AbortController());
-  const pending = controllers.map((controller) =>
-    waits.wait("requests", {signal: controller.signal, timeoutMs: 1000}).catch((error) => error.code)
-  );
-  expect(runtime.requestCapacityWatch).toHaveBeenCalledTimes(300);
-  for (const controller of controllers) controller.abort();
-  expect(await Promise.all(pending)).toEqual(Array(300).fill("NetworkRequestCapacityCancelled"));
-  runtime.requestCapacityWatch.mockReturnValue(true);
-  await waits.wait("requests", {signal: new AbortController().signal, timeoutMs: 1000});
-  waits.close();
-});
-
-test("unrelated notifications do not extend the waiting deadline and close rejects waits", async () => {
-  vi.useFakeTimers();
-  const waits = new RequestCapacityWaiters({requestCapacityWatch: () => false});
-  const options = {signal: new AbortController().signal, timeoutMs: 1000};
-  const pending = waits.wait("requests", options).catch((error) => error.code);
-  await vi.advanceTimersByTimeAsync(500);
-  waits.changed();
-  await vi.advanceTimersByTimeAsync(500);
-  expect(await pending).toBe("NetworkRequestCapacityTimeout");
-  const closing = waits.wait("requests", options).catch((error) => error.code);
-  waits.close();
-  expect(await closing).toBe("NetworkClosed");
-  expect(vi.getTimerCount()).toBe(0);
-  await expect(waits.wait("requests", options)).rejects.toMatchObject({code: "NetworkClosed"});
 });

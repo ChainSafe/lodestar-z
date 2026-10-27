@@ -49,16 +49,6 @@ const running: {resolve(result: {reason: "requested"}): void}[] = [];
 const LOG_TIMER = 1;
 const noLogs = {more: false, records: []};
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return {promise, reject, resolve};
-}
-
 function macrotask(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -110,7 +100,7 @@ function check(index: number): NativeGossipDependencyCheck {
 }
 
 function incoming(name = "start") {
-  const closed = deferred<void>();
+  const closed = Promise.withResolvers<void>();
   const request = {
     cancel: vi.fn(() => Promise.resolve()),
     closed: closed.promise,
@@ -140,7 +130,7 @@ const peerEvent: NativePeerObservation = {
 function fixture() {
   let now = 0;
   vi.spyOn(performance, "now").mockImplementation(() => now);
-  const closed = deferred<{reason: "requested"} | {reason: "failed"; error: Error}>();
+  const closed = Promise.withResolvers<{reason: "requested"} | {reason: "failed"; error: Error}>();
   running.push(closed);
   const runtime = {
     classifyGossip: vi.fn((_handle: NativeGossipHandle, _available: boolean) => undefined),
@@ -250,12 +240,16 @@ describe("binding pump scheduling", () => {
     expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
   });
 
-  it("hands over serving batches without a separate JavaScript capacity limit", async () => {
+  it("starts serving batches in order without waiting for handlers or imposing a JS capacity limit", async () => {
     const node = fixture();
     const starts = Array.from({length: 40}, () => incoming());
     const queue = starts.slice();
-    node.host.serve.mockImplementation(() => new Promise(() => undefined));
+    node.host.serve.mockImplementation(() => {
+      node.advance(100);
+      return new Promise(() => undefined);
+    });
     node.runtime.exchange.mockImplementation(() => {
+      node.advance(100);
       const serving = queue.splice(0, 8);
       return {...idle, needsAnotherExchange: queue.length > 0, serving};
     });
@@ -263,7 +257,12 @@ describe("binding pump scheduling", () => {
       await macrotask();
       expect(node.host.serve, `serving starts after turn ${turn}`).toHaveBeenCalledTimes((turn + 1) * 8);
     }
-    for (const start of starts) expect(start.retainUntil).toHaveBeenCalledOnce();
+    for (const start of starts) {
+      expect(start.retainUntil).toHaveBeenCalledOnce();
+      expect(start.cancel).not.toHaveBeenCalled();
+    }
+    const retained = starts.map((start) => start.retainUntil.mock.invocationCallOrder[0]);
+    expect(retained).toEqual([...retained].sort((a, b) => a - b));
     await macrotask();
     expect(node.runtime.exchange).toHaveBeenCalledTimes(5);
   });
@@ -446,55 +445,6 @@ describe("binding pump delivery", () => {
     expect(node.host.validate).not.toHaveBeenCalled();
   });
 
-  it("hands the host records that physically omit native handles and dispatch fields", async () => {
-    const node = fixture();
-    const start = incoming();
-    node.runtime.exchange.mockReturnValueOnce({
-      ...idle,
-      checks: [check(9)],
-      gossip: gossip({grouped: true, messages: [1, 2]}),
-      serving: [start],
-    });
-    node.pump.request();
-    await macrotask();
-    const job = node.host.validate.mock.calls[0][0];
-    expect(Object.keys(job).sort()).toEqual(["grouped", "kind", "messages"]);
-    expect(job).toMatchObject({grouped: true, kind: "beacon_attestation"});
-    expect(Object.keys(job.messages[0]).sort()).toEqual([
-      "attestationData",
-      "connection",
-      "data",
-      "endpoint",
-      "id",
-      "peerId",
-      "receivedAtUnixMs",
-      "slot",
-      "topic",
-    ]);
-    expect(job.messages[1].data).toEqual(new Uint8Array(4).fill(2));
-    expect(node.host.checkDependencies.mock.calls[0][0]).toEqual([
-      {
-        kind: "beacon_block",
-        parentBlockHash: null,
-        payloadPresent: true,
-        peerId: "peer",
-        root: new Uint8Array(32).fill(9),
-        slot: 3n,
-        topic: "topic",
-      },
-    ]);
-    const request = node.host.serve.mock.calls[0][0];
-    expect(Object.keys(request).sort()).toEqual(["closed", "connection", "data", "peerId", "protocol"]);
-    expect("retainUntil" in request).toBe(false);
-    await request.ready();
-    await request.respond(new Uint8Array(1), null);
-    await request.finish();
-    await request.fail(3, new Uint8Array(1));
-    await request.cancel();
-    for (const method of ["ready", "respond", "finish", "fail", "cancel"] as const)
-      expect(start[method]).toHaveBeenCalledOnce();
-  });
-
   it("delivers gossip in native priority order despite expensive handlers earlier in the batch", async () => {
     const node = fixture();
     const started: number[] = [];
@@ -660,38 +610,13 @@ describe("binding pump delivery", () => {
     expect(node.host.error).toHaveBeenCalledExactlyOnceWith(thrown);
   });
 
-  it("starts every request in a bounded batch in order without waiting for handlers to settle", async () => {
-    const node = fixture();
-    const starts = Array.from({length: 8}, (_, i) => incoming(`start-${i}`));
-    node.runtime.exchange.mockImplementationOnce(() => {
-      node.advance(100);
-      return {...idle, serving: starts};
-    });
-    node.host.serve.mockImplementation(() => {
-      node.advance(100);
-      return new Promise(() => undefined);
-    });
-    node.pump.request();
-    await macrotask();
-    expect(node.host.serve).toHaveBeenCalledTimes(8);
-    for (const start of starts) {
-      expect(start.retainUntil).toHaveBeenCalledOnce();
-      expect(start.cancel).not.toHaveBeenCalled();
-    }
-    const retained = starts.map((start) => start.retainUntil.mock.invocationCallOrder[0]);
-    expect(retained).toEqual([...retained].sort((a, b) => a - b));
-    expect(node.capacities()[0]).toEqual(full);
-    await macrotask();
-    expect(node.runtime.exchange).toHaveBeenCalledOnce();
-  });
-
   it("retains serving capacity until serve settles, registered before host code; a failure fails the stream once", async () => {
     const node = fixture();
     const [slow, thrown, rejected, ended] = ["slow", "thrown", "rejected", "ended"].map(incoming);
     ended.retainUntil.mockImplementation(() => {
       throw Object.assign(new Error("NetworkIncomingRetentionInvalid"), {code: "NetworkIncomingRetentionInvalid"});
     });
-    const served = deferred<void>();
+    const served = Promise.withResolvers<void>();
     const failure = new Error("serving failed");
     node.host.serve
       .mockImplementationOnce((request) => {

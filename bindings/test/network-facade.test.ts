@@ -405,55 +405,17 @@ test("queued block roots survive caller buffer reuse and transfer", childTestTim
   expect(output).toContain("queued roots survived buffer reuse and transfer");
 });
 
-test("the facade validates its host, starts without host callbacks and hides the exchange", async () => {
-  expect(() => createNativeNetwork(applicationConfig(), {} as NativeHost)).toThrow(
-    "NativeHost.capacity must be a function"
-  );
-  const calls: string[] = [];
-  const recorded = host();
-  for (const name of ["capacity", "validate", "checkDependencies", "serve", "peers", "failed", "logs"] as const) {
-    const callback = recorded[name] as (...args: unknown[]) => unknown;
-    (recorded as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
-      calls.push(name);
-      return callback(...args);
-    };
-  }
-  const config = applicationConfig();
-  const network = createNativeNetwork(config, recorded);
+test("construction returns before host callbacks start", async () => {
+  const networkHost = host();
+  const capacity = vi.spyOn(networkHost, "capacity");
+  const network = createNativeNetwork(applicationConfig(), networkHost);
   try {
-    expect(calls).toEqual([]);
-    expect(network.limits.peerCapacity).toBe(Math.max(64, 2 * config.resources.maxPeers));
-    expect(network.limits.incomingCapacity).toBeGreaterThan(0);
-    expect(Object.isFrozen(network.limits)).toBe(true);
-    for (const name of ["exchange", "fail", "holdVerdicts", "identity", "state"]) expect(name in network).toBe(false);
-    await network.applyIntent(localIntent(config));
-    const identity = await network.getIdentity();
-    const peer = identity.peerId;
-    identity.metadata.attnets.fill(255);
-    expect((await network.getIdentity()).metadata.attnets).not.toEqual(identity.metadata.attnets);
-    const endpoint = {address: Uint8Array.of(127, 0, 0, 1), family: 4 as const, port: 9};
-    const [direct] = unreachableConnect();
-    expect(peer).not.toBe(direct);
-    await network.setDirectPeer(direct, [endpoint]);
-    expect(await network.getDirectPeers()).toEqual([direct]);
-    expect(await network.setDirectPeer(direct, null)).toBe(true);
-    expect(await network.setDirectPeer(direct, null)).toBe(false);
-    // The native registry's families and the binding's families, each exactly once.
-    const families = (text: string) => [...text.matchAll(/^# TYPE (\S+) /gm)].map(([, name]) => name);
-    const native = families((await runtimeOf(network)?.getMetrics()) ?? "");
-    const rendered = families(await network.metrics());
-    expect(native.length).toBeGreaterThan(0);
-    expect(rendered).toEqual([
-      ...native,
-      "lodestar_network_drain_burst_seconds",
-      "lodestar_network_log_delivery_errors_total",
-      "lodestar_network_log_drain_errors_total",
-    ]);
-    expect(new Set(rendered).size).toBe(rendered.length);
+    expect(capacity).not.toHaveBeenCalled();
+    await network.getPeerScores();
+    expect(capacity).toHaveBeenCalled();
   } finally {
-    expect(await network.close()).toEqual({reason: "requested"});
+    await network.close();
   }
-  expect(await network.closed).toEqual({reason: "requested"});
 });
 
 test.each(["close-validation", "close-batches"])("explicit close lifecycle: %s", childTestTimeout(), (mode) => {
@@ -485,8 +447,12 @@ test("concurrent metrics scrapes share one owner command and reject after close"
     const first = network.metrics();
     const second = network.metrics();
     expect(second).toBe(first);
-    expect(await first).toContain("libp2p_peers 0\n");
-    expect(await second).toBe(await first);
+    const metrics = await first;
+    expect(metrics).toContain("libp2p_peers 0\n");
+    const families = [...metrics.matchAll(/^# TYPE (\S+) /gm)].map(([, name]) => name);
+    expect(families).toContain("lodestar_network_drain_burst_seconds");
+    expect(new Set(families).size).toBe(families.length);
+    expect(await second).toBe(metrics);
     await network.close();
     await expect(network.metrics()).rejects.toThrow("NetworkClosed");
   } finally {

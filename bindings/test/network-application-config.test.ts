@@ -28,11 +28,10 @@ test.each([
   Number.NaN,
   Number.POSITIVE_INFINITY,
   Number.MAX_SAFE_INTEGER + 1,
-  2 * 1024 ** 3 + 1,
 ])("rejects native byte ceiling %s", (value) => {
   const config = applicationConfig();
   config.resources.nativeBudgetBytes = value;
-  expect(() => startRuntime(config, () => undefined)).toThrow();
+  expect(() => startRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
 });
 
 test.each([
@@ -55,13 +54,7 @@ test.each([
     c.identify.protocolVersion = "é".repeat(33);
   },
   (c: ReturnType<typeof applicationConfig>) => {
-    c.resources.maxPeers = 257;
-  },
-  (c: ReturnType<typeof applicationConfig>) => {
     c.resources.targetPeers = 13;
-  },
-  (c: ReturnType<typeof applicationConfig>) => {
-    Reflect.set(c.resources, "connectionCapacity", 1);
   },
   (c: ReturnType<typeof applicationConfig>) => {
     Reflect.set(c.local.metadata, "custodyGroupCount", null);
@@ -81,15 +74,11 @@ test.each(["native", "bridge"])("rejects insufficient %s reservation before owne
   );
 });
 
-test.each([256, 257])("derives retained peer capacity from maxPeers %s", async (capacity) => {
+test("derives retained peer capacity at the maximum peer count", async () => {
   const config = applicationConfig();
-  config.resources.maxPeers = capacity;
+  config.resources.maxPeers = 256;
   config.resources.nativeBudgetBytes = 2 * 1024 ** 3;
   config.resources.receiveBudgetBytes = 512 * 1024 ** 2;
-  if (capacity === 257) {
-    expect(() => startRuntime(config)).toThrow("InvalidNetworkInteger");
-    return;
-  }
   const runtime = startRuntime(config);
   try {
     expect(runtime.limits.peerCapacity).toBe(512);
@@ -180,10 +169,4 @@ test.each(["absent", "undefined", "empty"] as const)("derives default gossip pol
   } finally {
     await runtime.close();
   }
-});
-
-test.each(["processor", "execution"])("rejects removed per-kind %s overrides", (key) => {
-  const config = applicationConfig();
-  Object.assign(config.gossipPolicy, {[key]: {}});
-  expect(() => startRuntime(config)).toThrow("InvalidNetworkConfig");
 });

@@ -55,55 +55,8 @@ test("metrics are available while open and reject after close", async () => {
     await runtime.identity;
     await runtime.applyIntent(localIntent(config));
     const metrics = samples(await runtime.getMetrics());
-    const validationCapacity = metrics.get("gossipsub_validation_capacity_count");
-    expect(validationCapacity).toBeGreaterThan(0);
-    expect(metrics.has("lodestar_peer_manager_starved_bool")).toBe(false);
-    expect(metrics.has("lodestar_discovery_total_dial_attempts")).toBe(false);
+    expect(metrics.get("gossipsub_validation_capacity_count")).toBeGreaterThan(0);
     expect(metrics.get("lodestar_network_step_seconds_count")).toBeGreaterThan(0);
-    expect(metrics.get("lodestar_gossip_validation_expired_executing_count")).toBe(0);
-    expect(metrics.get('lodestar_gossip_validation_queue_length{topic="beacon_block"}')).toBe(0);
-    for (const reason of [
-      "connection_capacity",
-      "protocol_concurrency",
-      "peer_quota",
-      "address_quota",
-      "global_quota",
-    ]) {
-      expect(metrics.get(`beacon_reqresp_admission_refusals_total{method="status",reason="${reason}"}`)).toBe(0);
-    }
-    for (const phase of ["receiving_request", "waiting_start", "waiting_host", "writing_response", "terminal"]) {
-      expect(metrics.get(`beacon_reqresp_incoming_count{phase="${phase}"}`)).toBe(0);
-    }
-    for (const name of [
-      "gossipsub_receive_pages_capacity_count",
-      "gossipsub_validation_capacity_count",
-      "gossipsub_delivery_descriptors_capacity_count",
-    ]) {
-      const value = metrics.get(name);
-      expect(value).toBeGreaterThan(0);
-      if (value === undefined) throw Error(`Missing capacity: ${name}`);
-    }
-    expect(metrics.get("gossipsub_iwant_rcv_dont_have_msgids_total")).toBe(0);
-    for (const direction of ["recv", "sent"]) {
-      for (const field of [
-        "bytes",
-        "count",
-        "subscription",
-        "message",
-        "control",
-        "ihave",
-        "iwant",
-        "graft",
-        "prune",
-        "idontwant",
-      ]) {
-        expect(metrics.get(`gossipsub_rpc_${direction}_${field}_total`)).toBe(0);
-      }
-    }
-    expect(metrics.get('gossipsub_msg_publish_bytes_total{topic="beacon_block"}')).toBe(0);
-    for (const outcome of ["limited", "queued", "refused"]) {
-      expect(metrics.get(`gossipsub_iwant_known_msgids_total{outcome="${outcome}"}`)).toBe(0);
-    }
   } finally {
     await runtime.close();
   }

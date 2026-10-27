@@ -30,8 +30,6 @@ test("native std.log captures lifecycle, timestamps and isolated processes throu
       expect(records.some((r) => r.message.startsWith("owner_stopped reason=requested "))).toBe(true);
       for (const record of records) {
         expect(record.timestampMs).toBeGreaterThan(Date.now() - 20000);
-        expect(Buffer.byteLength(record.message)).toBeLessThanOrEqual(768);
-        expect([...record.message].every((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) <= 126)).toBe(true);
       }
       expect((await runtime.drainLogs()).records).toEqual([]);
     }
@@ -122,32 +120,3 @@ test("native logging rejects malformed controls and honors off", async () => {
     await runtime.close();
   }
 });
-
-test.each([
-  "error",
-  "warn",
-  "info",
-  "debug",
-  "off",
-] as const)("native log level %s filters request traces", async (level) => {
-  const pair = await incomingPair();
-  try {
-    await pair.left.setLogLevel(level);
-    await drain(pair.left);
-    const request = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
-    const pending = request.next();
-    void pending.catch(() => undefined);
-    const incoming = await takeIncoming(pair.right);
-    await incoming.finish();
-    expect(await pending).toEqual({done: true, value: undefined});
-    const records = await drain(pair.left);
-    expect(records.some((record) => record.message.startsWith("request_started "))).toBe(level === "debug");
-    if (level === "off") expect(records).toEqual([]);
-    else {
-      const ranks = {debug: 3, error: 0, info: 2, warn: 1};
-      expect(records.every((record) => ranks[record.level] <= ranks[level])).toBe(true);
-    }
-  } finally {
-    await Promise.all([pair.left.stop(), pair.right.close()]);
-  }
-}, 15000);

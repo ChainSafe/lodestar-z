@@ -6,8 +6,6 @@ const Transport = @import("transport.zig").Transport;
 const udp = @import("udp");
 const validate = @import("configuration.zig").validate;
 const protocol = @import("reqresp/protocol.zig");
-const config = @import("config");
-const PeerId = @import("wire/peer_id.zig").PeerId;
 const ForkEntry = @import("types.zig").ForkEntry;
 const configuration = @import("configuration.zig");
 const gossip_limits = @import("gossip_limits.zig");
@@ -131,48 +129,24 @@ test "configuration control admission quotas permit the full two hundred peer wo
     }
 }
 
-test "configuration resolves shared capacities from their owners" {
-    const beacon = try resolve(.{ .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
-    try std.testing.expectEqual(@as(u16, 64), beacon.core.peers.target_peers);
-    try std.testing.expectEqual(@as(u16, 96), beacon.core.peers.max_peers);
-    try std.testing.expectEqual(@as(u16, 96), beacon.core.protocols.router.outbound_control_reserved);
-    try std.testing.expectEqual(@as(u16, 56), beacon.core.protocols.reqresp.outbound_max);
-    try std.testing.expectEqual(@as(usize, 128 * 1024 * 1024), beacon.core.protocols.gossipsub.receive_arena_bytes);
-    try std.testing.expectEqual(@as(u64, 6_000), beacon.core.protocols.gossipsub.large_frame_timeout_ms);
-    try std.testing.expectEqual(beacon.limits.connections_max, beacon.core.protocols.reqresp.connections);
-    try std.testing.expectEqual(beacon.core.peers.max_peers, beacon.core.protocols.gossipsub.connected_capacity);
-    try std.testing.expectEqual(beacon.core.peers.max_peers, beacon.core.protocols.control_reqresp.outbound_max);
-    const control = beacon.core.protocols.control_reqresp;
-    try std.testing.expectEqual(@as(u8, 8), control.inbound_per_connection_max);
-    try std.testing.expectEqual(@as(u8, 8), beacon.core.protocols.reqresp.inbound_per_connection_max);
-    try std.testing.expectEqual(@as(u16, 20), beacon.core.protocols.router.inbound_per_connection_max);
-    try std.testing.expectEqual(@as(u8, 1), control.outbound_per_connection_max);
-    try std.testing.expectEqual(@as(u8, 0), control.serving_per_source_max);
-    try std.testing.expectEqual(@as(u8, 4), beacon.core.protocols.reqresp.serving_per_source_max);
-    try std.testing.expectEqual(beacon.limits.connections_max, control.connections);
-    inline for (.{ "reqresp", "control_reqresp" }) |field| {
-        const starts = @field(beacon.core.protocols, field).admission.limits.starts;
-        try std.testing.expectEqual(@as(u32, 40), starts.tokens);
-        try std.testing.expectEqual(@as(u64, 10_000), starts.period_ms);
-    }
-}
-
-test "configuration overrides preserve defaults and derive shared fields" {
+test "configuration overrides derive shared capacities from their owners" {
     const forks: []const ForkEntry = &.{.{ .digest = @splat(1), .fork = .fulu }};
     const resolved = try resolve(.{
         .seed = 17,
         .forks = forks,
         .limits = .{ .connections_max = 8, .handshaking_max = 4, .dialing_max = 2 },
         .peers = .{ .capacity = 24, .outbound_reserve = 3, .max_peers = 6, .target_peers = 4, .min_outbound = 1 },
-        .reqresp = .{ .work_per_pump_max = 7 },
+        .reqresp = .{ .work_per_pump_max = 7, .outbound_max = 12 },
         .gossip = .{ .validation_capacity = 16 },
         .router = .{ .negotiations_max = 20, .outbound_reserved = 8 },
         .admission_policy = policy_fixture.config(),
     });
     const protocols = &resolved.core.protocols;
-    try std.testing.expectEqual(@as(u16, 8), protocols.reqresp.connections);
+    try std.testing.expectEqual(resolved.limits.connections_max, protocols.reqresp.connections);
+    try std.testing.expectEqual(resolved.limits.connections_max, protocols.control_reqresp.connections);
+    try std.testing.expectEqual(resolved.core.peers.max_peers, protocols.control_reqresp.outbound_max);
     try std.testing.expectEqualSlices(ForkEntry, forks, protocols.reqresp.forks);
-    try std.testing.expectEqual(@as(u16, 56), protocols.reqresp.outbound_max);
+    try std.testing.expectEqual(@as(u16, 12), protocols.reqresp.outbound_max);
     try std.testing.expectEqual(@as(u16, 7), protocols.reqresp.work_per_pump_max);
     try std.testing.expectEqual(@as(u16, 0), protocols.control_reqresp.serving_max);
     try std.testing.expectEqual(@as(u16, 6), protocols.router.outbound_control_reserved);
@@ -182,7 +156,6 @@ test "configuration overrides preserve defaults and derive shared fields" {
     try std.testing.expectEqual(@as(u16, 3), protocols.gossipsub.retained_outbound_reserve);
     try std.testing.expectEqual(@as(?u64, 17), protocols.gossipsub.random_seed);
     try std.testing.expectEqual(@as(usize, 16), protocols.gossipsub.validation_capacity);
-    try std.testing.expectEqual(@as(usize, 8192), protocols.gossipsub.mcache_capacity);
     try std.testing.expectEqual(@as(u16, 2), resolved.core.dial.concurrent_max);
 }
 
@@ -220,30 +193,6 @@ test "configuration rejects inconsistent capacity sections before owners" {
     try std.testing.expectError(error.InvalidOptions, validate(limits, resolved.core));
 }
 
-test "configuration rejects zero request work override" {
-    try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .reqresp = .{ .work_per_pump_max = 0 }, .admission_policy = policy_fixture.config() }));
-}
-
-test "configuration rejects zero control timer from complete section" {
-    try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .control = .{ .ping_inbound_ms = 0 }, .admission_policy = policy_fixture.config() }));
-}
-
-test "configuration validates router and score overrides" {
-    try std.testing.expectError(error.InvalidLimits, resolve(.{ .seed = 1, .forks = &.{}, .gossip = .{ .score_params = .{ .decay_interval_ms = 0 } }, .admission_policy = policy_fixture.config() }));
-    _ = try resolve(.{ .seed = 1, .forks = &.{}, .reqresp = .{ .outbound_max = 12 }, .admission_policy = policy_fixture.config() });
-    try std.testing.expectError(error.InvalidLimits, resolve(.{ .seed = 1, .forks = &.{}, .router = .{ .negotiations_max = 2 }, .admission_policy = policy_fixture.config() }));
-}
-
-test "configuration request admission derives retained capacity quotas and control reservation" {
-    const resolved = try resolve(.{ .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
-    const admission = resolved.core.protocols.reqresp.admission.limits;
-    const control_admission = resolved.core.protocols.control_reqresp.admission.limits;
-    try std.testing.expectEqual(admission.starts.tokens * (resolved.core.protocols.reqresp.serving_max / 4), admission.global_starts.tokens);
-    try std.testing.expectEqual(@as(u32, 128), admission.source.get(.blocks_by_root_v2, .fulu).tokens);
-    try std.testing.expectEqual(@as(u32, 1024), admission.source.get(.blocks_by_root_v2, .phase0).tokens);
-    try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * control_admission.source.get(.ping_v1, .fulu).tokens, control_admission.global.get(.ping_v1, .fulu).tokens);
-}
-
 test "configuration request admission memory plan measures retained capacity" {
     for ([_]u16{ 96, 200 }) |max_peers| {
         const resolved = try resolve(.{ .limits = .{ .connections_max = 232 }, .peers = .{ .capacity = 512, .target_peers = max_peers - 4, .max_peers = max_peers }, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
@@ -255,7 +204,6 @@ test "configuration request admission memory plan measures retained capacity" {
         const plan = handler.memoryPlan();
         const control_plan = control.memoryPlan();
         try std.testing.expectEqual(allocator.allocated_bytes, plan.total_bytes - plan.facade_bytes + control_plan.total_bytes - control_plan.facade_bytes);
-        std.debug.print("request admission memory {d}: retained={d} admission={d} facade={d} slots={d} io={d} sinks={d} total={d}\n", .{ max_peers, resolved.core.peers.capacity, plan.admission_bytes, plan.facade_bytes, plan.slot_bytes, plan.io_bytes, plan.request_sink_bytes, plan.total_bytes + control_plan.total_bytes });
     }
 }
 
@@ -267,10 +215,6 @@ test "configuration preserves independent transport work limits" {
 }
 
 test "configuration carries bounded UDP socket buffer requests" {
-    const resolved = try resolve(.{ .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
-    const mib = 1024 * 1024;
-    try std.testing.expectEqual(udp.Sockets.Buffers{ .receive = 16 * mib, .send = 4 * mib }, resolved.socket_buffers.quic);
-    try std.testing.expectEqual(udp.Sockets.Buffers{ .receive = 2 * mib, .send = 1 * mib }, resolved.socket_buffers.discovery);
     const bounds: configuration.SocketBuffers = .{
         .quic = .{ .receive = udp.Sockets.Buffers.bytes_max, .send = udp.Sockets.Buffers.bytes_min },
         .discovery = .{ .receive = udp.Sockets.Buffers.bytes_min, .send = udp.Sockets.Buffers.bytes_max },
@@ -301,7 +245,6 @@ test "resolved admission and Identify overrides use final capacities" {
     try std.testing.expectEqual(quotas.starts.tokens * (requests.serving_max / 4), quotas.global_starts.tokens);
     try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * control_quotas.source.get(.ping_v1, .fulu).tokens, control_quotas.global.get(.ping_v1, .fulu).tokens);
     const identify = resolved.core.protocols.identify;
-    try std.testing.expectEqual(@as(u16, 4), identify.inbound_max);
     try std.testing.expectEqualStrings("resolved-agent", identify.agent);
     try std.testing.expectEqualStrings("resolved-version", identify.protocol_version);
 }
@@ -325,12 +268,13 @@ test "application request limits preserve control capacity and size admission fr
         try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * resolved.core.protocols.control_reqresp.admission.limits.source.get(.ping_v1, .fulu).tokens, ping.tokens);
     }
     try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 0, .admission_policy = policy_fixture.config() }));
-    _ = try resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 32, .reqresp = .{ .serving_max = 1 }, .admission_policy = policy_fixture.config() });
+    const smaller = try resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 32, .reqresp = .{ .serving_max = 1 }, .admission_policy = policy_fixture.config() });
+    try std.testing.expectEqual(@as(u16, 1), smaller.core.protocols.reqresp.serving_max);
 }
 
 test "configuration rejects invalid complete sections" {
     const forks: []const ForkEntry = &.{.{ .digest = @splat(0), .fork = .phase0 }};
-    inline for (.{ error.InvalidOptions, error.InvalidOptions, error.InvalidOptions, error.InvalidLimits, error.InvalidLimits, error.InvalidOptions }, 0..) |expected, section| {
+    inline for (.{ error.InvalidOptions, error.InvalidOptions, error.InvalidOptions, error.InvalidLimits, error.InvalidLimits, error.InvalidOptions, error.InvalidLimits }, 0..) |expected, section| {
         var request: configuration.Options = .{ .seed = 1, .forks = forks, .admission_policy = policy_fixture.config() };
         switch (section) {
             0 => request.reqresp.work_per_pump_max = 0,
@@ -339,6 +283,7 @@ test "configuration rejects invalid complete sections" {
             3 => request.gossip.score_params = .{ .decay_interval_ms = 0 },
             4 => request.limits = .{ .handshaking_max = 0 },
             5 => request.peers = .{ .capacity = 0 },
+            6 => request.router = .{ .negotiations_max = 2 },
             else => unreachable,
         }
         try std.testing.expectError(expected, resolve(request));

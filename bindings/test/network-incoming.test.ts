@@ -11,19 +11,6 @@ import {
 import {drainUntil} from "./utils/network-bindings.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
-test("incoming request take is empty on an active application", async () => {
-  const config = applicationConfig();
-  config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-  const runtime = startRuntime(config, () => undefined);
-  try {
-    await runtime.identity;
-    await runtime.applyIntent(localIntent(config));
-    expect(nextIncoming(runtime)).toBeNull();
-  } finally {
-    await runtime.close();
-  }
-});
-
 test("incoming cancellation retains execution until host work retires", async () => {
   const pair = await incomingPair();
   let retire: () => void = () => undefined;

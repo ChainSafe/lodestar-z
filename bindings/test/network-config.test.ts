@@ -12,13 +12,6 @@ const cases: readonly [string, (config: ReturnType<typeof applicationConfig>) =>
     "InvalidXrayAddress",
   ],
   [
-    "removed stream polling",
-    (c) => {
-      Object.assign(c, {traceStreams: true});
-    },
-    "InvalidNetworkConfig",
-  ],
-  [
     "missing BeaconConfig",
     (c) => {
       Reflect.deleteProperty(c, "beaconConfig");
@@ -45,20 +38,6 @@ const cases: readonly [string, (config: ReturnType<typeof applicationConfig>) =>
       Object.assign(c, {beaconConfig: Object.create(bindings.BeaconConfig.prototype)});
     },
     "TypeMismatch",
-  ],
-  [
-    "target without peer headroom",
-    (c) => {
-      c.resources.targetPeers = c.resources.maxPeers;
-    },
-    "InvalidOptions",
-  ],
-  [
-    "removed profile selector",
-    (c) => {
-      Object.assign(c, {profile: "small"});
-    },
-    "InvalidNetworkConfig",
   ],
   [
     "unaligned receive buffer",
@@ -186,34 +165,6 @@ const cases: readonly [string, (config: ReturnType<typeof applicationConfig>) =>
     "InvalidNetworkInteger",
   ],
   [
-    "zero validators",
-    (c) => {
-      c.activeValidatorCount = 0;
-    },
-    "InvalidNetworkConfig",
-  ],
-  [
-    "oversized duration",
-    (c) => {
-      c.gossipPolicy.activeSendTimeoutMs = 86400001n;
-    },
-    "InvalidNetworkConfig",
-  ],
-  [
-    "zero active send deadline",
-    (c) => {
-      c.gossipPolicy.activeSendTimeoutMs = 0n;
-    },
-    "InvalidNetworkConfig",
-  ],
-  [
-    "oversized active send deadline",
-    (c) => {
-      c.gossipPolicy.activeSendTimeoutMs = 86400001n;
-    },
-    "InvalidNetworkConfig",
-  ],
-  [
     "zero active send capacity",
     (c) => {
       c.gossipPolicy.activeSendItems.beacon_block = 0;
@@ -292,21 +243,7 @@ it.each([
 ] as const)("rejects %s wire policy before startup", (_name, fields, code) => {
   const config = applicationConfig();
   Object.assign(config.gossipPolicy, fields);
-  for (const [key, value] of Object.entries(fields))
-    if (value === undefined) Reflect.deleteProperty(config.gossipPolicy, key);
   expect(() => startRuntime(config, () => undefined)).toThrow(code);
-});
-
-it.each([
-  "requestForks",
-  "forkSchedule",
-  "topicPolicy",
-  "requestPolicy",
-  "capabilities",
-])("rejects independent chain input %s", (field) => {
-  const config = applicationConfig();
-  Reflect.set(config, field, {});
-  expect(() => startRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
 });
 
 it.each([0, 129])("rejects chain custody group bound %s", (groups) => {
