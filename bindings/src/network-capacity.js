@@ -1,5 +1,8 @@
 // @ts-check
 
+// Node converts larger setTimeout delays to 1 ms.
+const TIMER_MAX_MS = 2 ** 31 - 1;
+
 /** @param {string} code */
 function failure(code) {
   return Object.assign(new Error(code), {code});
@@ -11,7 +14,6 @@ function failure(code) {
 class CapacityWaiters {
   #watch;
   #prefix;
-  #timeoutMax;
   /** @type {Set<Waiter>} */
   #waiters = new Set();
   #closed = false;
@@ -19,12 +21,10 @@ class CapacityWaiters {
   /**
    * @param {(token: string) => boolean} watch
    * @param {string} prefix
-   * @param {number} timeoutMax
    */
-  constructor(watch, prefix, timeoutMax) {
+  constructor(watch, prefix) {
     this.#watch = watch;
     this.#prefix = prefix;
-    this.#timeoutMax = timeoutMax;
   }
 
   /**
@@ -33,7 +33,7 @@ class CapacityWaiters {
    * @returns {Promise<void>}
    */
   async wait(token, {signal, timeoutMs}) {
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > this.#timeoutMax)
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > TIMER_MAX_MS)
       throw failure(`Invalid${this.#prefix}CapacityTimeout`);
     if (typeof signal?.addEventListener !== "function" || typeof signal?.removeEventListener !== "function")
       throw failure(`Invalid${this.#prefix}CapacitySignal`);
@@ -82,13 +82,13 @@ class CapacityWaiters {
 export class RequestCapacityWaiters extends CapacityWaiters {
   /** @param {{requestCapacityWatch(token: string): boolean}} runtime */
   constructor(runtime) {
-    super((token) => runtime.requestCapacityWatch(token), "Request", 60000);
+    super((token) => runtime.requestCapacityWatch(token), "Request");
   }
 }
 
 export class PublicationCapacityWaiters extends CapacityWaiters {
   /** @param {{publicationCapacityWatch(token: string): boolean}} runtime */
   constructor(runtime) {
-    super((token) => runtime.publicationCapacityWatch(token), "Publication", 86400000);
+    super((token) => runtime.publicationCapacityWatch(token), "Publication");
   }
 }

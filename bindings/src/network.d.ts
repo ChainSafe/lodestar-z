@@ -615,7 +615,7 @@ export interface NativeNetwork {
   publish(topic: string, data: Uint8Array, options?: NativeGossipPublishOptions): Promise<NativeGossipPublishResult>;
   /**
    * Resolves when the resource that refused publication changes, including before registration.
-   * Grants no reservation and retains no payload. timeoutMs is an integer in 1..86400000.
+   * Grants no reservation and retains no payload. The caller chooses timeoutMs within Node's timer range (1..2147483647).
    * Cancellation, timeout and close reject the wait; admitted publications are unaffected.
    */
   waitForPublicationCapacity(token: string, options: {signal: AbortSignal; timeoutMs: number}): Promise<void>;
@@ -629,7 +629,7 @@ export interface NativeNetwork {
   /**
    * Resolves when the resource that refused admission changes, including a change before this call.
    * The token belongs to this runtime and grants no reservation. No request is retained or retried.
-   * timeoutMs is an integer in 1..60000; cancellation, expiry and close reject locally.
+   * The caller chooses timeoutMs within Node's timer range (1..2147483647); cancellation, expiry and close reject locally.
    */
   waitForRequestCapacity(token: string, options: {signal: AbortSignal; timeoutMs: number}): Promise<void>;
   /** Checks the token and arms requestCapacityChanged atomically when its resource has not changed. */
