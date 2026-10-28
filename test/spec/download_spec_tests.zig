@@ -47,13 +47,14 @@ fn write_version(io: std.Io) !void {
         \\
         \\{s}
         \\ssz_generic {s}
-        \\SSZ {s} sha256:{s}
+        \\SSZ {s} sha256:{s} source sha256:{s}
         \\
     , .{
         spec_test_options.spec_test_version,
         spec_test_options.ssz_generic_spec_test_version,
         spec_test_options.ssz_spec_test_version,
         spec_test_options.ssz_spec_test_sha256,
+        spec_test_options.ssz_spec_source_sha256,
     });
     try writer.end();
 }

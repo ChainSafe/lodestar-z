@@ -6,6 +6,7 @@ test/spec/test_case/
 test/fuzz/zig-pkg/
 *.ssz
 test/spec/ssz/generic_tests.zig
+test/spec/ssz/json_types.zig
 test/spec/ssz/static_tests.zig
 test/spec/bls/spec_tests.zig
 *.era

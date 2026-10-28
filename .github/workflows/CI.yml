@@ -207,6 +207,7 @@ jobs:
             test/spec/root*.zig
             test/spec/test_case/
             test/spec/ssz/generic_tests.zig
+            test/spec/ssz/json_types.zig
             test/spec/ssz/static_tests.zig
             test/spec/bls/spec_tests.zig
           retention-days: 1
