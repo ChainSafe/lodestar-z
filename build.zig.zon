@@ -151,6 +151,11 @@
                 .default = "d83a63d7dd39a843eeffbe073562d89c4e2448c85e9df0bbcee857bd9ad63d19",
                 .description = "SHA-256 of the pinned SSZ fixture archive.",
             },
+            .ssz_spec_source_sha256 = .{
+                .type = .string,
+                .default = "dd775cd87733f24bb2703c6902cfff61bb785c4d94fc8ad5436d0c4228aac203",
+                .description = "SHA-256 of the ssz-specs source archive at the fixture tag, which holds the type declarations.",
+            },
             .spec_test_out_dir = .{
                 .type = .string,
                 .default = "test/spec/spec_tests",
@@ -489,6 +494,12 @@
         .tidy = .{
             .root_module = .{
                 .root_source_file = "test/tidy.zig",
+            },
+        },
+
+        .ssz_filler_schema = .{
+            .root_module = .{
+                .root_source_file = "test/spec/ssz/filler_schema.zig",
             },
         },
 

@@ -4,4 +4,4 @@
 
 v1.7.0-beta.4
 ssz_generic v1.7.0-alpha.11
-SSZ v0.0.1.dev2 sha256:d83a63d7dd39a843eeffbe073562d89c4e2448c85e9df0bbcee857bd9ad63d19
+SSZ v0.0.1.dev2 sha256:d83a63d7dd39a843eeffbe073562d89c4e2448c85e9df0bbcee857bd9ad63d19 source sha256:dd775cd87733f24bb2703c6902cfff61bb785c4d94fc8ad5436d0c4228aac203
