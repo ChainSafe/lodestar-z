@@ -1,6 +1,6 @@
 const std = @import("std");
-const Diagnostics = @import("diagnostics.zig").Diagnostics;
-const state_transition = @import("diagnostics.zig").state_transition;
+const diagnostics_module = @import("diagnostics.zig");
+const Diagnostics = diagnostics_module.Diagnostics;
 
 test "diagnostics should preserve the error and own its details" {
     var expected = [_]u8{0xab} ** 32;
@@ -8,11 +8,11 @@ test "diagnostics should preserve the error and own its details" {
     var diagnostics: Diagnostics = .{};
     try std.testing.expectEqual(
         error.WithdrawalsRootMismatch,
-        state_transition.withdrawalsRootMismatch(&diagnostics, &expected, &actual),
+        diagnostics_module.withdrawalsRootMismatch(&diagnostics, &expected, &actual),
     );
     try std.testing.expectEqual(
         error.WithdrawalsRootMismatch,
-        state_transition.withdrawalsRootMismatch(null, &expected, &actual),
+        diagnostics_module.withdrawalsRootMismatch(null, &expected, &actual),
     );
     @memset(&expected, 0);
     @memset(&actual, 0);
@@ -31,10 +31,10 @@ test "diagnostics should record withdrawal length mismatch" {
     var diagnostics: Diagnostics = .{};
     try std.testing.expectEqual(
         error.WithdrawalsLengthMismatch,
-        state_transition.withdrawalsLengthMismatch(&diagnostics, 2, 1),
+        diagnostics_module.withdrawalsLengthMismatch(&diagnostics, 2, 1),
     );
 
-    const mismatch = &diagnostics.detail.?.state_transition.withdrawals_length_mismatch;
+    const mismatch = &diagnostics.detail.?.withdrawals_length_mismatch;
     try std.testing.expectEqual(@as(usize, 2), mismatch.expected);
     try std.testing.expectEqual(@as(usize, 1), mismatch.actual);
 
@@ -45,6 +45,6 @@ test "diagnostics should record withdrawal length mismatch" {
     );
     try std.testing.expectEqual(
         error.WithdrawalsLengthMismatch,
-        state_transition.withdrawalsLengthMismatch(null, 2, 1),
+        diagnostics_module.withdrawalsLengthMismatch(null, 2, 1),
     );
 }

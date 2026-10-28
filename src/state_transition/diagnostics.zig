@@ -1,5 +1,10 @@
 const std = @import("std");
-const Diagnostics = @import("../diagnostics.zig").Diagnostics;
+
+/// Details own their values and survive failure cleanup. stateTransition resets them on entry.
+/// Initialize to .{} before calling block processing helpers directly.
+pub const Diagnostics = struct {
+    detail: ?ErrorDetails = null,
+};
 
 pub const ErrorDetails = union(enum) {
     withdrawals_root_mismatch: struct {
@@ -31,10 +36,10 @@ pub fn withdrawalsRootMismatch(
     actual: *const [32]u8,
 ) error{WithdrawalsRootMismatch} {
     if (diagnostics) |diag| {
-        diag.detail = .{ .state_transition = .{ .withdrawals_root_mismatch = .{
+        diag.detail = .{ .withdrawals_root_mismatch = .{
             .expected = expected.*,
             .actual = actual.*,
-        } } };
+        } };
     }
     return error.WithdrawalsRootMismatch;
 }
@@ -45,10 +50,14 @@ pub fn withdrawalsLengthMismatch(
     actual: usize,
 ) error{WithdrawalsLengthMismatch} {
     if (diagnostics) |diag| {
-        diag.detail = .{ .state_transition = .{ .withdrawals_length_mismatch = .{
+        diag.detail = .{ .withdrawals_length_mismatch = .{
             .expected = expected,
             .actual = actual,
-        } } };
+        } };
     }
     return error.WithdrawalsLengthMismatch;
+}
+
+test {
+    _ = @import("diagnostics_test.zig");
 }
