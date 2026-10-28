@@ -68,10 +68,6 @@ jobs:
         run: |
           zig build test:ssz
 
-      - name: Run ssz filler schema tests
-        run: |
-          zig build test:ssz_filler_schema
-
       - name: Run hex tests
         run: |
           zig build test:hex

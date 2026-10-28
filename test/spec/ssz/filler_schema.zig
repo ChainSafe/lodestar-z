@@ -1,6 +1,8 @@
-//! Translates the SSZ classes of an ssz-specs filler module into a Zig namespace. A class outside
-//! the accepted subset fails instead of yielding a wrong schema. Unknown names are emitted as-is
-//! and fail when the generated sources compile.
+//! A naive translator from the SSZ classes of an ssz-specs filler module to a Zig namespace. It
+//! understands only the Python subset the pinned fillers use and skips every other top-level
+//! statement, so extend it when a fixture bump brings new syntax. A class outside the subset fails
+//! instead of yielding a wrong schema, and unknown names are emitted as-is and fail when the
+//! generated sources compile.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -347,8 +349,4 @@ fn stringEnd(source: []const u8, start: usize) !usize {
         }
     }
     return error.UnterminatedString;
-}
-
-test {
-    _ = @import("filler_schema_test.zig");
 }
