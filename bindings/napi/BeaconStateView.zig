@@ -1511,7 +1511,7 @@ pub fn stateTransition(
     ) catch |err| {
         if (diagnostics.detail) |*detail| {
             var buffer: [256]u8 = undefined;
-            const message = std.fmt.bufPrintZ(&buffer, "{f}", .{detail}) catch return err;
+            const message = std.fmt.bufPrintSentinel(&buffer, "{f}", .{detail}, 0) catch return err;
             try js.env().throwError(@errorName(err), message);
             return error.PendingException;
         }

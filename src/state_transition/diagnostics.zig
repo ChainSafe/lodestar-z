@@ -1,7 +1,5 @@
 const std = @import("std");
 
-/// Details own their values and survive failure cleanup. stateTransition resets them on entry.
-/// Initialize to .{} before calling block processing helpers directly.
 pub const Diagnostics = struct {
     detail: ?ErrorDetails = null,
 };
