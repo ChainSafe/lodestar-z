@@ -18,8 +18,11 @@ const oom_pool_size = 128;
 
 const BitUpdate = struct { index: usize, bit: bool };
 
-const roundtrip_limit = 64;
-const roundtrip_len = 44;
+// Every single-chunk scenario shares one list limit; the limit only changes
+// the tree depth once it exceeds a chunk.
+const limit = 64;
+
+const len = 44;
 const roundtrip_set_bits = [_]usize{ 1, 7, 31, 43 };
 const roundtrip_updates = [_]BitUpdate{
     .{ .index = 0, .bit = true },
@@ -27,13 +30,15 @@ const roundtrip_updates = [_]BitUpdate{
     .{ .index = 12, .bit = true },
 };
 
-const bool_array_limit = 16;
 const bool_array_bits = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true };
 
-const uncommitted_limit = 16;
 const uncommitted_len = 8;
 const uncommitted_set_bits = [_]usize{ 0, 3, 7 };
-const uncommitted_expected = [_]bool{ true, false, false, true, false, false, false, true };
+const uncommitted_expected = blk: {
+    var bits = [_]bool{false} ** uncommitted_len;
+    for (uncommitted_set_bits) |i| bits[i] = true;
+    break :blk bits;
+};
 
 const two_chunk_limit = 2 * bits_per_chunk;
 const two_chunk_len = 300;
@@ -105,14 +110,14 @@ fn expectSameRoot(comptime Case: type, comptime B: type, value: *B.Type, view: *
 // roots equal.
 fn expectViewMatchesValue(comptime Case: type, pool: *Node.Pool) !void {
     const allocator = std.testing.allocator;
-    const B = Case.Bits(roundtrip_limit, roundtrip_len);
-    var value = try Case.initValue(allocator, B, roundtrip_len);
+    const B = Case.Bits(limit, len);
+    var value = try Case.initValue(allocator, B, len);
     defer Case.deinitValue(allocator, &value);
     for (roundtrip_set_bits) |i| try Case.setBit(&value, i, true);
 
     const view = try B.TreeView.init(allocator, pool, try B.tree.fromValue(pool, &value));
     defer view.deinit();
-    for (0..roundtrip_len) |i| try std.testing.expectEqual(try value.get(i), try view.get(i));
+    for (0..len) |i| try std.testing.expectEqual(try value.get(i), try view.get(i));
 
     for (roundtrip_updates) |u| {
         try view.set(u.index, u.bit);
@@ -125,7 +130,7 @@ fn expectViewMatchesValue(comptime Case: type, pool: *Node.Pool) !void {
 // order.
 fn expectToBoolArrayRoundTrip(comptime Case: type, pool: *Node.Pool) !void {
     const allocator = std.testing.allocator;
-    const B = Case.Bits(bool_array_limit, bool_array_bits.len);
+    const B = Case.Bits(limit, bool_array_bits.len);
     var value = try Case.initValue(allocator, B, bool_array_bits.len);
     defer Case.deinitValue(allocator, &value);
     for (bool_array_bits, 0..) |bit, i| try Case.setBit(&value, i, bit);
@@ -145,7 +150,7 @@ fn expectToBoolArrayRoundTrip(comptime Case: type, pool: *Node.Pool) !void {
 // Expect bits set on the view without a commit show up in toBoolArray.
 fn expectUncommittedSetsVisible(comptime Case: type, pool: *Node.Pool) !void {
     const allocator = std.testing.allocator;
-    const B = Case.Bits(uncommitted_limit, uncommitted_len);
+    const B = Case.Bits(limit, uncommitted_len);
     var value = try Case.initValue(allocator, B, uncommitted_len);
     defer Case.deinitValue(allocator, &value);
 
@@ -235,23 +240,18 @@ fn expectFullChunkLength(comptime Case: type, comptime len: usize, pool: *Node.P
     try expectSameRoot(Case, B, &value, view);
 }
 
-/// Runs the shared BitArray scenarios for one bit view on a single pool.
-fn expectBitArraySemantics(comptime Case: type) !void {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = scenario_pool_size });
-    defer pool.deinit();
-
-    try expectViewMatchesValue(Case, &pool);
-    try expectToBoolArrayRoundTrip(Case, &pool);
-    try expectUncommittedSetsVisible(Case, &pool);
-    try expectChunkBoundaryReadsAndWrites(Case, &pool);
-    inline for (remainder_lens) |len| try expectRemainderLength(Case, len, &pool);
-    inline for (full_chunk_lens) |len| try expectFullChunkLength(Case, len, &pool);
-}
-
 test "BitArray views agree with their value types across chunk boundaries" {
     inline for (.{ ListCase, VectorCase }) |Case| {
-        try expectBitArraySemantics(Case);
+        const allocator = std.testing.allocator;
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = scenario_pool_size });
+        defer pool.deinit();
+
+        try expectViewMatchesValue(Case, &pool);
+        try expectToBoolArrayRoundTrip(Case, &pool);
+        try expectUncommittedSetsVisible(Case, &pool);
+        try expectChunkBoundaryReadsAndWrites(Case, &pool);
+        inline for (remainder_lens) |r_len| try expectRemainderLength(Case, r_len, &pool);
+        inline for (full_chunk_lens) |fc_len| try expectFullChunkLength(Case, fc_len, &pool);
     }
 }
 
@@ -265,8 +265,8 @@ fn expectSetReclaimsUnpublishedNodeOnOom(comptime Case: type) !void {
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = oom_pool_size });
     defer pool.deinit();
 
-    const B = Case.Bits(roundtrip_limit, roundtrip_len);
-    var value = try Case.initValue(allocator, B, roundtrip_len);
+    const B = Case.Bits(limit, len);
+    var value = try Case.initValue(allocator, B, len);
     defer Case.deinitValue(allocator, &value);
 
     const view = try B.TreeView.init(failing.allocator(), &pool, try B.tree.fromValue(&pool, &value));
