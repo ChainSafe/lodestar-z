@@ -1,3 +1,9 @@
+# Notice
+
+This repo is archived.
+
+Development continues at https://github.com/chainsafe/lodestar.
+
 # lodestar-z
 
 Zig consensus modules for [Lodestar](https://github.com/chainsafe/lodestar), the TypeScript Ethereum consensus client.
