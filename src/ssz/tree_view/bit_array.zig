@@ -132,3 +132,7 @@ pub fn BitArray(comptime chunk_depth: Depth) type {
         }
     };
 }
+
+test {
+    _ = @import("bit_array_test.zig");
+}

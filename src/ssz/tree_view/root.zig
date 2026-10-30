@@ -25,6 +25,7 @@ test {
     _ = @import("progressive_list_basic.zig");
     _ = @import("list_composite.zig");
     _ = @import("progressive_list_composite.zig");
+    _ = @import("root_test.zig");
     _ = @import("utils/assert.zig");
     _ = @import("utils/clone_opts.zig");
     _ = @import("utils/tree_view_state.zig");
