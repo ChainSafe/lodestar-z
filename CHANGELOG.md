@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.3.0](https://github.com/ChainSafe/lodestar-z/compare/v2.2.0...v2.3.0) (2026-10-29)
+
+
+### Features
+
+* **fuzz:** add a minimize command for the fuzz platform ([#808](https://github.com/ChainSafe/lodestar-z/issues/808)) ([1010e78](https://github.com/ChainSafe/lodestar-z/commit/1010e78c41f4250f54ae12c27b8e213276f8dfd2))
+
+
+### Bug Fixes
+
+* **fuzz:** report AFL++'s last-minute exec rate ([#809](https://github.com/ChainSafe/lodestar-z/issues/809)) ([1921c84](https://github.com/ChainSafe/lodestar-z/commit/1921c8436ad72e6360d310429830c021ffac0748))
+* surface stf diagnostic messages ([#813](https://github.com/ChainSafe/lodestar-z/issues/813)) ([ff956b2](https://github.com/ChainSafe/lodestar-z/commit/ff956b2273a9ceff798b6d19bb0a5e7c1aa7833f))
+
 ## [2.2.0](https://github.com/ChainSafe/lodestar-z/compare/v2.1.0...v2.2.0) (2026-10-26)
 
 
