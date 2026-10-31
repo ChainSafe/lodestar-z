@@ -24,27 +24,63 @@ importers:
       '@chainsafe/biomejs-config':
         specifier: ^1.0.0
         version: 1.0.0(@biomejs/biome@2.3.11)
+      '@chainsafe/fast-crc32c':
+        specifier: 4.2.0
+        version: 4.2.0
+      '@chainsafe/libp2p-quic':
+        specifier: 2.1.3
+        version: 2.1.3
       '@chainsafe/ssz':
         specifier: 1.8.1
         version: 1.8.1
+      '@libp2p/crypto':
+        specifier: 5.1.23
+        version: 5.1.23
+      '@libp2p/gossipsub':
+        specifier: 17.1.1
+        version: 17.1.1
+      '@libp2p/identify':
+        specifier: 4.1.14
+        version: 4.1.14
+      '@libp2p/peer-id':
+        specifier: 6.0.15
+        version: 6.0.15
       '@lodestar/config':
         specifier: 1.50.0
         version: 1.50.0
       '@lodestar/era':
         specifier: 1.50.0
-        version: 1.50.0(libp2p@3.3.9)
+        version: 1.50.0(libp2p@3.3.10)
+      '@lodestar/reqresp':
+        specifier: 1.46.0
+        version: 1.46.0(libp2p@3.3.10)
       '@lodestar/state-transition':
         specifier: 1.50.0
         version: 1.50.0
       '@lodestar/types':
         specifier: 1.50.0
         version: 1.50.0
+      '@multiformats/multiaddr':
+        specifier: 13.0.3
+        version: 13.0.3
       '@types/node':
         specifier: ^25.0.9
         version: 25.0.9
+      it-length-prefixed:
+        specifier: 11.0.1
+        version: 11.0.1
+      libp2p:
+        specifier: 3.3.10
+        version: 3.3.10
+      snappy:
+        specifier: 7.3.3
+        version: 7.3.3
       tsx:
         specifier: ^4.20.6
         version: 4.23.11
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
       vitest:
         specifier: ^4.0.17
         version: 4.0.17(@types/node@25.0.9)(tsx@4.23.11)(yaml@2.8.2)
@@ -125,6 +161,7 @@ packages:
 
   '@azure/ms-rest-js@2.7.0':
     resolution: {integrity: sha512-ngbzWbqF+NmztDOpLBVDxYM+XLcUj7nKhxGbSU9WtIsXfRB//cf2ZbAG5HkOrhU9/wd/ORRB6lM/d69RKVjiyA==}
+    deprecated: This package has been deprecated in favor of the new Azure SDK packages from [Azure SDK for JavaScript](https://github.com/azure/azure-sdk-for-js).
 
   '@azure/storage-blob@12.31.0':
     resolution: {integrity: sha512-DBgNv10aCSxopt92DkTDD0o9xScXeBqPKGmR50FPZQaEcH4JLQ+GEOGEDv19V5BMkB7kxr+m4h6il/cCDPvmHg==}
@@ -156,28 +193,24 @@ packages:
     engines: {node: '>=14.21.3'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@biomejs/cli-linux-arm64@2.3.11':
     resolution: {integrity: sha512-l4xkGa9E7Uc0/05qU2lMYfN1H+fzzkHgaJoy98wO+b/7Gl78srbCRRgwYSW+BTLixTBrM6Ede5NSBwt7rd/i6g==}
     engines: {node: '>=14.21.3'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@biomejs/cli-linux-x64-musl@2.3.11':
     resolution: {integrity: sha512-vU7a8wLs5C9yJ4CB8a44r12aXYb8yYgBn+WeyzbMjaCMklzCv1oXr8x+VEyWodgJt9bDmhiaW/I0RHbn7rsNmw==}
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@biomejs/cli-linux-x64@2.3.11':
     resolution: {integrity: sha512-/1s9V/H3cSe0r0Mv/Z8JryF5x9ywRxywomqZVLHAoa/uN0eY7F8gEngWKNS5vbbN/BsfpCG5yeBT5ENh50Frxg==}
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@biomejs/cli-win32-arm64@2.3.11':
     resolution: {integrity: sha512-PZQ6ElCOnkYapSsysiTy0+fYX+agXPlWugh6+eQ6uPKI3vKAqNp6TnMhoM3oY2NltSB89hz59o8xIfOdyhi9Iw==}
@@ -217,28 +250,24 @@ packages:
     engines: {node: '>= 18'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@chainsafe/hashtree-linux-arm64-musl@1.0.2':
     resolution: {integrity: sha512-BUy+/9brJwAFAtraro4y/1F+aP/8j/7HrnYdde8PTu7jHWAClI9xZygadaJbk0GoWxyCOUAJKUs8KHVnYxJDeg==}
     engines: {node: '>= 18'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@chainsafe/hashtree-linux-x64-gnu@1.0.2':
     resolution: {integrity: sha512-bFy9ffFG77SivmeOjOlZmOCrxzQ/WqUESy0I+dW6IX7wquTXHldJKWvohs9+FEn3TSXgeigFmEATz5tfxBfIZw==}
     engines: {node: '>= 18'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@chainsafe/hashtree-linux-x64-musl@1.0.2':
     resolution: {integrity: sha512-mbJB3C0RjwpqOMPZIUQm3IBH6d3sYiKDXMU6ORt5nuk7Ix2I80xxffAciDO1d7kKNnW6HStOj5s/rGhIDxK1ug==}
     engines: {node: '>= 18'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@chainsafe/hashtree-win32-x64-msvc@1.0.2':
     resolution: {integrity: sha512-wXFhGqaydgadefQbjSTGqZY1R1MBhnJj+gbJhULNRUXco5pHsXfOk3QhCDAefp1PPW+wQwfT4clEnQCqJIf58w==}
@@ -252,6 +281,52 @@ packages:
 
   '@chainsafe/is-ip@2.1.0':
     resolution: {integrity: sha512-KIjt+6IfysQ4GCv66xihEitBjvhU/bixbbbFxdJ1sqCp4uJ0wuZiYBPhksZoy4lfaF0k9cwNzY5upEW/VWdw3w==}
+
+  '@chainsafe/libp2p-quic-darwin-arm64@2.1.3':
+    resolution: {integrity: sha512-nJxyHltv7t7BdeqjMAlcX6j+3H9P9YyYoQToIzaXlcphivY02vlHa31SDPA+h978DD0qo6o+yfJ6XjDgud4ZTg==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@chainsafe/libp2p-quic-darwin-x64@2.1.3':
+    resolution: {integrity: sha512-EvihuEoI+1XSTBUac13w3T/A2VySiCYEnminziK0gC2GWJKBxAvi9faWlj3YgZX5WEV4VSsRNnGWQFWlyWlA7A==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@chainsafe/libp2p-quic-linux-arm64-gnu@2.1.3':
+    resolution: {integrity: sha512-8fuB0EfjMImGLz1p9h0GwURdnX/DtZi+go4MKMml0ZzG7LxfAebh5OOvyprmjxq7d7IY63TtNzEJnRCClpVo0Q==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@chainsafe/libp2p-quic-linux-arm64-musl@2.1.3':
+    resolution: {integrity: sha512-4EKUkNDTZdEHCAwUxvm27cV9q6SMv0+CFni3XoPFSm6nIJGtb50RX/YqSqz7/SbnvYsI40sbvt/qXL0KN1TSKg==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@chainsafe/libp2p-quic-linux-x64-gnu@2.1.3':
+    resolution: {integrity: sha512-DF+bYVkcDrf1FMVGS4xhqOgQDASIj8p1YzpwJWJ8udIBzMmqXaW/3zoCrzjf8U2Cdnw6mCIUNNFLSNIGhxCALA==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+
+  '@chainsafe/libp2p-quic-linux-x64-musl@2.1.3':
+    resolution: {integrity: sha512-RCd4u87CwwfJDBsJzDQymhDj76vsvz+/+zHR9h5RJXDuqiH7Mr4JLyb8tzeD7pVTRt7MKNSJJFylUl5Tt9pTHQ==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+
+  '@chainsafe/libp2p-quic-win32-x64-msvc@2.1.3':
+    resolution: {integrity: sha512-IjdpofioPIcvht7AtYlLEYEHXB9htg50vSbRfNXcUwlYT+JsIbca7dt63CuAtfHRxIA//zjxzqP/GpxJ2+8aiA==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [win32]
+
+  '@chainsafe/libp2p-quic@2.1.3':
+    resolution: {integrity: sha512-y+diflUZN1hEnGhPnTPk3DUjtPigiGNf6bfXPuRSDwoB2obat0BHW7J2ZncayYTE0TAlel1sr66lLaLEO4VAdQ==}
+    engines: {node: '>= 22'}
 
   '@chainsafe/netmask@2.0.0':
     resolution: {integrity: sha512-I3Z+6SWUoaljh3TBzCnCxjlUyN8tA+NAk5L6m9IxvCf1BENQTePzPMis97CoN/iMW1St3WN+AWCCRp+TTBRiDg==}
@@ -611,8 +686,18 @@ packages:
   '@libp2p/crypto@5.1.23':
     resolution: {integrity: sha512-u6XVMD1YpUJgjS5MAayrxlzi+hQcj3FHY0wS6/M/T93ntyCW13BmmRzFb2ESamk65PEuSCAChmQeSzRV2sh2rQ==}
 
+  '@libp2p/gossipsub@17.1.1':
+    resolution: {integrity: sha512-SkQlCMbwltlGxaIcYKKycv43rYWhYftRMFOFTHSgGpECY4rZI5C6qteH8c/QgH9UVSjx+NdKRnaxQe9b5Z+Kzg==}
+    engines: {npm: '>=8.7.0'}
+
+  '@libp2p/identify@4.1.14':
+    resolution: {integrity: sha512-c7oU0DSKzkMNsanruOQc4Zy6mSf3fq8/W+4E/I936HiHZc/LIbUuCWaxbgmQexdfKqECH1qH4q9IwaCUWmjPMQ==}
+
   '@libp2p/interface-internal@3.1.13':
     resolution: {integrity: sha512-+vjQzpQl+0uoWCyNwV5NDnv1RAK9LDeWGeMbx/Fl2ZWrndtuFUPa9LxwqHXrTly6YOhgUatSzVqZBWnrQ1PxGg==}
+
+  '@libp2p/interface@3.1.0':
+    resolution: {integrity: sha512-RE7/XyvC47fQBe1cHxhMvepYKa5bFCUyFrrpj8PuM0E7JtzxU7F+Du5j4VXbg2yLDcToe0+j8mB7jvwE2AThYw==}
 
   '@libp2p/interface@3.3.0':
     resolution: {integrity: sha512-SXahM/4IgpiFKTtocbXYSTA1wEUVjktmT1yBCzBbc2Vgsu1VBCg6SvsFmXo2Hbeyev3D8EU+y3uaCKDB43C/Vg==}
@@ -644,8 +729,16 @@ packages:
   '@lodestar/era@1.50.0':
     resolution: {integrity: sha512-3GuuFtG7ZBG35q0YCGNBrsH8RIAV4KaKoE3QFo8cCPtDykqYqm/vMvqQ7hzym4PhCmdquDMEPuqB+bDI9q4I0w==}
 
+  '@lodestar/params@1.47.0':
+    resolution: {integrity: sha512-cpWuc0v2VaI+HBKijja8M7TNGD7KQcaJaznrC6xlRCM4CEcy8XFPzhl/K/00JtG3IMx1FtxtBit5d6LaKrzy7g==}
+
   '@lodestar/params@1.50.0':
     resolution: {integrity: sha512-6UAo9aih2BARMwDCPmhack+uMckVgeatiCRTajCL4xocHhltdbIXSfk1PdGx4cSmWVuteFaCec36Vg6g7v4b1Q==}
+
+  '@lodestar/reqresp@1.46.0':
+    resolution: {integrity: sha512-cV2W3zrbUtNTdprGG81Z3JlMFosMPeLacju+Utd2kXobPq47gdVzG2iHkaWvuabwYt6nQItuP0/xetXSU1v7pA==}
+    peerDependencies:
+      libp2p: ^3.1.4
 
   '@lodestar/reqresp@1.50.0':
     resolution: {integrity: sha512-7myNPlEExpttcG9L9pCJr5jbUcCBu5Faw9g3XgaDTxgmYecxmUuaBK90clYYKmml5uFM46IlEyINuGPIkJFC5Q==}
@@ -657,6 +750,9 @@ packages:
 
   '@lodestar/types@1.50.0':
     resolution: {integrity: sha512-pikbQ2SI2EBVTXLJKmaZmFz6bYJE9HMlKS310gAofsofDvVxX9iqVgIcJZ2cLqH6DguDRfzOs/oo/1/PfPiDjw==}
+
+  '@lodestar/utils@1.47.0':
+    resolution: {integrity: sha512-lm7JXO3SbiqLlgRKCJalpqjyyGpodr7Uu93SJ2Y38PVdrYZkij1YUZ0/uRHCfrb1/KzL/9REdUsKSXufunqIoA==}
 
   '@lodestar/utils@1.50.0':
     resolution: {integrity: sha512-EG3Wa9C04nqNcZJ/EASypzD+ovqFQJLNPR3oSnIwNofjF//VTThoReUV18kBPfqWIMwUAbFasq9JcpqpW4HF4w==}
@@ -670,10 +766,22 @@ packages:
   '@multiformats/multiaddr@13.0.3':
     resolution: {integrity: sha512-mEqqJ4r3a/uuFMTpRkU316wGNIDQNhuVWpm+ebKTQeYsfv9jXbPONWM6VVnj3KGUrwfsX7GZOyp4TFqEA2SPCw==}
 
+  '@napi-rs/snappy-android-arm-eabi@7.3.3':
+    resolution: {integrity: sha512-d4vUFFzNBvazGfB/KU8MnEax6itTIgRWXodPdZDnWKHy9HwVBndpCiedQDcSNHcZNYV36rx034rpn7SAuTL2NA==}
+    engines: {node: '>= 10'}
+    cpu: [arm]
+    os: [android]
+
   '@napi-rs/snappy-android-arm-eabi@7.4.3':
     resolution: {integrity: sha512-IUcqhinktWCfA3Cu/PaDNjixAt5hAn1sQlnl03qpQWNuv2PLju6LQqOa5kDoXnTFrLzu1/jpRexjR/KR8+ERog==}
     engines: {node: '>= 10'}
     cpu: [arm]
+    os: [android]
+
+  '@napi-rs/snappy-android-arm64@7.3.3':
+    resolution: {integrity: sha512-Uh+w18dhzjVl85MGhRnojb7OLlX2ErvMsYIunO/7l3Frvc2zQvfqsWsFJanu2dwqlE2YDooeNP84S+ywgN9sxg==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
     os: [android]
 
   '@napi-rs/snappy-android-arm64@7.4.3':
@@ -682,10 +790,22 @@ packages:
     cpu: [arm64]
     os: [android]
 
+  '@napi-rs/snappy-darwin-arm64@7.3.3':
+    resolution: {integrity: sha512-AmJn+6yOu/0V0YNHLKmRUNYkn93iv/1wtPayC7O1OHtfY6YqHQ31/MVeeRBiEYtQW9TwVZxXrDirxSB1PxRdtw==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [darwin]
+
   '@napi-rs/snappy-darwin-arm64@7.4.3':
     resolution: {integrity: sha512-eTPH4pSnuDOGi8wuKVFykZvcRlxAT3NNDeJkNWpiw+lzKLr7zmEdZqmTtTJDyzJR4zyV/kIV193JT3oDRlRE3Q==}
     engines: {node: '>= 10'}
     cpu: [arm64]
+    os: [darwin]
+
+  '@napi-rs/snappy-darwin-x64@7.3.3':
+    resolution: {integrity: sha512-biLTXBmPjPmO7HIpv+5BaV9Gy/4+QJSUNJW8Pjx1UlWAVnocPy7um+zbvAWStZssTI5sfn/jOClrAegD4w09UA==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
     os: [darwin]
 
   '@napi-rs/snappy-darwin-x64@7.4.3':
@@ -694,11 +814,23 @@ packages:
     cpu: [x64]
     os: [darwin]
 
+  '@napi-rs/snappy-freebsd-x64@7.3.3':
+    resolution: {integrity: sha512-E3R3ewm8Mrjm0yL2TC3VgnphDsQaCPixNJqBbGiz3NTshVDhlPlOgPKF0NGYqKiKaDGdD9PKtUgOR4vagUtn7g==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [freebsd]
+
   '@napi-rs/snappy-freebsd-x64@7.4.3':
     resolution: {integrity: sha512-LAj4AwbDWWKLprUJ2gl0h55imFpCzIDELms3wMAu2Jo+MF0GRKSY4bx8Yb5OWhh30OSMSq9bnKQvoEIAsS8uIw==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [freebsd]
+
+  '@napi-rs/snappy-linux-arm-gnueabihf@7.3.3':
+    resolution: {integrity: sha512-ZuNgtmk9j0KyT7TfLyEnvZJxOhbkyNR761nk04F0Q4NTHMICP28wQj0xgEsnCHUsEeA9OXrRL4R7waiLn+rOQA==}
+    engines: {node: '>= 10'}
+    cpu: [arm]
+    os: [linux]
 
   '@napi-rs/snappy-linux-arm-gnueabihf@7.4.3':
     resolution: {integrity: sha512-bUTs+JWl7kwYM1RPBBY0JLQ06+iVgRS81yVwMGtpD3C12tWKtoeTKM4ai33ySc+wnKvcpqhlHz2ZufcCESQHvg==}
@@ -706,54 +838,95 @@ packages:
     cpu: [arm]
     os: [linux]
 
+  '@napi-rs/snappy-linux-arm64-gnu@7.3.3':
+    resolution: {integrity: sha512-KIzwtq0dAzshzpqZWjg0Q9lUx93iZN7wCCUzCdLYIQ+mvJZKM10VCdn0RcuQze1R3UJTPwpPLXQIVskNMBYyPA==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+
   '@napi-rs/snappy-linux-arm64-gnu@7.4.3':
     resolution: {integrity: sha512-NOCDEWRhgnyffjUpgYy7kdUmFwtMILkQV9+n9CvnshxXsiJwTDLMkeDXWagcVBQheCnfUPLIEl1vHk71lQBANw==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
+
+  '@napi-rs/snappy-linux-arm64-musl@7.3.3':
+    resolution: {integrity: sha512-AAED4cQS74xPvktsyVmz5sy8vSxG/+3d7Rq2FDBZzj3Fv6v5vux6uZnECPCAqpALCdTtJ61unqpOyqO7hZCt1Q==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
 
   '@napi-rs/snappy-linux-arm64-musl@7.4.3':
     resolution: {integrity: sha512-+Lcf3PUrTE55MhCEp2FaEil8X5J68v8Y8DC1AvYmS0oODCDU2TUbn/cR6+ib1fTBjRz/b9G+NokW0bK/uE1vwA==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
+
+  '@napi-rs/snappy-linux-ppc64-gnu@7.3.3':
+    resolution: {integrity: sha512-pofO5eSLg8ZTBwVae4WHHwJxJGZI8NEb4r5Mppvq12J/1/Hq1HecClXmfY3A7bdT2fsS2Td+Q7CI9VdBOj2sbA==}
+    engines: {node: '>= 10'}
+    cpu: [ppc64]
+    os: [linux]
 
   '@napi-rs/snappy-linux-ppc64-gnu@7.4.3':
     resolution: {integrity: sha512-FjY2TncYM75uwSt+jQ6QeWX0rN56QWL2nTDLlKp30mCz4xjJ9XbnwCNOtxdQ92lKDOH5SC88c41uq4zv0F+ldQ==}
     engines: {node: '>= 10'}
     cpu: [ppc64]
     os: [linux]
-    libc: [glibc]
+
+  '@napi-rs/snappy-linux-riscv64-gnu@7.3.3':
+    resolution: {integrity: sha512-OiHYdeuwj0TVBXADUmmQDQ4lL1TB+8EwmXnFgOutoDVXHaUl0CJFyXLa6tYUXe+gRY8hs1v7eb0vyE97LKY06Q==}
+    engines: {node: '>= 10'}
+    cpu: [riscv64]
+    os: [linux]
 
   '@napi-rs/snappy-linux-riscv64-gnu@7.4.3':
     resolution: {integrity: sha512-RPdXvPOF2oRLiXj6PacW2LihJ9WTqCQyjEpw5W2p4ej3rzp3e0fFaRCOl5OepZEeiPOg0mnzHjzzE7PDEJr47A==}
     engines: {node: '>= 10'}
     cpu: [riscv64]
     os: [linux]
-    libc: [glibc]
+
+  '@napi-rs/snappy-linux-s390x-gnu@7.3.3':
+    resolution: {integrity: sha512-66QdmuV9CTq/S/xifZXlMy3PsZTviAgkqqpZ+7vPCmLtuP+nqhaeupShOFf/sIDsS0gZePazPosPTeTBbhkLHg==}
+    engines: {node: '>= 10'}
+    cpu: [s390x]
+    os: [linux]
 
   '@napi-rs/snappy-linux-s390x-gnu@7.4.3':
     resolution: {integrity: sha512-UeJSlY2lOe6dKwhXf2CCHYWOSPkSIEb32tW7nmfTo/CwLfMe6TA3pAdczH/NtElu0V/lKVva1vnQCiMywLVtVw==}
     engines: {node: '>= 10'}
     cpu: [s390x]
     os: [linux]
-    libc: [glibc]
+
+  '@napi-rs/snappy-linux-x64-gnu@7.3.3':
+    resolution: {integrity: sha512-g6KURjOxrgb8yXDEZMuIcHkUr/7TKlDwSiydEQtMtP3n4iI4sNjkcE/WNKlR3+t9bZh1pFGAq7NFRBtouQGHpQ==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
 
   '@napi-rs/snappy-linux-x64-gnu@7.4.3':
     resolution: {integrity: sha512-6fnGsH0yb48+PCYnKc6E5U1zUFXUpLtmyz8TnMstIBuiS7w1pf7e8GWN8GO//kz7+9E9jfD1/+8BZrp0FDOOqw==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
+
+  '@napi-rs/snappy-linux-x64-musl@7.3.3':
+    resolution: {integrity: sha512-6UvOyczHknpaKjrlKKSlX3rwpOrfJwiMG6qA0NRKJFgbcCAEUxmN9A8JvW4inP46DKdQ0bekdOxwRtAhFiTDfg==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
 
   '@napi-rs/snappy-linux-x64-musl@7.4.3':
     resolution: {integrity: sha512-ixpPsplb9A3JLjjDC6q7SdOgthsmme20STwW4KMw7ri68QP6cvwmG+Bbt6aWwHS2YJPZ9cwYaXTyNDohcP9Vxg==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
+
+  '@napi-rs/snappy-openharmony-arm64@7.3.3':
+    resolution: {integrity: sha512-I5mak/5rTprobf7wMCk0vFhClmWOL/QiIJM4XontysnadmP/R9hAcmuFmoMV2GaxC9MblqLA7Z++gy8ou5hJVw==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [openharmony]
 
   '@napi-rs/snappy-openharmony-arm64@7.4.3':
     resolution: {integrity: sha512-GUOv36Of8q8HbTDb4eaj0wpDQS15BsgNz/vVfjjKWJj+YMpnwiTAt1yVjAMCvYwSvLP5k8Xa2oYjuV+ZxazGKA==}
@@ -761,16 +934,39 @@ packages:
     cpu: [arm64]
     os: [openharmony]
 
+  '@napi-rs/snappy-wasm32-wasi@7.3.3':
+    resolution: {integrity: sha512-+EroeygVYo9RksOchjF206frhMkfD2PaIun3yH4Zp5j/Y0oIEgs/+VhAYx/f+zHRylQYUIdLzDRclcoepvlR8Q==}
+    engines: {node: '>=14.0.0'}
+    cpu: [wasm32]
+
+  '@napi-rs/snappy-win32-arm64-msvc@7.3.3':
+    resolution: {integrity: sha512-rxqfntBsCfzgOha/OlG8ld2hs6YSMGhpMUbFjeQLyVDbooY041fRXv3S7yk52DfO6H4QQhLT5+p7cW0mYdhyiQ==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [win32]
+
   '@napi-rs/snappy-win32-arm64-msvc@7.4.3':
     resolution: {integrity: sha512-pHR8PD74KBm4hEoxwiwR6jgxo0wPQJVfuv2fwBw7Jv461N+hY5VI9iLZRx3yDWp+Uy4eHWQQsqhjC7JOVjh+1w==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [win32]
 
+  '@napi-rs/snappy-win32-ia32-msvc@7.3.3':
+    resolution: {integrity: sha512-joRV16DsRtqjGt0CdSpxGCkO0UlHGeTZ/GqvdscoALpRKbikR2Top4C61dxEchmOd3lSYsXutuwWWGg3Nr++WA==}
+    engines: {node: '>= 10'}
+    cpu: [ia32]
+    os: [win32]
+
   '@napi-rs/snappy-win32-ia32-msvc@7.4.3':
     resolution: {integrity: sha512-/LIy2afUxoybWAdathj7GAHAHPT5XKzG3XNzAPBI+BOCmADYsv0ui8vZYHmt0SqoDcEHCifUbUKGFfhqL55hjQ==}
     engines: {node: '>= 10'}
     cpu: [ia32]
+    os: [win32]
+
+  '@napi-rs/snappy-win32-x64-msvc@7.3.3':
+    resolution: {integrity: sha512-cEnQwcsdJyOU7HSZODWsHpKuQoSYM4jaqw/hn9pOXYbRN1+02WxYppD3fdMuKN6TOA6YG5KA5PHRNeVilNX86Q==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
     os: [win32]
 
   '@napi-rs/snappy-win32-x64-msvc@7.4.3':
@@ -781,6 +977,9 @@ packages:
 
   '@napi-rs/wasm-runtime@0.2.12':
     resolution: {integrity: sha512-ZVWUcfwY4E/yPitQJl481FjFo3K22D6qF0DuFH6Y/nbnE11GY5uguDxZMGXPQ8WQ0128MXQD7TnfHyK4oWoIJQ==}
+
+  '@napi-rs/wasm-runtime@1.1.1':
+    resolution: {integrity: sha512-p64ah1M1ld8xjWv3qbvFwHiFVWrq1yFvV4f7w+mzaqiR4IlSgkqhcRdHwsGgomwzBH51sRY4NEowLxnaBjcW/A==}
 
   '@noble/curves@1.4.2':
     resolution: {integrity: sha512-TavHr8qycMChk8UwMld0ZDRvatedkzWfH8IiaeGCfymOP5i0hSCozz9vHOL0nkwk7HRMlFnAiKpS2jrUmSybcw==}
@@ -842,28 +1041,24 @@ packages:
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@node-rs/crc32-linux-arm64-musl@1.10.6':
     resolution: {integrity: sha512-k8ra/bmg0hwRrIEE8JL1p32WfaN9gDlUUpQRWsbxd1WhjqvXea7kKO6K4DwVxyxlPhBS9Gkb5Urq7Y4mXANzaw==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@node-rs/crc32-linux-x64-gnu@1.10.6':
     resolution: {integrity: sha512-IfjtqcuFK7JrSZ9mlAFhb83xgium30PguvRjIMI45C3FJwu18bnLk1oR619IYb/zetQT82MObgmqfKOtgemEKw==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@node-rs/crc32-linux-x64-musl@1.10.6':
     resolution: {integrity: sha512-LbFYsA5M9pNunOweSt6uhxenYQF94v3bHDAQRPTQ3rnjn+mK6IC7YTAYoBjvoJP8lVzcvk9hRj8wp4Jyh6Y80g==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@node-rs/crc32-wasm32-wasi@1.10.6':
     resolution: {integrity: sha512-KaejdLgHMPsRaxnM+OG9L9XdWL2TabNx80HLdsCOoX9BVhEkfh39OeahBo8lBmidylKbLGMQoGfIKDjq0YMStw==}
@@ -984,79 +1179,66 @@ packages:
     resolution: {integrity: sha512-Rn3n+FUk2J5VWx+ywrG/HGPTD9jXNbicRtTM11e/uorplArnXZYsVifnPPqNNP5BsO3roI4n8332ukpY/zN7rQ==}
     cpu: [arm]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-arm-musleabihf@4.55.1':
     resolution: {integrity: sha512-grPNWydeKtc1aEdrJDWk4opD7nFtQbMmV7769hiAaYyUKCT1faPRm2av8CX1YJsZ4TLAZcg9gTR1KvEzoLjXkg==}
     cpu: [arm]
     os: [linux]
-    libc: [musl]
 
   '@rollup/rollup-linux-arm64-gnu@4.55.1':
     resolution: {integrity: sha512-a59mwd1k6x8tXKcUxSyISiquLwB5pX+fJW9TkWU46lCqD/GRDe9uDN31jrMmVP3feI3mhAdvcCClhV8V5MhJFQ==}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-arm64-musl@4.55.1':
     resolution: {integrity: sha512-puS1MEgWX5GsHSoiAsF0TYrpomdvkaXm0CofIMG5uVkP6IBV+ZO9xhC5YEN49nsgYo1DuuMquF9+7EDBVYu4uA==}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@rollup/rollup-linux-loong64-gnu@4.55.1':
     resolution: {integrity: sha512-r3Wv40in+lTsULSb6nnoudVbARdOwb2u5fpeoOAZjFLznp6tDU8kd+GTHmJoqZ9lt6/Sys33KdIHUaQihFcu7g==}
     cpu: [loong64]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-loong64-musl@4.55.1':
     resolution: {integrity: sha512-MR8c0+UxAlB22Fq4R+aQSPBayvYa3+9DrwG/i1TKQXFYEaoW3B5b/rkSRIypcZDdWjWnpcvxbNaAJDcSbJU3Lw==}
     cpu: [loong64]
     os: [linux]
-    libc: [musl]
 
   '@rollup/rollup-linux-ppc64-gnu@4.55.1':
     resolution: {integrity: sha512-3KhoECe1BRlSYpMTeVrD4sh2Pw2xgt4jzNSZIIPLFEsnQn9gAnZagW9+VqDqAHgm1Xc77LzJOo2LdigS5qZ+gw==}
     cpu: [ppc64]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-ppc64-musl@4.55.1':
     resolution: {integrity: sha512-ziR1OuZx0vdYZZ30vueNZTg73alF59DicYrPViG0NEgDVN8/Jl87zkAPu4u6VjZST2llgEUjaiNl9JM6HH1Vdw==}
     cpu: [ppc64]
     os: [linux]
-    libc: [musl]
 
   '@rollup/rollup-linux-riscv64-gnu@4.55.1':
     resolution: {integrity: sha512-uW0Y12ih2XJRERZ4jAfKamTyIHVMPQnTZcQjme2HMVDAHY4amf5u414OqNYC+x+LzRdRcnIG1YodLrrtA8xsxw==}
     cpu: [riscv64]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-riscv64-musl@4.55.1':
     resolution: {integrity: sha512-u9yZ0jUkOED1BFrqu3BwMQoixvGHGZ+JhJNkNKY/hyoEgOwlqKb62qu+7UjbPSHYjiVy8kKJHvXKv5coH4wDeg==}
     cpu: [riscv64]
     os: [linux]
-    libc: [musl]
 
   '@rollup/rollup-linux-s390x-gnu@4.55.1':
     resolution: {integrity: sha512-/0PenBCmqM4ZUd0190j7J0UsQ/1nsi735iPRakO8iPciE7BQ495Y6msPzaOmvx0/pn+eJVVlZrNrSh4WSYLxNg==}
     cpu: [s390x]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-x64-gnu@4.55.1':
     resolution: {integrity: sha512-a8G4wiQxQG2BAvo+gU6XrReRRqj+pLS2NGXKm8io19goR+K8lw269eTrPkSdDTALwMmJp4th2Uh0D8J9bEV1vg==}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-x64-musl@4.55.1':
     resolution: {integrity: sha512-bD+zjpFrMpP/hqkfEcnjXWHMw5BIghGisOKPj+2NaNDuVT+8Ds4mPf3XcPHuat1tz89WRL+1wbcxKY3WSbiT7w==}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@rollup/rollup-openbsd-x64@4.55.1':
     resolution: {integrity: sha512-eLXw0dOiqE4QmvikfQ6yjgkg/xDM+MdU9YJuP4ySTibXU0oAvnEWXt7UDJmD4UkYialMfOGFPJnIHSe/kdzPxg==}
@@ -1174,6 +1356,9 @@ packages:
     resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==}
     engines: {node: '>=6.5'}
 
+  abort-error@1.0.1:
+    resolution: {integrity: sha512-fxqCblJiIPdSXIUrxI0PL+eJG49QdP9SQ70qtB65MVAoMr2rASlOyAbJFOylfB467F/f+5BCLJJq58RYi7mGfg==}
+
   abort-error@1.0.2:
     resolution: {integrity: sha512-lVgvB2NyPLqbXXhVmXcYFTC1x5K7CiVdPgdY7LGgFQWC8506oN01sPN3i9cl9ynuwF4iJ0TS9exnR7cZ9FuX4w==}
 
@@ -1260,8 +1445,8 @@ packages:
     resolution: {integrity: sha512-mzDSXIPaFwVDvZAHqZ9VlbyF4yyXRuX6IvB06WvPYkqJVO24kX1PPhv9bfpKNFZyxYFmmgo03HUiD8iklmJYRQ==}
     engines: {node: '>= 0.8.0'}
 
-  cborg@6.1.3:
-    resolution: {integrity: sha512-Kb/wD/AFuVcqvVjR+HYNOjNiuhVJ2C+RWxQE2Yqq2WVlVkRjdvVLkkM6QsL3NMsBRh+rgNc+aXmcraA+X0HObQ==}
+  cborg@6.1.2:
+    resolution: {integrity: sha512-hQfFh6FuuCDoycN68FtUpjtQx5kCtxOLA8msbpJZxjtxaMqxgHl+4GNwO+0YexH/lHmVzhhAKa0ua+vtmTRoVw==}
     hasBin: true
 
   chai@6.2.2:
@@ -1323,6 +1508,10 @@ packages:
   delayed-stream@1.0.0:
     resolution: {integrity: sha512-ZySD7Nf91aLB0RxL4KGrKHBXl7Eds1DAmEdcoVawXnLD7SDhpNgtuII2aAkg7a7QS41jxPSZ17p4VdGnMHk3MQ==}
     engines: {node: '>=0.4.0'}
+
+  denque@2.1.0:
+    resolution: {integrity: sha512-HVQE3AAb/pxF8fQAoiqpvg9i3evqug3hoiwakOyZAwJm+6vZehbkYXZ0l4JxS+I3QxM97v5aaRNhj8v5oBhekw==}
+    engines: {node: '>=0.10'}
 
   deprecation@2.3.1:
     resolution: {integrity: sha512-xmHIy4F3scKVwMsQ4WnVaS8bHOx0DmVwRywosKhaILI0ywMDWPtBSku2HNxRvF7jtwDRsoEwYQSfbxj8b7RlJQ==}
@@ -1614,8 +1803,8 @@ packages:
   json-schema-traverse@1.0.0:
     resolution: {integrity: sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==}
 
-  libp2p@3.3.9:
-    resolution: {integrity: sha512-+9hPbAAUyYHbp0DTEeWN2P/HSrgYS/2u4Rfsur8INmQ88El45xD1IM50N9sUnS7GGpX9mgiJL5mpJJP8PVyUIg==}
+  libp2p@3.3.10:
+    resolution: {integrity: sha512-cCC0slI33Szl3y+uepcUE9iJjttdMcNmSEjOcOilBDGPzo6YJvp+u9wyBAiV7by/ew4WxY3FbCZ0v/LuvEWh2Q==}
 
   log-symbols@7.0.1:
     resolution: {integrity: sha512-ja1E3yCr9i/0hmBVaM0bfwDjnGy8I/s6PP4DFp+yP+a+mrHO4Rm7DtmnqROTUkHIkqffC84YY7AeqX6oFk0WFg==}
@@ -1700,8 +1889,8 @@ packages:
     resolution: {integrity: sha512-Mr5KC5efvAK5VUptYEIopP1bakB85k2IWXaRC0rsh1uwn1L6M0LVml8OIQ4Gudg4oyZakf7FmeRLkMMtZW1i5A==}
     engines: {node: '>=12'}
 
-  p-event@7.1.1:
-    resolution: {integrity: sha512-T629EpxCTho6yxIZz2dFZwMkyWUM5jh/0h1+u/Xo4+Fllu0DuKQF6ghqIgSWVTluIvHSXL+XBRScH+E+y9TQ0g==}
+  p-event@7.1.0:
+    resolution: {integrity: sha512-/lkPs5W1aC3cp6vqZefpdosOn65J571sWodyfOQiF0+tmDCpU+H8Atwpu0vQROCVUlZuToDN5eyTLsMLLc54mg==}
     engines: {node: '>=20'}
 
   p-queue@9.1.0:
@@ -1752,11 +1941,14 @@ packages:
     resolution: {integrity: sha512-3Ybi1tAuwAP9s0r1UQ2J4n5Y0G05bJkpUIO0/bI9MhwmD70S5aTWbXGBwxHrelT+XM1k6dM0pk+SwNkpTRN7Pg==}
     engines: {node: ^10 || ^12 || >=14}
 
+  progress-events@1.0.1:
+    resolution: {integrity: sha512-MOzLIwhpt64KIVN64h1MwdKWiyKFNc/S6BoYKPIVUHFg0/eIEyBulhWCgn678v/4c0ri3FdGuzXymNCv02MUIw==}
+
   progress-events@1.1.0:
     resolution: {integrity: sha512-82DVc5tI36neVB3IjdXR11ztwGuoBc98em9ijzubeZKxI47OlV2Znq6mlPqE5xPDzO2Uw98GHiQSjj2favBCRQ==}
 
-  protons-runtime@7.1.2:
-    resolution: {integrity: sha512-j7Y7MfCwPCxYwopyqDt8+CoJULzdajSBrFAzzfBHEhOTfdvOJ2z1QLK9aK34bSBz6V/9JAAlrsc/rFkIbqppuw==}
+  protons-runtime@7.0.0:
+    resolution: {integrity: sha512-r/e72006xoVND4Uvf1aIs4OQOkJaASBU3ip4DzOWAktoKAkTiOYqKoS3TYMBm8HnnYU8+h0uEzr5gIRwk/pmTg==}
 
   punycode@1.3.2:
     resolution: {integrity: sha512-RofWgt/7fL5wP1Y7fxE7/EmTLzQVnB0ycyibJ0OOHIlJqTNzglYFxVwETOcIoJqJmpDXJ9xImDv+Fq34F/d4Dw==}
@@ -1768,6 +1960,9 @@ packages:
 
   race-event@1.6.1:
     resolution: {integrity: sha512-vi7WH5g5KoTFpu2mme/HqZiWH14XSOtg5rfp6raBskBHl7wnmy3F/biAIyY5MsK+BHWhoPhxtZ1Y2R7OHHaWyQ==}
+
+  race-signal@1.1.3:
+    resolution: {integrity: sha512-Mt2NznMgepLfORijhQMncE26IhkmjEphig+/1fKC0OtaKwys/gpvpmswSjoN01SS+VO951mj0L4VIDXdXsjnfA==}
 
   race-signal@2.0.0:
     resolution: {integrity: sha512-P31bLhE4ByBX/70QDXMutxnqgwrF1WUXea1O8DXuviAgkdbQ1iQMQotNgzJIBC9yUSn08u/acZrMUhgw7w6GpA==}
@@ -1826,9 +2021,16 @@ packages:
     resolution: {integrity: sha512-bzyZ1e88w9O1iNJbKnOlvYTrWPDl46O1bG0D3XInv+9tkPrxrN8jUUTiFlDkkmKWgn1M6CfIA13SuGqOa9Korw==}
     engines: {node: '>=14'}
 
+  snappy@7.3.3:
+    resolution: {integrity: sha512-UDJVCunvgblRpfTOjo/uT7pQzfrTsSICJ4yVS4aq7SsGBaUSpJwaVP15nF//jqinSLpN7boe/BqbUmtWMTQ5MQ==}
+    engines: {node: '>= 10'}
+
   snappy@7.4.3:
     resolution: {integrity: sha512-oP0N73t0urt9niE9PAoj8eV7SDXkCWB76oWkPbGmIJ70L4nBes66hZxRhVtOBQG1uJXkmLhs6yTxyW/I8XAeHQ==}
     engines: {node: '>= 10'}
+
+  snappyjs@0.7.0:
+    resolution: {integrity: sha512-u5iEEXkMe2EInQio6Wv9LWHOQYRDbD2O9hzS27GpT/lwfIQhTCnHCTqedqHIHe9ZcvQo+9au6vngQayipz1NYw==}
 
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
@@ -1900,6 +2102,11 @@ packages:
     resolution: {integrity: sha512-1h/Lnq9yajKY2PEbBadPXj3VxsDDu844OnaAo52UVmIzIvwwtBPIuNvkjuzBlTWpfJyUbG3ez0KSBibQkj4ojg==}
     engines: {node: '>=0.6.11 <=0.7.0 || >=0.7.3'}
 
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
   uint8-varint@2.0.4:
     resolution: {integrity: sha512-FwpTa7ZGA/f/EssWAb5/YV6pHgVF1fViKdW8cWaEarjB8t7NyofSWBdOTyFPaGuUG4gx3v1O3PQ8etsiOs3lcw==}
 
@@ -1940,10 +2147,12 @@ packages:
 
   uuid@8.0.0:
     resolution: {integrity: sha512-jOXGuXZAWdsTH7eZLtyXMqUb9EcWMGZNbL9YcGBJl4MH4nrxHmZJhEHvyLFrkxo+28uLb/NYRcStH48fnD0Vzw==}
+    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
   uuid@8.3.2:
     resolution: {integrity: sha512-+NYs2QeMWy+GWFOEm9xnn6HCDp0l7QBD7ml8zLUmJ+93Q5NF0NocErnwkTkXVFNiX3/fpC6afS8Dhb/gz7R7eg==}
+    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
   vite@7.3.1:
@@ -2360,6 +2569,46 @@ snapshots:
 
   '@chainsafe/is-ip@2.1.0': {}
 
+  '@chainsafe/libp2p-quic-darwin-arm64@2.1.3':
+    optional: true
+
+  '@chainsafe/libp2p-quic-darwin-x64@2.1.3':
+    optional: true
+
+  '@chainsafe/libp2p-quic-linux-arm64-gnu@2.1.3':
+    optional: true
+
+  '@chainsafe/libp2p-quic-linux-arm64-musl@2.1.3':
+    optional: true
+
+  '@chainsafe/libp2p-quic-linux-x64-gnu@2.1.3':
+    optional: true
+
+  '@chainsafe/libp2p-quic-linux-x64-musl@2.1.3':
+    optional: true
+
+  '@chainsafe/libp2p-quic-win32-x64-msvc@2.1.3':
+    optional: true
+
+  '@chainsafe/libp2p-quic@2.1.3':
+    dependencies:
+      '@libp2p/crypto': 5.1.23
+      '@libp2p/interface': 3.1.0
+      '@libp2p/peer-id': 6.0.15
+      '@libp2p/utils': 7.4.1
+      '@multiformats/multiaddr': 13.0.3
+      '@multiformats/multiaddr-matcher': 3.0.2
+      race-signal: 1.1.3
+      uint8arraylist: 2.4.8
+    optionalDependencies:
+      '@chainsafe/libp2p-quic-darwin-arm64': 2.1.3
+      '@chainsafe/libp2p-quic-darwin-x64': 2.1.3
+      '@chainsafe/libp2p-quic-linux-arm64-gnu': 2.1.3
+      '@chainsafe/libp2p-quic-linux-arm64-musl': 2.1.3
+      '@chainsafe/libp2p-quic-linux-x64-gnu': 2.1.3
+      '@chainsafe/libp2p-quic-linux-x64-musl': 2.1.3
+      '@chainsafe/libp2p-quic-win32-x64-msvc': 2.1.3
+
   '@chainsafe/netmask@2.0.0':
     dependencies:
       '@chainsafe/is-ip': 2.1.0
@@ -2575,7 +2824,41 @@ snapshots:
       '@noble/curves': 2.0.1
       '@noble/hashes': 2.0.1
       multiformats: 14.0.5
-      protons-runtime: 7.1.2
+      protons-runtime: 7.0.0
+      uint8arraylist: 3.0.2
+      uint8arrays: 6.1.1
+
+  '@libp2p/gossipsub@17.1.1':
+    dependencies:
+      '@libp2p/crypto': 5.1.23
+      '@libp2p/interface': 3.3.0
+      '@libp2p/interface-internal': 3.1.13
+      '@libp2p/peer-id': 6.0.15
+      '@libp2p/utils': 7.4.1
+      '@multiformats/multiaddr': 13.0.3
+      denque: 2.1.0
+      it-length-prefixed: 11.0.1
+      it-pipe: 3.0.1
+      it-pushable: 3.2.3
+      multiformats: 14.0.5
+      protons-runtime: 7.0.0
+      uint8arraylist: 3.0.2
+      uint8arrays: 6.1.1
+
+  '@libp2p/identify@4.1.14':
+    dependencies:
+      '@libp2p/crypto': 5.1.23
+      '@libp2p/interface': 3.3.0
+      '@libp2p/interface-internal': 3.1.13
+      '@libp2p/peer-id': 6.0.15
+      '@libp2p/peer-record': 9.0.16
+      '@libp2p/utils': 7.4.1
+      '@multiformats/multiaddr': 13.0.3
+      '@multiformats/multiaddr-matcher': 3.0.2
+      it-drain: 3.0.10
+      it-parallel: 3.0.13
+      main-event: 1.0.1
+      protons-runtime: 7.0.0
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
 
@@ -2585,6 +2868,15 @@ snapshots:
       '@libp2p/peer-collections': 7.0.28
       '@multiformats/multiaddr': 13.0.3
       progress-events: 1.1.0
+
+  '@libp2p/interface@3.1.0':
+    dependencies:
+      '@multiformats/dns': 1.0.11
+      '@multiformats/multiaddr': 13.0.3
+      main-event: 1.0.1
+      multiformats: 13.4.2
+      progress-events: 1.0.1
+      uint8arraylist: 2.4.8
 
   '@libp2p/interface@3.3.0':
     dependencies:
@@ -2632,7 +2924,7 @@ snapshots:
       '@libp2p/peer-id': 6.0.15
       '@multiformats/multiaddr': 13.0.3
       multiformats: 14.0.5
-      protons-runtime: 7.1.2
+      protons-runtime: 7.0.0
       uint8-varint: 3.0.0
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
@@ -2650,7 +2942,7 @@ snapshots:
       main-event: 1.0.1
       mortice: 3.3.1
       multiformats: 14.0.5
-      protons-runtime: 7.1.2
+      protons-runtime: 7.0.0
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
 
@@ -2664,7 +2956,7 @@ snapshots:
       '@multiformats/multiaddr-matcher': 3.0.2
       '@sindresorhus/fnv1a': 3.1.0
       any-signal: 4.2.0
-      cborg: 6.1.3
+      cborg: 6.1.2
       delay: 7.0.0
       is-loopback-addr: 2.0.2
       it-length-prefixed: 11.0.1
@@ -2674,9 +2966,9 @@ snapshots:
       main-event: 1.0.1
       netmask: 2.0.2
       p-defer: 4.0.1
-      p-event: 7.1.1
+      p-event: 7.1.0
       progress-events: 1.1.0
-      protons-runtime: 7.1.2
+      protons-runtime: 7.0.0
       race-signal: 2.0.0
       uint8-varint: 3.0.0
       uint8arraylist: 3.0.2
@@ -2692,21 +2984,39 @@ snapshots:
     transitivePeerDependencies:
       - '@vekexasia/bigint-uint8array'
 
-  '@lodestar/era@1.50.0(libp2p@3.3.9)':
+  '@lodestar/era@1.50.0(libp2p@3.3.10)':
     dependencies:
       '@chainsafe/lodestar-z': 'link:'
       '@lodestar/config': 1.50.0
       '@lodestar/params': 1.50.0
-      '@lodestar/reqresp': 1.50.0(libp2p@3.3.9)
+      '@lodestar/reqresp': 1.50.0(libp2p@3.3.10)
       '@lodestar/types': 1.50.0
       '@lodestar/utils': 1.50.0
     transitivePeerDependencies:
       - '@vekexasia/bigint-uint8array'
       - libp2p
 
+  '@lodestar/params@1.47.0': {}
+
   '@lodestar/params@1.50.0': {}
 
-  '@lodestar/reqresp@1.50.0(libp2p@3.3.9)':
+  '@lodestar/reqresp@1.46.0(libp2p@3.3.10)':
+    dependencies:
+      '@chainsafe/fast-crc32c': 4.2.0
+      '@libp2p/interface': 3.3.0
+      '@libp2p/utils': 7.4.1
+      '@lodestar/config': 1.50.0
+      '@lodestar/params': 1.47.0
+      '@lodestar/utils': 1.47.0
+      libp2p: 3.3.10
+      snappy: 7.3.3
+      snappyjs: 0.7.0
+      uint8-varint: 2.0.4
+      uint8arraylist: 2.4.8
+    transitivePeerDependencies:
+      - '@vekexasia/bigint-uint8array'
+
+  '@lodestar/reqresp@1.50.0(libp2p@3.3.10)':
     dependencies:
       '@chainsafe/fast-crc32c': 4.2.0
       '@chainsafe/snappy-wasm': 0.5.2
@@ -2715,7 +3025,7 @@ snapshots:
       '@lodestar/config': 1.50.0
       '@lodestar/params': 1.50.0
       '@lodestar/utils': 1.50.0
-      libp2p: 3.3.9
+      libp2p: 3.3.10
       snappy: 7.4.3
       uint8-varint: 2.0.4
       uint8arraylist: 3.0.2
@@ -2742,6 +3052,16 @@ snapshots:
       '@lodestar/params': 1.50.0
       ethereum-cryptography: 2.2.1
 
+  '@lodestar/utils@1.47.0':
+    dependencies:
+      '@chainsafe/as-sha256': 1.2.5
+      '@vekexasia/bigint-buffer2': 1.1.1
+      any-signal: 4.2.0
+      case: 1.6.3
+      js-yaml: 4.1.1
+    transitivePeerDependencies:
+      - '@vekexasia/bigint-uint8array'
+
   '@lodestar/utils@1.50.0':
     dependencies:
       '@chainsafe/as-sha256': 1.2.5
@@ -2758,7 +3078,7 @@ snapshots:
       dns-packet: 5.6.1
       hashlru: 2.3.0
       p-queue: 9.1.0
-      progress-events: 1.1.0
+      progress-events: 1.0.1
       uint8arrays: 5.1.0
 
   '@multiformats/multiaddr-matcher@3.0.2':
@@ -2772,58 +3092,121 @@ snapshots:
       uint8-varint: 3.0.0
       uint8arrays: 6.1.1
 
+  '@napi-rs/snappy-android-arm-eabi@7.3.3':
+    optional: true
+
   '@napi-rs/snappy-android-arm-eabi@7.4.3':
+    optional: true
+
+  '@napi-rs/snappy-android-arm64@7.3.3':
     optional: true
 
   '@napi-rs/snappy-android-arm64@7.4.3':
     optional: true
 
+  '@napi-rs/snappy-darwin-arm64@7.3.3':
+    optional: true
+
   '@napi-rs/snappy-darwin-arm64@7.4.3':
+    optional: true
+
+  '@napi-rs/snappy-darwin-x64@7.3.3':
     optional: true
 
   '@napi-rs/snappy-darwin-x64@7.4.3':
     optional: true
 
+  '@napi-rs/snappy-freebsd-x64@7.3.3':
+    optional: true
+
   '@napi-rs/snappy-freebsd-x64@7.4.3':
+    optional: true
+
+  '@napi-rs/snappy-linux-arm-gnueabihf@7.3.3':
     optional: true
 
   '@napi-rs/snappy-linux-arm-gnueabihf@7.4.3':
     optional: true
 
+  '@napi-rs/snappy-linux-arm64-gnu@7.3.3':
+    optional: true
+
   '@napi-rs/snappy-linux-arm64-gnu@7.4.3':
+    optional: true
+
+  '@napi-rs/snappy-linux-arm64-musl@7.3.3':
     optional: true
 
   '@napi-rs/snappy-linux-arm64-musl@7.4.3':
     optional: true
 
+  '@napi-rs/snappy-linux-ppc64-gnu@7.3.3':
+    optional: true
+
   '@napi-rs/snappy-linux-ppc64-gnu@7.4.3':
+    optional: true
+
+  '@napi-rs/snappy-linux-riscv64-gnu@7.3.3':
     optional: true
 
   '@napi-rs/snappy-linux-riscv64-gnu@7.4.3':
     optional: true
 
+  '@napi-rs/snappy-linux-s390x-gnu@7.3.3':
+    optional: true
+
   '@napi-rs/snappy-linux-s390x-gnu@7.4.3':
+    optional: true
+
+  '@napi-rs/snappy-linux-x64-gnu@7.3.3':
     optional: true
 
   '@napi-rs/snappy-linux-x64-gnu@7.4.3':
     optional: true
 
+  '@napi-rs/snappy-linux-x64-musl@7.3.3':
+    optional: true
+
   '@napi-rs/snappy-linux-x64-musl@7.4.3':
+    optional: true
+
+  '@napi-rs/snappy-openharmony-arm64@7.3.3':
     optional: true
 
   '@napi-rs/snappy-openharmony-arm64@7.4.3':
     optional: true
 
+  '@napi-rs/snappy-wasm32-wasi@7.3.3':
+    dependencies:
+      '@napi-rs/wasm-runtime': 1.1.1
+    optional: true
+
+  '@napi-rs/snappy-win32-arm64-msvc@7.3.3':
+    optional: true
+
   '@napi-rs/snappy-win32-arm64-msvc@7.4.3':
     optional: true
 
+  '@napi-rs/snappy-win32-ia32-msvc@7.3.3':
+    optional: true
+
   '@napi-rs/snappy-win32-ia32-msvc@7.4.3':
+    optional: true
+
+  '@napi-rs/snappy-win32-x64-msvc@7.3.3':
     optional: true
 
   '@napi-rs/snappy-win32-x64-msvc@7.4.3':
     optional: true
 
   '@napi-rs/wasm-runtime@0.2.12':
+    dependencies:
+      '@emnapi/core': 1.8.1
+      '@emnapi/runtime': 1.8.1
+      '@tybys/wasm-util': 0.10.1
+    optional: true
+
+  '@napi-rs/wasm-runtime@1.1.1':
     dependencies:
       '@emnapi/core': 1.8.1
       '@emnapi/runtime': 1.8.1
@@ -3151,6 +3534,8 @@ snapshots:
     dependencies:
       event-target-shim: 5.0.1
 
+  abort-error@1.0.1: {}
+
   abort-error@1.0.2: {}
 
   agent-base@7.1.4: {}
@@ -3242,7 +3627,7 @@ snapshots:
 
   case@1.6.3: {}
 
-  cborg@6.1.3: {}
+  cborg@6.1.2: {}
 
   chai@6.2.2: {}
 
@@ -3310,6 +3695,8 @@ snapshots:
       unlimited-timeout: 0.1.0
 
   delayed-stream@1.0.0: {}
+
+  denque@2.1.0: {}
 
   deprecation@2.3.1: {}
 
@@ -3627,7 +4014,7 @@ snapshots:
 
   it-queue@1.1.1:
     dependencies:
-      abort-error: 1.0.2
+      abort-error: 1.0.1
       it-pushable: 3.2.3
       main-event: 1.0.1
       race-event: 1.6.1
@@ -3635,7 +4022,7 @@ snapshots:
 
   it-queueless-pushable@2.0.3:
     dependencies:
-      abort-error: 1.0.2
+      abort-error: 1.0.1
       p-defer: 4.0.1
       race-signal: 2.0.0
 
@@ -3666,7 +4053,7 @@ snapshots:
 
   json-schema-traverse@1.0.0: {}
 
-  libp2p@3.3.9:
+  libp2p@3.3.10:
     dependencies:
       '@chainsafe/is-ip': 2.1.0
       '@chainsafe/netmask': 2.0.0
@@ -3690,7 +4077,7 @@ snapshots:
       main-event: 1.0.1
       multiformats: 14.0.5
       p-defer: 4.0.1
-      p-event: 7.1.1
+      p-event: 7.1.0
       p-retry: 8.0.1
       progress-events: 1.1.0
       race-signal: 2.0.0
@@ -3731,7 +4118,7 @@ snapshots:
 
   mortice@3.3.1:
     dependencies:
-      abort-error: 1.0.2
+      abort-error: 1.0.1
       it-queue: 1.1.1
       main-event: 1.0.1
 
@@ -3759,7 +4146,7 @@ snapshots:
 
   p-defer@4.0.1: {}
 
-  p-event@7.1.1:
+  p-event@7.1.0:
     dependencies:
       p-timeout: 7.0.1
 
@@ -3801,9 +4188,11 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
+  progress-events@1.0.1: {}
+
   progress-events@1.1.0: {}
 
-  protons-runtime@7.1.2:
+  protons-runtime@7.0.0:
     dependencies:
       uint8-varint: 3.0.0
       uint8arraylist: 3.0.2
@@ -3815,7 +4204,9 @@ snapshots:
 
   race-event@1.6.1:
     dependencies:
-      abort-error: 1.0.2
+      abort-error: 1.0.1
+
+  race-signal@1.1.3: {}
 
   race-signal@2.0.0: {}
 
@@ -3889,6 +4280,27 @@ snapshots:
 
   signal-exit@4.1.0: {}
 
+  snappy@7.3.3:
+    optionalDependencies:
+      '@napi-rs/snappy-android-arm-eabi': 7.3.3
+      '@napi-rs/snappy-android-arm64': 7.3.3
+      '@napi-rs/snappy-darwin-arm64': 7.3.3
+      '@napi-rs/snappy-darwin-x64': 7.3.3
+      '@napi-rs/snappy-freebsd-x64': 7.3.3
+      '@napi-rs/snappy-linux-arm-gnueabihf': 7.3.3
+      '@napi-rs/snappy-linux-arm64-gnu': 7.3.3
+      '@napi-rs/snappy-linux-arm64-musl': 7.3.3
+      '@napi-rs/snappy-linux-ppc64-gnu': 7.3.3
+      '@napi-rs/snappy-linux-riscv64-gnu': 7.3.3
+      '@napi-rs/snappy-linux-s390x-gnu': 7.3.3
+      '@napi-rs/snappy-linux-x64-gnu': 7.3.3
+      '@napi-rs/snappy-linux-x64-musl': 7.3.3
+      '@napi-rs/snappy-openharmony-arm64': 7.3.3
+      '@napi-rs/snappy-wasm32-wasi': 7.3.3
+      '@napi-rs/snappy-win32-arm64-msvc': 7.3.3
+      '@napi-rs/snappy-win32-ia32-msvc': 7.3.3
+      '@napi-rs/snappy-win32-x64-msvc': 7.3.3
+
   snappy@7.4.3:
     optionalDependencies:
       '@napi-rs/snappy-android-arm-eabi': 7.4.3
@@ -3908,6 +4320,8 @@ snapshots:
       '@napi-rs/snappy-win32-arm64-msvc': 7.4.3
       '@napi-rs/snappy-win32-ia32-msvc': 7.4.3
       '@napi-rs/snappy-win32-x64-msvc': 7.4.3
+
+  snappyjs@0.7.0: {}
 
   source-map-js@1.2.1: {}
 
@@ -3965,6 +4379,8 @@ snapshots:
       fsevents: 2.3.3
 
   tunnel@0.0.6: {}
+
+  typescript@5.9.3: {}
 
   uint8-varint@2.0.4:
     dependencies:
